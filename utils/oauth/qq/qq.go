@@ -22,20 +22,6 @@ func (q *QQ) GetConfiguration() factory.Configuration {
 	return &q.Addition
 }
 
-// GetAuthorizationURL 构建QQ OAuth授权URL
-// 根据QQ聚合登录文档，此步骤会向QQ聚合登录平台发起请求，获取实际的QQ授权URL
-// 第一步：向QQ聚合登录平台发送请求
-// 请求URL：https://login.qjqq.cn/connect.php?act=login&appid={appid}&appkey={appkey}&type=qq&redirect_uri={你的回调地址}
-// 第二步：QQ聚合登录平台返回实际的QQ授权URL，格式如下：
-// {
-//   "code": 0,
-//   "msg": "succ",
-//   "type": "qq",
-//   "url": "https://graph.qq.com/oauth2.0/authorize?response_type=code&client_id={client_id}&redirect_uri={QQ聚合登录回调地址}&state={state}"
-// }
-// 第三步：用户在QQ授权页面授权
-// 第四步：QQ回调到QQ聚合登录平台
-// 第五步：QQ聚合登录平台再回调到我们系统设置的redirect_uri
 func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 	state := utils.GenerateRandomString(16)
 
@@ -48,8 +34,8 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 		url.QueryEscape(q.Addition.LoginType),
 		url.QueryEscape(redirectURI),
 	)
-	
-	// 向QQ聚合登录平台发送请求
+
+	// 向聚合登录平台发送请求
 	resp, err := http.Get(requestURL)
 	if err != nil {
 		// 如果请求失败，返回错误信息
@@ -69,7 +55,7 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 		Msg  string `json:"msg"`
 		URL  string `json:"url"`
 	}
-	
+
 	if err := json.Unmarshal(body, &result); err != nil {
 		return "", state
 	}
@@ -84,22 +70,19 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 }
 
 // OnCallback 处理QQ OAuth回调
-// 根据QQ聚合登录文档，回调会包含type和code参数
 // 例如：http://localhost:25774/api/oauth_callback?type=qq&code=XXXXXXXXXXXXXXXX
-// 然后我们使用code参数向QQ聚合登录平台请求用户信息
+// 然后我们使用code参数向聚合登录平台请求用户信息
 func (q *QQ) OnCallback(ctx context.Context, state string, query map[string]string, callbackURI string) (factory.OidcCallback, error) {
-	// 从QQ聚合登录回调中提取参数 (符合QQ聚合登录文档规范)
 	// 根据文档，回调地址会附带type和code参数
 	code := query["code"]
 	loginType := query["type"]
-	
+
 	// 如果回调中没有type参数，则使用配置中的LoginType
 	if loginType == "" {
 		loginType = q.Addition.LoginType
 	}
 
 	// 验证state防止CSRF攻击
-	// 注意：在QQ聚合登录中，state验证应该在Komari系统层面完成，而不是在调用QQ API时传递
 	if q.stateCache == nil {
 		return factory.OidcCallback{}, fmt.Errorf("state cache not initialized")
 	}
@@ -115,7 +98,7 @@ func (q *QQ) OnCallback(ctx context.Context, state string, query map[string]stri
 		return factory.OidcCallback{}, fmt.Errorf("no authorization code provided")
 	}
 
-	// 通过Authorization Code获取用户信息 (符合QQ聚合登录文档规范)
+	// 通过Authorization Code获取用户信息
 	// 根据文档，请求URL应为: {AggregationURL}/connect.php?act=callback&appid={appid}&appkey={appkey}&type={登录方式}&code={code}
 	callbackURL := fmt.Sprintf(
 		"%s/connect.php?act=callback&appid=%s&appkey=%s&type=%s&code=%s",
@@ -156,7 +139,7 @@ func (q *QQ) OnCallback(ctx context.Context, state string, query map[string]stri
 		Location    string `json:"location"`
 		IP          string `json:"ip"`
 	}
-	
+
 	if err := json.Unmarshal(body, &result); err != nil {
 		return factory.OidcCallback{}, fmt.Errorf("failed to parse callback response: %v, response body: %s", err, string(body))
 	}

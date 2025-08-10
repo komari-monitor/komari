@@ -107,18 +107,6 @@ func InitGeoIp() {
 			CurrentProvider = &EmptyProvider{}
 			log.Println("Failed to initialize IPInfo service, using EmptyProvider instead.")
 		}
-	case "nsmao":
-		NewCurrentProvider, err := NewNsmaoService()
-		if err != nil {
-			log.Printf("Failed to initialize Nsmao service: " + err.Error())
-		}
-		if NewCurrentProvider != nil {
-			CurrentProvider = NewCurrentProvider
-			log.Println("Using api.nsmao.net as GeoIP provider.")
-		} else {
-			CurrentProvider = &EmptyProvider{}
-			log.Println("Failed to initialize Nsmao service, using EmptyProvider instead.")
-		}
 	default:
 		CurrentProvider = &EmptyProvider{}
 	}
