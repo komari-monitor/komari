@@ -51,10 +51,10 @@ func GetClients(c *gin.Context) {
 		}
 		message := string(data)
 
-		uuid := ""
+		uuID := ""
 		if message != "get" { // 非请求全部内容
 			if strings.HasPrefix(message, "get ") {
-				uuid = strings.TrimSpace(strings.TrimPrefix(message, "get "))
+				uuID = strings.TrimSpace(strings.TrimPrefix(message, "get "))
 			} else {
 				conn.WriteJSON(gin.H{"status": "error", "error": "Invalid message"})
 				continue
@@ -80,8 +80,8 @@ func GetClients(c *gin.Context) {
 		}
 		// 已建立连接的客户端uuid列表
 		for key := range ws.GetConnectedClients() {
-			if uuid != "" { // 请求特定服务器信息
-				if !(!isLogin && hiddenMap[key]) && key == uuid { // 未登录且 Hidden 或 不符合请求的特定服务器 -> 跳过
+			if uuID != "" { // 请求特定服务器信息
+				if !(!isLogin && hiddenMap[key]) && key == uuID { // 未登录且 Hidden 或 不符合请求的特定服务器 -> 跳过
 					resp.Online = append(resp.Online, key)
 				}
 			} else {
@@ -99,6 +99,15 @@ func GetClients(c *gin.Context) {
 				}
 			}
 		}
+
+		if uuID != "" { // 过滤不符合请求的特定服务器
+			for key := range resp.Data {
+				if key != uuID {
+					delete(resp.Data, key)
+				}
+			}
+		}
+
 		for _, report := range resp.Data { // 不暴露 uuid
 			report.UUID = ""
 			if report.CPU.Usage == 0 {
