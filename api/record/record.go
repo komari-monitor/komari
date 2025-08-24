@@ -2,7 +2,6 @@ package record
 
 import (
 	"log"
-	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -154,6 +153,9 @@ func GetPingRecords(c *gin.Context) {
 	}
 
 	records, err = tasks.GetPingRecords(uuid, taskId, startTime, endTime)
+	if err != nil {
+		api.RespondError(c, 500, "Failed to fetch ping tasks: "+err.Error())
+	}
 
 	lenRecords := len(records)
 
@@ -172,16 +174,17 @@ func GetPingRecords(c *gin.Context) {
 	var granularitySeconds int
 	if maxPerWindowInt != lenRecords {
 		// 自动切分粒度
-		totalSeconds := int(endTime.Sub(startTime).Seconds())
-		avgInterval := float64(totalSeconds) / float64(lenRecords)
-		granularitySeconds = int(math.Ceil(avgInterval * float64(lenRecords) / float64(maxPerWindowInt)))
+		totalSeconds := hoursInt * 3600
+		secondsPerRecord := float64(totalSeconds) / float64(lenRecords)     // 平均记录时间差
+		densityRecord := float64(lenRecords) / float64(maxPerWindowInt)     // 记录密度
+		granularitySeconds = int(float64(secondsPerRecord) * densityRecord) // 平均采样时间差
 
 		// 保证最小粒度是1秒
 		if granularitySeconds < 1 {
 			granularitySeconds = 1
 		}
 	} else {
-		granularitySeconds = 1 // 绕过计算 使其可以输出全部值
+		granularitySeconds = 0 // 绕过计算 使其可以输出全部值
 	}
 	log.Printf("当前时间窗口 %d 需求数量 %d", granularitySeconds, maxPerWindowInt)
 	// 用于统计每个客户端的信息（按 task_id 查询时使用）
