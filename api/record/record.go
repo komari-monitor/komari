@@ -1,6 +1,7 @@
 package record
 
 import (
+	"log"
 	"math"
 	"slices"
 	"strconv"
@@ -68,7 +69,7 @@ func GetRecordsByUUID(c *gin.Context) {
 	})
 }
 
-// GET query: uuid string OR task_id int, hours int
+// GET query: uuid string OR task_id int, hours int, gs int
 func GetPingRecords(c *gin.Context) {
 	uuid := c.Query("uuid")
 	taskIdStr := c.Query("task_id")
@@ -153,9 +154,6 @@ func GetPingRecords(c *gin.Context) {
 	}
 
 	records, err = tasks.GetPingRecords(uuid, taskId, startTime, endTime)
-	if err != nil {
-		api.RespondError(c, 500, "Failed to fetch ping tasks: "+err.Error())
-	}
 
 	lenRecords := len(records)
 
@@ -168,15 +166,24 @@ func GetPingRecords(c *gin.Context) {
 	if maxPerWindowInt < 1 {
 		maxPerWindowInt = 5000
 	}
-	// 自动切分粒度
-	numWindows := int(math.Ceil(float64(lenRecords) / float64(maxPerWindowInt))) // 窗口数
-	totalSeconds := hoursInt * 3600
-	granularitySeconds := int(math.Ceil(float64(totalSeconds) / float64(numWindows)))
-	// 保证最小粒度是1秒
-	if granularitySeconds < 1 {
-		granularitySeconds = 1
+	if maxPerWindowInt > lenRecords {
+		maxPerWindowInt = lenRecords
 	}
+	var granularitySeconds int
+	if maxPerWindowInt != lenRecords {
+		// 自动切分粒度
+		totalSeconds := int(endTime.Sub(startTime).Seconds())
+		avgInterval := float64(totalSeconds) / float64(lenRecords)
+		granularitySeconds = int(math.Ceil(avgInterval * float64(lenRecords) / float64(maxPerWindowInt)))
 
+		// 保证最小粒度是1秒
+		if granularitySeconds < 1 {
+			granularitySeconds = 1
+		}
+	} else {
+		granularitySeconds = 1 // 绕过计算 使其可以输出全部值
+	}
+	log.Printf("当前时间窗口 %d 需求数量 %d", granularitySeconds, maxPerWindowInt)
 	// 用于统计每个客户端的信息（按 task_id 查询时使用）
 	clientStats := make(map[string]struct {
 		total int
@@ -197,11 +204,16 @@ func GetPingRecords(c *gin.Context) {
 		if !ok {
 			granularityMap[r.Client] = toTime.Add(time.Second)
 		}
-		windowEndPrev := windowStart
-		windowStartPrev := windowStart.Add(-time.Duration(granularitySeconds) * time.Second)
-		if toTime.Before(windowStartPrev) || !toTime.Before(windowEndPrev) {
-			continue // 跳过不在当前范围的值
+		windowEnd := windowStart.Add(-time.Duration(granularitySeconds) * time.Second)
+		if !toTime.After(windowEnd) { // 防止粒度过小 值已经到达末尾之后
+			granularityMap[r.Client] = toTime.Add(time.Second)
+			windowStart = toTime.Add(time.Second)
+			windowEnd = windowStart.Add(-time.Duration(granularitySeconds) * time.Second)
 		}
+		if toTime.After(windowStart) {
+			continue
+		}
+		granularityMap[r.Client] = windowEnd // 更新起始位置
 		rec := RecordsResp{
 			Time:  toTime.Format(time.RFC3339),
 			Value: r.Value,
