@@ -1,7 +1,6 @@
 package record
 
 import (
-	"log"
 	"slices"
 	"strconv"
 	"time"
@@ -186,7 +185,6 @@ func GetPingRecords(c *gin.Context) {
 	} else {
 		granularitySeconds = 0 // 绕过计算 使其可以输出全部值
 	}
-	log.Printf("当前时间窗口 %d 需求数量 %d", granularitySeconds, maxPerWindowInt)
 	// 用于统计每个客户端的信息（按 task_id 查询时使用）
 	clientStats := make(map[string]struct {
 		total int
