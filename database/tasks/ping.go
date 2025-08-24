@@ -61,15 +61,6 @@ func SavePingRecord(record models.PingRecord) error {
 	return db.Create(&record).Error
 }
 
-func GetPingRecords(client string) ([]models.PingRecord, error) {
-	db := dbcore.GetDBInstance()
-	var records []models.PingRecord
-	if err := db.Where("client = ?", client).Order("time DESC").Find(&records).Error; err != nil {
-		return nil, err
-	}
-	return records, nil
-}
-
 func DeletePingRecordsBefore(time time.Time) error {
 	db := dbcore.GetDBInstance()
 	err := db.Where("time < ?", time).Delete(&models.PingRecord{}).Error
@@ -101,19 +92,18 @@ func ReloadPingSchedule() error {
 	}
 	return utils.ReloadPingSchedule(pingTasks)
 }
-func GetPingRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.PingRecord, error) {
-	db := dbcore.GetDBInstance()
-	var records []models.PingRecord
-	if err := db.Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).Order("time DESC").Find(&records).Error; err != nil {
-		return nil, err
-	}
-	return records, nil
-}
 
-func GetPingRecordsByTaskAndTime(taskId uint, start, end time.Time) ([]models.PingRecord, error) {
+func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
 	db := dbcore.GetDBInstance()
 	var records []models.PingRecord
-	if err := db.Where("task_id = ? AND time >= ? AND time <= ?", taskId, start, end).Order("time DESC").Find(&records).Error; err != nil {
+	dbQuery := db.Model(&models.PingRecord{})
+	if uuid != "" {
+		dbQuery = dbQuery.Where("client = ?", uuid)
+	}
+	if taskId >= 0 {
+		dbQuery = dbQuery.Where("task_id = ?", uint(taskId))
+	}
+	if err := dbQuery.Where("time >= ? AND time <= ?", start, end).Order("time DESC").Find(&records).Error; err != nil {
 		return nil, err
 	}
 	return records, nil
