@@ -1,6 +1,7 @@
 package record
 
 import (
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -138,12 +139,13 @@ func GetPingRecords(c *gin.Context) {
 		hoursInt = 4
 	}
 
-	if hoursInt > 168 { // 最大查询7日内数据
-		hoursInt = 168
+	if hoursInt > 720 { // 最大查询30日内数据
+		hoursInt = 720
 	}
 
-	startTime := time.Now().Add(-time.Duration(hoursInt) * time.Hour)
 	endTime := time.Now()
+	startTime := endTime.Add(-time.Duration(hoursInt) * time.Hour)
+
 	taskId := -1
 	taskId, err = strconv.Atoi(taskIdStr)
 	if err != nil {
@@ -151,6 +153,29 @@ func GetPingRecords(c *gin.Context) {
 	}
 
 	records, err = tasks.GetPingRecords(uuid, taskId, startTime, endTime)
+	if err != nil {
+		api.RespondError(c, 500, "Failed to fetch ping tasks: "+err.Error())
+	}
+
+	lenRecords := len(records)
+
+	// 切分数据优化获取速度
+	maxPerWindow := c.Query("gs")
+	maxPerWindowInt, err := strconv.Atoi(maxPerWindow)
+	if err != nil {
+		maxPerWindowInt = 5000
+	}
+	if maxPerWindowInt < 1 {
+		maxPerWindowInt = 5000
+	}
+	// 自动切分粒度
+	numWindows := int(math.Ceil(float64(lenRecords) / float64(maxPerWindowInt))) // 窗口数
+	totalSeconds := hoursInt * 3600
+	granularitySeconds := int(math.Ceil(float64(totalSeconds) / float64(numWindows)))
+	// 保证最小粒度是1秒
+	if granularitySeconds < 1 {
+		granularitySeconds = 1
+	}
 
 	// 用于统计每个客户端的信息（按 task_id 查询时使用）
 	clientStats := make(map[string]struct {
@@ -160,14 +185,25 @@ func GetPingRecords(c *gin.Context) {
 		max   int
 	})
 
+	granularityMap := make(map[string]time.Time)
 	for _, r := range records {
 		if r.Client != "" && !isLogin {
 			if hiddenMap[r.Client] {
 				continue // 跳过隐藏的节点
 			}
 		}
+		toTime := r.Time.ToTime()
+		windowStart, ok := granularityMap[r.Client]
+		if !ok {
+			granularityMap[r.Client] = toTime.Add(time.Second)
+		}
+		windowEndPrev := windowStart
+		windowStartPrev := windowStart.Add(-time.Duration(granularitySeconds) * time.Second)
+		if toTime.Before(windowStartPrev) || !toTime.Before(windowEndPrev) {
+			continue // 跳过不在当前范围的值
+		}
 		rec := RecordsResp{
-			Time:  r.Time.ToTime().Format(time.RFC3339),
+			Time:  toTime.Format(time.RFC3339),
 			Value: r.Value,
 		}
 		rec.Client = r.Client
