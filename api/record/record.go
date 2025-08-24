@@ -164,10 +164,10 @@ func GetPingRecords(c *gin.Context) {
 	if err != nil {
 		maxPerWindowInt = 5000
 	}
-	if maxPerWindowInt < 1 {
+	if maxPerWindowInt < 1 && maxPerWindowInt != -1 {
 		maxPerWindowInt = 5000
 	}
-	if maxPerWindowInt > lenRecords {
+	if maxPerWindowInt > lenRecords || maxPerWindowInt == -1 {
 		maxPerWindowInt = lenRecords
 	}
 	var granularitySeconds int
@@ -201,20 +201,22 @@ func GetPingRecords(c *gin.Context) {
 			}
 		}
 		toTime := r.Time.ToTime()
-		windowStart, ok := granularityMap[r.Client]
-		if !ok {
-			granularityMap[r.Client] = toTime.Add(time.Second)
+		if granularitySeconds > 0 {
+			windowStart, ok := granularityMap[r.Client]
+			if !ok {
+				granularityMap[r.Client] = toTime.Add(time.Second)
+			}
+			windowEnd := windowStart.Add(-time.Duration(granularitySeconds) * time.Second)
+			if !toTime.After(windowEnd) { // 防止粒度过小 值已经到达末尾之后
+				granularityMap[r.Client] = toTime.Add(time.Second)
+				windowStart = toTime.Add(time.Second)
+				windowEnd = windowStart.Add(-time.Duration(granularitySeconds) * time.Second)
+			}
+			if toTime.After(windowStart) {
+				continue
+			}
+			granularityMap[r.Client] = windowEnd // 更新起始位置
 		}
-		windowEnd := windowStart.Add(-time.Duration(granularitySeconds) * time.Second)
-		if !toTime.After(windowEnd) { // 防止粒度过小 值已经到达末尾之后
-			granularityMap[r.Client] = toTime.Add(time.Second)
-			windowStart = toTime.Add(time.Second)
-			windowEnd = windowStart.Add(-time.Duration(granularitySeconds) * time.Second)
-		}
-		if toTime.After(windowStart) {
-			continue
-		}
-		granularityMap[r.Client] = windowEnd // 更新起始位置
 		rec := RecordsResp{
 			Time:  toTime.Format(time.RFC3339),
 			Value: r.Value,
