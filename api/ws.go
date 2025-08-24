@@ -37,13 +37,39 @@ func GetClients(c *gin.Context) {
 	}
 	defer conn.Close()
 
+	// 初始化用户信息
+	var (
+		isLogin    = false
+		hiddenMap  = map[string]bool{}
+		session, _ = c.Cookie("session_token")
+	)
+
+	// 登录状态检查
+	_, err = accounts.GetUserBySession(session)
+	if err == nil {
+		isLogin = true
+	}
+
+	// 仅在未登录时需要 Hidden 信息做过滤
+	if !isLogin {
+		var hiddenClients []models.Client
+		db := dbcore.GetDBInstance()
+		_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
+		for _, cli := range hiddenClients {
+			hiddenMap[cli.UUID] = true
+		}
+	}
+
 	// 请求
 	for {
 		var resp struct {
-			Online []string                  `json:"online"` // 已建立连接的客户端uuid列表
-			Data   map[string]*common.Report `json:"data"`   // 最后上报的数据
+			Online []string                 `json:"online"` // 已建立连接的客户端uuid列表
+			Data   map[string]common.Report `json:"data"`   // 最后上报的数据
 		}
+
 		resp.Online = []string{}
+		resp.Data = map[string]common.Report{}
+
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			//log.Println("Error reading message:", err)
@@ -61,58 +87,31 @@ func GetClients(c *gin.Context) {
 			}
 		}
 
-		// 登录状态检查
-		isLogin := false
-		session, _ := c.Cookie("session_token")
-		_, err = accounts.GetUserBySession(session)
-		if err == nil {
-			isLogin = true
-		}
-		// 仅在未登录时需要 Hidden 信息做过滤
-		hiddenMap := map[string]bool{}
-		if !isLogin {
-			var hiddenClients []models.Client
-			db := dbcore.GetDBInstance()
-			_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
-			for _, cli := range hiddenClients {
-				hiddenMap[cli.UUID] = true
-			}
-		}
 		// 已建立连接的客户端uuid列表
 		for key := range ws.GetConnectedClients() {
-			if uuID != "" { // 请求特定服务器信息
-				if !(!isLogin && hiddenMap[key]) && key == uuID { // 未登录且 Hidden 或 不符合请求的特定服务器 -> 跳过
-					resp.Online = append(resp.Online, key)
-				}
-			} else {
-				if !(!isLogin && hiddenMap[key]) { // 未登录且 Hidden -> 跳过
-					resp.Online = append(resp.Online, key)
-				}
+			if !isLogin && hiddenMap[key] {
+				continue
 			}
-		}
-		// 清除UUID，简化报告单
-		resp.Data = ws.GetLatestReport()
-		if !isLogin { // 未登录过滤 Hidden 的节点报告
-			for uuid := range resp.Data {
-				if hiddenMap[uuid] {
-					delete(resp.Data, uuid)
-				}
+			if uuID != "" && key != uuID {
+				continue
 			}
+			resp.Online = append(resp.Online, key)
 		}
 
-		if uuID != "" { // 过滤不符合请求的特定服务器
-			for key := range resp.Data {
-				if key != uuID {
-					delete(resp.Data, key)
-				}
+		//过往节点数据信息
+		for key, report := range ws.GetLatestReport() {
+			if !isLogin && hiddenMap[key] {
+				continue
 			}
-		}
+			if uuID != "" && key != uuID {
+				continue
+			}
 
-		for _, report := range resp.Data { // 不暴露 uuid
-			report.UUID = ""
+			report.UUID = "" // 不暴露 uuid
 			if report.CPU.Usage == 0 {
 				report.CPU.Usage = 0.01
 			}
+			resp.Data[key] = *report
 		}
 
 		err = conn.WriteJSON(gin.H{"status": "success", "data": resp})
@@ -120,5 +119,4 @@ func GetClients(c *gin.Context) {
 			return
 		}
 	}
-
 }
