@@ -8,6 +8,7 @@ import (
 	"github.com/komari-monitor/komari/database/config"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/oauth"
+	"github.com/komari-monitor/komari/utils/oauth/cloudflare/handler"
 	"github.com/komari-monitor/komari/utils/oauth/factory"
 )
 
@@ -75,6 +76,14 @@ func SetOidcProvider(c *gin.Context) {
 		api.RespondError(c, 404, "Provider not found: "+oidcConfig.Name)
 		return
 	}
+	// 对于 Cloudflare Access 提供商，使用专用处理器
+	if oidcConfig.Name == "cloudflare_access" {
+		if err := handler.HandleSetOidcProvider(&oidcConfig); err != nil {
+			api.RespondError(c, 500, "Failed to configure Cloudflare provider: "+err.Error())
+			return
+		}
+	}
+	
 	if err := database.SaveOidcConfig(&oidcConfig); err != nil {
 		api.RespondError(c, 500, "Failed to save OIDC provider configuration: "+err.Error())
 		return

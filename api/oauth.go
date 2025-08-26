@@ -9,6 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/config"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/oauth"
+	"github.com/komari-monitor/komari/utils/oauth/cloudflare/handler"
 )
 
 // /api/oauth
@@ -16,6 +17,12 @@ func OAuth(c *gin.Context) {
 	cfg, _ := config.Get()
 	if !cfg.OAuthEnabled {
 		c.JSON(403, gin.H{"status": "error", "error": "OAuth is not enabled"})
+		return
+	}
+
+	// 对于 Cloudflare Access，使用专用处理器
+	if handler.IsCloudflareProvider() {
+		handler.HandleOAuth(c)
 		return
 	}
 
@@ -28,10 +35,16 @@ func OAuth(c *gin.Context) {
 
 // /api/oauth_callback
 func OAuthCallback(c *gin.Context) {
+	// 对于 Cloudflare Access，使用专用处理器
+	if handler.IsCloudflareProvider() {
+		handler.HandleOAuthCallback(c)
+		return
+	}
+
 	// 验证state防止CSRF攻击
 	state, _ := c.Cookie("oauth_state")
 	c.SetCookie("oauth_state", "", -1, "/", "", false, true)
-	
+
 	// 获取当前OAuth提供商名称
 	providerName := oauth.CurrentProvider().GetName()
 	
