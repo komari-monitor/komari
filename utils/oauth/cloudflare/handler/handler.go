@@ -45,7 +45,7 @@ func HandleOAuthCallback(c *gin.Context) {
 	}
 
 	// 生成 SSO ID
-	ssoID := fmt.Sprintf("cloudflare_access_%s", oidcUser.UserId)
+	ssoID := fmt.Sprintf("cloudflare_%s", oidcUser.UserId)
 
 	// 检查是否为绑定外部账号流程
 	uuid, _ := c.Cookie("binding_external_account")
