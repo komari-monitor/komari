@@ -16,6 +16,7 @@ import (
 
 func GetRecordsByUUID(c *gin.Context) {
 	uuid := c.Query("uuid")
+	loadType := c.Query("load_type")
 
 	// 登录状态检查
 	isLogin := false
@@ -56,15 +57,95 @@ func GetRecordsByUUID(c *gin.Context) {
 		return
 	}
 
+	// 验证 load_type 参数
+	validLoadTypes := map[string]bool{
+		"cpu": true, "gpu": true, "ram": true, "swap": true,
+		"load": true, "temp": true, "disk": true, "network": true,
+		"process": true, "connections": true, "all": true, "": true,
+	}
+	
+	if !validLoadTypes[loadType] {
+		api.RespondError(c, 400, "Invalid load_type parameter")
+		return
+	}
+
 	records, err := records.GetRecordsByClientAndTime(uuid, time.Now().Add(-time.Duration(hoursInt)*time.Hour), time.Now())
 	if err != nil {
 		api.RespondError(c, 500, "Failed to fetch records: "+err.Error())
 		return
 	}
-	api.RespondSuccess(c, gin.H{
-		"records": records,
-		"count":   len(records),
-	})
+
+	// 根据 load_type 过滤返回的数据
+	if loadType != "" && loadType != "all" {
+		filteredRecords := filterRecordsByLoadType(records, loadType)
+		api.RespondSuccess(c, gin.H{
+			"records":   filteredRecords,
+			"count":     len(filteredRecords),
+			"load_type": loadType,
+		})
+	} else {
+		// 返回所有数据（向后兼容）
+		api.RespondSuccess(c, gin.H{
+			"records": records,
+			"count":   len(records),
+		})
+	}
+}
+
+// filterRecordsByLoadType 根据 load_type 过滤记录，只返回相关字段
+func filterRecordsByLoadType(records []models.Record, loadType string) []gin.H {
+	filteredRecords := make([]gin.H, 0, len(records))
+	
+	for _, r := range records {
+		record := gin.H{
+			"client": r.Client,
+			"time":   r.Time,
+		}
+		
+		switch loadType {
+		case "cpu":
+			record["cpu"] = r.Cpu
+		case "gpu":
+			record["gpu"] = r.Gpu
+		case "ram":
+			record["ram"] = r.Ram
+			record["ram_total"] = r.RamTotal
+			if r.RamTotal > 0 {
+				record["ram_percent"] = float32(r.Ram) / float32(r.RamTotal) * 100
+			}
+		case "swap":
+			record["swap"] = r.Swap
+			record["swap_total"] = r.SwapTotal
+			if r.SwapTotal > 0 {
+				record["swap_percent"] = float32(r.Swap) / float32(r.SwapTotal) * 100
+			}
+		case "load":
+			record["load"] = r.Load
+		case "temp":
+			record["temp"] = r.Temp
+		case "disk":
+			record["disk"] = r.Disk
+			record["disk_total"] = r.DiskTotal
+			if r.DiskTotal > 0 {
+				record["disk_percent"] = float32(r.Disk) / float32(r.DiskTotal) * 100
+			}
+		case "network":
+			record["net_in"] = r.NetIn
+			record["net_out"] = r.NetOut
+			record["net_total_up"] = r.NetTotalUp
+			record["net_total_down"] = r.NetTotalDown
+		case "process":
+			record["process"] = r.Process
+		case "connections":
+			record["connections"] = r.Connections
+			record["connections_udp"] = r.ConnectionsUdp
+			record["connections_tcp"] = r.Connections - r.ConnectionsUdp
+		}
+		
+		filteredRecords = append(filteredRecords, record)
+	}
+	
+	return filteredRecords
 }
 
 // GET query: uuid string, task_id int, hours int
