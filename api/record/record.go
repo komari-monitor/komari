@@ -307,7 +307,6 @@ func GetPingRecords(c *gin.Context) {
 				"id":       t.Id,
 				"name":     t.Name,
 				"type":     t.Type,
-				"target":   t.Target,
 				"interval": t.Interval,
 				"loss":     lossRate,
 				"min":      minLatency,
