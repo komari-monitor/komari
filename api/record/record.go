@@ -67,14 +67,18 @@ func GetRecordsByUUID(c *gin.Context) {
 	})
 }
 
-// GET query: uuid string OR task_id int, hours int, gs int
+// GET query: uuid string, task_id int, hours int
+// 支持三种查询模式：
+// 1. 仅 uuid - 获取该客户端的所有 ping 任务记录
+// 2. 仅 task_id - 获取该任务的所有客户端记录
+// 3. uuid + task_id - 获取特定客户端在特定任务的记录
 func GetPingRecords(c *gin.Context) {
 	uuid := c.Query("uuid")
 	taskIdStr := c.Query("task_id")
 
-	// 必须提供 uuid 或 task_id 其中之一
+	// 必须提供 uuid 或 task_id 其中至少一个
 	if uuid == "" && taskIdStr == "" {
-		api.RespondError(c, 400, "UUID or task_id error")
+		api.RespondError(c, 400, "UUID or task_id is required")
 		return
 	}
 
@@ -138,53 +142,26 @@ func GetPingRecords(c *gin.Context) {
 		hoursInt = 4
 	}
 
-	if hoursInt > 720 { // 最大查询30日内数据
-		hoursInt = 720
-	}
-
 	endTime := time.Now()
 	startTime := endTime.Add(-time.Duration(hoursInt) * time.Hour)
 
+	// 解析 task_id，支持同时传入 uuid 和 task_id
 	taskId := -1
-	taskId, err = strconv.Atoi(taskIdStr)
-	if err != nil {
-		taskId = -1
+	if taskIdStr != "" {
+		taskId, err = strconv.Atoi(taskIdStr)
+		if err != nil {
+			api.RespondError(c, 400, "Invalid task_id parameter")
+			return
+		}
 	}
 
+	// 查询记录，现在支持 uuid + task_id 组合查询
 	records, err = tasks.GetPingRecords(uuid, taskId, startTime, endTime)
 	if err != nil {
-		api.RespondError(c, 500, "Failed to fetch ping tasks: "+err.Error())
+		api.RespondError(c, 500, "Failed to fetch ping records: "+err.Error())
+		return
 	}
 
-	lenRecords := len(records)
-
-	// 切分数据优化获取速度
-	maxPerWindow := c.Query("gs")
-	maxPerWindowInt, err := strconv.Atoi(maxPerWindow)
-	if err != nil {
-		maxPerWindowInt = 5000
-	}
-	if maxPerWindowInt < 1 && maxPerWindowInt != -1 {
-		maxPerWindowInt = 5000
-	}
-	if maxPerWindowInt > lenRecords || maxPerWindowInt == -1 {
-		maxPerWindowInt = lenRecords
-	}
-	var granularitySeconds int
-	if maxPerWindowInt != lenRecords {
-		// 自动切分粒度
-		totalSeconds := hoursInt * 3600
-		secondsPerRecord := float64(totalSeconds) / float64(lenRecords)     // 平均记录时间差
-		densityRecord := float64(lenRecords) / float64(maxPerWindowInt)     // 记录密度
-		granularitySeconds = int(float64(secondsPerRecord) * densityRecord) // 平均采样时间差
-
-		// 保证最小粒度是1秒
-		if granularitySeconds < 1 {
-			granularitySeconds = 1
-		}
-	} else {
-		granularitySeconds = 0 // 绕过计算 使其可以输出全部值
-	}
 	// 用于统计每个客户端的信息（按 task_id 查询时使用）
 	clientStats := make(map[string]struct {
 		total int
@@ -193,7 +170,6 @@ func GetPingRecords(c *gin.Context) {
 		max   int
 	})
 
-	granularityMap := make(map[string]time.Time)
 	for _, r := range records {
 		if r.Client != "" && !isLogin {
 			if hiddenMap[r.Client] {
@@ -201,22 +177,6 @@ func GetPingRecords(c *gin.Context) {
 			}
 		}
 		toTime := r.Time.ToTime()
-		if granularitySeconds > 0 {
-			windowStart, ok := granularityMap[r.Client]
-			if !ok {
-				granularityMap[r.Client] = toTime.Add(time.Second)
-			}
-			windowEnd := windowStart.Add(-time.Duration(granularitySeconds) * time.Second)
-			if !toTime.After(windowEnd) { // 防止粒度过小 值已经到达末尾之后
-				granularityMap[r.Client] = toTime.Add(time.Second)
-				windowStart = toTime.Add(time.Second)
-				windowEnd = windowStart.Add(-time.Duration(granularitySeconds) * time.Second)
-			}
-			if toTime.After(windowStart) {
-				continue
-			}
-			granularityMap[r.Client] = windowEnd // 更新起始位置
-		}
 		rec := RecordsResp{
 			Time:  toTime.Format(time.RFC3339),
 			Value: r.Value,
@@ -241,7 +201,10 @@ func GetPingRecords(c *gin.Context) {
 		response.Records = append(response.Records, rec)
 	}
 
-	// 都返回 BasicInfo
+	// 返回 BasicInfo - 按客户端分组的统计信息
+	// 在以下情况下特别有用：
+	// 1. 仅 task_id 查询 - 查看该任务下所有客户端的表现
+	// 2. uuid + task_id 查询 - 查看特定客户端在特定任务的表现
 	if len(clientStats) > 0 {
 		response.BasicInfo = make([]ClientBasicInfo, 0, len(clientStats))
 		for client, stats := range clientStats {
@@ -261,11 +224,20 @@ func GetPingRecords(c *gin.Context) {
 				Max:    stats.max,
 			})
 		}
+		
+		// 如果同时指定了 uuid 和 task_id，BasicInfo 应该只有一条记录
+		// 这种情况下可以在响应中标记查询模式
+		if uuid != "" && taskId != -1 && len(response.BasicInfo) == 1 {
+			// 这是精确查询模式
+		}
 	}
 
-	// uuid不为空返回全部 为空返回当前任务
-	if uuid != "" && len(records) >= 0 {
-		// 获取当前属于该 uuid 的 pingTasks
+	// 优化后的任务信息返回逻辑
+	// 1. uuid != "" - 返回该客户端参与的所有任务信息
+	// 2. uuid != "" && taskId != -1 - 返回该客户端在指定任务的信息
+	// 3. taskId != -1 && uuid == "" - 返回该任务的所有客户端统计（通过 BasicInfo）
+	if uuid != "" || taskId != -1 {
+		// 获取所有 pingTasks
 		pingTasks, err := tasks.GetAllPingTasks()
 		if err != nil {
 			api.RespondError(c, 500, "Failed to fetch ping tasks: "+err.Error())
@@ -274,27 +246,51 @@ func GetPingRecords(c *gin.Context) {
 
 		tasksList := make([]gin.H, 0, len(pingTasks))
 		for _, t := range pingTasks {
-			// 只保留当前请求的 taskInfo
-			if taskId != -1 && taskIdStr != "" {
+			// 如果指定了 taskId，只处理该任务
+			if taskId != -1 {
 				if t.Id != uint(taskId) {
 					continue
 				}
 			}
 
-			// 只保留分配给该 uuid 的任务
-			found := slices.Contains(t.Clients, uuid)
-			if !found {
-				continue
+			// 如果指定了 uuid，检查任务是否分配给该客户端
+			if uuid != "" {
+				found := slices.Contains(t.Clients, uuid)
+				if !found {
+					continue
+				}
 			}
 
-			// 计算该任务的丢包率
+			// 计算该任务的丢包率和延迟统计
 			totalCount := 0
 			lossCount := 0
+			minLatency := 0
+			maxLatency := 0
+			avgLatency := 0
+			sumLatency := 0
+			validCount := 0
+
 			for _, r := range records {
-				if r.TaskId == t.Id {
-					totalCount++
-					if r.Value < 0 {
-						lossCount++
+				// 根据查询模式过滤记录
+				if r.TaskId != t.Id {
+					continue
+				}
+				// 如果同时指定了 uuid 和 task_id，只统计该客户端的记录
+				if uuid != "" && r.Client != uuid {
+					continue
+				}
+				
+				totalCount++
+				if r.Value < 0 {
+					lossCount++
+				} else {
+					validCount++
+					sumLatency += r.Value
+					if minLatency == 0 || r.Value < minLatency {
+						minLatency = r.Value
+					}
+					if r.Value > maxLatency {
+						maxLatency = r.Value
 					}
 				}
 			}
@@ -303,13 +299,29 @@ func GetPingRecords(c *gin.Context) {
 			if totalCount > 0 {
 				lossRate = float64(lossCount) / float64(totalCount) * 100
 			}
+			if validCount > 0 {
+				avgLatency = sumLatency / validCount
+			}
 
-			tasksList = append(tasksList, gin.H{
+			taskInfo := gin.H{
 				"id":       t.Id,
 				"name":     t.Name,
+				"type":     t.Type,
+				"target":   t.Target,
 				"interval": t.Interval,
 				"loss":     lossRate,
-			})
+				"min":      minLatency,
+				"max":      maxLatency,
+				"avg":      avgLatency,
+				"total":    totalCount,
+			}
+			
+			// 如果是仅 task_id 查询，添加客户端列表信息
+			if uuid == "" && taskId != -1 {
+				taskInfo["clients"] = t.Clients
+			}
+			
+			tasksList = append(tasksList, taskInfo)
 		}
 		response.Tasks = tasksList
 	}
