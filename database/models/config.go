@@ -11,6 +11,7 @@ type Config struct {
 	AutoDiscoveryKey  string `json:"auto_discovery_key" gorm:"type:varchar(255);default:''"` // 自动发现密钥
 	ScriptDomain      string `json:"script_domain" gorm:"type:varchar(255);default:''"`      // 自定义脚本域名
 	SendIpAddrToGuest bool   `json:"send_ip_addr_to_guest" gorm:"default:false"`             // 是否向访客页面发送 IP 地址，默认 false
+	EulaAccepted      bool   `json:"eula_accepted" gorm:"default:false"`
 	// GeoIP 配置
 	GeoIpEnabled  bool   `json:"geo_ip_enabled" gorm:"default:true"`
 	GeoIpProvider string `json:"geo_ip_provider" gorm:"type:varchar(20);default:'ip-api'"` // empty, mmdb, ip-api, geojs
