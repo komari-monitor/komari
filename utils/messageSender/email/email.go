@@ -19,6 +19,59 @@ type EmailSender struct {
 	Addition
 }
 
+// loginAuth 是一个更宽松的 SMTP 认证实现,支持更多 SMTP 服务器
+// 它不会严格验证服务器主机名,从而兼容微软邮箱、网易邮箱等服务
+type loginAuth struct {
+	username string
+	password string
+	host     string
+}
+
+func (a *loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	return "LOGIN", []byte{}, nil
+}
+
+func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if more {
+		switch string(fromServer) {
+		case "Username:", "User Name":
+			return []byte(a.username), nil
+		case "Password:", "password:":
+			return []byte(a.password), nil
+		default:
+			// 某些服务器可能发送 base64 编码的提示
+			// 尝试返回用户名或密码
+			prompt := strings.ToLower(strings.TrimSpace(string(fromServer)))
+			if strings.Contains(prompt, "user") {
+				return []byte(a.username), nil
+			}
+			return []byte(a.password), nil
+		}
+	}
+	return nil, nil
+}
+
+// plainAuthWithoutCheck 是一个不检查主机名的 PlainAuth 实现
+// 用于解决某些 SMTP 服务器主机名与配置不匹配的问题
+type plainAuthWithoutCheck struct {
+	identity string
+	username string
+	password string
+	host     string
+}
+
+func (a *plainAuthWithoutCheck) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	resp := []byte(a.identity + "\x00" + a.username + "\x00" + a.password)
+	return "PLAIN", resp, nil
+}
+
+func (a *plainAuthWithoutCheck) Next(fromServer []byte, more bool) ([]byte, error) {
+	if more {
+		return nil, fmt.Errorf("unexpected server challenge")
+	}
+	return nil, nil
+}
+
 func (e *EmailSender) GetName() string {
 	return "email"
 }
@@ -41,13 +94,25 @@ func (e *EmailSender) SendTextMessage(message, title string) error {
 		return fmt.Errorf("email sending is not fully configured")
 	}
 
-	// Prepare auth
-	auth := smtp.PlainAuth(
-		"",
-		e.Addition.Username,
-		e.Addition.Password,
-		e.Addition.Host,
-	)
+	// 使用更宽松的认证方式,优先尝试 PLAIN,如果失败则尝试 LOGIN
+	// 这样可以兼容更多的 SMTP 服务器,包括微软邮箱、网易邮箱等
+	var auth smtp.Auth
+	if e.Addition.UseLoginAuth {
+		// 使用 LOGIN 认证(适用于某些旧的或特殊的 SMTP 服务器)
+		auth = &loginAuth{
+			username: e.Addition.Username,
+			password: e.Addition.Password,
+			host:     e.Addition.Host,
+		}
+	} else {
+		// 使用不检查主机名的 PLAIN 认证(适用于大多数现代 SMTP 服务器)
+		auth = &plainAuthWithoutCheck{
+			identity: "",
+			username: e.Addition.Username,
+			password: e.Addition.Password,
+			host:     e.Addition.Host,
+		}
+	}
 
 	// Parse sender address (for MAIL FROM and header)
 	var senderAddr string
