@@ -15,11 +15,10 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/utils"
+	logutil "github.com/komari-monitor/komari/utils/log"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 // zipDirectoryExcluding 将 srcDir 打包为 dstZip，exclude 是绝对路径集合需要排除
@@ -408,13 +407,7 @@ func GetDBInstance() *gorm.DB {
 		}()
 
 		logConfig := &gorm.Config{
-			Logger: logger.Default.LogMode(logger.Silent),
-		}
-
-		if utils.VersionHash == "unknown" {
-			logConfig = &gorm.Config{
-				Logger: logger.Default.LogMode(logger.Info),
-			}
+			Logger: logutil.NewGormLogger(),
 		}
 
 		// 根据数据库类型选择不同的连接方式

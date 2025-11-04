@@ -37,6 +37,7 @@ import (
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
 	"github.com/komari-monitor/komari/utils/geoip"
+	logutil "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/utils/oauth"
@@ -134,7 +135,9 @@ func RunServer() {
 		}
 	}
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(logutil.GinLogger())
+	r.Use(logutil.GinRecovery())
 
 	// 动态 CORS 中间件
 
