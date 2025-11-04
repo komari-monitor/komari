@@ -103,6 +103,22 @@ func SendEvent(event models.EventMessage) error {
 	if !cfg.NotificationEnabled {
 		return nil
 	}
+
+	// 检查提供者是否实现了 IEventMessageSender 接口
+	if eventSender, ok := CurrentProvider().(factory.IEventMessageSender); ok {
+		// 如果实现了,直接调用 SendEvent
+		for i := 0; i < 3; i++ {
+			err = eventSender.SendEvent(event)
+			if err == nil || err.Error() == "short response: \x00\x00\x00\x1a\x00\x00\x00" {
+				auditlog.Log("", "", "Event message sent: "+event.Event, "info")
+				return nil
+			}
+		}
+		auditlog.Log("", "", "Failed to send event message after 3 attempts: "+err.Error()+","+event.Event, "error")
+		return err
+	}
+
+	// 如果没有实现,使用模板格式化为文本消息
 	messageTemplate := cfg.NotificationTemplate
 	if messageTemplate == "" {
 		messageTemplate = "{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}"
