@@ -24,9 +24,6 @@ Komari is a lightweight, self-hosted server monitoring tool designed to provide 
 
 [![](https://rainyun-apps.cn-nb1.rains3.com/materials/deploy-on-rainyun-cn.svg)](https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_) 
 
-- Claw Run - USD 1.5/month
-
-[![](https://raw.githubusercontent.com/ClawCloud/Run-Template/refs/heads/main/Run-on-ClawCloud.svg)](https://template.run.claw.cloud/?openapp=system-fastdeploy%3FtemplateName%3Dkomari)
 
 ### 1. Use the One-click Install Script
 Suitable for distributions using systemd (Ubuntu, Debian...).
