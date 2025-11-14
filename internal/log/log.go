@@ -105,11 +105,10 @@ func (h *LogHandler) Handle(_ context.Context, r slog.Record) error {
 
 	var msg string
 	if file != "" {
-		msg = fmt.Sprintf("%s %s %s %s",
+		msg = fmt.Sprintf("%s %s %s",
 			timeStr,
 			levelStr,
-			r.Message,
-			Gray(fmt.Sprintf("(%s:%d)", file, line)))
+			r.Message)
 	} else {
 		msg = fmt.Sprintf("%s %s %s",
 			timeStr,
@@ -123,7 +122,9 @@ func (h *LogHandler) Handle(_ context.Context, r slog.Record) error {
 		}
 		return true
 	})
-
+	if file != "" {
+		msg += Gray(fmt.Sprintf("(%s:%d)", file, line))
+	}
 	msg += "\n"
 	_, err := h.w.Write([]byte(msg))
 	return err

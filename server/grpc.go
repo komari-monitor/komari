@@ -13,12 +13,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gookit/event"
 	apiClient "github.com/komari-monitor/komari/internal/api_v1/client"
 	"github.com/komari-monitor/komari/internal/common"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/database/config"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/geoip"
 	"github.com/komari-monitor/komari/internal/notifier"
 	"github.com/komari-monitor/komari/internal/ws"
@@ -31,22 +33,27 @@ import (
 )
 
 func StartNezhaGRPCServer(listen string) {
+	if listen == "" {
+		return
+	}
 	if err := StartNezhaCompat(listen); err != nil {
 		log.Printf("Nezha compat server error: %v", err)
 		auditlog.EventLog("error", fmt.Sprintf("Nezha compat server error: %v", err))
 	}
-	config.Subscribe(func(event config.ConfigEvent) {
-		if event.New.NezhaCompatEnabled != event.Old.NezhaCompatEnabled {
-			if event.New.NezhaCompatEnabled {
-				if err := StartNezhaCompat(event.New.NezhaCompatListen); err != nil {
+	config.Subscribe(func(config_event config.ConfigEvent) {
+		if config_event.New.NezhaCompatEnabled != config_event.Old.NezhaCompatEnabled {
+			if config_event.New.NezhaCompatEnabled {
+				if err := StartNezhaCompat(config_event.New.NezhaCompatListen); err != nil {
 					log.Printf("start Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
 				}
+				event.Trigger(eventType.ServerListenGrpcStart, nil)
 			} else {
 				if err := StopNezhaCompat(); err != nil {
 					log.Printf("stop Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("stop Nezha compat server error: %v", err))
 				}
+				event.Trigger(eventType.ServerListenGrpcStop, nil)
 			}
 		}
 

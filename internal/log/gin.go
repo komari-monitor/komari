@@ -3,6 +3,9 @@ package log
 import (
 	"fmt"
 	"log/slog"
+	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -65,7 +68,8 @@ func GinRecovery() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
-				msg := fmt.Sprintf("panic recovered: %v | %s %s", err, c.Request.Method, c.Request.URL.Path)
+				lan := FileWithLineNum()
+				msg := fmt.Sprintf("panic recovered: %v | %s %s (%s)", err, c.Request.Method, c.Request.URL.Path, lan)
 				handler := slog.Default().Handler()
 				r := slog.NewRecord(time.Now(), slog.LevelError, msg, 0)
 				r.AddAttrs(slog.String("_group", "GIN"))
@@ -75,4 +79,26 @@ func GinRecovery() gin.HandlerFunc {
 		}()
 		c.Next()
 	}
+}
+
+func FileWithLineNum() string {
+	pcs := [20]uintptr{}
+	len := runtime.Callers(3, pcs[:])
+	frames := runtime.CallersFrames(pcs[:len])
+	for i := 0; i < len; i++ {
+		frame, _ := frames.Next()
+
+		if !strings.HasPrefix(frame.Function, "runtime") &&
+			!strings.HasPrefix(frame.Function, "cmd") &&
+			!strings.HasPrefix(frame.Function, "event") &&
+			!strings.HasPrefix(frame.Function, "gorm") &&
+			!strings.HasPrefix(frame.Function, "log") &&
+			!strings.HasSuffix(frame.File, ".gen.go") ||
+			strings.HasSuffix(frame.File, "_test.go") {
+			return string(strconv.AppendInt(append([]byte(frame.File), ':'), int64(frame.Line), 10))
+		}
+
+	}
+
+	return ""
 }

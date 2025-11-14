@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
 	api "github.com/komari-monitor/komari/internal/api_v1"
 	"github.com/komari-monitor/komari/internal/database"
@@ -23,6 +24,7 @@ import (
 	d_notification "github.com/komari-monitor/komari/internal/database/notification"
 	"github.com/komari-monitor/komari/internal/database/records"
 	"github.com/komari-monitor/komari/internal/database/tasks"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/geoip"
 	logutil "github.com/komari-monitor/komari/internal/log"
 	"github.com/komari-monitor/komari/internal/messageSender"
@@ -57,25 +59,35 @@ func RunServer() {
 		log.Fatalf("Failed to create theme directory: %v", err)
 	}
 	InitDatabase()
+
 	if version.VersionHash != "unknown" {
 		gin.SetMode(gin.ReleaseMode)
 	}
+
 	conf, err := config.Get()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	r := gin.New()
+	r.Use(logutil.GinLogger())
+	r.Use(logutil.GinRecovery())
+
+	event.Trigger(eventType.ServerInitializeStart, event.M{"config": conf, "engine": r})
+	defer event.Trigger(eventType.ServerInitializeDone, event.M{"config": conf})
+
 	go geoip.InitGeoIp()
 	go DoScheduledWork()
 	go messageSender.Initialize()
 	go oauth.Initialize()
 
-	if conf.NezhaCompatEnabled {
-		server.StartNezhaGRPCServer(conf.NezhaCompatListen)
-	}
+	server.StartNezhaGRPCServer(conf.NezhaCompatListen)
 
-	config.Subscribe(func(event config.ConfigEvent) {
-		if event.New.OAuthProvider != event.Old.OAuthProvider {
-			oidcProvider, err := database.GetOidcConfigByName(event.New.OAuthProvider)
+	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
+		newConf := e.Get("new").(models.Config)
+		oldConf := e.Get("old").(models.Config)
+		if newConf.OAuthProvider != oldConf.OAuthProvider {
+			oidcProvider, err := database.GetOidcConfigByName(newConf.OAuthProvider)
 			if err != nil {
 				log.Printf("Failed to get OIDC provider config: %v", err)
 			} else {
@@ -86,10 +98,11 @@ func RunServer() {
 				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
 			}
 		}
-		if event.New.NotificationMethod != event.Old.NotificationMethod {
+		if newConf.NotificationMethod != oldConf.NotificationMethod {
 			messageSender.Initialize()
 		}
-	})
+		return nil
+	}), event.Max)
 
 	// 初始化 cloudflared
 	if strings.ToLower(GetEnv("KOMARI_ENABLE_CLOUDFLARED", "false")) == "true" {
@@ -99,9 +112,6 @@ func RunServer() {
 		}
 	}
 
-	r := gin.New()
-	r.Use(logutil.GinLogger())
-	r.Use(logutil.GinRecovery())
 	server.Init(r)
 
 	srv := &http.Server{

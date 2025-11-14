@@ -6,8 +6,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"gorm.io/gorm"
 )
 
@@ -61,6 +63,7 @@ func Save(cst models.Config) error {
 	}
 	newConfig, _ := Get()
 	publishEvent(oldConfig, newConfig)
+	event.Trigger(eventType.ConfigUpdated, event.M{"old": oldConfig, "new": newConfig})
 	return nil
 }
 
@@ -103,6 +106,7 @@ func Update(cst map[string]interface{}) error {
 		if err := tx.Where("id = ?", oldConfig.ID).First(newConfig).Error; err != nil {
 			return errors.Join(err, errors.New("failed to retrieve updated configuration"))
 		}
+		event.Trigger(eventType.ConfigUpdated, event.M{"old": oldConfig, "new": *newConfig})
 		publishEvent(oldConfig, *newConfig)
 		return nil
 	})

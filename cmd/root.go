@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/internal/eventType"
 
 	"github.com/spf13/cobra"
 )
@@ -40,6 +42,8 @@ Made by Akizon77 with love.`,
 }
 
 func Execute() {
+	event.Trigger(eventType.ProcessStart, nil)
+	defer event.Trigger(eventType.ProcessExit, nil)
 	if err := RootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
