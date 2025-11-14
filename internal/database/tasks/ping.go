@@ -5,7 +5,7 @@ import (
 
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
-	"github.com/komari-monitor/komari/pkg/utils"
+	"github.com/komari-monitor/komari/internal/pingSchedule"
 	"gorm.io/gorm"
 )
 
@@ -90,7 +90,7 @@ func ReloadPingSchedule() error {
 	if err := db.Find(&pingTasks).Error; err != nil {
 		return err
 	}
-	return utils.ReloadPingSchedule(pingTasks)
+	return pingSchedule.ReloadPingSchedule(pingTasks)
 }
 
 func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
