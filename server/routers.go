@@ -27,7 +27,7 @@ func Init(r *gin.Engine) {
 		newConf := e.Get("new").(models.Config)
 		oldConf := e.Get("old").(models.Config)
 		AllowCors = newConf.AllowCors
-
+		public.UpdateIndex(newConf)
 		if newConf.GeoIpProvider != oldConf.GeoIpProvider {
 			go geoip.InitGeoIp()
 		}
@@ -58,9 +58,6 @@ func Init(r *gin.Engine) {
 	})
 	// #region 静态文件服务
 	public.UpdateIndex(conf)
-	config.Subscribe(func(event config.ConfigEvent) {
-		public.UpdateIndex(event.New)
-	})
 
 	internal.LoadApiV1Routes(r, conf)
 }

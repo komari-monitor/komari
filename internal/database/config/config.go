@@ -62,7 +62,6 @@ func Save(cst models.Config) error {
 		return err
 	}
 	newConfig, _ := Get()
-	publishEvent(oldConfig, newConfig)
 	event.Trigger(eventType.ConfigUpdated, event.M{"old": oldConfig, "new": newConfig})
 	return nil
 }
@@ -107,7 +106,6 @@ func Update(cst map[string]interface{}) error {
 			return errors.Join(err, errors.New("failed to retrieve updated configuration"))
 		}
 		event.Trigger(eventType.ConfigUpdated, event.M{"old": oldConfig, "new": *newConfig})
-		publishEvent(oldConfig, *newConfig)
 		return nil
 	})
 	if err != nil {
