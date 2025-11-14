@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"log"
+	"strconv"
 
 	"context"
 	"errors"
@@ -33,17 +34,12 @@ import (
 )
 
 func StartNezhaGRPCServer(listen string) {
-	if listen == "" {
-		return
-	}
-	if err := StartNezhaCompat(listen); err != nil {
-		log.Printf("Nezha compat server error: %v", err)
-		auditlog.EventLog("error", fmt.Sprintf("Nezha compat server error: %v", err))
-	}
-	config.Subscribe(func(config_event config.ConfigEvent) {
-		if config_event.New.NezhaCompatEnabled != config_event.Old.NezhaCompatEnabled {
-			if config_event.New.NezhaCompatEnabled {
-				if err := StartNezhaCompat(config_event.New.NezhaCompatListen); err != nil {
+	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
+		New := e.Get("new").(models.Config)
+		Old := e.Get("old").(models.Config)
+		if New.NezhaCompatEnabled != Old.NezhaCompatEnabled {
+			if New.NezhaCompatEnabled {
+				if err := StartNezhaCompat(New.NezhaCompatListen); err != nil {
 					log.Printf("start Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
 				}
@@ -56,8 +52,16 @@ func StartNezhaGRPCServer(listen string) {
 				event.Trigger(eventType.ServerListenGrpcStop, nil)
 			}
 		}
+		return nil
+	}))
 
-	})
+	if listen == "" {
+		return
+	}
+	if err := StartNezhaCompat(listen); err != nil {
+		log.Printf("Nezha compat server error: %v", err)
+		auditlog.EventLog("error", fmt.Sprintf("Nezha compat server error: %v", err))
+	}
 }
 
 // ---- Manual start/stop support ----
@@ -74,6 +78,22 @@ func StartNezhaCompat(addr string) error {
 	defer nezhaOnceM.Unlock()
 	if nezhaSrv != nil {
 		return errors.New("nezha compat server already started")
+	}
+	if addr == "" {
+		return errors.New("address is empty")
+	}
+	if strings.Contains(addr, ":") {
+		parts := strings.Split(addr, ":")
+		port_s := parts[len(parts)-1]
+		port, err := strconv.Atoi(port_s)
+		if err != nil {
+			return errors.New("invalid port")
+		}
+		if port < 1 || port > 65535 {
+			return errors.New("port out of range")
+		}
+	} else {
+		return errors.New("invalid address")
 	}
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
