@@ -5,18 +5,18 @@ import (
 	"log/slog"
 
 	"github.com/komari-monitor/komari/cmd"
-	"github.com/komari-monitor/komari/utils"
-	logutil "github.com/komari-monitor/komari/utils/log"
+	logutil "github.com/komari-monitor/komari/internal/log"
+	"github.com/komari-monitor/komari/internal/version"
 )
 
 func main() {
-	if utils.VersionHash == "unknown" {
+	if version.VersionHash == "unknown" {
 		logutil.SetupGlobalLogger(slog.LevelDebug)
 	} else {
 		logutil.SetupGlobalLogger(slog.LevelInfo)
 	}
 
-	log.Printf("Komari Monitor %s (hash: %s)", utils.CurrentVersion, utils.VersionHash)
+	log.Printf("Komari Monitor %s (hash: %s)", version.CurrentVersion, version.VersionHash)
 
 	cmd.Execute()
 }

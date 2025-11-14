@@ -14,8 +14,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/database/config"
-	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/database/config"
+	"github.com/komari-monitor/komari/internal/database/models"
 )
 
 //go:embed dist

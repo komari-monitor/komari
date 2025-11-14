@@ -4,9 +4,9 @@ import (
 	"os"
 
 	"github.com/komari-monitor/komari/cmd/flags"
-	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/database/accounts"
+	"github.com/komari-monitor/komari/internal/database/dbcore"
+	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/spf13/cobra"
 )
 

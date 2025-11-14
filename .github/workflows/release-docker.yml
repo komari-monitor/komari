@@ -58,7 +58,7 @@ jobs:
         run: |
           VERSION="${{ github.event.release.tag_name }}"
           VERSION_HASH="${{ github.sha }}"
-          LDFLAGS="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}"
+          LDFLAGS="-s -w -X github.com/komari-monitor/komari/internal/version.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/internal/version.VersionHash=${VERSION_HASH}"
 
           echo "Building for linux/amd64..."
           GOARCH=amd64 CC="zig cc -target x86_64-linux-musl" go build -trimpath -ldflags="$LDFLAGS" -o komari-linux-amd64
