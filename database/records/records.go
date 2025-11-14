@@ -41,9 +41,9 @@ func DeleteAll() error {
 func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.GPURecord, error) {
 	db := dbcore.GetDBInstance()
 	var records []models.GPURecord
-	
+
 	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-	
+
 	var recentRecords []models.GPURecord
 	recentStart := start
 	if end.After(fourHoursAgo) {
@@ -57,7 +57,7 @@ func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.G
 			return nil, err
 		}
 	}
-	
+
 	var longTermRecords []models.GPURecord
 	err := db.Table("gpu_records_long_term").Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).
 		Order("time ASC, device_index ASC").Find(&longTermRecords).Error
@@ -176,6 +176,7 @@ func CompactRecord() error {
 		if err := db.Exec("VACUUM").Error; err != nil {
 			log.Printf("Error vacuuming database: %v", err)
 		}
+		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
 	//log.Printf("Record compaction completed")
 	return nil
@@ -363,17 +364,17 @@ func migrateOldRecords(db *gorm.DB) error {
 // migrateGPURecords 压缩GPU记录数据
 func migrateGPURecords(db *gorm.DB) error {
 	fourHoursAgo := time.Now().Add(-4 * time.Hour)
-	
+
 	// 查询超过4小时的GPU记录
 	var gpuRecords []models.GPURecord
 	if err := db.Where("time < ?", fourHoursAgo).Find(&gpuRecords).Error; err != nil {
 		return err
 	}
-	
+
 	if len(gpuRecords) == 0 {
 		return nil
 	}
-	
+
 	// 按Client + DeviceIndex + 15分钟时间窗口分组
 	type gpuGroupKey struct {
 		Client      string
@@ -381,16 +382,16 @@ func migrateGPURecords(db *gorm.DB) error {
 		TimeSlot    time.Time
 		DeviceName  string
 	}
-	
+
 	type gpuGroupData struct {
 		MemTotal    []int64
 		MemUsed     []int64
 		Utilization []float32
 		Temperature []int
 	}
-	
+
 	groupedGPUs := make(map[gpuGroupKey]*gpuGroupData)
-	
+
 	for _, record := range gpuRecords {
 		key := gpuGroupKey{
 			Client:      record.Client,
@@ -398,18 +399,18 @@ func migrateGPURecords(db *gorm.DB) error {
 			TimeSlot:    record.Time.ToTime().Truncate(15 * time.Minute),
 			DeviceName:  record.DeviceName,
 		}
-		
+
 		if _, ok := groupedGPUs[key]; !ok {
 			groupedGPUs[key] = &gpuGroupData{}
 		}
-		
+
 		data := groupedGPUs[key]
 		data.MemTotal = append(data.MemTotal, record.MemTotal)
 		data.MemUsed = append(data.MemUsed, record.MemUsed)
 		data.Utilization = append(data.Utilization, record.Utilization)
 		data.Temperature = append(data.Temperature, record.Temperature)
 	}
-	
+
 	// 百分位数计算函数 (复用传统Record压缩逻辑)
 	getPercentile := func(values []float64, percentile float64) float64 {
 		if len(values) == 0 {
@@ -457,7 +458,7 @@ func migrateGPURecords(db *gorm.DB) error {
 		}
 		return float32(getPercentile(floats, percentile))
 	}
-	
+
 	// 保持与传统Record压缩的一致性
 	high_percentile := 0.7
 
@@ -480,10 +481,10 @@ func migrateGPURecords(db *gorm.DB) error {
 				Utilization: getFloat32Percentile(data.Utilization, high_percentile),
 				Temperature: int(getIntPercentile(convertIntToInt64(data.Temperature), high_percentile)),
 			}
-			
+
 			if existingCount > 0 {
 				// 更新已存在记录
-				if err := tx.Table("gpu_records_long_term").Where("client = ? AND device_index = ? AND time = ?", 
+				if err := tx.Table("gpu_records_long_term").Where("client = ? AND device_index = ? AND time = ?",
 					key.Client, key.DeviceIndex, key.TimeSlot).Updates(&compressedGPU).Error; err != nil {
 					return err
 				}
@@ -494,12 +495,12 @@ func migrateGPURecords(db *gorm.DB) error {
 				}
 			}
 		}
-		
+
 		// 删除已压缩的原始GPU数据
 		if err := tx.Where("time < ?", fourHoursAgo.Add(-1*time.Hour)).Delete(&models.GPURecord{}).Error; err != nil {
 			return err
 		}
-		
+
 		return nil
 	})
 }

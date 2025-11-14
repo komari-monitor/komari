@@ -424,6 +424,7 @@ func GetDBInstance() *gorm.DB {
 				log.Printf("Failed to enable WAL mode for SQLite: %v", err)
 			}
 			instance.Exec("VACUUM;")
+			instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 		case "mysql":
 			// MySQL 连接
 			dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=True&loc=Local",
