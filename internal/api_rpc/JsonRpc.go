@@ -19,6 +19,11 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
+func RegisterRouters(path string, r *gin.Engine) {
+	r.GET(path, OnRpcRequest)
+	r.POST(path, OnRpcRequest)
+}
+
 // Json Rpc2 over websocket, /api/rpc2
 func OnRpcRequest(c *gin.Context) {
 	cfg, _ := config.Get()

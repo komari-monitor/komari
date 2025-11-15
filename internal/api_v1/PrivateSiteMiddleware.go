@@ -21,6 +21,7 @@ var (
 		"/api/recent",
 		"/api/admin",    // 由AdminAuthMiddleware处理
 		"/api/clients/", // 由TokenAuthMiddleware处理
+		"/api/rpc2",     // 由JsonRpc处理
 	}
 )
 
@@ -65,7 +66,7 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 		}
 		_, err = accounts.GetSession(session)
 		if err != nil {
-			RespondError(c, http.StatusUnauthorized, "Unauthorized.")
+			RespondError(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
 			c.Abort()
 			return
 		}

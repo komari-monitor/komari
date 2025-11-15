@@ -2,7 +2,6 @@ package internal
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/internal/api_rpc"
 	api "github.com/komari-monitor/komari/internal/api_v1"
 	"github.com/komari-monitor/komari/internal/api_v1/admin"
 	"github.com/komari-monitor/komari/internal/api_v1/admin/clipboard"
@@ -44,8 +43,6 @@ func LoadApiV1Routes(r *gin.Engine, conf models.Config) {
 	r.GET("/api/records/load", record.GetRecordsByUUID)
 	r.GET("/api/records/ping", record.GetPingRecords)
 	r.GET("/api/task/ping", task.GetPublicPingTasks)
-	r.GET("/api/rpc2", api_rpc.OnRpcRequest)
-	r.POST("/api/rpc2", api_rpc.OnRpcRequest)
 
 	// #region Agent
 	r.POST("/api/clients/register", client.RegisterClient)

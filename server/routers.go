@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal"
+	"github.com/komari-monitor/komari/internal/api_rpc"
 	"github.com/komari-monitor/komari/internal/database/config"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/eventType"
@@ -60,6 +61,8 @@ func Init(r *gin.Engine) {
 	public.UpdateIndex(conf)
 
 	internal.LoadApiV1Routes(r, conf)
+
+	api_rpc.RegisterRouters("/api/rpc2", r)
 }
 
 func ScheduledTasksInit() {
