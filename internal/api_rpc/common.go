@@ -1,4 +1,4 @@
-package jsonRpc
+package api_rpc
 
 import (
 	"context"
