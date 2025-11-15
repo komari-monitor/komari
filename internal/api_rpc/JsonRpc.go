@@ -11,10 +11,9 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 	"github.com/komari-monitor/komari/internal/database/clients"
-	"github.com/komari-monitor/komari/internal/database/config"
-	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/ws"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
@@ -26,7 +25,7 @@ func RegisterRouters(path string, r *gin.Engine) {
 
 // Json Rpc2 over websocket, /api/rpc2
 func OnRpcRequest(c *gin.Context) {
-	cfg, _ := config.Get()
+	cfg, _ := conf.GetWithV1Format()
 
 	// GET -> WebSocket
 	if c.Request.Method == http.MethodGet {
@@ -123,7 +122,7 @@ func OnRpcRequest(c *gin.Context) {
 }
 
 // detectPermissionGroup 提取权限分组，与原逻辑保持一致
-func detectPermissionGroup(c *gin.Context, cfg models.Config) string {
+func detectPermissionGroup(c *gin.Context, cfg conf.V1Struct) string {
 	permissionGroup := "guest"
 	token := c.Query("Authorization")
 	if _, err := clients.GetClientUUIDByToken(token); err == nil {

@@ -17,8 +17,8 @@ import (
 	"github.com/gookit/event"
 	apiClient "github.com/komari-monitor/komari/internal/api_v1/client"
 	"github.com/komari-monitor/komari/internal/common"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
-	"github.com/komari-monitor/komari/internal/database/config"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/eventType"
@@ -35,11 +35,11 @@ import (
 
 func StartNezhaGRPCServer(listen string) {
 	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
-		New := e.Get("new").(models.Config)
-		Old := e.Get("old").(models.Config)
-		if New.NezhaCompatEnabled != Old.NezhaCompatEnabled {
-			if New.NezhaCompatEnabled {
-				if err := StartNezhaCompat(New.NezhaCompatListen); err != nil {
+		New := e.Get("new").(conf.Config)
+		Old := e.Get("old").(conf.Config)
+		if New.Compact.Nezha.NezhaCompatEnabled != Old.Compact.Nezha.NezhaCompatEnabled {
+			if New.Compact.Nezha.NezhaCompatEnabled {
+				if err := StartNezhaCompat(New.Compact.Nezha.NezhaCompatListen); err != nil {
 					log.Printf("start Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
 				}
@@ -387,7 +387,7 @@ func (s *nezhaCompatServer) ReportGeoIP(ctx context.Context, in *proto.GeoIP) (*
 	if in != nil && in.Ip != nil {
 		if v4 := strings.TrimSpace(in.Ip.Ipv4); v4 != "" {
 			updates["ipv4"] = v4
-			if cfg, err := config.Get(); err == nil && cfg.GeoIpEnabled {
+			if cfg, err := conf.GetWithV1Format(); err == nil && cfg.GeoIpEnabled {
 				if ip := net.ParseIP(v4); ip != nil {
 					if gi, _ := geoip.GetGeoInfo(ip); gi != nil {
 						iso = gi.ISOCode
@@ -398,7 +398,7 @@ func (s *nezhaCompatServer) ReportGeoIP(ctx context.Context, in *proto.GeoIP) (*
 		if v6 := strings.TrimSpace(in.Ip.Ipv6); v6 != "" {
 			updates["ipv6"] = v6
 			if iso == "" { // 优先使用 v4 的国家码
-				if cfg, err := config.Get(); err == nil && cfg.GeoIpEnabled {
+				if cfg, err := conf.GetWithV1Format(); err == nil && cfg.GeoIpEnabled {
 					if ip := net.ParseIP(v6); ip != nil {
 						if gi, _ := geoip.GetGeoInfo(ip); gi != nil {
 							iso = gi.ISOCode

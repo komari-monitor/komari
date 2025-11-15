@@ -9,6 +9,6 @@ var (
 	DatabaseUser string // MySQL/其他数据库用户名
 	DatabasePass string // MySQL/其他数据库密码
 	DatabaseName string // MySQL/其他数据库名称
-
-	Listen string
+	ConfigFile   string // 配置文件路径
+	Listen       string
 )

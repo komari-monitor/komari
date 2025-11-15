@@ -15,10 +15,10 @@ import (
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
 	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
-	"github.com/komari-monitor/komari/internal/database/config"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 	d_notification "github.com/komari-monitor/komari/internal/database/notification"
@@ -30,7 +30,8 @@ import (
 	"github.com/komari-monitor/komari/internal/messageSender"
 	"github.com/komari-monitor/komari/internal/notifier"
 	"github.com/komari-monitor/komari/internal/oauth"
-	"github.com/komari-monitor/komari/internal/version"
+	"github.com/komari-monitor/komari/internal/patch"
+	"github.com/komari-monitor/komari/internal/restore"
 	"github.com/komari-monitor/komari/pkg/cloudflared"
 	"github.com/komari-monitor/komari/server"
 	"github.com/spf13/cobra"
@@ -58,13 +59,19 @@ func RunServer() {
 	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
 		log.Fatalf("Failed to create theme directory: %v", err)
 	}
+	// 进行备份恢复
+	if restore.NeedBackupRestore() {
+		restore.RestoreBackup()
+	}
+	conf.Load()
 	InitDatabase()
+	patch.ApplyPatch()
 
-	if version.VersionHash != "unknown" {
+	if conf.Version != conf.Version_Development {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	conf, err := config.Get()
+	config, err := conf.GetWithV1Format()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -73,21 +80,20 @@ func RunServer() {
 	r.Use(logutil.GinLogger())
 	r.Use(logutil.GinRecovery())
 
-	event.Trigger(eventType.ServerInitializeStart, event.M{"config": conf, "engine": r})
-	defer event.Trigger(eventType.ServerInitializeDone, event.M{"config": conf})
+	event.Trigger(eventType.ServerInitializeStart, event.M{"config": config, "engine": r})
 
 	go geoip.InitGeoIp()
 	go DoScheduledWork()
 	go messageSender.Initialize()
 	go oauth.Initialize()
 
-	server.StartNezhaGRPCServer(conf.NezhaCompatListen)
+	server.StartNezhaGRPCServer(config.NezhaCompatListen)
 
 	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
-		newConf := e.Get("new").(models.Config)
-		oldConf := e.Get("old").(models.Config)
-		if newConf.OAuthProvider != oldConf.OAuthProvider {
-			oidcProvider, err := database.GetOidcConfigByName(newConf.OAuthProvider)
+		newConf := e.Get("new").(conf.Config)
+		oldConf := e.Get("old").(conf.Config)
+		if newConf.Login.OAuthProvider != oldConf.Login.OAuthProvider {
+			oidcProvider, err := database.GetOidcConfigByName(newConf.Login.OAuthProvider)
 			if err != nil {
 				log.Printf("Failed to get OIDC provider config: %v", err)
 			} else {
@@ -98,7 +104,7 @@ func RunServer() {
 				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
 			}
 		}
-		if newConf.NotificationMethod != oldConf.NotificationMethod {
+		if newConf.Notification.NotificationMethod != oldConf.Notification.NotificationMethod {
 			messageSender.Initialize()
 		}
 		return nil
@@ -118,13 +124,14 @@ func RunServer() {
 		Addr:    flags.Listen,
 		Handler: r,
 	}
+
+	event.Trigger(eventType.ServerInitializeDone, event.M{"config": config})
+
 	log.Printf("Starting server on %s ...", flags.Listen)
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			OnFatal(err)
-			log.Fatalf("listen: %s\n", err)
-		}
-	}()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		OnFatal(err)
+		log.Fatalf("listen: %s\n", err)
+	}
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
@@ -168,7 +175,7 @@ func DoScheduledWork() {
 	minute := time.NewTicker(60 * time.Second)
 	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
 	records.CompactRecord()
-	cfg, _ := config.Get()
+	cfg, _ := conf.GetWithV1Format()
 	go notifier.CheckExpireScheduledWork()
 	for {
 		select {

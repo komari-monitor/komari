@@ -3,8 +3,8 @@ package client
 import (
 	"net"
 
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/clients"
-	"github.com/komari-monitor/komari/internal/database/config"
 	"github.com/komari-monitor/komari/internal/geoip"
 
 	"github.com/gin-gonic/gin"
@@ -60,7 +60,7 @@ func UploadBasicInfo(c *gin.Context) {
 		}
 	}
 
-	if cfg, err := config.Get(); err == nil && cfg.GeoIpEnabled {
+	if cfg, err := conf.GetWithV1Format(); err == nil && cfg.GeoIpEnabled {
 		if ipv4, ok := cbi["ipv4"].(string); ok && ipv4 != "" {
 			ip4 := net.ParseIP(ipv4)
 			ip4_record, _ := geoip.GetGeoInfo(ip4)

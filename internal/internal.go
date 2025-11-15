@@ -12,10 +12,10 @@ import (
 	"github.com/komari-monitor/komari/internal/api_v1/client"
 	"github.com/komari-monitor/komari/internal/api_v1/record"
 	"github.com/komari-monitor/komari/internal/api_v1/task"
-	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/conf"
 )
 
-func LoadApiV1Routes(r *gin.Engine, conf models.Config) {
+func LoadApiV1Routes(r *gin.Engine, conf conf.V1Struct) {
 	r.Use(func(c *gin.Context) {
 		if len(c.Request.URL.Path) >= 4 && c.Request.URL.Path[:4] == "/api" {
 			c.Header("Cache-Control", "no-store")

@@ -4,9 +4,8 @@ import (
 	"database/sql"
 
 	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
-	"github.com/komari-monitor/komari/internal/database/config"
-	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/database/records"
 	"github.com/komari-monitor/komari/internal/database/tasks"
 
@@ -15,13 +14,13 @@ import (
 
 // GetSettings 获取自定义配置
 func GetSettings(c *gin.Context) {
-	cst, err := config.Get()
+	cst, err := conf.GetWithV1Format()
 	if err != nil {
 		if err == sql.ErrNoRows {
 			//override
-			cst = models.Config{Sitename: "Komari"}
+			cst = conf.V1Struct{Sitename: "Komari"}
 			cst.ID = 1
-			config.Save(cst)
+			conf.Save(cst)
 			api.RespondSuccess(c, cst)
 			return
 		}
@@ -42,7 +41,7 @@ func EditSettings(c *gin.Context) {
 	}
 
 	cfg["id"] = 1 // Only one record
-	if err := config.Update(cfg); err != nil {
+	if err := conf.Update(cfg); err != nil {
 		api.RespondError(c, 500, "Failed to update settings: "+err.Error())
 		return
 	}

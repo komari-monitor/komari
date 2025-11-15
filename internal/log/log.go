@@ -152,7 +152,7 @@ func SetupGlobalLogger(level slog.Level) {
 	stdlog.SetPrefix("")
 
 	// 替换标准库 log 的输出为 slog handler
-	stdlog.SetOutput(&writerAdapter{handler: handler, level: level})
+	stdlog.SetOutput(&writerAdapter{handler: handler, level: slog.LevelInfo})
 }
 
 // writerAdapter 将标准库 log 的输出适配到 slog

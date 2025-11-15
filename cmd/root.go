@@ -21,13 +21,14 @@ func GetEnv(key, defaultValue string) string {
 
 // 从环境变量获取默认值
 var (
-	dbTypeEnv = GetEnv("KOMARI_DB_TYPE", "sqlite")
-	dbFileEnv = GetEnv("KOMARI_DB_FILE", "./data/komari.db")
-	dbHostEnv = GetEnv("KOMARI_DB_HOST", "localhost")
-	dbPortEnv = GetEnv("KOMARI_DB_PORT", "3306")
-	dbUserEnv = GetEnv("KOMARI_DB_USER", "root")
-	dbPassEnv = GetEnv("KOMARI_DB_PASS", "")
-	dbNameEnv = GetEnv("KOMARI_DB_NAME", "komari")
+	dbTypeEnv     = GetEnv("KOMARI_DB_TYPE", "sqlite")
+	dbFileEnv     = GetEnv("KOMARI_DB_FILE", "./data/komari.db")
+	dbHostEnv     = GetEnv("KOMARI_DB_HOST", "localhost")
+	dbPortEnv     = GetEnv("KOMARI_DB_PORT", "3306")
+	dbUserEnv     = GetEnv("KOMARI_DB_USER", "root")
+	dbPassEnv     = GetEnv("KOMARI_DB_PASS", "")
+	dbNameEnv     = GetEnv("KOMARI_DB_NAME", "komari")
+	configFileEnv = GetEnv("KOMARI_CONFIG_FILE", "./data/komari.json")
 )
 
 var RootCmd = &cobra.Command{
@@ -59,4 +60,5 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.DatabaseUser, "db-user", dbUserEnv, "MySQL/Other database username [env: KOMARI_DB_USER]")
 	RootCmd.PersistentFlags().StringVar(&flags.DatabasePass, "db-pass", dbPassEnv, "MySQL/Other database password [env: KOMARI_DB_PASS]")
 	RootCmd.PersistentFlags().StringVar(&flags.DatabaseName, "db-name", dbNameEnv, "MySQL/Other database name [env: KOMARI_DB_NAME]")
+	RootCmd.PersistentFlags().StringVarP(&flags.ConfigFile, "config", "c", configFileEnv, "Configuration file path [env: KOMARI_CONFIG_FILE]")
 }

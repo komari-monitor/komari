@@ -5,9 +5,11 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/gookit/event"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
-	"github.com/komari-monitor/komari/internal/database/config"
+	"github.com/komari-monitor/komari/internal/eventType"
 
 	"github.com/gin-gonic/gin"
 )
@@ -19,7 +21,7 @@ type LoginRequest struct {
 }
 
 func Login(c *gin.Context) {
-	conf, _ := config.Get()
+	conf, _ := conf.GetWithV1Format()
 	if conf.DisablePasswordLogin {
 		RespondError(c, http.StatusForbidden, "Password login is disabled")
 		return
@@ -44,6 +46,15 @@ func Login(c *gin.Context) {
 	uuid, success := accounts.CheckPassword(data.Username, data.Password)
 	if !success {
 		RespondError(c, http.StatusUnauthorized, "Invalid credentials")
+		event.Trigger(eventType.LoginFailed, event.M{
+			"username": data.Username,
+			"method":   "password",
+			"ip":       c.ClientIP(),
+			"ua":       c.Request.UserAgent(),
+			"header":   c.Request.Header,
+			"referrer": c.Request.Referer(),
+			"host":     c.Request.Host,
+		})
 		return
 	}
 	// 2FA
@@ -67,6 +78,15 @@ func Login(c *gin.Context) {
 	c.SetCookie("session_token", session, 2592000, "/", "", false, true)
 	auditlog.Log(c.ClientIP(), uuid, "logged in (password)", "login")
 	RespondSuccess(c, gin.H{"set-cookie": gin.H{"session_token": session}})
+	event.Trigger(eventType.UserLogin, event.M{
+		"username": data.Username,
+		"method":   "password",
+		"ip":       c.ClientIP(),
+		"ua":       c.Request.UserAgent(),
+		"header":   c.Request.Header,
+		"referrer": c.Request.Referer(),
+		"host":     c.Request.Host,
+	})
 }
 func Logout(c *gin.Context) {
 	session, _ := c.Cookie("session_token")

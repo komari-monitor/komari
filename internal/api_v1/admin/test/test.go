@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	api "github.com/komari-monitor/komari/internal/api_v1"
-	"github.com/komari-monitor/komari/internal/database/config"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/geoip"
 	"github.com/komari-monitor/komari/internal/messageSender"
@@ -32,7 +32,7 @@ func TestGeoIp(c *gin.Context) {
 			ip = c.ClientIP()
 		}
 	}
-	conf, err := config.Get()
+	conf, err := conf.GetWithV1Format()
 	if err != nil {
 		api.RespondError(c, 500, "Failed to get configuration: "+err.Error())
 		return

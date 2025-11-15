@@ -5,8 +5,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/clients"
-	"github.com/komari-monitor/komari/internal/database/config"
 	"github.com/komari-monitor/komari/internal/database/models"
 	messageevent "github.com/komari-monitor/komari/internal/database/models/messageEvent"
 	"github.com/komari-monitor/komari/internal/messageSender"
@@ -23,7 +23,7 @@ func CheckExpireScheduledWork() {
 		duration := next.Sub(now)
 		time.Sleep(duration)
 
-		cfg, err := config.Get()
+		cfg, err := conf.GetWithV1Format()
 		if err != nil {
 			time.Sleep(time.Second)
 			continue

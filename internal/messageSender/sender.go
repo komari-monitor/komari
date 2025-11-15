@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
-	"github.com/komari-monitor/komari/internal/database/config"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/messageSender/factory"
 )
@@ -52,7 +52,7 @@ func Initialize() {
 			}
 		})
 	}()
-	cfg, _ := config.Get()
+	cfg, _ := conf.GetWithV1Format()
 
 	if cfg.NotificationMethod == "" || cfg.NotificationMethod == "none" {
 		LoadProvider("empty", "{}")
@@ -74,7 +74,7 @@ func SendTextMessage(message string, title string) error {
 		return fmt.Errorf("message sender provider is not initialized")
 	}
 	var err error
-	cfg, err := config.Get()
+	cfg, err := conf.GetWithV1Format()
 	if err != nil {
 		return err
 	}
@@ -96,7 +96,7 @@ func SendEvent(event models.EventMessage) error {
 		return fmt.Errorf("message sender provider is not initialized")
 	}
 	var err error
-	cfg, err := config.Get()
+	cfg, err := conf.GetWithV1Format()
 	if err != nil {
 		return err
 	}

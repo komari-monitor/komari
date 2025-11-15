@@ -3,8 +3,8 @@ package cmd
 import (
 	"os"
 
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
-	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/spf13/cobra"
 	"gorm.io/gorm"
 )
@@ -16,7 +16,7 @@ var PermitPasswordLoginCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		db := dbcore.GetDBInstance()
 		err := db.Transaction(func(tx *gorm.DB) error {
-			return tx.Model(&models.Config{}).Where("id = ?", 1).
+			return tx.Model(&conf.V1Struct{}).Where("id = ?", 1).
 				Update("disable_password_login", false).Error
 		})
 		if err != nil {

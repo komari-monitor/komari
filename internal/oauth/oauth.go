@@ -6,8 +6,8 @@ import (
 	"log"
 	"sync"
 
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database"
-	"github.com/komari-monitor/komari/internal/database/config"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/oauth/factory"
 )
@@ -70,7 +70,7 @@ func Initialize() error {
 			}
 		}
 	})
-	cfg, _ := config.Get()
+	cfg, _ := conf.GetWithV1Format()
 	if cfg.OAuthProvider == "" || cfg.OAuthProvider == "none" {
 		LoadProvider("empty", "{}")
 		return nil

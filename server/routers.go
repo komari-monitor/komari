@@ -8,8 +8,7 @@ import (
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal"
 	"github.com/komari-monitor/komari/internal/api_rpc"
-	"github.com/komari-monitor/komari/internal/database/config"
-	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/geoip"
 	"github.com/komari-monitor/komari/internal/messageSender"
@@ -21,18 +20,18 @@ var (
 )
 
 func Init(r *gin.Engine) {
-	conf, _ := config.Get()
-	AllowCors = conf.AllowCors
+	config, _ := conf.GetWithV1Format()
+	AllowCors = config.AllowCors
 
 	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
-		newConf := e.Get("new").(models.Config)
-		oldConf := e.Get("old").(models.Config)
-		AllowCors = newConf.AllowCors
-		public.UpdateIndex(newConf)
-		if newConf.GeoIpProvider != oldConf.GeoIpProvider {
+		newConf := e.Get("new").(conf.Config)
+		oldConf := e.Get("old").(conf.Config)
+		AllowCors = newConf.Site.AllowCors
+		public.UpdateIndex(newConf.ToV1Format())
+		if newConf.GeoIp.GeoIpProvider != oldConf.GeoIp.GeoIpProvider {
 			go geoip.InitGeoIp()
 		}
-		if newConf.NotificationMethod != oldConf.NotificationMethod {
+		if newConf.Notification.NotificationMethod != oldConf.Notification.NotificationMethod {
 			go messageSender.Initialize()
 		}
 		return nil
@@ -58,9 +57,9 @@ func Init(r *gin.Engine) {
 		r.NoRoute(handlers...)
 	})
 	// #region 静态文件服务
-	public.UpdateIndex(conf)
+	public.UpdateIndex(config)
 
-	internal.LoadApiV1Routes(r, conf)
+	internal.LoadApiV1Routes(r, config)
 
 	api_rpc.RegisterRouters("/api/rpc2", r)
 }

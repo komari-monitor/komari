@@ -8,7 +8,6 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 )
@@ -171,14 +170,6 @@ func CompactRecord() error {
 		log.Printf("Error migrating GPU records: %v", err)
 		return err
 	}
-
-	if flags.DatabaseType == "sqlite" {
-		if err := db.Exec("VACUUM").Error; err != nil {
-			log.Printf("Error vacuuming database: %v", err)
-		}
-		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
-	}
-	//log.Printf("Record compaction completed")
 	return nil
 }
 

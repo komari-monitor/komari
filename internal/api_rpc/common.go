@@ -10,13 +10,12 @@ import (
 
 	api "github.com/komari-monitor/komari/internal/api_v1"
 	"github.com/komari-monitor/komari/internal/common"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database"
 	"github.com/komari-monitor/komari/internal/database/clients"
-	"github.com/komari-monitor/komari/internal/database/config"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/database/tasks"
-	"github.com/komari-monitor/komari/internal/version"
 	"github.com/komari-monitor/komari/internal/ws"
 	"github.com/komari-monitor/komari/pkg/rpc"
 
@@ -229,7 +228,7 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 	}
 	meta := rpc.MetaFromContext(ctx)
 
-	cfg, _ := config.Get()
+	cfg, _ := conf.GetWithV1Format()
 	if meta.Permission != "admin" {
 		// 过滤 Hidden 节点并隐藏敏感字段
 		filtered := make([]models.Client, 0, len(cinfo))
@@ -455,8 +454,8 @@ func getVersion(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcErro
 		Version string `json:"version"`
 		Hash    string `json:"hash"`
 	}{
-		Version: version.CurrentVersion,
-		Hash:    version.VersionHash,
+		Version: conf.Version,
+		Hash:    conf.CommitHash,
 	}, nil
 }
 

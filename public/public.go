@@ -14,8 +14,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/internal/database/config"
-	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/conf"
 )
 
 //go:embed dist
@@ -54,12 +53,12 @@ func initIndex() {
 	}
 	RawIndexFile = string(index)
 }
-func UpdateIndex(cfg models.Config) {
+func UpdateIndex(cfg conf.V1Struct) {
 	IndexFile = applyCustomizations(RawIndexFile, cfg)
 }
 
 // applyCustomizations 应用自定义内容到HTML字符串
-func applyCustomizations(htmlContent string, cfg models.Config) string {
+func applyCustomizations(htmlContent string, cfg conf.V1Struct) string {
 	var titleReplacement string
 	if cfg.Sitename == "Komari" {
 		titleReplacement = "<title>Komari Monitor</title>"
@@ -144,7 +143,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		}
 
 		// 获取当前主题配置
-		cfg, err := config.Get()
+		cfg, err := conf.GetWithV1Format()
 		if err != nil || cfg.Theme == "default" || cfg.Theme == "" {
 			// 使用默认主题（embedded文件）
 			serveFromEmbedded(c, path)
@@ -269,7 +268,7 @@ func serveThemeIndexWithCustomizations(c *gin.Context, indexPath string) {
 	}
 
 	// 获取配置以应用自定义内容
-	cfg, err := config.Get()
+	cfg, err := conf.GetWithV1Format()
 	if err != nil {
 		// 如果获取配置失败，直接返回原始文件
 		c.Header("Content-Type", "text/html")

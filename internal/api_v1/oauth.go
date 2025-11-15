@@ -5,16 +5,18 @@ import (
 	"slices"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gookit/event"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
-	"github.com/komari-monitor/komari/internal/database/config"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/oauth"
 	"github.com/komari-monitor/komari/pkg/utils"
 )
 
 // /api/oauth
 func OAuth(c *gin.Context) {
-	cfg, _ := config.Get()
+	cfg, _ := conf.GetWithV1Format()
 	if !cfg.OAuthEnabled {
 		c.JSON(403, gin.H{"status": "error", "error": "OAuth is not enabled"})
 		return
@@ -97,6 +99,17 @@ func OAuthCallback(c *gin.Context) {
 			"status":  "error",
 			"message": "please log in and bind your external account first.",
 		})
+		event.Trigger(eventType.UserLogin, event.M{
+			"username": user.Username,
+			"method":   "oauth",
+			"ip":       c.ClientIP(),
+			"ua":       c.Request.UserAgent(),
+			"header":   c.Request.Header,
+			"referrer": c.Request.Referer(),
+			"host":     c.Request.Host,
+			"error":    "no linked account",
+			"sso_id":   sso_id,
+		})
 		return
 	}
 
@@ -104,11 +117,32 @@ func OAuthCallback(c *gin.Context) {
 	session, err := accounts.CreateSession(user.UUID, 2592000, c.Request.UserAgent(), c.ClientIP(), "oauth")
 	if err != nil {
 		c.JSON(500, gin.H{"status": "error", "message": err.Error()})
+		event.Trigger(eventType.LoginFailed, event.M{
+			"username": user.Username,
+			"method":   "oauth",
+			"ip":       c.ClientIP(),
+			"ua":       c.Request.UserAgent(),
+			"header":   c.Request.Header,
+			"referrer": c.Request.Referer(),
+			"host":     c.Request.Host,
+			"error":    err.Error(),
+			"sso_id":   sso_id,
+		})
 		return
 	}
 
 	// 设置cookie并返回
 	c.SetCookie("session_token", session, 2592000, "/", "", false, true)
 	auditlog.Log(c.ClientIP(), user.UUID, "logged in (OAuth)", "login")
+	event.Trigger(eventType.UserLogin, event.M{
+		"username": user.Username,
+		"method":   "oauth",
+		"ip":       c.ClientIP(),
+		"ua":       c.Request.UserAgent(),
+		"header":   c.Request.Header,
+		"referrer": c.Request.Referer(),
+		"host":     c.Request.Host,
+	})
 	c.Redirect(302, "/admin")
+
 }

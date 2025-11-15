@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/komari-monitor/komari/internal/database/config"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 	messageevent "github.com/komari-monitor/komari/internal/database/models/messageEvent"
@@ -39,7 +39,7 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 		LoginMethod:  login_method,
 		LatestOnline: models.FromTime(time.Now()),
 	}
-	cfg, _ := config.Get()
+	cfg, _ := conf.GetWithV1Format()
 	if cfg.LoginNotification {
 		ipAddr := net.ParseIP(ip)
 		ipinfo, _ := geoip.GetGeoInfo(ipAddr)

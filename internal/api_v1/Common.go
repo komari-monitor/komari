@@ -9,12 +9,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/internal/common"
-	"github.com/komari-monitor/komari/internal/version"
 	"github.com/patrickmn/go-cache"
 
 	"strconv"
 
-	"github.com/komari-monitor/komari/internal/database/config"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/pkg/utils"
@@ -141,13 +140,13 @@ func RespondError(c *gin.Context, httpStatus int, message string) {
 }
 func GetVersion(c *gin.Context) {
 	RespondSuccess(c, gin.H{
-		"version": version.CurrentVersion,
-		"hash":    version.VersionHash,
+		"version": conf.Version,
+		"hash":    conf.CommitHash,
 	})
 }
 
 func isApiKeyValid(apiKey string) bool {
-	cfg, err := config.Get()
+	cfg, err := conf.GetWithV1Format()
 	if err != nil {
 		return false
 	}

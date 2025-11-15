@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/komari-monitor/komari/internal/database/config"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/patrickmn/go-cache"
 )
 
@@ -52,14 +52,14 @@ func GetRegionUnicodeEmoji(isoCode string) string {
 }
 
 func InitGeoIp() {
-	conf, err := config.Get()
+	config, err := conf.GetWithV1Format()
 	if err != nil {
 		panic("Failed to get configuration for GeoIP: " + err.Error())
 	}
-	if !conf.GeoIpEnabled {
+	if !config.GeoIpEnabled {
 		return
 	}
-	switch conf.GeoIpProvider {
+	switch config.GeoIpProvider {
 	case "mmdb":
 		NewCurrentProvider, err := NewMaxMindGeoIPService()
 		if err != nil {

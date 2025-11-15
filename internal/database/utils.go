@@ -8,13 +8,13 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/internal/database/config"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 )
 
 func GetPublicInfo() (any, error) {
-	cst, err := config.Get()
+	cst, err := conf.GetWithV1Format()
 	if err != nil {
 		return nil, err
 	}

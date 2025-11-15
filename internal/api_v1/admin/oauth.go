@@ -3,9 +3,9 @@ package admin
 import (
 	"github.com/gin-gonic/gin"
 	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database"
 	"github.com/komari-monitor/komari/internal/database/accounts"
-	"github.com/komari-monitor/komari/internal/database/config"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/oauth"
 	"github.com/komari-monitor/komari/internal/oauth/factory"
@@ -80,7 +80,7 @@ func SetOidcProvider(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to save OIDC provider configuration: "+err.Error())
 		return
 	}
-	cfg, _ := config.Get()
+	cfg, _ := conf.GetWithV1Format()
 	// 正在使用，重载
 	if cfg.OAuthProvider == oidcConfig.Name {
 		err := oauth.LoadProvider(oidcConfig.Name, oidcConfig.Addition)

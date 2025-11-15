@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/komari-monitor/komari/internal/version"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/gorm/utils"
@@ -25,12 +24,7 @@ func NewGormLogger() *GormLogger {
 	return &GormLogger{
 		SlowThreshold:             200 * time.Millisecond,
 		IgnoreRecordNotFoundError: true,
-		LogLevel: func(hash string) gormlogger.LogLevel {
-			if hash == "unknown" {
-				return gormlogger.Info
-			}
-			return gormlogger.Silent
-		}(version.VersionHash),
+		LogLevel:                  gormlogger.Warn,
 	}
 }
 

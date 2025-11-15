@@ -3,8 +3,8 @@ package api_v1
 import (
 	"net/http"
 
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/accounts"
-	"github.com/komari-monitor/komari/internal/database/config"
 
 	"github.com/gin-gonic/gin"
 )
@@ -46,7 +46,7 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		conf, err := config.Get()
+		conf, err := conf.GetWithV1Format()
 		if err != nil {
 			RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
 			c.Abort()
