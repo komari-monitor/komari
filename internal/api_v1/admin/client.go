@@ -4,9 +4,11 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/records"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/ws"
 )
 
@@ -30,6 +32,10 @@ func AddClient(c *gin.Context) {
 	}
 	user_uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), user_uuid.(string), "create client:"+uuid, "info")
+	event.Trigger(eventType.ClientCreated, event.M{
+		"client": uuid,
+		"token":  token,
+	})
 	c.JSON(http.StatusOK, gin.H{"status": "success", "uuid": uuid, "token": token, "message": ""})
 }
 
@@ -52,6 +58,10 @@ func EditClient(c *gin.Context) {
 	}
 	user_uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), user_uuid.(string), "edit client:"+uuid, "info")
+	event.Trigger(eventType.ClientUpdated, event.M{
+		"client": uuid,
+		"data":   req,
+	})
 	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
@@ -70,6 +80,9 @@ func RemoveClient(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "success"})
 	ws.DeleteConnectedClients(uuid)
 	ws.DeleteLatestReport(uuid)
+	event.Trigger(eventType.ClientDeleted, event.M{
+		"client": uuid,
+	})
 }
 
 func ClearRecord(c *gin.Context) {

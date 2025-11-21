@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/models"
 	messageevent "github.com/komari-monitor/komari/internal/database/models/messageEvent"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/messageSender"
 	"github.com/komari-monitor/komari/internal/ws"
 )
@@ -111,6 +113,10 @@ func CheckAndAutoRenewal(client models.Client) {
 				Time:    time.Now(),
 				Emoji:   "🔄",
 				Message: fmt.Sprintf("• %s until %s\n", client.Name, newExpireTime.Format("2006-01-02")),
+			})
+			event.Trigger(eventType.ClientRenewed, event.M{
+				"client":        client,
+				"new_expire_at": newExpireTime,
 			})
 		}
 	}

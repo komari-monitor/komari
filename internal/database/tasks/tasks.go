@@ -3,8 +3,10 @@ package tasks
 import (
 	"time"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/eventType"
 )
 
 func CreateTask(taskId string, clients []string, command string) error {
@@ -32,6 +34,11 @@ func CreateTask(taskId string, clients []string, command string) error {
 	if len(taskResults) > 0 {
 		return db.Create(&taskResults).Error
 	}
+	event.Trigger(eventType.TaskCreated, event.M{
+		"task":    taskId,
+		"clients": clients,
+		"command": command,
+	})
 	return nil
 }
 func GetTaskByTaskId(taskId string) (*models.Task, error) {

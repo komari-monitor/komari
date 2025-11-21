@@ -93,5 +93,13 @@ func Logout(c *gin.Context) {
 	accounts.DeleteSession(session)
 	c.SetCookie("session_token", "", -1, "/", "", false, true)
 	auditlog.Log(c.ClientIP(), "", "logged out", "logout")
+	event.Trigger(eventType.UserLogout, event.M{
+		"ip":       c.ClientIP(),
+		"ua":       c.Request.UserAgent(),
+		"header":   c.Request.Header,
+		"referrer": c.Request.Referer(),
+		"host":     c.Request.Host,
+	})
 	c.Redirect(302, "/")
+
 }

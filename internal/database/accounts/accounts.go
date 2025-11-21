@@ -7,8 +7,10 @@ import (
 	"os"
 	"time"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/pkg/utils"
 
 	"github.com/google/uuid"
@@ -178,6 +180,19 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 	}
 	if password != nil {
 		DeleteAllSessions()
+	}
+	if name != nil {
+		event.Trigger(eventType.UserUpdateUsername, event.M{
+			"user": uuid,
+		})
+	} else if password != nil {
+		event.Trigger(eventType.UserUpdatePassword, event.M{
+			"user": uuid,
+		})
+	} else if sso_type != nil && *sso_type == "" {
+		event.Trigger(eventType.UserOidcUnbound, event.M{
+			"user": uuid,
+		})
 	}
 	return nil
 }

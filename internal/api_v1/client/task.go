@@ -4,9 +4,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/database/tasks"
+	"github.com/komari-monitor/komari/internal/eventType"
 )
 
 func TaskResult(c *gin.Context) {
@@ -33,4 +35,9 @@ func TaskResult(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"status": "success", "message": "Task result updated successfully"})
+	event.Trigger(eventType.TaskUpdated, event.M{
+		"task":   req.TaskId,
+		"client": clientId,
+		"data":   req,
+	})
 }

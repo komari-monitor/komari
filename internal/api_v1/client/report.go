@@ -11,12 +11,14 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gookit/event"
 	"github.com/gorilla/websocket"
 	api "github.com/komari-monitor/komari/internal/api_v1"
 	"github.com/komari-monitor/komari/internal/common"
 	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/database/tasks"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/notifier"
 	"github.com/komari-monitor/komari/internal/ws"
 	"github.com/patrickmn/go-cache"
@@ -123,13 +125,18 @@ func WebSocketReport(c *gin.Context) {
 		go oldConn.Close()
 	}
 	ws.SetConnectedClients(uuid, conn)
-	log.Printf("Client %s is reconnect success, connID: %d", uuid, conn.ID)
+	//log.Printf("Client %s is reconnect success, connID: %d", uuid, conn.ID)
 	go notifier.OnlineNotification(uuid, conn.ID)
 	defer func() {
 		ws.DeleteClientConditionally(uuid, conn)
 		notifier.OfflineNotification(uuid, conn.ID)
 	}()
 
+	event.Trigger(eventType.ClientWebsocketConnected, event.M{
+		"client": uuid,
+		"online": len(ws.GetConnectedClients()),
+		"connID": conn.ID,
+	})
 	// 首先处理第一次ws conn收到的消息
 	processMessage(conn, message, uuid)
 
@@ -143,8 +150,18 @@ func WebSocketReport(c *gin.Context) {
 			}
 			break // 任何读错误（包括超时）都意味着连接已断开，退出循环
 		}
+		event.Trigger(eventType.ClientMessageReceived, event.M{
+			"client":  uuid,
+			"type":    "websocket",
+			"message": string(message),
+		})
 		processMessage(conn, message, uuid)
 	}
+	event.Trigger(eventType.ClientWebsocketDisconnected, event.M{
+		"client": uuid,
+		"online": len(ws.GetConnectedClients()),
+		"connID": conn.ID,
+	})
 }
 
 // 将消息处理逻辑提取到一个函数中，方便复用

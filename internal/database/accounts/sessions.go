@@ -6,10 +6,12 @@ import (
 	"net"
 	"time"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 	messageevent "github.com/komari-monitor/komari/internal/database/models/messageEvent"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/geoip"
 	"github.com/komari-monitor/komari/internal/messageSender"
 	"github.com/komari-monitor/komari/pkg/utils"
@@ -97,6 +99,9 @@ func DeleteSession(session string) (err error) {
 	if result.Error != nil {
 		return result.Error
 	}
+	event.Trigger(eventType.UserSessionRevoked, event.M{
+		"session": session,
+	})
 	return nil
 }
 

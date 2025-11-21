@@ -3,8 +3,10 @@ package client
 import (
 	"net"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/clients"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/geoip"
 
 	"github.com/gin-gonic/gin"
@@ -80,6 +82,11 @@ func UploadBasicInfo(c *gin.Context) {
 		c.JSON(500, gin.H{"status": "error", "error": err})
 		return
 	}
-
+	event.Trigger(eventType.ClientMessageReceived, event.M{
+		"client": cbi["uuid"],
+		"type":   "basic_info",
+		"data":   cbi,
+	})
 	c.JSON(200, gin.H{"status": "success"})
+
 }

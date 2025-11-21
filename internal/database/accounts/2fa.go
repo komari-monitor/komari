@@ -3,8 +3,10 @@ package accounts
 import (
 	"image"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -29,7 +31,14 @@ func Generate2Fa() (string, image.Image, error) {
 
 func Enable2Fa(uuid, secret string) error {
 	db := dbcore.GetDBInstance()
-	return db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", secret).Error
+	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", secret).Error
+	if err != nil {
+		event.Trigger(eventType.UserTwoFaAdded, event.M{
+			"user": uuid,
+		})
+		return err
+	}
+	return nil
 }
 
 func Verify2Fa(uuid, code string) (bool, error) {
@@ -54,5 +63,12 @@ func Verify2Fa(uuid, code string) (bool, error) {
 
 func Disable2Fa(uuid string) error {
 	db := dbcore.GetDBInstance()
-	return db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", "").Error
+	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", "").Error
+	if err != nil {
+		return err
+	}
+	event.Trigger(eventType.UserTwoFaRemoved, event.M{
+		"user": uuid,
+	})
+	return nil
 }

@@ -88,7 +88,12 @@ func OAuthCallback(c *gin.Context) {
 			return
 		}
 		auditlog.Log(c.ClientIP(), user.UUID, "bound external account (OAuth)"+fmt.Sprintf(",sso_id: %s", sso_id), "login")
+		event.Trigger(eventType.UserOidcBound, event.M{
+			"user":   user.UUID,
+			"sso_id": sso_id,
+		})
 		c.Redirect(302, "/admin")
+
 		return
 	}
 
