@@ -11,17 +11,17 @@ import (
 	"sync"
 	"time"
 
-	apiClient "github.com/komari-monitor/komari/api/client"
-	"github.com/komari-monitor/komari/common"
-	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/database/config"
-	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/utils/geoip"
-	"github.com/komari-monitor/komari/utils/notifier"
-	"github.com/komari-monitor/komari/ws"
+	apiClient "github.com/komari-monitor/komari/internal/api_v1/client"
+	"github.com/komari-monitor/komari/internal/common"
+	"github.com/komari-monitor/komari/internal/conf"
+	"github.com/komari-monitor/komari/internal/database/auditlog"
+	"github.com/komari-monitor/komari/internal/database/dbcore"
+	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/geoip"
+	"github.com/komari-monitor/komari/internal/notifier"
+	"github.com/komari-monitor/komari/internal/ws"
 
-	"github.com/komari-monitor/komari/compat/nezha/proto"
+	"github.com/komari-monitor/komari/internal/nezha/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
@@ -370,7 +370,7 @@ func (s *nezhaCompatServer) ReportGeoIP(ctx context.Context, in *proto.GeoIP) (*
 	if in != nil && in.Ip != nil {
 		if v4 := strings.TrimSpace(in.Ip.Ipv4); v4 != "" {
 			updates["ipv4"] = v4
-			if cfg, err := config.Get(); err == nil && cfg.GeoIpEnabled {
+			if cfg, err := conf.GetWithV1Format(); err == nil && cfg.GeoIpEnabled {
 				if ip := net.ParseIP(v4); ip != nil {
 					if gi, _ := geoip.GetGeoInfo(ip); gi != nil {
 						iso = gi.ISOCode
@@ -381,7 +381,7 @@ func (s *nezhaCompatServer) ReportGeoIP(ctx context.Context, in *proto.GeoIP) (*
 		if v6 := strings.TrimSpace(in.Ip.Ipv6); v6 != "" {
 			updates["ipv6"] = v6
 			if iso == "" { // 优先使用 v4 的国家码
-				if cfg, err := config.Get(); err == nil && cfg.GeoIpEnabled {
+				if cfg, err := conf.GetWithV1Format(); err == nil && cfg.GeoIpEnabled {
 					if ip := net.ParseIP(v6); ip != nil {
 						if gi, _ := geoip.GetGeoInfo(ip); gi != nil {
 							iso = gi.ISOCode

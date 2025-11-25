@@ -103,7 +103,7 @@ jobs:
           fi
           VERSION="${{ github.event.release.tag_name }}"
           VERSION_HASH="${{ github.sha }}" # Use commit SHA for hash
-          go build -trimpath -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}" -o $BINARY_NAME
+          go build -trimpath -ldflags="-s -w -X github.com/komari-monitor/komari/internal/conf.Version=${VERSION} -X github.com/komari-monitor/komari/internal/conf.CommitHash=${VERSION_HASH}" -o $BINARY_NAME
 
       - name: Upload binary to release
         env:
