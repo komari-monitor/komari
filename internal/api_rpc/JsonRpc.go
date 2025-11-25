@@ -25,12 +25,11 @@ func RegisterRouters(path string, r *gin.Engine) {
 
 // Json Rpc2 over websocket, /api/rpc2
 func OnRpcRequest(c *gin.Context) {
-	cfg, _ := conf.GetWithV1Format()
 
 	// GET -> WebSocket
 	if c.Request.Method == http.MethodGet {
 		_conn, err := ws.UpgradeRequest(c, func(r *http.Request) bool {
-			if cfg.AllowCors {
+			if conf.Conf.Site.AllowCors {
 				return true
 			}
 			return ws.CheckOrigin(r)
@@ -40,7 +39,7 @@ func OnRpcRequest(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket"})
 			return
 		}
-		permissionGroup := detectPermissionGroup(c, cfg)
+		permissionGroup := detectPermissionGroup(c)
 		meta := buildContextMeta(c, permissionGroup)
 		defer conn.Close()
 		for {
@@ -81,7 +80,7 @@ func OnRpcRequest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, jerr.Response())
 		return
 	}
-	permissionGroup := detectPermissionGroup(c, cfg)
+	permissionGroup := detectPermissionGroup(c)
 	meta := buildContextMeta(c, permissionGroup)
 	// 批量
 	responses := make([]*rpc.JsonRpcResponse, 0, len(requests))
@@ -95,8 +94,8 @@ func OnRpcRequest(c *gin.Context) {
 		switch fc[0] {
 		case "guest", "", "rpc", "common":
 			allowed = true
-		case "client":
-			if permissionGroup == "client" || permissionGroup == "admin" {
+		case GroupClient:
+			if permissionGroup == GroupClient || permissionGroup == "admin" {
 				allowed = true
 			}
 		case "admin":
@@ -104,11 +103,11 @@ func OnRpcRequest(c *gin.Context) {
 				allowed = true
 			}
 		default:
-			responses = append(responses, rpc.ErrorResponse(rreq.ID, 401, "Unauthorized", nil))
+			responses = append(responses, rpc.ErrorResponse(rreq.ID, rpc.Unauthenticated, "Unauthorized", nil))
 			continue
 		}
 		if !allowed {
-			responses = append(responses, rpc.ErrorResponse(rreq.ID, 401, "Unauthorized", nil))
+			responses = append(responses, rpc.ErrorResponse(rreq.ID, rpc.PermissionDenied, "Permission denied", nil))
 			continue
 		}
 		responses = append(responses, rpc.CallWithContext(rpc.NewContextWithMeta(context.TODO(), meta), rreq.ID, rreq.Method, rreq.Params))
@@ -122,11 +121,11 @@ func OnRpcRequest(c *gin.Context) {
 }
 
 // detectPermissionGroup 提取权限分组，与原逻辑保持一致
-func detectPermissionGroup(c *gin.Context, cfg conf.V1Struct) string {
+func detectPermissionGroup(c *gin.Context) string {
 	permissionGroup := "guest"
-	token := c.Query("Authorization")
+	token := c.Query("token")
 	if _, err := clients.GetClientUUIDByToken(token); err == nil {
-		permissionGroup = "client"
+		permissionGroup = GroupClient
 	}
 	if session_token, _ := c.Cookie("session_token"); session_token != "" {
 		if _, err := accounts.GetUserBySession(session_token); err == nil {
@@ -134,7 +133,7 @@ func detectPermissionGroup(c *gin.Context, cfg conf.V1Struct) string {
 		}
 	}
 	apiKey := c.GetHeader("Authorization")
-	if apiKey == "Bearer "+cfg.ApiKey {
+	if apiKey == "Bearer "+conf.Conf.Login.ApiKey {
 		permissionGroup = "admin"
 	}
 	return permissionGroup
@@ -143,8 +142,8 @@ func detectPermissionGroup(c *gin.Context, cfg conf.V1Struct) string {
 // buildContextMeta 从 gin.Context 构建 *rpc.ContextMeta
 func buildContextMeta(c *gin.Context, permissionGroup string) *rpc.ContextMeta {
 	meta := &rpc.ContextMeta{Permission: permissionGroup}
-	// 提取客户端 token (query Authorization / Header Authorization Bearer token)
-	token := c.Query("Authorization")
+	// 提取客户端 token (query token / Header Authorization Bearer token)
+	token := c.Query("token")
 	if token == "" {
 		// 兼容 header Bearer <token>
 		hAuth := c.GetHeader("Authorization")
@@ -176,24 +175,25 @@ func dispatchByPermissionWithMeta(conn *ws.SafeConn, permissionGroup string, met
 	if len(fc) == 1 {
 		fc[0] = "common"
 	}
-	ctx := rpc.NewContextWithMeta(context.TODO(), meta)
+	ctx := rpc.NewContextWithMeta(context.Background(), meta)
+
 	switch fc[0] {
 	case "guest", "", "rpc", "common":
 		go conn.WriteJSON(rpc.CallWithContext(ctx, req.ID, req.Method, req.Params))
-	case "client":
-		if permissionGroup == "client" || permissionGroup == "admin" {
+	case GroupClient:
+		if permissionGroup == GroupClient || permissionGroup == "admin" {
 			go conn.WriteJSON(rpc.CallWithContext(ctx, req.ID, req.Method, req.Params))
 		} else {
-			conn.WriteJSON(rpc.ErrorResponse(req.ID, 401, "Unauthorized", nil))
+			conn.WriteJSON(rpc.ErrorResponse(req.ID, rpc.PermissionDenied, "Permission Denied", nil))
 		}
 	case "admin":
 		if permissionGroup == "admin" {
 			go conn.WriteJSON(rpc.CallWithContext(ctx, req.ID, req.Method, req.Params))
 		} else {
-			conn.WriteJSON(rpc.ErrorResponse(req.ID, 401, "Unauthorized", nil))
+			conn.WriteJSON(rpc.ErrorResponse(req.ID, rpc.PermissionDenied, "Permission Denied", nil))
 		}
 	default:
-		conn.WriteJSON(rpc.ErrorResponse(req.ID, 401, "Unauthorized", nil))
+		conn.WriteJSON(rpc.ErrorResponse(req.ID, rpc.Unauthenticated, "Unauthenticated", nil))
 	}
 }
 
