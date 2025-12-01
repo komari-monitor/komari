@@ -25,7 +25,7 @@ func init() {
 	CurrentProvider = &EmptyProvider{}
 	geoCache = cache.New(48*time.Hour, 1*time.Hour)
 
-	err := SetProvider(conf.Conf.GeoIp.GeoIpProvider)
+	err := SetProvider("empty")
 	if err != nil {
 		log.Printf("Failed to set initial GeoIP provider: %v", err)
 	}

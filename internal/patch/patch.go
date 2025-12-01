@@ -8,7 +8,8 @@ import (
 	"github.com/komari-monitor/komari/internal/database/models"
 )
 
-func ApplyPatch() {
+func Apply() {
+
 	db := dbcore.GetDBInstance()
 	// 0.0.5 迁移ClientInfo
 	if db.Migrator().HasTable("client_infos") {

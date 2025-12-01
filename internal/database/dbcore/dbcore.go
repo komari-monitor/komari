@@ -5,8 +5,10 @@ import (
 	"log"
 	"sync"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/eventType"
 	logutil "github.com/komari-monitor/komari/internal/log"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
@@ -105,4 +107,11 @@ func GetDBInstance() *gorm.DB {
 
 	})
 	return instance
+}
+
+func init() {
+	event.On(eventType.SchedulerEvery5Minutes, event.ListenerFunc(func(e event.Event) error {
+		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+		return nil
+	}))
 }

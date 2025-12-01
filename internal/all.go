@@ -4,6 +4,7 @@ import (
 	// Import all internal packages to ensure their init() functions are executed
 	_ "github.com/komari-monitor/komari/internal/api_rpc"
 	_ "github.com/komari-monitor/komari/internal/client"
+	_ "github.com/komari-monitor/komari/internal/cloudflared"
 	_ "github.com/komari-monitor/komari/internal/common"
 	_ "github.com/komari-monitor/komari/internal/conf"
 	_ "github.com/komari-monitor/komari/internal/database"

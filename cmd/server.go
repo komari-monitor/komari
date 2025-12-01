@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -20,15 +19,11 @@ import (
 	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
-	d_notification "github.com/komari-monitor/komari/internal/database/notification"
 	"github.com/komari-monitor/komari/internal/database/records"
 	"github.com/komari-monitor/komari/internal/database/tasks"
 	"github.com/komari-monitor/komari/internal/eventType"
 	logutil "github.com/komari-monitor/komari/internal/log"
-	"github.com/komari-monitor/komari/internal/messageSender"
 	"github.com/komari-monitor/komari/internal/patch"
-	"github.com/komari-monitor/komari/internal/restore"
-	"github.com/komari-monitor/komari/pkg/cloudflared"
 	"github.com/komari-monitor/komari/server"
 	"github.com/spf13/cobra"
 )
@@ -55,41 +50,30 @@ func RunServer() {
 	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
 		log.Fatalf("Failed to create theme directory: %v", err)
 	}
-	// 进行备份恢复
-	if restore.NeedBackupRestore() {
-		restore.RestoreBackup()
-	}
-	conf.Load()
-	InitDatabase()
-	patch.ApplyPatch()
 
 	if conf.Version != conf.Version_Development {
 		gin.SetMode(gin.ReleaseMode)
-	}
-
-	config, err := conf.GetWithV1Format()
-	if err != nil {
-		log.Fatal(err)
 	}
 
 	r := gin.New()
 	r.Use(logutil.GinLogger())
 	r.Use(logutil.GinRecovery())
 
-	event.Trigger(eventType.ServerInitializeStart, event.M{"config": config, "engine": r})
+	InitDatabase()
+	patch.Apply()
+	err, _ := event.Trigger(eventType.ServerInitializeStart, event.M{"engine": r})
+	if err != nil {
+		log.Fatalf("Something went wrong during ServerInitializeStart event: %v", err)
+		os.Exit(1)
+	}
 
+	config, err := conf.GetWithV1Format()
+	if err != nil {
+		log.Fatal(err)
+	}
 	go DoScheduledWork()
-	go messageSender.Initialize()
 
 	server.StartNezhaGRPCServer(config.NezhaCompatListen)
-
-	// 初始化 cloudflared
-	if strings.ToLower(GetEnv("KOMARI_ENABLE_CLOUDFLARED", "false")) == "true" {
-		err := cloudflared.RunCloudflared() // 阻塞，确保cloudflared跑起来
-		if err != nil {
-			log.Fatalf("Failed to run cloudflared: %v", err)
-		}
-	}
 
 	server.Init(r)
 
@@ -97,12 +81,13 @@ func RunServer() {
 		Addr:    flags.Listen,
 		Handler: r,
 	}
-
-	event.Trigger(eventType.ServerInitializeDone, event.M{"config": config})
-
 	log.Printf("Starting server on %s ...", flags.Listen)
+	event.Trigger(eventType.ServerInitializeDone, event.M{})
+	ScheduledEventTasksInit()
+
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		OnFatal(err)
+		event.Trigger(eventType.ProcessExit, event.M{})
 		log.Fatalf("listen: %s\n", err)
 	}
 	quit := make(chan os.Signal, 1)
@@ -119,18 +104,6 @@ func RunServer() {
 }
 
 func InitDatabase() {
-	// // 打印数据库类型和连接信息
-	// if flags.DatabaseType == "mysql" {
-	// 	log.Printf("使用 MySQL 数据库连接: %s@%s:%s/%s",
-	// 		flags.DatabaseUser, flags.DatabaseHost, flags.DatabasePort, flags.DatabaseName)
-	// 	log.Printf("环境变量配置: [KOMARI_DB_TYPE=%s] [KOMARI_DB_HOST=%s] [KOMARI_DB_PORT=%s] [KOMARI_DB_USER=%s] [KOMARI_DB_NAME=%s]",
-	// 		os.Getenv("KOMARI_DB_TYPE"), os.Getenv("KOMARI_DB_HOST"), os.Getenv("KOMARI_DB_PORT"),
-	// 		os.Getenv("KOMARI_DB_USER"), os.Getenv("KOMARI_DB_NAME"))
-	// } else {
-	// 	log.Printf("使用 SQLite 数据库文件: %s", flags.DatabaseFile)
-	// 	log.Printf("环境变量配置: [KOMARI_DB_TYPE=%s] [KOMARI_DB_FILE=%s]",
-	// 		os.Getenv("KOMARI_DB_TYPE"), os.Getenv("KOMARI_DB_FILE"))
-	// }
 	var count int64 = 0
 	if dbcore.GetDBInstance().Model(&models.User{}).Count(&count); count == 0 {
 		user, passwd, err := accounts.CreateDefaultAdminAccount()
@@ -144,12 +117,10 @@ func InitDatabase() {
 // #region 定时任务
 func DoScheduledWork() {
 	tasks.ReloadPingSchedule()
-	d_notification.ReloadLoadNotificationSchedule()
 
 	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
 
 	records.CompactRecord()
-	ScheduledEventTasksInit()
 
 	event.On(eventType.SchedulerEvery30Minutes, event.ListenerFunc(func(e event.Event) error {
 		cfg, err := conf.GetWithV1Format()
@@ -183,12 +154,10 @@ func DoScheduledWork() {
 
 func OnShutdown() {
 	auditlog.Log("", "", "server is shutting down", "info")
-	cloudflared.Kill()
 }
 
 func OnFatal(err error) {
 	auditlog.Log("", "", "server encountered a fatal error: "+err.Error(), "error")
-	cloudflared.Kill()
 }
 
 func ScheduledEventTasksInit() {
@@ -198,22 +167,17 @@ func ScheduledEventTasksInit() {
 	every1h := time.NewTicker(1 * time.Hour)
 	every1d := time.NewTicker(24 * time.Hour)
 	for {
-		var err error = nil
-		var e event.Event
 		select {
 		case <-every1m.C:
-			err, e = event.Trigger(eventType.SchedulerEveryMinute, event.M{"interval": "1m"})
+			event.Async(eventType.SchedulerEveryMinute, event.M{"interval": "1m"})
 		case <-every5m.C:
-			err, e = event.Trigger(eventType.SchedulerEvery5Minutes, event.M{"interval": "5m"})
+			event.Async(eventType.SchedulerEvery5Minutes, event.M{"interval": "5m"})
 		case <-every30m.C:
-			err, e = event.Trigger(eventType.SchedulerEvery30Minutes, event.M{"interval": "30m"})
+			event.Async(eventType.SchedulerEvery30Minutes, event.M{"interval": "30m"})
 		case <-every1h.C:
-			err, e = event.Trigger(eventType.SchedulerEveryHour, event.M{"interval": "1h"})
+			event.Async(eventType.SchedulerEveryHour, event.M{"interval": "1h"})
 		case <-every1d.C:
-			err, e = event.Trigger(eventType.SchedulerEveryDay, event.M{"interval": "1d"})
-		}
-		if err != nil {
-			slog.Warn("Scheduled task error:", "error", err, "event", e)
+			event.Async(eventType.SchedulerEveryDay, event.M{"interval": "1d"})
 		}
 	}
 }

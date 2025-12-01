@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/gookit/event"
@@ -43,8 +44,11 @@ Made by Akizon77 with love.`,
 }
 
 func Execute() {
-	event.Trigger(eventType.ProcessStart, nil)
-	defer event.Trigger(eventType.ProcessExit, nil)
+	err, _ := event.Trigger(eventType.ProcessStart, event.M{})
+	if err != nil {
+		log.Fatalf("Something went wrong during process start: %v", err)
+		os.Exit(1)
+	}
 	if err := RootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

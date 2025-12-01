@@ -97,19 +97,6 @@ func SaveFull(cst Config) error {
 	return Override(cst)
 }
 
-func Load() (*Config, error) {
-	b, err := os.ReadFile(flags.ConfigFile)
-	if err != nil {
-		return nil, err
-	}
-	cst := &Config{}
-	if err := json.Unmarshal(b, cst); err != nil {
-		return nil, err
-	}
-	Conf = cst
-	return cst, nil
-}
-
 // GetWithV1Format 以 v1 API 格式获取配置对象,使用 Conf 直接获取对象引用
 func GetWithV1Format() (V1Struct, error) {
 	return Conf.ToV1Format(), nil

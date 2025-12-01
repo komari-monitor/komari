@@ -6,9 +6,13 @@ import (
 )
 
 func init() {
-	go CheckExpireScheduledWork()
 	event.On(eventType.SchedulerEveryMinute, event.ListenerFunc(func(e event.Event) error {
 		CheckTraffic()
+		return nil
+	}))
+	event.On(eventType.ServerInitializeDone, event.ListenerFunc(func(e event.Event) error {
+		go CheckExpireScheduledWork()
+		ReloadLoadNotification()
 		return nil
 	}))
 }

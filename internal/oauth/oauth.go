@@ -71,19 +71,19 @@ func init() {
 		}
 	}
 
-	cfg, _ := conf.GetWithV1Format()
-	if cfg.OAuthProvider == "" || cfg.OAuthProvider == "none" {
-		LoadProvider("empty", "{}")
-	}
-	provider, err := database.GetOidcConfigByName(cfg.OAuthProvider)
-	if err != nil {
-		// 如果没有找到配置，使用empty provider
-		LoadProvider("empty", "{}")
-	}
-	err = LoadProvider(provider.Name, provider.Addition)
-	if err != nil {
-		log.Printf("Failed to load OIDC provider %s: %v", provider.Name, err)
-	}
+	// cfg, _ := conf.GetWithV1Format()
+	// if cfg.OAuthProvider == "" || cfg.OAuthProvider == "none" {
+	// 	LoadProvider("empty", "{}")
+	// }
+	// provider, err := database.GetOidcConfigByName(cfg.OAuthProvider)
+	// if err != nil {
+	// 	// 如果没有找到配置，使用empty provider
+	// 	LoadProvider("empty", "{}")
+	// }
+	// err = LoadProvider(provider.Name, provider.Addition)
+	// if err != nil {
+	// 	log.Printf("Failed to load OIDC provider %s: %v", provider.Name, err)
+	// }
 
 	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
 		oldConf, newConf, err := conf.FromEvent(e)

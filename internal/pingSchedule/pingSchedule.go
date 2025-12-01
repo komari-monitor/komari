@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/ws"
 )
@@ -107,7 +108,16 @@ func executePingTask(ctx context.Context, task models.PingTask, onlineClients ma
 	}
 }
 
-// ReloadPingSchedule 加载或重载时间表
-func ReloadPingSchedule(pingTasks []models.PingTask) error {
+// ReloadPingScheduleWithTasks 加载或重载时间表
+func ReloadPingScheduleWithTasks(pingTasks []models.PingTask) error {
+	return manager.Reload(pingTasks)
+}
+
+func ReloadPingSchedule() error {
+	db := dbcore.GetDBInstance()
+	var pingTasks []models.PingTask
+	if err := db.Find(&pingTasks).Error; err != nil {
+		return err
+	}
 	return manager.Reload(pingTasks)
 }
