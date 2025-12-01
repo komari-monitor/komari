@@ -3,6 +3,7 @@ package internal
 import (
 	// Import all internal packages to ensure their init() functions are executed
 	_ "github.com/komari-monitor/komari/internal/api_rpc"
+	_ "github.com/komari-monitor/komari/internal/api_v1"
 	_ "github.com/komari-monitor/komari/internal/client"
 	_ "github.com/komari-monitor/komari/internal/cloudflared"
 	_ "github.com/komari-monitor/komari/internal/common"
@@ -12,6 +13,7 @@ import (
 	_ "github.com/komari-monitor/komari/internal/geoip"
 	_ "github.com/komari-monitor/komari/internal/log"
 	_ "github.com/komari-monitor/komari/internal/messageSender"
+	_ "github.com/komari-monitor/komari/internal/nezha"
 	_ "github.com/komari-monitor/komari/internal/notifier"
 	_ "github.com/komari-monitor/komari/internal/oauth"
 	_ "github.com/komari-monitor/komari/internal/patch"

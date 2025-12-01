@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 
+	"log/slog"
+
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/eventType"
 )
 
@@ -39,9 +42,6 @@ func Override(cst Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(flags.ConfigFile, b, 0644); err != nil {
-		return err
-	}
 
 	oldConf := *Conf
 	Conf = &cst
@@ -49,6 +49,17 @@ func Override(cst Config) error {
 		"old": oldConf,
 		"new": cst,
 	})
+	if err != nil {
+		// 撤回配置修改
+		Conf = &oldConf
+		b, _ = json.MarshalIndent(oldConf, "", "  ")
+
+		auditlog.EventLog("error", fmt.Sprintf("Configuration update reverted due to error in ConfigUpdated event: %v", err))
+		slog.Error("Configuration update reverted due to error in ConfigUpdated event.", slog.Any("error", err))
+	}
+	if err := os.WriteFile(flags.ConfigFile, b, 0644); err != nil {
+		return err
+	}
 	return err
 }
 

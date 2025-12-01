@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gookit/event"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
@@ -23,29 +24,29 @@ type LoginRequest struct {
 func Login(c *gin.Context) {
 	conf, _ := conf.GetWithV1Format()
 	if conf.DisablePasswordLogin {
-		RespondError(c, http.StatusForbidden, "Password login is disabled")
+		resp.RespondError(c, http.StatusForbidden, "Password login is disabled")
 		return
 	}
 
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		resp.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
 		return
 	}
 	var data LoginRequest
 	err = json.Unmarshal(bodyBytes, &data)
 	if err != nil {
-		RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		resp.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
 		return
 	}
 	if data.Username == "" || data.Password == "" {
-		RespondError(c, http.StatusBadRequest, "Invalid request body: Username and password are required")
+		resp.RespondError(c, http.StatusBadRequest, "Invalid request body: Username and password are required")
 		return
 	}
 
 	uuid, success := accounts.CheckPassword(data.Username, data.Password)
 	if !success {
-		RespondError(c, http.StatusUnauthorized, "Invalid credentials")
+		resp.RespondError(c, http.StatusUnauthorized, "Invalid credentials")
 		event.Trigger(eventType.LoginFailed, event.M{
 			"username": data.Username,
 			"method":   "password",
@@ -61,23 +62,23 @@ func Login(c *gin.Context) {
 	user, _ := accounts.GetUserByUUID(uuid)
 	if user.TwoFactor != "" { // 开启了2FA
 		if data.TwoFa == "" {
-			RespondError(c, http.StatusUnauthorized, "2FA code is required")
+			resp.RespondError(c, http.StatusUnauthorized, "2FA code is required")
 			return
 		}
 		if ok, err := accounts.Verify2Fa(uuid, data.TwoFa); err != nil || !ok {
-			RespondError(c, http.StatusUnauthorized, "Invalid 2FA code")
+			resp.RespondError(c, http.StatusUnauthorized, "Invalid 2FA code")
 			return
 		}
 	}
 	// Create session
 	session, err := accounts.CreateSession(uuid, 2592000, c.Request.UserAgent(), c.ClientIP(), "password")
 	if err != nil {
-		RespondError(c, http.StatusInternalServerError, "Failed to create session: "+err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, "Failed to create session: "+err.Error())
 		return
 	}
 	c.SetCookie("session_token", session, 2592000, "/", "", false, true)
 	auditlog.Log(c.ClientIP(), uuid, "logged in (password)", "login")
-	RespondSuccess(c, gin.H{"set-cookie": gin.H{"session_token": session}})
+	resp.RespondSuccess(c, gin.H{"set-cookie": gin.H{"session_token": session}})
 	event.Trigger(eventType.UserLogin, event.M{
 		"username": data.Username,
 		"method":   "password",

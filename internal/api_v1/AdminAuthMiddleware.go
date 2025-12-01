@@ -3,6 +3,7 @@ package api_v1
 import (
 	"net/http"
 
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 
 	"github.com/gin-gonic/gin"
@@ -20,7 +21,7 @@ func AdminAuthMiddleware() gin.HandlerFunc {
 		// session-based authentication
 		session, err := c.Cookie("session_token")
 		if err != nil {
-			RespondError(c, http.StatusUnauthorized, "Unauthorized.")
+			resp.RespondError(c, http.StatusUnauthorized, "Unauthorized.")
 			c.Abort()
 			return
 		}
@@ -28,7 +29,7 @@ func AdminAuthMiddleware() gin.HandlerFunc {
 		// Komari is a single user system
 		uuid, err := accounts.GetSession(session)
 		if err != nil {
-			RespondError(c, http.StatusUnauthorized, "Unauthorized.")
+			resp.RespondError(c, http.StatusUnauthorized, "Unauthorized.")
 			c.Abort()
 			return
 		}

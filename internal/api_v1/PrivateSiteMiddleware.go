@@ -3,6 +3,7 @@ package api_v1
 import (
 	"net/http"
 
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 
@@ -48,7 +49,7 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 		}
 		conf, err := conf.GetWithV1Format()
 		if err != nil {
-			RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
+			resp.RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
 			c.Abort()
 			return
 		}
@@ -60,13 +61,13 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 		// 如果是私有站点，检查是否有 session
 		session, err := c.Cookie("session_token")
 		if err != nil {
-			RespondError(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
+			resp.RespondError(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
 			c.Abort()
 			return
 		}
 		_, err = accounts.GetSession(session)
 		if err != nil {
-			RespondError(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
+			resp.RespondError(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
 			c.Abort()
 			return
 		}

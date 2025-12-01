@@ -2,8 +2,9 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"os"
+
+	"log/slog"
 
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
@@ -46,7 +47,7 @@ Made by Akizon77 with love.`,
 func Execute() {
 	err, _ := event.Trigger(eventType.ProcessStart, event.M{})
 	if err != nil {
-		log.Fatalf("Something went wrong during process start: %v", err)
+		slog.Error("Something went wrong during process start.", slog.Any("error", err))
 		os.Exit(1)
 	}
 	if err := RootCmd.Execute(); err != nil {

@@ -4,7 +4,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 )
@@ -22,12 +22,12 @@ func GetLogs(c *gin.Context) {
 	// If conversion fails, return an error
 	limitInt, err := strconv.Atoi(limit)
 	if err != nil || limitInt <= 0 {
-		api.RespondError(c, 400, "Invalid limit: "+limit)
+		resp.RespondError(c, 400, "Invalid limit: "+limit)
 		return
 	}
 	pageInt, err := strconv.Atoi(page)
 	if err != nil || pageInt <= 0 {
-		api.RespondError(c, 400, "Invalid page: "+page)
+		resp.RespondError(c, 400, "Invalid page: "+page)
 		return
 	}
 	db := dbcore.GetDBInstance()
@@ -37,13 +37,13 @@ func GetLogs(c *gin.Context) {
 
 	var total int64
 	if err := db.Model(&models.Log{}).Count(&total).Error; err != nil {
-		api.RespondError(c, 500, "Failed to count logs: "+err.Error())
+		resp.RespondError(c, 500, "Failed to count logs: "+err.Error())
 		return
 	}
 
 	if err := db.Order("time desc").Limit(limitInt).Offset(offset).Find(&logs).Error; err != nil {
-		api.RespondError(c, 500, "Failed to retrieve logs: "+err.Error())
+		resp.RespondError(c, 500, "Failed to retrieve logs: "+err.Error())
 		return
 	}
-	api.RespondSuccess(c, gin.H{"logs": logs, "total": total})
+	resp.RespondSuccess(c, gin.H{"logs": logs, "total": total})
 }

@@ -21,9 +21,9 @@ const (
 
 	LoginFailed = "user.login.failed" // 用户登录失败
 
-	ConfigUpdated = "config.updated" // 配置更改。当服务器第一次启动载入配置时也会触发此事件，其中 old 全部为go类型零值， new 为载入的配置内容，若在配置载入前读取Conf，返回的将是零值配置。
+	ConfigUpdated = "config.updated" // 配置更改。当服务器第一次启动载入配置时也会触发此事件（由 ServerInitializeDone 事件联动），其中 old 全部为go类型零值， new 为载入的配置内容，若在配置载入前读取Conf，返回的将是零值配置。当出现错误时，配置修改将会被撤回。
 
-	ProcessStart = "process.start" // 进程启动，如果在此事件的监听器中返回错误，进程将退出
+	ProcessStart = "process.start" // 进程启动，如果在此事件的监听器中返回错误，进程将退出。注意：此时数据库、配置进行初始化，不应该在此事件的监听器中执行需要数据库或配置的操作，即使需要进行操作数据库和配置，请将优先级设置为event.Max以下
 	ProcessExit  = "process.exit"  // 进程停止
 
 	ServerInitializeStart = "server.routers.start"     // 服务器路由初始化开始，如果在此事件的监听器中返回错误，进程将退出

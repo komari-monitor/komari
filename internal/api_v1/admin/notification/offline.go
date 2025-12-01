@@ -2,7 +2,7 @@ package notification
 
 import (
 	"github.com/gin-gonic/gin"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	resp "github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"gorm.io/gorm/clause"
@@ -12,7 +12,7 @@ import (
 func EnableOfflineNotification(c *gin.Context) {
 	var uuids []string
 	if err := c.ShouldBindJSON(&uuids); err != nil {
-		api.RespondError(c, 400, "Invalid request body: "+err.Error())
+		resp.RespondError(c, 400, "Invalid request body: "+err.Error())
 		return
 	}
 	var notifications []models.OfflineNotification
@@ -30,17 +30,17 @@ func EnableOfflineNotification(c *gin.Context) {
 		Select("client", "enable").
 		Create(notifications).Error
 	if err != nil {
-		api.RespondError(c, 500, "Failed to enable offline notifications: "+err.Error())
+		resp.RespondError(c, 500, "Failed to enable offline notifications: "+err.Error())
 		return
 	}
-	api.RespondSuccess(c, nil)
+	resp.RespondSuccess(c, nil)
 }
 
 // POST body : []uuid
 func DisableOfflineNotification(c *gin.Context) {
 	var uuids []string
 	if err := c.ShouldBindJSON(&uuids); err != nil {
-		api.RespondError(c, 400, "Invalid request body: "+err.Error())
+		resp.RespondError(c, 400, "Invalid request body: "+err.Error())
 		return
 	}
 	var notifications []models.OfflineNotification
@@ -58,29 +58,29 @@ func DisableOfflineNotification(c *gin.Context) {
 		Select("client", "enable").
 		Create(notifications).Error
 	if err != nil {
-		api.RespondError(c, 500, "Failed to disable offline notifications: "+err.Error())
+		resp.RespondError(c, 500, "Failed to disable offline notifications: "+err.Error())
 		return
 	}
-	api.RespondSuccess(c, nil)
+	resp.RespondSuccess(c, nil)
 }
 
 func EditOfflineNotification(c *gin.Context) {
 	var notifications []models.OfflineNotification
 	if err := c.ShouldBindJSON(&notifications); err != nil {
-		api.RespondError(c, 400, "Invalid request body: "+err.Error())
+		resp.RespondError(c, 400, "Invalid request body: "+err.Error())
 		return
 	}
 	if len(notifications) == 0 {
-		api.RespondError(c, 400, "At least one notification is required")
+		resp.RespondError(c, 400, "At least one notification is required")
 		return
 	}
 	for _, noti := range notifications {
 		if noti.Client == "" {
-			api.RespondError(c, 400, "Client UUID cannot be empty")
+			resp.RespondError(c, 400, "Client UUID cannot be empty")
 			return
 		}
 		if noti.GracePeriod <= 0 {
-			api.RespondError(c, 400, "GracePeriod must be a positive integer")
+			resp.RespondError(c, 400, "GracePeriod must be a positive integer")
 			return
 		}
 	}
@@ -92,18 +92,18 @@ func EditOfflineNotification(c *gin.Context) {
 		Select("*").
 		Create(notifications).Error
 	if err != nil {
-		api.RespondError(c, 500, "Failed to edit offline notifications: "+err.Error())
+		resp.RespondError(c, 500, "Failed to edit offline notifications: "+err.Error())
 		return
 	}
-	api.RespondSuccess(c, nil)
+	resp.RespondSuccess(c, nil)
 }
 
 func ListOfflineNotifications(c *gin.Context) {
 	var notifications []models.OfflineNotification
 	err := dbcore.GetDBInstance().Model(&models.OfflineNotification{}).Find(&notifications).Error
 	if err != nil {
-		api.RespondError(c, 500, "Failed to list offline notifications: "+err.Error())
+		resp.RespondError(c, 500, "Failed to list offline notifications: "+err.Error())
 		return
 	}
-	api.RespondSuccess(c, notifications)
+	resp.RespondSuccess(c, notifications)
 }

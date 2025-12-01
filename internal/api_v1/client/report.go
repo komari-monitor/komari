@@ -13,7 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gookit/event"
 	"github.com/gorilla/websocket"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/vars"
 	"github.com/komari-monitor/komari/internal/common"
 	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/models"
@@ -217,7 +217,7 @@ func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
 }
 
 func SaveClientReport(uuid string, report common.Report) error {
-	reports, _ := api.Records.Get(uuid)
+	reports, _ := vars.Records.Get(uuid)
 	if reports == nil {
 		reports = []common.Report{}
 	}
@@ -225,7 +225,7 @@ func SaveClientReport(uuid string, report common.Report) error {
 		report.CPU.Usage = 0.01
 	}
 	reports = append(reports.([]common.Report), report)
-	api.Records.Set(uuid, reports, cache.DefaultExpiration)
+	vars.Records.Set(uuid, reports, cache.DefaultExpiration)
 
 	return nil
 }

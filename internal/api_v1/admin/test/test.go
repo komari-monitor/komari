@@ -4,7 +4,7 @@ import (
 	"net"
 
 	"github.com/gin-gonic/gin"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/geoip"
@@ -17,10 +17,10 @@ func TestSendMessage(c *gin.Context) {
 		Message: "This is a test message from Komari.",
 	})
 	if err != nil {
-		api.RespondError(c, 500, "Failed to send message: "+err.Error())
+		resp.RespondError(c, 500, "Failed to send message: "+err.Error())
 		return
 	}
-	api.RespondSuccess(c, nil)
+	resp.RespondSuccess(c, nil)
 }
 
 func TestGeoIp(c *gin.Context) {
@@ -34,17 +34,17 @@ func TestGeoIp(c *gin.Context) {
 	}
 	conf, err := conf.GetWithV1Format()
 	if err != nil {
-		api.RespondError(c, 500, "Failed to get configuration: "+err.Error())
+		resp.RespondError(c, 500, "Failed to get configuration: "+err.Error())
 		return
 	}
 	if !conf.GeoIpEnabled {
-		api.RespondError(c, 400, "GeoIP is not enabled in the configuration.")
+		resp.RespondError(c, 400, "GeoIP is not enabled in the configuration.")
 		return
 	}
 	GeoIpRecord, err := geoip.GetGeoInfo(net.ParseIP(ip))
 	if err != nil {
-		api.RespondError(c, 500, "Failed to get GeoIP record: "+err.Error())
+		resp.RespondError(c, 500, "Failed to get GeoIP record: "+err.Error())
 		return
 	}
-	api.RespondSuccess(c, GeoIpRecord)
+	resp.RespondSuccess(c, GeoIpRecord)
 }
