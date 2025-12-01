@@ -50,40 +50,27 @@ func LoadProvider(name string, configJson string) error {
 }
 
 func init() {
-	all := factory.GetAllOidcProviders()
-	for _, provider := range all {
-		if _, err := database.GetOidcConfigByName(provider.GetName()); err == nil {
-			continue
+	event.On(eventType.ServerInitializeStart, event.ListenerFunc(func(e event.Event) error {
+		all := factory.GetAllOidcProviders()
+		for _, provider := range all {
+			if _, err := database.GetOidcConfigByName(provider.GetName()); err == nil {
+				continue
+			}
+			// 如果数据库中没有该提供者的配置，则保存默认配置
+			config := provider.GetConfiguration()
+			configBytes, err := json.Marshal(config)
+			if err != nil {
+				return fmt.Errorf("failed to marshal config for provider %s: %v", provider.GetName(), err)
+			}
+			if err := database.SaveOidcConfig(&models.OidcProvider{
+				Name:     provider.GetName(),
+				Addition: string(configBytes),
+			}); err != nil {
+				return fmt.Errorf("failed to save default config for provider %s: %v", provider.GetName(), err)
+			}
 		}
-		// 如果数据库中没有该提供者的配置，则保存默认配置
-		config := provider.GetConfiguration()
-		configBytes, err := json.Marshal(config)
-		if err != nil {
-			log.Printf("Failed to marshal config for provider %s: %v", provider.GetName(), err)
-			return
-		}
-		if err := database.SaveOidcConfig(&models.OidcProvider{
-			Name:     provider.GetName(),
-			Addition: string(configBytes),
-		}); err != nil {
-			log.Printf("Failed to save default config for provider %s: %v", provider.GetName(), err)
-			return
-		}
-	}
-
-	// cfg, _ := conf.GetWithV1Format()
-	// if cfg.OAuthProvider == "" || cfg.OAuthProvider == "none" {
-	// 	LoadProvider("empty", "{}")
-	// }
-	// provider, err := database.GetOidcConfigByName(cfg.OAuthProvider)
-	// if err != nil {
-	// 	// 如果没有找到配置，使用empty provider
-	// 	LoadProvider("empty", "{}")
-	// }
-	// err = LoadProvider(provider.Name, provider.Addition)
-	// if err != nil {
-	// 	log.Printf("Failed to load OIDC provider %s: %v", provider.Name, err)
-	// }
+		return nil
+	}))
 
 	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
 		oldConf, newConf, err := conf.FromEvent(e)
