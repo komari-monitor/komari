@@ -6,16 +6,18 @@ import (
 	"log"
 	"sync"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database"
+	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/oauth/factory"
 )
 
 var (
 	currentProvider factory.IOidcProvider
 	mu              = sync.Mutex{}
-	once            = sync.Once{}
 )
 
 func CurrentProvider() factory.IOidcProvider {
@@ -47,44 +49,60 @@ func LoadProvider(name string, configJson string) error {
 	return nil
 }
 
-func Initialize() error {
-	once.Do(func() {
-		all := factory.GetAllOidcProviders()
-		for _, provider := range all {
-			if _, err := database.GetOidcConfigByName(provider.GetName()); err == nil {
-				continue
-			}
-			// 如果数据库中没有该提供者的配置，则保存默认配置
-			config := provider.GetConfiguration()
-			configBytes, err := json.Marshal(config)
-			if err != nil {
-				log.Printf("Failed to marshal config for provider %s: %v", provider.GetName(), err)
-				return
-			}
-			if err := database.SaveOidcConfig(&models.OidcProvider{
-				Name:     provider.GetName(),
-				Addition: string(configBytes),
-			}); err != nil {
-				log.Printf("Failed to save default config for provider %s: %v", provider.GetName(), err)
-				return
-			}
+func init() {
+	all := factory.GetAllOidcProviders()
+	for _, provider := range all {
+		if _, err := database.GetOidcConfigByName(provider.GetName()); err == nil {
+			continue
 		}
-	})
+		// 如果数据库中没有该提供者的配置，则保存默认配置
+		config := provider.GetConfiguration()
+		configBytes, err := json.Marshal(config)
+		if err != nil {
+			log.Printf("Failed to marshal config for provider %s: %v", provider.GetName(), err)
+			return
+		}
+		if err := database.SaveOidcConfig(&models.OidcProvider{
+			Name:     provider.GetName(),
+			Addition: string(configBytes),
+		}); err != nil {
+			log.Printf("Failed to save default config for provider %s: %v", provider.GetName(), err)
+			return
+		}
+	}
+
 	cfg, _ := conf.GetWithV1Format()
 	if cfg.OAuthProvider == "" || cfg.OAuthProvider == "none" {
 		LoadProvider("empty", "{}")
-		return nil
 	}
 	provider, err := database.GetOidcConfigByName(cfg.OAuthProvider)
 	if err != nil {
 		// 如果没有找到配置，使用empty provider
 		LoadProvider("empty", "{}")
-		return nil
 	}
 	err = LoadProvider(provider.Name, provider.Addition)
 	if err != nil {
 		log.Printf("Failed to load OIDC provider %s: %v", provider.Name, err)
-		return err
 	}
-	return nil
+
+	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
+		oldConf, newConf, err := conf.FromEvent(e)
+		if err != nil {
+			log.Printf("Failed to parse config from event: %v", err)
+		}
+
+		if newConf.Login.OAuthProvider != oldConf.Login.OAuthProvider {
+			oidcProvider, err := database.GetOidcConfigByName(newConf.Login.OAuthProvider)
+			if err != nil {
+				log.Printf("Failed to get OIDC provider config: %v", err)
+			} else {
+				log.Printf("Using %s as OIDC provider", oidcProvider.Name)
+			}
+			err = LoadProvider(oidcProvider.Name, oidcProvider.Addition)
+			if err != nil {
+				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
+			}
+		}
+		return nil
+	}))
 }

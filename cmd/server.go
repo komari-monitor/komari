@@ -24,10 +24,8 @@ import (
 	"github.com/komari-monitor/komari/internal/database/records"
 	"github.com/komari-monitor/komari/internal/database/tasks"
 	"github.com/komari-monitor/komari/internal/eventType"
-	"github.com/komari-monitor/komari/internal/geoip"
 	logutil "github.com/komari-monitor/komari/internal/log"
 	"github.com/komari-monitor/komari/internal/messageSender"
-	"github.com/komari-monitor/komari/internal/oauth"
 	"github.com/komari-monitor/komari/internal/patch"
 	"github.com/komari-monitor/komari/internal/restore"
 	"github.com/komari-monitor/komari/pkg/cloudflared"
@@ -80,10 +78,8 @@ func RunServer() {
 
 	event.Trigger(eventType.ServerInitializeStart, event.M{"config": config, "engine": r})
 
-	go geoip.InitGeoIp()
 	go DoScheduledWork()
 	go messageSender.Initialize()
-	go oauth.Initialize()
 
 	server.StartNezhaGRPCServer(config.NezhaCompatListen)
 

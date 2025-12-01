@@ -45,11 +45,11 @@ func Override(cst Config) error {
 
 	oldConf := *Conf
 	Conf = &cst
-	event.Trigger(eventType.ConfigUpdated, event.M{
+	err, _ = event.Trigger(eventType.ConfigUpdated, event.M{
 		"old": oldConf,
 		"new": cst,
 	})
-	return nil
+	return err
 }
 
 func SavePartial(cst map[string]interface{}) error {

@@ -218,7 +218,11 @@ func updateLastNotified(taskId uint, notifyTime time.Time) {
 	}
 }
 
-// ReloadLoadNotificationSchedule 加载或重载时间表
-func ReloadLoadNotificationSchedule(loadNotifications []models.LoadNotification) error {
+func ReloadLoadNotification() error {
+	db := dbcore.GetDBInstance()
+	var loadNotifications []models.LoadNotification
+	if err := db.Find(&loadNotifications).Error; err != nil {
+		return err
+	}
 	return LoadNotificationManager.Reload(loadNotifications)
 }

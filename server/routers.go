@@ -7,7 +7,6 @@ import (
 	"github.com/komari-monitor/komari/internal/api_rpc"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/eventType"
-	"github.com/komari-monitor/komari/internal/geoip"
 	"github.com/komari-monitor/komari/internal/messageSender"
 	"github.com/komari-monitor/komari/public"
 )
@@ -25,9 +24,7 @@ func Init(r *gin.Engine) {
 		oldConf := e.Get("old").(conf.Config)
 		AllowCors = newConf.Site.AllowCors
 		public.UpdateIndex(newConf.ToV1Format())
-		if newConf.GeoIp.GeoIpProvider != oldConf.GeoIp.GeoIpProvider {
-			go geoip.InitGeoIp()
-		}
+
 		if newConf.Notification.NotificationMethod != oldConf.Notification.NotificationMethod {
 			go messageSender.Initialize()
 		}
