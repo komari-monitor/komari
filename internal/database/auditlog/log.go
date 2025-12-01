@@ -1,6 +1,7 @@
 package auditlog
 
 import (
+	"fmt"
 	"log"
 	"time"
 
@@ -23,6 +24,14 @@ func Log(ip, uuid, message, msgType string) {
 
 func EventLog(eventType, message string) {
 	Log("", "", message, eventType)
+}
+
+func InternalInfof(message string, v ...interface{}) {
+	Log("", "", fmt.Sprintf(message, v...), "info")
+}
+
+func InternalErrorf(message string, v ...interface{}) {
+	Log("", "", fmt.Sprintf(message, v...), "error")
 }
 
 // Delete logs older than 30 days

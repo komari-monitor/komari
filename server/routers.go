@@ -1,9 +1,6 @@
 package server
 
 import (
-	"log/slog"
-	"time"
-
 	"github.com/gin-gonic/gin"
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal"
@@ -62,31 +59,4 @@ func Init(r *gin.Engine) {
 	internal.LoadApiV1Routes(r, config)
 
 	api_rpc.RegisterRouters("/api/rpc2", r)
-}
-
-func ScheduledTasksInit() {
-	every1m := time.NewTicker(1 * time.Minute)
-	every5m := time.NewTicker(5 * time.Minute)
-	every30m := time.NewTicker(30 * time.Minute)
-	every1h := time.NewTicker(1 * time.Hour)
-	every1d := time.NewTicker(24 * time.Hour)
-	for {
-		var err error = nil
-		var e event.Event
-		select {
-		case <-every1m.C:
-			err, e = event.Trigger(eventType.SchedulerEveryMinute, event.M{"interval": "1m"})
-		case <-every5m.C:
-			err, e = event.Trigger(eventType.SchedulerEvery5Minutes, event.M{"interval": "5m"})
-		case <-every30m.C:
-			err, e = event.Trigger(eventType.SchedulerEvery30Minutes, event.M{"interval": "30m"})
-		case <-every1h.C:
-			err, e = event.Trigger(eventType.SchedulerEveryHour, event.M{"interval": "1h"})
-		case <-every1d.C:
-			err, e = event.Trigger(eventType.SchedulerEveryDay, event.M{"interval": "1d"})
-		}
-		if err != nil {
-			slog.Warn("Scheduled task error:", "error", err, "event", e)
-		}
-	}
 }

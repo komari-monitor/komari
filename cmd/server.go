@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,7 +16,6 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	api "github.com/komari-monitor/komari/internal/api_v1"
 	"github.com/komari-monitor/komari/internal/conf"
-	"github.com/komari-monitor/komari/internal/database"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
@@ -28,7 +27,6 @@ import (
 	"github.com/komari-monitor/komari/internal/geoip"
 	logutil "github.com/komari-monitor/komari/internal/log"
 	"github.com/komari-monitor/komari/internal/messageSender"
-	"github.com/komari-monitor/komari/internal/notifier"
 	"github.com/komari-monitor/komari/internal/oauth"
 	"github.com/komari-monitor/komari/internal/patch"
 	"github.com/komari-monitor/komari/internal/restore"
@@ -89,27 +87,6 @@ func RunServer() {
 
 	server.StartNezhaGRPCServer(config.NezhaCompatListen)
 
-	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
-		newConf := e.Get("new").(conf.Config)
-		oldConf := e.Get("old").(conf.Config)
-		if newConf.Login.OAuthProvider != oldConf.Login.OAuthProvider {
-			oidcProvider, err := database.GetOidcConfigByName(newConf.Login.OAuthProvider)
-			if err != nil {
-				log.Printf("Failed to get OIDC provider config: %v", err)
-			} else {
-				log.Printf("Using %s as OIDC provider", oidcProvider.Name)
-			}
-			err = oauth.LoadProvider(oidcProvider.Name, oidcProvider.Addition)
-			if err != nil {
-				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
-			}
-		}
-		if newConf.Notification.NotificationMethod != oldConf.Notification.NotificationMethod {
-			messageSender.Initialize()
-		}
-		return nil
-	}), event.Max)
-
 	// 初始化 cloudflared
 	if strings.ToLower(GetEnv("KOMARI_ENABLE_CLOUDFLARED", "false")) == "true" {
 		err := cloudflared.RunCloudflared() // 阻塞，确保cloudflared跑起来
@@ -136,6 +113,7 @@ func RunServer() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 	OnShutdown()
+	event.Trigger(eventType.ProcessExit, event.M{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
@@ -171,31 +149,40 @@ func InitDatabase() {
 func DoScheduledWork() {
 	tasks.ReloadPingSchedule()
 	d_notification.ReloadLoadNotificationSchedule()
-	ticker := time.NewTicker(time.Minute * 30)
-	minute := time.NewTicker(60 * time.Second)
-	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
-	records.CompactRecord()
-	cfg, _ := conf.GetWithV1Format()
-	go notifier.CheckExpireScheduledWork()
-	for {
-		select {
-		case <-ticker.C:
-			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			records.CompactRecord()
-			tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
-			auditlog.RemoveOldLogs()
-		case <-minute.C:
-			api.SaveClientReportToDB()
-			if !cfg.RecordEnabled {
-				records.DeleteAll()
-				tasks.DeleteAllPingRecords()
-			}
-			// 每分钟检查一次流量提醒
-			go notifier.CheckTraffic()
-		}
-	}
 
+	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
+
+	records.CompactRecord()
+	ScheduledEventTasksInit()
+
+	event.On(eventType.SchedulerEvery30Minutes, event.ListenerFunc(func(e event.Event) error {
+		cfg, err := conf.GetWithV1Format()
+		if err != nil {
+			slog.Warn("Failed to get config in scheduled task:", "error", err)
+			return err
+		}
+		records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
+		records.CompactRecord()
+		tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
+		tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
+		auditlog.RemoveOldLogs()
+		return nil
+	}))
+
+	event.On(eventType.SchedulerEveryMinute, event.ListenerFunc(func(e event.Event) error {
+		cfg, err := conf.GetWithV1Format()
+		if err != nil {
+			slog.Warn("Failed to get config in scheduled task:", "error", err)
+			return err
+		}
+		api.SaveClientReportToDB()
+		if !cfg.RecordEnabled {
+			records.DeleteAll()
+			tasks.DeleteAllPingRecords()
+		}
+
+		return nil
+	}))
 }
 
 func OnShutdown() {
@@ -206,4 +193,31 @@ func OnShutdown() {
 func OnFatal(err error) {
 	auditlog.Log("", "", "server encountered a fatal error: "+err.Error(), "error")
 	cloudflared.Kill()
+}
+
+func ScheduledEventTasksInit() {
+	every1m := time.NewTicker(1 * time.Minute)
+	every5m := time.NewTicker(5 * time.Minute)
+	every30m := time.NewTicker(30 * time.Minute)
+	every1h := time.NewTicker(1 * time.Hour)
+	every1d := time.NewTicker(24 * time.Hour)
+	for {
+		var err error = nil
+		var e event.Event
+		select {
+		case <-every1m.C:
+			err, e = event.Trigger(eventType.SchedulerEveryMinute, event.M{"interval": "1m"})
+		case <-every5m.C:
+			err, e = event.Trigger(eventType.SchedulerEvery5Minutes, event.M{"interval": "5m"})
+		case <-every30m.C:
+			err, e = event.Trigger(eventType.SchedulerEvery30Minutes, event.M{"interval": "30m"})
+		case <-every1h.C:
+			err, e = event.Trigger(eventType.SchedulerEveryHour, event.M{"interval": "1h"})
+		case <-every1d.C:
+			err, e = event.Trigger(eventType.SchedulerEveryDay, event.M{"interval": "1d"})
+		}
+		if err != nil {
+			slog.Warn("Scheduled task error:", "error", err, "event", e)
+		}
+	}
 }

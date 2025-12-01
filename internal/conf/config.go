@@ -2,6 +2,7 @@ package conf
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 
 	"github.com/gookit/event"
@@ -248,4 +249,22 @@ func deepMerge(dst, src map[string]interface{}) map[string]interface{} {
 		dst[k] = v
 	}
 	return dst
+}
+
+// FromEvent 从事件对象中提取旧配置和新配置 returns (old,new,error)。
+func FromEvent(e event.Event) (Config, Config, error) {
+	oldVal := e.Get("old")
+	newVal := e.Get("new")
+
+	oldConf, ok := oldVal.(Config)
+	if !ok {
+		return Config{}, Config{}, fmt.Errorf("FromEvent: 'old' key value is not of type Config. Got: %T", oldVal)
+	}
+
+	newConf, ok := newVal.(Config)
+	if !ok {
+		return Config{}, Config{}, fmt.Errorf("FromEvent: 'new' key value is not of type Config. Got: %T", newVal)
+	}
+
+	return oldConf, newConf, nil
 }
