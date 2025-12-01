@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	"log/slog"
+
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/internal/eventType"
@@ -43,8 +45,11 @@ Made by Akizon77 with love.`,
 }
 
 func Execute() {
-	event.Trigger(eventType.ProcessStart, nil)
-	defer event.Trigger(eventType.ProcessExit, nil)
+	err, _ := event.Trigger(eventType.ProcessStart, event.M{})
+	if err != nil {
+		slog.Error("Something went wrong during process start.", slog.Any("error", err))
+		os.Exit(1)
+	}
 	if err := RootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

@@ -6,7 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/database/tasks"
@@ -25,7 +25,7 @@ func Exec(c *gin.Context) {
 	var onlineClients []string
 	var offlineClients []string
 	if err := c.ShouldBindJSON(&req); err != nil {
-		api.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
+		resp.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
 		return
 	}
 	// for uuid := range ws.GetConnectedClients() {
@@ -33,7 +33,7 @@ func Exec(c *gin.Context) {
 	// 		onlineClients = append(onlineClients, uuid)
 	// 	}
 	// 	// else {
-	// 	// 	api.RespondError(c, 400, "Client not connected: "+uuid)
+	// 	// 	resp.RespondError(c, 400, "Client not connected: "+uuid)
 	// 	// 	return
 	// 	// }
 	// }
@@ -45,12 +45,12 @@ func Exec(c *gin.Context) {
 		}
 	}
 	if len(onlineClients) == 0 {
-		api.RespondError(c, 400, "No clients connected")
+		resp.RespondError(c, 400, "No clients connected")
 		return
 	}
 	taskId := utils.GenerateRandomString(16)
 	if err := tasks.CreateTask(taskId, append(onlineClients, offlineClients...), req.Command); err != nil {
-		api.RespondError(c, 500, "Failed to create task: "+err.Error())
+		resp.RespondError(c, 500, "Failed to create task: "+err.Error())
 		return
 	}
 	for _, uuid := range onlineClients {
@@ -67,17 +67,17 @@ func Exec(c *gin.Context) {
 		client := ws.GetConnectedClients()[uuid]
 		if client != nil {
 			if err := client.WriteMessage(websocket.TextMessage, payload); err != nil {
-				api.RespondError(c, 400, "Client connection is broke: "+uuid)
+				resp.RespondError(c, 400, "Client connection is broke: "+uuid)
 				return
 			}
 		} else {
-			api.RespondError(c, 400, "Client connection is null: "+uuid)
+			resp.RespondError(c, 400, "Client connection is null: "+uuid)
 			return
 		}
 	}
 	uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), uuid.(string), "REC, task id: "+taskId, "warn")
-	api.RespondSuccess(c, gin.H{
+	resp.RespondSuccess(c, gin.H{
 		"task_id": taskId,
 		"clients": onlineClients,
 	})

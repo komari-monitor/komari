@@ -3,7 +3,7 @@ package admin
 import (
 	"database/sql"
 
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/database/records"
@@ -21,7 +21,7 @@ func GetSettings(c *gin.Context) {
 			cst = conf.V1Struct{Sitename: "Komari"}
 			cst.ID = 1
 			conf.Save(cst)
-			api.RespondSuccess(c, cst)
+			resp.RespondSuccess(c, cst)
 			return
 		}
 		c.JSON(500, gin.H{
@@ -29,20 +29,20 @@ func GetSettings(c *gin.Context) {
 			"message": "Internal Server Error: " + err.Error(),
 		})
 	}
-	api.RespondSuccess(c, cst)
+	resp.RespondSuccess(c, cst)
 }
 
 // EditSettings 更新自定义配置
 func EditSettings(c *gin.Context) {
 	cfg := make(map[string]interface{})
 	if err := c.ShouldBindJSON(&cfg); err != nil {
-		api.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
+		resp.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
 		return
 	}
 
 	cfg["id"] = 1 // Only one record
 	if err := conf.Update(cfg); err != nil {
-		api.RespondError(c, 500, "Failed to update settings: "+err.Error())
+		resp.RespondError(c, 500, "Failed to update settings: "+err.Error())
 		return
 	}
 
@@ -59,7 +59,7 @@ func EditSettings(c *gin.Context) {
 		message = message[:len(message)-2]
 	}
 	auditlog.Log(c.ClientIP(), uuid.(string), message, "info")
-	api.RespondSuccess(c, nil)
+	resp.RespondSuccess(c, nil)
 }
 
 func contains(slice []string, item string) bool {
@@ -76,5 +76,5 @@ func ClearAllRecords(c *gin.Context) {
 	tasks.DeleteAllPingRecords()
 	uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), uuid.(string), "clear all records", "info")
-	api.RespondSuccess(c, nil)
+	resp.RespondSuccess(c, nil)
 }

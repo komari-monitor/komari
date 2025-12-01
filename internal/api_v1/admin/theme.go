@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
@@ -24,32 +24,32 @@ func UploadTheme(c *gin.Context) {
 	// 读取上传的文件内容
 	data, err := io.ReadAll(c.Request.Body)
 	if err != nil || len(data) == 0 {
-		api.RespondError(c, http.StatusBadRequest, "请选择要上传的主题文件")
+		resp.RespondError(c, http.StatusBadRequest, "请选择要上传的主题文件")
 		return
 	}
 
 	// 临时文件名
 	tempFile := filepath.Join(os.TempDir(), "uploaded_theme.zip")
 	if err := os.WriteFile(tempFile, data, 0644); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
 		return
 	}
 	defer os.Remove(tempFile)
 
 	// 检查文件扩展名（这里假定上传的就是zip）
 	if !strings.HasSuffix(strings.ToLower(tempFile), ".zip") {
-		api.RespondError(c, http.StatusBadRequest, "只支持ZIP格式的主题文件")
+		resp.RespondError(c, http.StatusBadRequest, "只支持ZIP格式的主题文件")
 		return
 	}
 
 	// 解压ZIP文件并验证
 	themeInfo, err := extractAndValidateTheme(tempFile)
 	if err != nil {
-		api.RespondError(c, http.StatusBadRequest, err.Error())
+		resp.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	api.RespondSuccessMessage(c, "主题上传成功", themeInfo)
+	resp.RespondSuccessMessage(c, "主题上传成功", themeInfo)
 }
 
 // ListThemes 列出所有主题
@@ -58,13 +58,13 @@ func ListThemes(c *gin.Context) {
 
 	// 确保主题目录存在
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
-		api.RespondSuccess(c, []models.Theme{})
+		resp.RespondSuccess(c, []models.Theme{})
 		return
 	}
 
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		api.RespondError(c, http.StatusInternalServerError, "读取主题目录失败: "+err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, "读取主题目录失败: "+err.Error())
 		return
 	}
 
@@ -78,7 +78,7 @@ func ListThemes(c *gin.Context) {
 		}
 	}
 
-	api.RespondSuccess(c, themes)
+	resp.RespondSuccess(c, themes)
 }
 
 // DeleteTheme 删除主题
@@ -88,12 +88,12 @@ func DeleteTheme(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		api.RespondError(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		resp.RespondError(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
 
 	if req.Short == "default" {
-		api.RespondError(c, http.StatusBadRequest, "默认主题不能删除")
+		resp.RespondError(c, http.StatusBadRequest, "默认主题不能删除")
 		return
 	}
 
@@ -101,24 +101,24 @@ func DeleteTheme(c *gin.Context) {
 
 	// 检查主题是否存在
 	if _, err := os.Stat(themeDir); os.IsNotExist(err) {
-		api.RespondError(c, http.StatusNotFound, "主题不存在")
+		resp.RespondError(c, http.StatusNotFound, "主题不存在")
 		return
 	}
 
 	// 删除主题目录
 	if err := os.RemoveAll(themeDir); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, "删除主题失败: "+err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, "删除主题失败: "+err.Error())
 		return
 	}
 
-	api.RespondSuccessMessage(c, "主题删除成功", nil)
+	resp.RespondSuccessMessage(c, "主题删除成功", nil)
 }
 
 // SetTheme 设置主题
 func SetTheme(c *gin.Context) {
 	themeName := c.Query("theme")
 	if themeName == "" {
-		api.RespondError(c, http.StatusBadRequest, "主题名称不能为空")
+		resp.RespondError(c, http.StatusBadRequest, "主题名称不能为空")
 		return
 	}
 
@@ -128,7 +128,7 @@ func SetTheme(c *gin.Context) {
 		themeConfigPath := filepath.Join(themeDir, "komari-theme.json")
 
 		if _, err := os.Stat(themeConfigPath); os.IsNotExist(err) {
-			api.RespondError(c, http.StatusNotFound, "主题不存在")
+			resp.RespondError(c, http.StatusNotFound, "主题不存在")
 			return
 		}
 	}
@@ -139,11 +139,11 @@ func SetTheme(c *gin.Context) {
 	}
 
 	if err := conf.Update(updateData); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, "更新主题设置失败: "+err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, "更新主题设置失败: "+err.Error())
 		return
 	}
 
-	api.RespondSuccessMessage(c, "主题设置成功", gin.H{"theme": themeName})
+	resp.RespondSuccessMessage(c, "主题设置成功", gin.H{"theme": themeName})
 }
 
 // extractAndValidateTheme 解压并验证主题
@@ -431,7 +431,7 @@ func UpdateTheme(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		api.RespondError(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		resp.RespondError(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
 
@@ -440,14 +440,14 @@ func UpdateTheme(c *gin.Context) {
 	themeConfigPath := filepath.Join(themeDir, "komari-theme.json")
 
 	if _, err := os.Stat(themeConfigPath); os.IsNotExist(err) {
-		api.RespondError(c, http.StatusNotFound, "主题不存在")
+		resp.RespondError(c, http.StatusNotFound, "主题不存在")
 		return
 	}
 
 	// 加载现有主题配置
 	themeInfo, err := loadThemeConfig(themeConfigPath)
 	if err != nil {
-		api.RespondError(c, http.StatusInternalServerError, "读取主题配置失败: "+err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, "读取主题配置失败: "+err.Error())
 		return
 	}
 
@@ -494,14 +494,14 @@ func UpdateTheme(c *gin.Context) {
 			// 相当于: DOWNLOAD_URL=$(curl -s https://api.github.com/repos/owner/repo/releases/latest | jq -r ".assets[0].browser_download_url")
 			gitHubURL, err := getGitHubReleaseDownloadURL(req.GitOwner, req.GitRepo)
 			if err != nil {
-				api.RespondError(c, http.StatusBadRequest, "从GitHub获取下载链接失败: "+err.Error())
+				resp.RespondError(c, http.StatusBadRequest, "从GitHub获取下载链接失败: "+err.Error())
 				return
 			}
 
 			// 使用获取到的链接下载主题
 			themeData, err = downloadThemeFromURL(gitHubURL)
 			if err != nil {
-				api.RespondError(c, http.StatusBadRequest, "从GitHub下载主题失败: "+err.Error())
+				resp.RespondError(c, http.StatusBadRequest, "从GitHub下载主题失败: "+err.Error())
 				return
 			}
 			// 保存下载链接，稍后更新到主题配置中
@@ -515,14 +515,14 @@ func UpdateTheme(c *gin.Context) {
 				// 这里也应用了自动检测GitHub仓库并下载最新release的功能
 				gitHubURL, err := getGitHubReleaseDownloadURL(owner, repo)
 				if err != nil {
-					api.RespondError(c, http.StatusBadRequest, "从GitHub获取下载链接失败: "+err.Error())
+					resp.RespondError(c, http.StatusBadRequest, "从GitHub获取下载链接失败: "+err.Error())
 					return
 				}
 
 				// 使用获取到的链接下载主题
 				themeData, err = downloadThemeFromURL(gitHubURL)
 				if err != nil {
-					api.RespondError(c, http.StatusBadRequest, "从GitHub下载主题失败: "+err.Error())
+					resp.RespondError(c, http.StatusBadRequest, "从GitHub下载主题失败: "+err.Error())
 					return
 				}
 				// 保存GitHub仓库URL，而不是release下载链接，以便将来可以获取最新版本
@@ -533,7 +533,7 @@ func UpdateTheme(c *gin.Context) {
 				// 新URL不是GitHub仓库地址，直接尝试下载
 				themeData, err = downloadThemeFromURL(req.URL)
 				if err != nil {
-					api.RespondError(c, http.StatusBadRequest, "从新URL下载主题失败: "+err.Error())
+					resp.RespondError(c, http.StatusBadRequest, "从新URL下载主题失败: "+err.Error())
 					return
 				}
 				// downloadURL = req.URL
@@ -543,7 +543,7 @@ func UpdateTheme(c *gin.Context) {
 
 	// 如果没有成功下载主题数据
 	if themeData == nil || len(themeData) == 0 {
-		api.RespondError(c, http.StatusBadRequest, "无法下载主题，请提供有效的URL或GitHub仓库信息")
+		resp.RespondError(c, http.StatusBadRequest, "无法下载主题，请提供有效的URL或GitHub仓库信息")
 		return
 	}
 
@@ -556,7 +556,7 @@ func UpdateTheme(c *gin.Context) {
 	// 临时文件名
 	tempFile := filepath.Join(os.TempDir(), "downloaded_theme.zip")
 	if err := os.WriteFile(tempFile, themeData, 0644); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
 		return
 	}
 	defer os.Remove(tempFile)
@@ -564,7 +564,7 @@ func UpdateTheme(c *gin.Context) {
 	// 解压ZIP文件并验证
 	updatedThemeInfo, err := extractAndValidateTheme(tempFile)
 	if err != nil {
-		api.RespondError(c, http.StatusBadRequest, err.Error())
+		resp.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -576,23 +576,23 @@ func UpdateTheme(c *gin.Context) {
 	// 	updatedConfigPath := filepath.Join("./data/theme", updatedThemeInfo.Short, "komari-theme.json")
 	// 	updatedConfigData, err := json.MarshalIndent(updatedThemeInfo, "", "  ")
 	// 	if err != nil {
-	// 		api.RespondError(c, http.StatusInternalServerError, "生成主题配置失败: "+err.Error())
+	// 		resp.RespondError(c, http.StatusInternalServerError, "生成主题配置失败: "+err.Error())
 	// 		return
 	// 	}
 
 	// 	if err := os.WriteFile(updatedConfigPath, updatedConfigData, 0644); err != nil {
-	// 		api.RespondError(c, http.StatusInternalServerError, "更新主题配置文件失败: "+err.Error())
+	// 		resp.RespondError(c, http.StatusInternalServerError, "更新主题配置文件失败: "+err.Error())
 	// 		return
 	// 	}
 	// }
 
-	api.RespondSuccessMessage(c, "主题更新成功", updatedThemeInfo)
+	resp.RespondSuccessMessage(c, "主题更新成功", updatedThemeInfo)
 }
 
 func UpdateThemeSettings(c *gin.Context) {
 	theme := c.Query("theme")
 	if theme == "" || theme == "default" {
-		api.RespondError(c, http.StatusBadRequest, "主题名称不能为空或不能是默认主题")
+		resp.RespondError(c, http.StatusBadRequest, "主题名称不能为空或不能是默认主题")
 		return
 	}
 
@@ -600,14 +600,14 @@ func UpdateThemeSettings(c *gin.Context) {
 
 	err := c.ShouldBindJSON(&req)
 	if err != nil {
-		api.RespondError(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		resp.RespondError(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
 	db := dbcore.GetDBInstance()
 
 	data, err := json.Marshal(&req)
 	if err != nil {
-		api.RespondError(c, http.StatusInternalServerError, "生成主题配置失败: "+err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, "生成主题配置失败: "+err.Error())
 		return
 	}
 
@@ -615,5 +615,5 @@ func UpdateThemeSettings(c *gin.Context) {
 	db.Where("short = ?", theme).
 		Assign(models.ThemeConfiguration{Short: theme, Data: string(data)}).
 		FirstOrCreate(&themeCfg)
-	api.RespondSuccess(c, nil)
+	resp.RespondSuccess(c, nil)
 }

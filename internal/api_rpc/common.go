@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/vars"
 	"github.com/komari-monitor/komari/internal/common"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database"
@@ -489,7 +489,7 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 		}
 	}
 
-	raw, _ := api.Records.Get(params.UUID)
+	raw, _ := vars.Records.Get(params.UUID)
 	reports, _ := raw.([]common.Report)
 
 	// 扁平化为 { count, records: [] }

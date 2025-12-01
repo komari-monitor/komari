@@ -7,7 +7,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/conf"
+	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/patrickmn/go-cache"
 )
 
@@ -22,44 +24,31 @@ type GeoInfo struct {
 func init() {
 	CurrentProvider = &EmptyProvider{}
 	geoCache = cache.New(48*time.Hour, 1*time.Hour)
-}
 
-// GeoIPService 接口定义了获取地理位置信息的核心方法。
-// 任何实现此接口的类型都可以作为地理位置服务提供者。
-type GeoIPService interface {
-	Name() string
-
-	GetGeoInfo(ip net.IP) (*GeoInfo, error)
-
-	UpdateDatabase() error
-
-	Close() error
-}
-
-func GetRegionUnicodeEmoji(isoCode string) string {
-	if len(isoCode) != 2 {
-		return ""
-	}
-	isoCode = strings.ToUpper(isoCode)
-
-	if !unicode.IsLetter(rune(isoCode[0])) || !unicode.IsLetter(rune(isoCode[1])) {
-		return ""
-	}
-
-	rune1 := rune(0x1F1E6 + (rune(isoCode[0]) - 'A'))
-	rune2 := rune(0x1F1E6 + (rune(isoCode[1]) - 'A'))
-	return string(rune1) + string(rune2)
-}
-
-func InitGeoIp() {
-	config, err := conf.GetWithV1Format()
+	err := SetProvider("empty")
 	if err != nil {
-		panic("Failed to get configuration for GeoIP: " + err.Error())
+		log.Printf("Failed to set initial GeoIP provider: %v", err)
 	}
-	if !config.GeoIpEnabled {
-		return
-	}
-	switch config.GeoIpProvider {
+
+	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
+		oldConf, newConf, err := conf.FromEvent(e)
+		if oldConf.GeoIp.GeoIpProvider == newConf.GeoIp.GeoIpProvider {
+			return nil
+		}
+		if err != nil {
+			log.Printf("Failed to parse config from event: %v", err)
+			return err
+		}
+		err = SetProvider(newConf.GeoIp.GeoIpProvider)
+		if err != nil {
+			log.Printf("Failed to set GeoIP provider: %v", err)
+		}
+		return nil
+	}))
+}
+
+func SetProvider(provider string) error {
+	switch provider {
 	case "mmdb":
 		NewCurrentProvider, err := NewMaxMindGeoIPService()
 		if err != nil {
@@ -110,6 +99,34 @@ func InitGeoIp() {
 	default:
 		CurrentProvider = &EmptyProvider{}
 	}
+	return nil
+}
+
+// GeoIPService 接口定义了获取地理位置信息的核心方法。
+// 任何实现此接口的类型都可以作为地理位置服务提供者。
+type GeoIPService interface {
+	Name() string
+
+	GetGeoInfo(ip net.IP) (*GeoInfo, error)
+
+	UpdateDatabase() error
+
+	Close() error
+}
+
+func GetRegionUnicodeEmoji(isoCode string) string {
+	if len(isoCode) != 2 {
+		return ""
+	}
+	isoCode = strings.ToUpper(isoCode)
+
+	if !unicode.IsLetter(rune(isoCode[0])) || !unicode.IsLetter(rune(isoCode[1])) {
+		return ""
+	}
+
+	rune1 := rune(0x1F1E6 + (rune(isoCode[0]) - 'A'))
+	rune2 := rune(0x1F1E6 + (rune(isoCode[1]) - 'A'))
+	return string(rune1) + string(rune2)
 }
 
 func GetGeoInfo(ip net.IP) (*GeoInfo, error) {

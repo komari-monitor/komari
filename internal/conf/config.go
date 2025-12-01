@@ -2,10 +2,14 @@ package conf
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+
+	"log/slog"
 
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/eventType"
 )
 
@@ -38,17 +42,25 @@ func Override(cst Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(flags.ConfigFile, b, 0644); err != nil {
-		return err
-	}
 
 	oldConf := *Conf
 	Conf = &cst
-	event.Trigger(eventType.ConfigUpdated, event.M{
+	err, _ = event.Trigger(eventType.ConfigUpdated, event.M{
 		"old": oldConf,
 		"new": cst,
 	})
-	return nil
+	if err != nil {
+		// 撤回配置修改
+		Conf = &oldConf
+		b, _ = json.MarshalIndent(oldConf, "", "  ")
+
+		auditlog.EventLog("error", fmt.Sprintf("Configuration update reverted due to error in ConfigUpdated event: %v", err))
+		slog.Error("Configuration update reverted due to error in ConfigUpdated event.", slog.Any("error", err))
+	}
+	if err := os.WriteFile(flags.ConfigFile, b, 0644); err != nil {
+		return err
+	}
+	return err
 }
 
 func SavePartial(cst map[string]interface{}) error {
@@ -94,19 +106,6 @@ func EditAndTrigger(fn func()) error {
 
 func SaveFull(cst Config) error {
 	return Override(cst)
-}
-
-func Load() (*Config, error) {
-	b, err := os.ReadFile(flags.ConfigFile)
-	if err != nil {
-		return nil, err
-	}
-	cst := &Config{}
-	if err := json.Unmarshal(b, cst); err != nil {
-		return nil, err
-	}
-	Conf = cst
-	return cst, nil
 }
 
 // GetWithV1Format 以 v1 API 格式获取配置对象,使用 Conf 直接获取对象引用
@@ -248,4 +247,22 @@ func deepMerge(dst, src map[string]interface{}) map[string]interface{} {
 		dst[k] = v
 	}
 	return dst
+}
+
+// FromEvent 从事件对象中提取旧配置和新配置 returns (old,new,error)。
+func FromEvent(e event.Event) (Config, Config, error) {
+	oldVal := e.Get("old")
+	newVal := e.Get("new")
+
+	oldConf, ok := oldVal.(Config)
+	if !ok {
+		return Config{}, Config{}, fmt.Errorf("FromEvent: 'old' key value is not of type Config. Got: %T", oldVal)
+	}
+
+	newConf, ok := newVal.(Config)
+	if !ok {
+		return Config{}, Config{}, fmt.Errorf("FromEvent: 'new' key value is not of type Config. Got: %T", newVal)
+	}
+
+	return oldConf, newConf, nil
 }

@@ -3,7 +3,7 @@ package client
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/gookit/event"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/eventType"
@@ -13,12 +13,12 @@ import (
 func RegisterClient(c *gin.Context) {
 	auth := c.GetHeader("Authorization")
 	if auth == "" {
-		api.RespondError(c, 403, "Invalid AutoDiscovery Key")
+		resp.RespondError(c, 403, "Invalid AutoDiscovery Key")
 		return
 	}
 	cfg, err := conf.GetWithV1Format()
 	if err != nil {
-		api.RespondError(c, 500, "Failed to get configuration: "+err.Error())
+		resp.RespondError(c, 500, "Failed to get configuration: "+err.Error())
 		return
 	}
 
@@ -26,7 +26,7 @@ func RegisterClient(c *gin.Context) {
 		len(cfg.AutoDiscoveryKey) < 12 ||
 		"Bearer "+cfg.AutoDiscoveryKey != auth {
 
-		api.RespondError(c, 403, "Invalid AutoDiscovery Key")
+		resp.RespondError(c, 403, "Invalid AutoDiscovery Key")
 		return
 	}
 	name := c.Query("name")
@@ -36,12 +36,12 @@ func RegisterClient(c *gin.Context) {
 	name = "Auto-" + name
 	uuid, token, err := clients.CreateClientWithName(name)
 	if err != nil {
-		api.RespondError(c, 500, "Failed to create client: "+err.Error())
+		resp.RespondError(c, 500, "Failed to create client: "+err.Error())
 		return
 	}
 	event.Trigger(eventType.ClientCreated, event.M{
 		"client": uuid,
 		"token":  token,
 	})
-	api.RespondSuccess(c, gin.H{"uuid": uuid, "token": token})
+	resp.RespondSuccess(c, gin.H{"uuid": uuid, "token": token})
 }

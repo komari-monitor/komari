@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
@@ -37,14 +37,14 @@ func GetRecordsByUUID(c *gin.Context) {
 		}
 
 		if hiddenMap[uuid] {
-			api.RespondError(c, 400, "UUID is required") //防止未登录用户获取隐藏客户端数据
+			resp.RespondError(c, 400, "UUID is required") //防止未登录用户获取隐藏客户端数据
 			return
 		}
 	}
 
 	hours := c.Query("hours")
 	if uuid == "" {
-		api.RespondError(c, 400, "UUID is required")
+		resp.RespondError(c, 400, "UUID is required")
 		return
 	}
 	if hours == "" {
@@ -53,7 +53,7 @@ func GetRecordsByUUID(c *gin.Context) {
 
 	hoursInt, err := strconv.Atoi(hours)
 	if err != nil {
-		api.RespondError(c, 400, "Invalid hours parameter")
+		resp.RespondError(c, 400, "Invalid hours parameter")
 		return
 	}
 
@@ -65,13 +65,13 @@ func GetRecordsByUUID(c *gin.Context) {
 	}
 
 	if !validLoadTypes[loadType] {
-		api.RespondError(c, 400, "Invalid load_type parameter")
+		resp.RespondError(c, 400, "Invalid load_type parameter")
 		return
 	}
 
 	clientRecords, err := records.GetRecordsByClientAndTime(uuid, time.Now().Add(-time.Duration(hoursInt)*time.Hour), time.Now())
 	if err != nil {
-		api.RespondError(c, 500, "Failed to fetch records: "+err.Error())
+		resp.RespondError(c, 500, "Failed to fetch records: "+err.Error())
 		return
 	}
 
@@ -125,7 +125,7 @@ func GetRecordsByUUID(c *gin.Context) {
 		}
 	}
 
-	api.RespondSuccess(c, response)
+	resp.RespondSuccess(c, response)
 }
 
 // filterRecordsByLoadType 根据 load_type 过滤记录，只返回相关字段
@@ -195,7 +195,7 @@ func GetPingRecords(c *gin.Context) {
 
 	// 必须提供 uuid 或 task_id 其中至少一个
 	if uuid == "" && taskIdStr == "" {
-		api.RespondError(c, 400, "UUID or task_id is required")
+		resp.RespondError(c, 400, "UUID or task_id is required")
 		return
 	}
 
@@ -242,7 +242,7 @@ func GetPingRecords(c *gin.Context) {
 		}
 		if uuid != "" {
 			if hiddenMap[uuid] {
-				api.RespondSuccess(c, response) // 对于尝试获取隐藏uuid一键哈气
+				resp.RespondSuccess(c, response) // 对于尝试获取隐藏uuid一键哈气
 				return
 			}
 		}
@@ -267,7 +267,7 @@ func GetPingRecords(c *gin.Context) {
 	if taskIdStr != "" {
 		taskId, err = strconv.Atoi(taskIdStr)
 		if err != nil {
-			api.RespondError(c, 400, "Invalid task_id parameter")
+			resp.RespondError(c, 400, "Invalid task_id parameter")
 			return
 		}
 	}
@@ -275,7 +275,7 @@ func GetPingRecords(c *gin.Context) {
 	// 查询记录，现在支持 uuid + task_id 组合查询
 	records, err = tasks.GetPingRecords(uuid, taskId, startTime, endTime)
 	if err != nil {
-		api.RespondError(c, 500, "Failed to fetch ping records: "+err.Error())
+		resp.RespondError(c, 500, "Failed to fetch ping records: "+err.Error())
 		return
 	}
 
@@ -357,7 +357,7 @@ func GetPingRecords(c *gin.Context) {
 		// 获取所有 pingTasks
 		pingTasks, err := tasks.GetAllPingTasks()
 		if err != nil {
-			api.RespondError(c, 500, "Failed to fetch ping tasks: "+err.Error())
+			resp.RespondError(c, 500, "Failed to fetch ping tasks: "+err.Error())
 			return
 		}
 
@@ -443,5 +443,5 @@ func GetPingRecords(c *gin.Context) {
 	}
 
 	response.Count = len(response.Records) // 计算最后结果保持计数一致
-	api.RespondSuccess(c, response)
+	resp.RespondSuccess(c, response)
 }

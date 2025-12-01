@@ -12,7 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/cmd/flags"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 )
 
@@ -108,14 +108,14 @@ func DownloadBackup(c *gin.Context) {
 	// 1) 创建临时目录
 	tempDir, err := os.MkdirTemp("", "komari-backup-*")
 	if err != nil {
-		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error creating temporary directory: %v", err))
+		resp.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error creating temporary directory: %v", err))
 		return
 	}
 	defer os.RemoveAll(tempDir)
 
 	// 2) 复制 ./data 下除 .db/.db-wal/.db-shm 外的所有文件到临时目录
 	if err := copyDataToTempExcludingDB(tempDir); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error copying data to temp: %v", err))
+		resp.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error copying data to temp: %v", err))
 		return
 	}
 
@@ -125,18 +125,18 @@ func DownloadBackup(c *gin.Context) {
 
 	if flags.DatabaseType == "sqlite" || flags.DatabaseType == "" {
 		if err := backupSQLiteTo(destDB); err != nil {
-			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error backing up sqlite database: %v", err))
+			resp.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error backing up sqlite database: %v", err))
 			return
 		}
 	} else if dbFilePath != "" {
 		// 非 sqlite 的情况：若配置了文件路径且存在，则直接复制（按用户需求仍然将名称固定为 komari.db）
 		if _, err := os.Stat(dbFilePath); err == nil {
 			if err := copyFile(dbFilePath, destDB); err != nil {
-				api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error copying database file: %v", err))
+				resp.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error copying database file: %v", err))
 				return
 			}
 		} else if !os.IsNotExist(err) {
-			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error stating database file: %v", err))
+			resp.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error stating database file: %v", err))
 			return
 		}
 	}
@@ -188,7 +188,7 @@ func DownloadBackup(c *gin.Context) {
 		return err
 	})
 	if err != nil {
-		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error archiving temp folder: %v", err))
+		resp.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error archiving temp folder: %v", err))
 		return
 	}
 
@@ -200,11 +200,11 @@ func DownloadBackup(c *gin.Context) {
 		Modified: time.Now(),
 	})
 	if err != nil {
-		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error creating backup markup file: %v", err))
+		resp.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error creating backup markup file: %v", err))
 		return
 	}
 	if _, err = markupWriter.Write([]byte(markupContent)); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error writing backup markup file: %v", err))
+		resp.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error writing backup markup file: %v", err))
 		return
 	}
 }

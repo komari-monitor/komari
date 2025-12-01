@@ -2,7 +2,7 @@ package admin
 
 import (
 	"github.com/gin-gonic/gin"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database"
 	"github.com/komari-monitor/komari/internal/database/accounts"
@@ -15,7 +15,7 @@ func BindingExternalAccount(c *gin.Context) {
 	session, _ := c.Cookie("session_token")
 	user, err := accounts.GetUserBySession(session)
 	if err != nil {
-		api.RespondError(c, 500, "No user found: "+err.Error())
+		resp.RespondError(c, 500, "No user found: "+err.Error())
 		return
 	}
 
@@ -26,17 +26,17 @@ func UnbindExternalAccount(c *gin.Context) {
 	session, _ := c.Cookie("session_token")
 	user, err := accounts.GetUserBySession(session)
 	if err != nil {
-		api.RespondError(c, 500, "No user found: "+err.Error())
+		resp.RespondError(c, 500, "No user found: "+err.Error())
 		return
 	}
 
 	err = accounts.UnbindExternalAccount(user.UUID)
 	if err != nil {
-		api.RespondError(c, 500, "Failed to unbind external account: "+err.Error())
+		resp.RespondError(c, 500, "Failed to unbind external account: "+err.Error())
 		return
 	}
 
-	api.RespondSuccess(c, nil)
+	resp.RespondSuccess(c, nil)
 }
 
 func GetOidcProvider(c *gin.Context) {
@@ -45,39 +45,39 @@ func GetOidcProvider(c *gin.Context) {
 		// 如果指定了provider，返回单个提供者的配置
 		config, err := database.GetOidcConfigByName(provider)
 		if err != nil {
-			api.RespondError(c, 404, "Provider not found: "+err.Error())
+			resp.RespondError(c, 404, "Provider not found: "+err.Error())
 			return
 		}
-		api.RespondSuccess(c, config)
+		resp.RespondSuccess(c, config)
 		return
 	}
 	// 否则返回所有提供者的配置
 	providers := factory.GetProviderConfigs()
 	if len(providers) == 0 {
-		api.RespondError(c, 404, "No OIDC providers found")
+		resp.RespondError(c, 404, "No OIDC providers found")
 		return
 	}
-	api.RespondSuccess(c, providers)
+	resp.RespondSuccess(c, providers)
 }
 
 func SetOidcProvider(c *gin.Context) {
 	var oidcConfig models.OidcProvider
 	if err := c.ShouldBindJSON(&oidcConfig); err != nil {
-		api.RespondError(c, 400, "Invalid configuration: "+err.Error())
+		resp.RespondError(c, 400, "Invalid configuration: "+err.Error())
 		return
 	}
 	if oidcConfig.Name == "" {
-		api.RespondError(c, 400, "Provider name is required")
+		resp.RespondError(c, 400, "Provider name is required")
 		return
 	}
 	_, exists := factory.GetConstructor(oidcConfig.Name)
 	if !exists {
-		api.RespondError(c, 404, "Provider not found: "+oidcConfig.Name)
+		resp.RespondError(c, 404, "Provider not found: "+oidcConfig.Name)
 		return
 	}
 
 	if err := database.SaveOidcConfig(&oidcConfig); err != nil {
-		api.RespondError(c, 500, "Failed to save OIDC provider configuration: "+err.Error())
+		resp.RespondError(c, 500, "Failed to save OIDC provider configuration: "+err.Error())
 		return
 	}
 	cfg, _ := conf.GetWithV1Format()
@@ -85,9 +85,9 @@ func SetOidcProvider(c *gin.Context) {
 	if cfg.OAuthProvider == oidcConfig.Name {
 		err := oauth.LoadProvider(oidcConfig.Name, oidcConfig.Addition)
 		if err != nil {
-			api.RespondError(c, 500, "Failed to load OIDC provider: "+err.Error())
+			resp.RespondError(c, 500, "Failed to load OIDC provider: "+err.Error())
 			return
 		}
 	}
-	api.RespondSuccess(c, gin.H{"message": "OIDC provider set successfully"})
+	resp.RespondSuccess(c, gin.H{"message": "OIDC provider set successfully"})
 }

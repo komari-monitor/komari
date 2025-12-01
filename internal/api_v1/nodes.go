@@ -2,6 +2,7 @@ package api_v1
 
 import (
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 	"github.com/komari-monitor/komari/internal/database/clients"
 )
@@ -9,7 +10,7 @@ import (
 func GetNodesInformation(c *gin.Context) {
 	clientList, err := clients.GetAllClientBasicInfo()
 	if err != nil {
-		RespondError(c, 500, "Failed to retrieve client information: "+err.Error())
+		resp.RespondError(c, 500, "Failed to retrieve client information: "+err.Error())
 		return
 	}
 	isLogin := false
@@ -35,5 +36,5 @@ func GetNodesInformation(c *gin.Context) {
 	}
 	clientList = clientList[:j]
 
-	RespondSuccess(c, clientList)
+	resp.RespondSuccess(c, clientList)
 }

@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/database/tasks"
 )
@@ -20,14 +20,14 @@ func AddPingTask(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		api.RespondError(c, http.StatusBadRequest, err.Error())
+		resp.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	if taskID, err := tasks.AddPingTask(req.Clients, req.Name, req.Target, req.TaskType, req.Interval); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
-		api.RespondSuccess(c, gin.H{"task_id": taskID})
+		resp.RespondSuccess(c, gin.H{"task_id": taskID})
 	}
 }
 
@@ -37,14 +37,14 @@ func DeletePingTask(c *gin.Context) {
 		ID []uint `json:"id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		api.RespondError(c, http.StatusBadRequest, err.Error())
+		resp.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	if err := tasks.DeletePingTask(req.ID); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
-		api.RespondSuccess(c, nil)
+		resp.RespondSuccess(c, nil)
 	}
 }
 
@@ -55,26 +55,26 @@ func EditPingTask(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		api.RespondError(c, http.StatusBadRequest, "Invalid request data")
+		resp.RespondError(c, http.StatusBadRequest, "Invalid request data")
 		return
 	}
 
 	if err := tasks.EditPingTask(req.Tasks); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		// for _, task := range req.Tasks {
 		// 	tasks.DeletePingRecords([]uint{task.Id})
 		// }
-		api.RespondSuccess(c, nil)
+		resp.RespondSuccess(c, nil)
 	}
 }
 
 func GetAllPingTasks(c *gin.Context) {
 	tasks, err := tasks.GetAllPingTasks()
 	if err != nil {
-		api.RespondError(c, http.StatusInternalServerError, err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	api.RespondSuccess(c, tasks)
+	resp.RespondSuccess(c, tasks)
 }

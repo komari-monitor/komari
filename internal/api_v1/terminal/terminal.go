@@ -1,17 +1,31 @@
-package api_v1
+package terminal
 
 import (
+	"sync"
+
 	"log"
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+
+	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/ws"
 	"github.com/komari-monitor/komari/pkg/utils"
 )
+
+type TerminalSession struct {
+	UUID        string
+	UserUUID    string
+	Browser     *websocket.Conn
+	Agent       *websocket.Conn
+	RequesterIp string
+}
+
+var TerminalSessionsMutex = &sync.Mutex{}
+var TerminalSessions = make(map[string]*TerminalSession)
 
 func RequestTerminal(c *gin.Context) {
 	uuid := c.Param("uuid")

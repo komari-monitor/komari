@@ -1,4 +1,4 @@
-package server
+package nezha
 
 import (
 	"fmt"
@@ -33,35 +33,25 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-func StartNezhaGRPCServer(listen string) {
+func init() {
 	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
-		New := e.Get("new").(conf.Config)
-		Old := e.Get("old").(conf.Config)
-		if New.Compact.Nezha.NezhaCompatEnabled != Old.Compact.Nezha.NezhaCompatEnabled {
+		Old, New, _ := conf.FromEvent(e)
+		if New.Compact.Nezha.NezhaCompatEnabled != Old.Compact.Nezha.NezhaCompatEnabled || New.Compact.Nezha.NezhaCompatListen != Old.Compact.Nezha.NezhaCompatListen {
 			if New.Compact.Nezha.NezhaCompatEnabled {
+				StopNezhaCompat()
 				if err := StartNezhaCompat(New.Compact.Nezha.NezhaCompatListen); err != nil {
-					log.Printf("start Nezha compat server error: %v", err)
-					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
+					return fmt.Errorf("start Nezha compat server error: %w", err)
 				}
 				event.Trigger(eventType.ServerListenGrpcStart, nil)
 			} else {
 				if err := StopNezhaCompat(); err != nil {
-					log.Printf("stop Nezha compat server error: %v", err)
-					auditlog.EventLog("error", fmt.Sprintf("stop Nezha compat server error: %v", err))
+					return fmt.Errorf("stop Nezha compat server error: %w", err)
 				}
 				event.Trigger(eventType.ServerListenGrpcStop, nil)
 			}
 		}
 		return nil
 	}))
-
-	if listen == "" {
-		return
-	}
-	if err := StartNezhaCompat(listen); err != nil {
-		log.Printf("Nezha compat server error: %v", err)
-		auditlog.EventLog("error", fmt.Sprintf("Nezha compat server error: %v", err))
-	}
 }
 
 // ---- Manual start/stop support ----
@@ -131,7 +121,7 @@ func StopNezhaCompat() error {
 	nezhaOnceM.Lock()
 	defer nezhaOnceM.Unlock()
 	if nezhaSrv == nil {
-		return errors.New("nezha compat server not running")
+		return nil
 	}
 	// 强制立即断开所有连接与流，不等待在途 RPC 完成。
 	nezhaSrv.Stop()

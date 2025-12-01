@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	api "github.com/komari-monitor/komari/internal/api_v1"
+	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/database/tasks"
 )
 
@@ -19,7 +19,7 @@ type PublicPingTask struct {
 func GetPublicPingTasks(c *gin.Context) {
 	tasks, err := tasks.GetAllPingTasks()
 	if err != nil {
-		api.RespondError(c, http.StatusInternalServerError, err.Error())
+		resp.RespondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -34,5 +34,5 @@ func GetPublicPingTasks(c *gin.Context) {
 		}
 	}
 
-	api.RespondSuccess(c, publicTasks)
+	resp.RespondSuccess(c, publicTasks)
 }

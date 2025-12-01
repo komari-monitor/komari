@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/komari-monitor/komari/pkg/cloudflared"
+	"github.com/komari-monitor/komari/internal/cloudflared"
 )
 
 func TestRunCloudflared(t *testing.T) {

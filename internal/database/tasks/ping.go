@@ -84,13 +84,9 @@ func DeleteAllPingRecords() error {
 	}
 	return result.Error
 }
+
 func ReloadPingSchedule() error {
-	db := dbcore.GetDBInstance()
-	var pingTasks []models.PingTask
-	if err := db.Find(&pingTasks).Error; err != nil {
-		return err
-	}
-	return pingSchedule.ReloadPingSchedule(pingTasks)
+	return pingSchedule.ReloadPingSchedule()
 }
 
 func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
