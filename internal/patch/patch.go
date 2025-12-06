@@ -11,6 +11,9 @@ import (
 )
 
 func init() {
+	// 1.1.4 迁移配置表 - 在 ProcessStart 事件之前执行，在数据库初始化前进行
+	v1_1_4_PreMigration()
+
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
 		db := dbcore.GetDBInstance()
 		// 0.0.5 迁移ClientInfo
@@ -34,8 +37,8 @@ func init() {
 		if !db.Migrator().HasTable(&models.MessageSenderProvider{}) && db.Migrator().HasTable(&conf.V1Struct{}) {
 			v1_0_2_MessageSender(db)
 		}
-		// 1.1.4 迁移配置表
-		if db.Migrator().HasColumn(&conf.V1Struct{}, "id") {
+		// 1.1.4 清理配置表
+		if db.Migrator().HasTable(&conf.V1Struct{}) {
 			v1_1_4(db)
 		}
 		return nil

@@ -1,77 +1,196 @@
 package patch
 
 import (
-	"encoding/json"
+	"database/sql"
 	"log/slog"
-	"time"
+	"os"
 
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/internal/conf"
+	_ "github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
 )
 
-func v1_1_4(db *gorm.DB) {
-	slog.Info("[>1.1.4] Migrating config table to file config...")
-	var old_config struct {
-		ID                uint   `json:"id,omitempty" gorm:"primaryKey;autoIncrement"` // 1
-		Sitename          string `json:"sitename" gorm:"type:varchar(100);not null"`
-		Description       string `json:"description" gorm:"type:text"`
-		AllowCors         bool   `json:"allow_cors" gorm:"column:allow_cors;default:false"`
-		Theme             string `json:"theme" gorm:"type:varchar(100);default:'default'"` // 主题名称，默认 'default'
-		PrivateSite       bool   `json:"private_site" gorm:"default:false"`                // 是否为私有站点，默认 false
-		ApiKey            string `json:"api_key" gorm:"type:varchar(255);default:''"`
-		AutoDiscoveryKey  string `json:"auto_discovery_key" gorm:"type:varchar(255);default:''"` // 自动发现密钥
-		ScriptDomain      string `json:"script_domain" gorm:"type:varchar(255);default:''"`      // 自定义脚本域名
-		SendIpAddrToGuest bool   `json:"send_ip_addr_to_guest" gorm:"default:false"`             // 是否向访客页面发送 IP 地址，默认 false
-		EulaAccepted      bool   `json:"eula_accepted" gorm:"default:false"`
-		// GeoIP 配置
-		GeoIpEnabled  bool   `json:"geo_ip_enabled" gorm:"default:true"`
-		GeoIpProvider string `json:"geo_ip_provider" gorm:"type:varchar(20);default:'ip-api'"` // empty, mmdb, ip-api, geojs
-		// Nezha 兼容（Agent gRPC）
-		NezhaCompatEnabled bool   `json:"nezha_compat_enabled" gorm:"default:false"`
-		NezhaCompatListen  string `json:"nezha_compat_listen" gorm:"type:varchar(100);default:''"` // 例如 0.0.0.0:5555
-		// OAuth 配置
-		OAuthEnabled         bool   `json:"o_auth_enabled" gorm:"default:false"`
-		OAuthProvider        string `json:"o_auth_provider" gorm:"type:varchar(50);default:'github'"`
-		DisablePasswordLogin bool   `json:"disable_password_login" gorm:"default:false"`
-		// 自定义美化
-		CustomHead string `json:"custom_head" gorm:"type:longtext"`
-		CustomBody string `json:"custom_body" gorm:"type:longtext"`
-		// 通知
-		NotificationEnabled        bool    `json:"notification_enabled" gorm:"default:false"` // 通知总开关
-		NotificationMethod         string  `json:"notification_method" gorm:"type:varchar(64);default:'none'"`
-		NotificationTemplate       string  `json:"notification_template" gorm:"type:longtext;default:'{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}'"`
-		ExpireNotificationEnabled  bool    `json:"expire_notification_enabled" gorm:"default:false"` // 是否启用过期通知
-		ExpireNotificationLeadDays int     `json:"expire_notification_lead_days" gorm:"default:7"`   // 过期前多少天通知，默认7天
-		LoginNotification          bool    `json:"login_notification" gorm:"default:false"`          // 登录通知
-		TrafficLimitPercentage     float64 `json:"traffic_limit_percentage" gorm:"default:80.00"`    // 流量限制百分比，默认80.00%
-		// Record
-		RecordEnabled          bool `json:"record_enabled" gorm:"default:true"`          // 是否启用记录功能
-		RecordPreserveTime     int  `json:"record_preserve_time" gorm:"default:720"`     // 记录保留时间，单位小时，默认30天
-		PingRecordPreserveTime int  `json:"ping_record_preserve_time" gorm:"default:24"` // Ping 记录保留时间，单位小时，默认1天
-		CreatedAt              time.Time
-		UpdatedAt              time.Time
-	}
-	if err := db.Raw("SELECT * FROM configs LIMIT 1").Scan(&old_config).Error; err != nil {
-		slog.Error("Failed to get config.", slog.Any("error", err))
-		return
-	}
-	// 将旧结构转为 map[string]interface{}，键为扁平 json 标签
-	bytes, err := json.Marshal(&old_config)
-	if err != nil {
-		slog.Error("Failed to marshal old config.", slog.Any("error", err))
-		return
-	}
-	var flat map[string]interface{}
-	if err := json.Unmarshal(bytes, &flat); err != nil {
-		slog.Error("Failed to unmarshal to map.", slog.Any("error", err))
+// v1_1_4_PreMigration 在数据库和配置加载前执行，直接操作 SQLite 数据库文件
+func v1_1_4_PreMigration() {
+	// 检查数据库文件是否存在
+	if _, err := os.Stat(flags.DatabaseFile); os.IsNotExist(err) {
+		// 数据库文件不存在，无需迁移
 		return
 	}
 
-	// 使用 conf.Update 以 SavePartial 语义合并，并兼容旧键名
-	if err := conf.Update(flat); err != nil {
-		slog.Error("Failed to write new file config.", slog.Any("error", err))
+	// 打开 SQLite 数据库
+	db, err := sql.Open("sqlite3", flags.DatabaseFile)
+	if err != nil {
+		slog.Error("[>1.1.4] Failed to open database file for migration.", slog.Any("error", err))
 		return
 	}
+	defer db.Close()
+
+	// 检查配置表是否存在
+	var tableExists bool
+	row := db.QueryRow(`SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='configs'`)
+	if err := row.Scan(&tableExists); err != nil {
+		slog.Error("[>1.1.4] Failed to check configs table existence.", slog.Any("error", err))
+		return
+	}
+
+	if !tableExists {
+		// 表不存在，无需迁移
+		return
+	}
+
+	// 检查是否已经迁移过（通过检查 id 列）
+	var idColumnExists bool
+	rows, err := db.Query(`PRAGMA table_info(configs)`)
+	if err != nil {
+		slog.Error("[>1.1.4] Failed to check configs table schema.", slog.Any("error", err))
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name string
+		var typeStr string
+		var notnull int
+		var dfltValue interface{}
+		var pk int
+		if err := rows.Scan(&cid, &name, &typeStr, &notnull, &dfltValue, &pk); err != nil {
+			continue
+		}
+		if name == "id" {
+			idColumnExists = true
+			break
+		}
+	}
+
+	if !idColumnExists {
+		// id 列不存在，说明已经迁移过或不需要迁移
+		return
+	}
+
+	slog.Info("[>1.1.4] Starting config table migration to file config...")
+
+	// 从数据库读取配置
+	row = db.QueryRow(`SELECT 
+		id, sitename, description, allow_cors, theme, private_site, api_key, auto_discovery_key,
+		script_domain, send_ip_addr_to_guest, eula_accepted, geo_ip_enabled, geo_ip_provider,
+		nezha_compat_enabled, nezha_compat_listen, o_auth_enabled, o_auth_provider,
+		disable_password_login, custom_head, custom_body, notification_enabled,
+		notification_method, notification_template, expire_notification_enabled,
+		expire_notification_lead_days, login_notification, traffic_limit_percentage,
+		record_enabled, record_preserve_time, ping_record_preserve_time
+	FROM configs LIMIT 1`)
+
+	var (
+		id                         uint
+		sitename                   string
+		description                string
+		allowCors                  bool
+		theme                      string
+		privateSite                bool
+		apiKey                     string
+		autoDiscoveryKey           string
+		scriptDomain               string
+		sendIpAddrToGuest          bool
+		eulaAccepted               bool
+		geoIpEnabled               bool
+		geoIpProvider              string
+		nezhaCompatEnabled         bool
+		nezhaCompatListen          string
+		oAuthEnabled               bool
+		oAuthProvider              string
+		disablePasswordLogin       bool
+		customHead                 string
+		customBody                 string
+		notificationEnabled        bool
+		notificationMethod         string
+		notificationTemplate       string
+		expireNotificationEnabled  bool
+		expireNotificationLeadDays int
+		loginNotification          bool
+		trafficLimitPercentage     float64
+		recordEnabled              bool
+		recordPreserveTime         int
+		pingRecordPreserveTime     int
+	)
+
+	if err := row.Scan(
+		&id, &sitename, &description, &allowCors, &theme, &privateSite, &apiKey, &autoDiscoveryKey,
+		&scriptDomain, &sendIpAddrToGuest, &eulaAccepted, &geoIpEnabled, &geoIpProvider,
+		&nezhaCompatEnabled, &nezhaCompatListen, &oAuthEnabled, &oAuthProvider,
+		&disablePasswordLogin, &customHead, &customBody, &notificationEnabled,
+		&notificationMethod, &notificationTemplate, &expireNotificationEnabled,
+		&expireNotificationLeadDays, &loginNotification, &trafficLimitPercentage,
+		&recordEnabled, &recordPreserveTime, &pingRecordPreserveTime,
+	); err != nil {
+		slog.Error("[>1.1.4] Failed to read config from database.", slog.Any("error", err))
+		return
+	}
+
+	// 关闭数据库连接
+	db.Close()
+
+	// 转换为 Config 结构体
+	newConfig := conf.Config{
+		Site: conf.Site{
+			Sitename:          sitename,
+			Description:       description,
+			AllowCors:         allowCors,
+			PrivateSite:       privateSite,
+			SendIpAddrToGuest: sendIpAddrToGuest,
+			ScriptDomain:      scriptDomain,
+			EulaAccepted:      eulaAccepted,
+			CustomHead:        customHead,
+			CustomBody:        customBody,
+			Theme:             theme,
+		},
+		Login: conf.Login{
+			ApiKey:               apiKey,
+			AutoDiscoveryKey:     autoDiscoveryKey,
+			OAuthEnabled:         oAuthEnabled,
+			OAuthProvider:        oAuthProvider,
+			DisablePasswordLogin: disablePasswordLogin,
+		},
+		GeoIp: conf.GeoIp{
+			GeoIpEnabled:  geoIpEnabled,
+			GeoIpProvider: geoIpProvider,
+		},
+		Notification: conf.Notification{
+			NotificationEnabled:        notificationEnabled,
+			NotificationMethod:         notificationMethod,
+			NotificationTemplate:       notificationTemplate,
+			ExpireNotificationEnabled:  expireNotificationEnabled,
+			ExpireNotificationLeadDays: expireNotificationLeadDays,
+			LoginNotification:          loginNotification,
+			TrafficLimitPercentage:     trafficLimitPercentage,
+		},
+		Record: conf.Record{
+			RecordEnabled:          recordEnabled,
+			RecordPreserveTime:     recordPreserveTime,
+			PingRecordPreserveTime: pingRecordPreserveTime,
+		},
+		Compact: conf.Compact{
+			Nezha: conf.Nezha{
+				NezhaCompatEnabled: nezhaCompatEnabled,
+				NezhaCompatListen:  nezhaCompatListen,
+			},
+		},
+	}
+
+	// 使用 conf.Override() 写入配置文件
+	if err := conf.Override(newConfig); err != nil {
+		slog.Error("[>1.1.4] Failed to write new file config.", slog.Any("error", err))
+		return
+	}
+
+	slog.Info("[>1.1.4] Config migration to file config finished.")
+}
+
+func v1_1_4(db *gorm.DB) {
+	// 迁移已在 v1_1_4_PreMigration() 中完成，此处仅清理数据库中的配置表
+	slog.Info("[>1.1.4] Dropping configs table...")
 	db.Migrator().DropTable(&conf.V1Struct{})
-	slog.Info("[>1.1.4] Config migration finished.")
+	slog.Info("[>1.1.4] Configs table dropped.")
 }
