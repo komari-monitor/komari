@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/internal/conf"
 	_ "github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
@@ -14,13 +13,18 @@ import (
 // v1_1_4_PreMigration 在数据库和配置加载前执行，直接操作 SQLite 数据库文件
 func v1_1_4_PreMigration() {
 	// 检查数据库文件是否存在
-	if _, err := os.Stat(flags.DatabaseFile); os.IsNotExist(err) {
+	if _, err := os.Stat("./data/komari.db"); os.IsNotExist(err) {
 		// 数据库文件不存在，无需迁移
 		return
 	}
 
+	if _, err := os.Stat("./data/komari.json"); err == nil {
+		// 配置文件已存在，无需迁移
+		return
+	}
+
 	// 打开 SQLite 数据库
-	db, err := sql.Open("sqlite3", flags.DatabaseFile)
+	db, err := sql.Open("sqlite3", "./data/komari.db")
 	if err != nil {
 		slog.Error("[>1.1.4] Failed to open database file for migration.", slog.Any("error", err))
 		return

@@ -12,6 +12,11 @@ import (
 func init() {
 	Conf = &Config{}
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
+		if _, err := os.Stat(flags.ConfigFile); os.IsNotExist(err) {
+			if err := Override(Default()); err != nil {
+				return err
+			}
+		}
 		b, err := os.ReadFile(flags.ConfigFile)
 		if err != nil {
 			return err
