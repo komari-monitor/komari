@@ -2,6 +2,7 @@ package patch
 
 import (
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"os"
 
@@ -183,8 +184,14 @@ func v1_1_4_PreMigration() {
 		},
 	}
 
-	// 使用 conf.Override() 写入配置文件
-	if err := conf.Override(newConfig); err != nil {
+	// 使用 json.MarshalIndent 直接写入配置文件
+	b, err := json.MarshalIndent(newConfig, "", "  ")
+	if err != nil {
+		slog.Error("[>1.1.4] Failed to marshal config.", slog.Any("error", err))
+		return
+	}
+
+	if err := os.WriteFile("./data/komari.json", b, 0644); err != nil {
 		slog.Error("[>1.1.4] Failed to write new file config.", slog.Any("error", err))
 		return
 	}
