@@ -197,6 +197,47 @@ func dispatchByPermissionWithMeta(conn *ws.SafeConn, permissionGroup string, met
 	}
 }
 
+// OnInternalRequest 内部调用 RPC 方法，支持权限控制
+// group: 调用者的权限分组 (guest/client/admin)
+// method: RPC 方法名 (如 "common:getNodes")
+// params: 方法参数
+func OnInternalRequest(ctx context.Context, group string, method string, params interface{}) *rpc.JsonRpcResponse {
+	// 检查私有站点
+	if conf.Conf.Site.PrivateSite && group == "guest" {
+		return rpc.ErrorResponse(nil, rpc.PermissionDenied, "Private site enabled, please login first", nil)
+	}
+
+	// 解析方法命名空间
+	fc := strings.Split(method, ":")
+	namespace := "common"
+	if len(fc) >= 2 {
+		namespace = fc[0]
+	}
+
+	// 权限检查
+	allowed := false
+	switch namespace {
+	case "guest", "", "rpc", "common":
+		allowed = true
+	case GroupClient:
+		if group == GroupClient || group == "admin" {
+			allowed = true
+		}
+	case "admin":
+		if group == "admin" {
+			allowed = true
+		}
+	}
+
+	if !allowed {
+		return rpc.ErrorResponse(nil, rpc.PermissionDenied, "Permission denied", nil)
+	}
+
+	// 构建 context meta
+	meta := &rpc.ContextMeta{Permission: group}
+	return rpc.CallWithContext(rpc.NewContextWithMeta(ctx, meta), nil, method, params)
+}
+
 // registry holds method handlers keyed by "namespace:MethodName"
 var (
 	registryMu sync.RWMutex
