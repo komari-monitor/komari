@@ -2,6 +2,7 @@ package api_v1
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/conf"
@@ -11,18 +12,28 @@ import (
 )
 
 var (
-	publicPaths = []string{
-		"/ping",
-		"/api/public",
-		"/api/login",
-		"/api/me",
-		"/api/oauth",
-		"/api/oauth_callback",
-		"/api/version",
-		"/api/recent",
-		"/api/admin",    // 由AdminAuthMiddleware处理
-		"/api/clients/", // 由TokenAuthMiddleware处理
-		"/api/rpc2",     // 由JsonRpc处理
+	requireAuthPaths = []string{
+		// v1 API at 2025-12-06
+		// "/api/rpc2",
+		// "/ping",
+		// "/api/login",
+		// "/api/me",
+		"/api/clients",
+		"/api/nodes",
+		// "/api/public",
+		// "/api/oauth",
+		// "/api/oauth_callback",
+		// "/api/logout",
+		// "/api/version",
+		"/api/recent/",
+		"/api/records/",
+		"/api/task/",
+		// "/api/clients/register",
+		// "/api/clients/report",
+		// "/api/clients/uploadBasicInfo",
+		// "/api/clients/terminal",
+		// "/api/clients/task/result",
+		// "/api/admin/download/backup",
 	}
 )
 
@@ -35,15 +46,32 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		// 如果是公开的路径，直接放行
-		for _, path := range publicPaths {
-			if len(c.Request.URL.Path) >= len(path) && c.Request.URL.Path[:len(path)] == path {
-				c.Next()
-				return
+		path := c.Request.URL.Path
+		// 如果不是 /api 开头的路径，直接放行
+		if !strings.HasPrefix(path, "/api") {
+			c.Next()
+			return
+		}
+
+		// /api/clients/* 由 TokenAuthMiddleware 处理
+		// /api/rpc2 由 api_rpc 处理
+		// /api/admin/* 由 AdminAuthMiddleware 处理
+		if strings.HasPrefix(path, "/api/clients/") ||
+			strings.HasPrefix(path, "/api/admin") ||
+			strings.HasPrefix(path, "/api/rpc2") {
+			c.Next()
+			return
+		}
+
+		require := false
+		for _, p := range requireAuthPaths {
+			if strings.HasPrefix(path, p) {
+				require = true
+				break
 			}
 		}
-		// 如果不是 /api，直接放行
-		if len(c.Request.URL.Path) < 4 || c.Request.URL.Path[:4] != "/api" {
+
+		if !require {
 			c.Next()
 			return
 		}
