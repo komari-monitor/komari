@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/gookit/event"
-	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/eventType"
 	logutil "github.com/komari-monitor/komari/internal/log"
@@ -29,14 +29,14 @@ func GetDBInstance() *gorm.DB {
 		}
 
 		// 根据数据库类型选择不同的连接方式
-		switch flags.DatabaseType {
+		switch conf.Conf.Database.DatabaseType {
 		case "sqlite", "":
 			// SQLite 连接
-			instance, err = gorm.Open(sqlite.Open(flags.DatabaseFile), logConfig)
+			instance, err = gorm.Open(sqlite.Open(conf.Conf.Database.DatabaseFile), logConfig)
 			if err != nil {
 				log.Fatalf("Failed to connect to SQLite3 database: %v", err)
 			}
-			log.Printf("Using SQLite database file: %s", flags.DatabaseFile)
+			log.Printf("Using SQLite database file: %s", conf.Conf.Database.DatabaseFile)
 			instance.Exec("PRAGMA wal = ON;")
 			if err := instance.Exec("PRAGMA journal_mode = WAL;").Error; err != nil {
 				log.Printf("Failed to enable WAL mode for SQLite: %v", err)
@@ -46,18 +46,18 @@ func GetDBInstance() *gorm.DB {
 		case "mysql":
 			// MySQL 连接
 			dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=True&loc=Local",
-				flags.DatabaseUser,
-				flags.DatabasePass,
-				flags.DatabaseHost,
-				flags.DatabasePort,
-				flags.DatabaseName)
+				conf.Conf.Database.DatabaseUser,
+				conf.Conf.Database.DatabasePass,
+				conf.Conf.Database.DatabaseHost,
+				conf.Conf.Database.DatabasePort,
+				conf.Conf.Database.DatabaseName)
 			instance, err = gorm.Open(mysql.Open(dsn), logConfig)
 			if err != nil {
 				log.Fatalf("Failed to connect to MySQL database: %v", err)
 			}
-			log.Printf("Using MySQL database: %s@%s:%s/%s", flags.DatabaseUser, flags.DatabaseHost, flags.DatabasePort, flags.DatabaseName)
+			log.Printf("Using MySQL database: %s@%s:%s/%s", conf.Conf.Database.DatabaseUser, conf.Conf.Database.DatabaseHost, conf.Conf.Database.DatabasePort, conf.Conf.Database.DatabaseName)
 		default:
-			log.Fatalf("Unsupported database type: %s", flags.DatabaseType)
+			log.Fatalf("Unsupported database type: %s", conf.Conf.Database.DatabaseType)
 		}
 		// 自动迁移模型
 		err = instance.AutoMigrate(

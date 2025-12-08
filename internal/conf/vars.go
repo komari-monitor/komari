@@ -17,6 +17,8 @@ type Config struct {
 	GeoIp        GeoIp                  `json:"geo_ip"`
 	Notification Notification           `json:"notification"`
 	Record       Record                 `json:"record"`
+	Listen       string                 `json:"listen"`
+	Database     Database               `json:"database"`
 	Extensions   map[string]interface{} `json:"extensions,omitempty"` // 扩展配置，由各模块注册
 }
 
@@ -42,6 +44,16 @@ type Login struct {
 	OAuthEnabled         bool   `json:"o_auth_enabled"`
 	OAuthProvider        string `json:"o_auth_provider"`
 	DisablePasswordLogin bool   `json:"disable_password_login"`
+}
+
+type Database struct {
+	DatabaseType string `json:"database_type"` // 数据库类型：sqlite, mysql
+	DatabaseFile string `json:"database_file"` // SQLite数据库文件路径
+	DatabaseHost string `json:"database_host"` // MySQL/其他数据库主机地址
+	DatabasePort string `json:"database_port"` // MySQL/其他数据库端口
+	DatabaseUser string `json:"database_user"` // MySQL/其他数据库用户名
+	DatabasePass string `json:"database_pass"` // MySQL/其他数据库密码
+	DatabaseName string `json:"database_name"` // MySQL/其他数据库名称
 }
 
 type GeoIp struct {

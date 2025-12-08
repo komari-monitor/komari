@@ -9,7 +9,6 @@ import (
 
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
-	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/eventType"
 )
 
@@ -27,14 +26,28 @@ func Default() Config {
 			GeoIpProvider: GeoIp_IPInfo,
 		},
 		Notification: Notification{
-			NotificationEnabled:    true,
-			TrafficLimitPercentage: 80.00,
+			NotificationEnabled:        true,
+			TrafficLimitPercentage:     80.00,
+			NotificationTemplate:       "{{emoji}}{{emoji}}{{emoji}}\n{{event}}\n{{client}}\n{{message}}\n{{time}}",
+			NotificationMethod:         "empty",
+			ExpireNotificationEnabled:  true,
+			ExpireNotificationLeadDays: 7,
+			LoginNotification:          true,
+		},
+		Login: Login{
+			OAuthEnabled:  false,
+			OAuthProvider: "github",
 		},
 		Record: Record{
 			RecordEnabled:          true,
 			RecordPreserveTime:     720,
 			PingRecordPreserveTime: 24,
 		},
+		Database: Database{
+			DatabaseType: "sqlite",
+			DatabaseFile: "./data/komari.db",
+		},
+		Listen:     "0.0.0.0:25774",
 		Extensions: map[string]interface{}{},
 	}
 }
@@ -60,7 +73,8 @@ func Override(cst Config) error {
 		Conf = &oldConf
 		b, _ = json.MarshalIndent(oldConf, "", "  ")
 
-		auditlog.EventLog("error", fmt.Sprintf("Configuration update reverted due to error in ConfigUpdated event: %v", err))
+		//TODO: 循环引用，解耦dbcore与其他数据库模块
+		//auditlog.EventLog("error", fmt.Sprintf("Configuration update reverted due to error in ConfigUpdated event: %v", err))
 		slog.Error("Configuration update reverted due to error in ConfigUpdated event.", slog.Any("error", err))
 	}
 	if err := os.WriteFile(flags.ConfigFile, b, 0644); err != nil {

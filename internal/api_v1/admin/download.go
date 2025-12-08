@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/internal/api_v1/resp"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 )
 
@@ -121,9 +121,9 @@ func DownloadBackup(c *gin.Context) {
 
 	// 3) 处理数据库备份 -> 临时目录/komari.db
 	destDB := filepath.Join(tempDir, "komari.db")
-	dbFilePath := flags.DatabaseFile
+	dbFilePath := conf.Conf.Database.DatabaseFile
 
-	if flags.DatabaseType == "sqlite" || flags.DatabaseType == "" {
+	if conf.Conf.Database.DatabaseType == "sqlite" || conf.Conf.Database.DatabaseType == "" {
 		if err := backupSQLiteTo(destDB); err != nil {
 			resp.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error backing up sqlite database: %v", err))
 			return

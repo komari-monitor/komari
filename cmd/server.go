@@ -12,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gookit/event"
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/internal"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
@@ -35,18 +34,11 @@ var ServerCmd = &cobra.Command{
 var AllowCors bool = false
 
 func init() {
-	// 从环境变量获取监听地址
-	listenAddr := GetEnv("KOMARI_LISTEN", "0.0.0.0:25774")
-	ServerCmd.PersistentFlags().StringVarP(&flags.Listen, "listen", "l", listenAddr, "监听地址 [env: KOMARI_LISTEN]")
 	RootCmd.AddCommand(ServerCmd)
 }
 
 func RunServer() {
 	// #region 初始化
-	// 创建目录
-	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
-		log.Fatalf("Failed to create theme directory: %v", err)
-	}
 	internal.All()
 	if conf.Version != conf.Version_Development {
 		gin.SetMode(gin.ReleaseMode)
@@ -90,7 +82,7 @@ func RunServer() {
 	})
 
 	srv := &http.Server{
-		Addr:    flags.Listen,
+		Addr:    conf.Conf.Listen,
 		Handler: r,
 	}
 
@@ -100,7 +92,7 @@ func RunServer() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 
-	log.Printf("Starting server on %s ...", flags.Listen)
+	log.Printf("Starting server on %s ...", conf.Conf.Listen)
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

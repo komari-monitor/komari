@@ -3,7 +3,7 @@ package cmd
 import (
 	"os"
 
-	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
@@ -25,7 +25,7 @@ var ChpasswdCmd = &cobra.Command{
 			cmd.Help()
 			return
 		}
-		if _, err := os.Stat(flags.DatabaseFile); os.IsNotExist(err) {
+		if _, err := os.Stat(conf.Conf.Database.DatabaseFile); os.IsNotExist(err) {
 			cmd.Println("Database file does not exist.")
 			return
 		}

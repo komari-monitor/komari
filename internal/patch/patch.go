@@ -12,7 +12,10 @@ import (
 
 func init() {
 	// 1.1.4 迁移配置表 - 在 ProcessStart 事件之前执行，在数据库初始化前进行
-	v1_1_4_PreMigration()
+	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
+		v1_1_4_PreMigration()
+		return nil
+	}), event.Max+4) // Max+4 在备份恢复之后，配置加载之前
 	// 1.1.5 迁移 compact.nezha 到 extensions.nezha
 
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {

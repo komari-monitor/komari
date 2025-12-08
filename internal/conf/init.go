@@ -10,7 +10,8 @@ import (
 )
 
 func init() {
-	Conf = &Config{}
+	temp := Default()
+	Conf = &temp
 	// 以最高优先级启动程序时加载配置文件
 	// Extensions的注册已经在相应模块的init中完成
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {

@@ -23,13 +23,6 @@ func GetEnv(key, defaultValue string) string {
 
 // 从环境变量获取默认值
 var (
-	dbTypeEnv     = GetEnv("KOMARI_DB_TYPE", "sqlite")
-	dbFileEnv     = GetEnv("KOMARI_DB_FILE", "./data/komari.db")
-	dbHostEnv     = GetEnv("KOMARI_DB_HOST", "localhost")
-	dbPortEnv     = GetEnv("KOMARI_DB_PORT", "3306")
-	dbUserEnv     = GetEnv("KOMARI_DB_USER", "root")
-	dbPassEnv     = GetEnv("KOMARI_DB_PASS", "")
-	dbNameEnv     = GetEnv("KOMARI_DB_NAME", "komari")
 	configFileEnv = GetEnv("KOMARI_CONFIG_FILE", "./data/komari.json")
 )
 
@@ -45,6 +38,11 @@ Made by Akizon77 with love.`,
 }
 
 func Execute() {
+	detectDeprecatedFlags()
+	// 创建目录
+	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
+		slog.Error("Failed to create theme directory", slog.Any("error", err))
+	}
 	err, _ := event.Trigger(eventType.ProcessStart, event.M{})
 	if err != nil {
 		slog.Error("Something went wrong during process start.", slog.Any("error", err))
@@ -56,14 +54,44 @@ func Execute() {
 	}
 }
 
+// detectDeprecatedFlags 检测过时的数据库相关命令行参数
+func detectDeprecatedFlags() {
+	deprecatedFlags := map[string]bool{
+		"db-host":  false,
+		"database": false,
+		"db-user":  false,
+		"db-pass":  false,
+		"db-port":  false,
+		"db-name":  false,
+		"db-type":  false,
+	}
+
+	// 检查命令行参数
+	for _, arg := range os.Args[1:] {
+		for flagName := range deprecatedFlags {
+			if arg == "--"+flagName || arg == "-"+string(flagName[0]) {
+				deprecatedFlags[flagName] = true
+				break
+			}
+		}
+	}
+
+	// 如果检测到过时参数，记录警告
+	hasDeprecated := false
+	for flagName, found := range deprecatedFlags {
+		if found {
+			hasDeprecated = true
+			slog.Warn("Deprecated command-line flag detected", slog.String("flag", "--"+flagName))
+		}
+	}
+
+	if hasDeprecated {
+		slog.Warn("Command-line database configuration flags are deprecated. " +
+			"Please migrate to komari.json file. ")
+	}
+}
+
 func init() {
 	// 设置命令行参数，提供环境变量作为默认值
-	RootCmd.PersistentFlags().StringVarP(&flags.DatabaseType, "db-type", "t", dbTypeEnv, "Database type (sqlite, mysql) [env: KOMARI_DB_TYPE]")
-	RootCmd.PersistentFlags().StringVarP(&flags.DatabaseFile, "database", "d", dbFileEnv, "SQLite database file path [env: KOMARI_DB_FILE]")
-	RootCmd.PersistentFlags().StringVar(&flags.DatabaseHost, "db-host", dbHostEnv, "MySQL/Other database host address [env: KOMARI_DB_HOST]")
-	RootCmd.PersistentFlags().StringVar(&flags.DatabasePort, "db-port", dbPortEnv, "MySQL/Other database port [env: KOMARI_DB_PORT]")
-	RootCmd.PersistentFlags().StringVar(&flags.DatabaseUser, "db-user", dbUserEnv, "MySQL/Other database username [env: KOMARI_DB_USER]")
-	RootCmd.PersistentFlags().StringVar(&flags.DatabasePass, "db-pass", dbPassEnv, "MySQL/Other database password [env: KOMARI_DB_PASS]")
-	RootCmd.PersistentFlags().StringVar(&flags.DatabaseName, "db-name", dbNameEnv, "MySQL/Other database name [env: KOMARI_DB_NAME]")
 	RootCmd.PersistentFlags().StringVarP(&flags.ConfigFile, "config", "c", configFileEnv, "Configuration file path [env: KOMARI_CONFIG_FILE]")
 }

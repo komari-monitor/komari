@@ -20,7 +20,7 @@ func NeedBackupRestore() bool {
 	return false
 }
 
-func RestoreBackup() {
+func RestoreBackup() error {
 	// 4. 把除了 ./data/backup.zip 之外的所有文件压缩到 ./backup/{time}.zip
 	if err := os.MkdirAll("./backup", 0755); err != nil {
 		log.Printf("[restore] failed to create backup dir: %v", err)
@@ -28,7 +28,7 @@ func RestoreBackup() {
 		tsName := time.Now().Format("20060102-150405")
 		bakPath := filepath.Join("./backup", fmt.Sprintf("%s.zip", tsName))
 		if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
-			log.Printf("[restore] failed to zip current data: %v", zipErr)
+			return fmt.Errorf("[restore] failed to zip current data: %w", zipErr)
 		} else {
 			log.Printf("[restore] current data zipped to %s", bakPath)
 		}
@@ -36,28 +36,29 @@ func RestoreBackup() {
 
 	// 5. 删除除了 ./data/backup.zip 之外的所有文件
 	if delErr := removeAllInDirExcept("./data", map[string]struct{}{backupZipPath: {}}); delErr != nil {
-		log.Printf("[restore] failed to cleanup data dir: %v", delErr)
+		return fmt.Errorf("[restore] failed to cleanup data dir: %w", delErr)
 	}
 
 	// 6. 解压 ./data/backup.zip 到 ./data
 	if unzipErr := unzipToDir(backupZipPath, "./data"); unzipErr != nil {
-		log.Printf("[restore] failed to unzip backup into data: %v", unzipErr)
+		return fmt.Errorf("[restore] failed to unzip backup into data: %w", unzipErr)
 	} else {
 		log.Printf("[restore] backup.zip extracted to ./data")
 	}
 
 	// 7. 删除 ./data/backup.zip
 	if rmErr := os.Remove(backupZipPath); rmErr != nil {
-		log.Printf("[restore] failed to remove backup.zip: %v", rmErr)
+		return fmt.Errorf("[restore] failed to remove backup.zip: %w", rmErr)
 	} else {
 		log.Printf("[restore] backup.zip removed")
 	}
 	// 8. 删除标记
 	if rmErr := os.Remove("./data/komari-backup-markup"); rmErr != nil {
-		log.Printf("[restore] failed to remove komari-backup-markup: %v", rmErr)
+		return fmt.Errorf("[restore] failed to remove komari-backup-markup: %w", rmErr)
 	} else {
 		log.Printf("[restore] komari-backup-markup removed")
 	}
+	return nil
 
 }
 
