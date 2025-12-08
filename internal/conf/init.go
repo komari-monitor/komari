@@ -11,6 +11,8 @@ import (
 
 func init() {
 	Conf = &Config{}
+	// 以最高优先级启动程序时加载配置文件
+	// Extensions的注册已经在相应模块的init中完成
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
 		if _, err := os.Stat(flags.ConfigFile); os.IsNotExist(err) {
 			if err := Override(Default()); err != nil {
@@ -25,6 +27,8 @@ func init() {
 		if err := json.Unmarshal(b, cst); err != nil {
 			return err
 		}
+		// 确保 Extensions 包含所有已注册字段的默认值
+		ensureExtensionsDefaults(cst)
 		Conf = cst
 		return nil
 	}), event.Max+2)

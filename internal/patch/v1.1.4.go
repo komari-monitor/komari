@@ -176,16 +176,24 @@ func v1_1_4_PreMigration() {
 			RecordPreserveTime:     recordPreserveTime,
 			PingRecordPreserveTime: pingRecordPreserveTime,
 		},
-		Compact: conf.Compact{
-			Nezha: conf.Nezha{
-				NezhaCompatEnabled: nezhaCompatEnabled,
-				NezhaCompatListen:  nezhaCompatListen,
-			},
-		},
 	}
 
 	// 使用 json.MarshalIndent 直接写入配置文件
-	b, err := json.MarshalIndent(newConfig, "", "  ")
+	// 构建包含 extensions 的完整配置
+	fullConfig := map[string]interface{}{
+		"site":         newConfig.Site,
+		"login":        newConfig.Login,
+		"geo_ip":       newConfig.GeoIp,
+		"notification": newConfig.Notification,
+		"record":       newConfig.Record,
+		"extensions": map[string]interface{}{
+			"nezha": map[string]interface{}{
+				"nezha_compat_enabled": nezhaCompatEnabled,
+				"nezha_compat_listen":  nezhaCompatListen,
+			},
+		},
+	}
+	b, err := json.MarshalIndent(fullConfig, "", "  ")
 	if err != nil {
 		slog.Error("[>1.1.4] Failed to marshal config.", slog.Any("error", err))
 		return

@@ -12,12 +12,12 @@ var (
 )
 
 type Config struct {
-	Site         Site         `json:"site"`
-	Login        Login        `json:"login"`
-	GeoIp        GeoIp        `json:"geo_ip"`
-	Notification Notification `json:"notification"`
-	Record       Record       `json:"record"`
-	Compact      Compact      `json:"compact"`
+	Site         Site                   `json:"site"`
+	Login        Login                  `json:"login"`
+	GeoIp        GeoIp                  `json:"geo_ip"`
+	Notification Notification           `json:"notification"`
+	Record       Record                 `json:"record"`
+	Extensions   map[string]interface{} `json:"extensions,omitempty"` // 扩展配置，由各模块注册
 }
 
 type Site struct {
@@ -65,16 +65,6 @@ type Record struct {
 	PingRecordPreserveTime int  `json:"ping_record_preserve_time"` // Ping 记录保留时间，单位小时，默认1天
 }
 
-type Compact struct {
-	Nezha Nezha `json:"nezha"`
-}
-
-type Nezha struct {
-	// Nezha 兼容（Agent gRPC）
-	NezhaCompatEnabled bool   `json:"nezha_compat_enabled"`
-	NezhaCompatListen  string `json:"nezha_compat_listen"` // 例如 0.0.0.0:5555
-}
-
 // [DEPRECATED] 旧的数据结构，将不再维护，请考虑使用 conf.Config 结构体
 type V1Struct struct {
 	ID                uint   `json:"id,omitempty" gorm:"primaryKey;autoIncrement"` // 1
@@ -91,7 +81,7 @@ type V1Struct struct {
 	// GeoIP 配置
 	GeoIpEnabled  bool   `json:"geo_ip_enabled" gorm:"default:true"`
 	GeoIpProvider string `json:"geo_ip_provider" gorm:"type:varchar(20);default:'ip-api'"` // empty, mmdb, ip-api, geojs
-	// Nezha 兼容（Agent gRPC）
+	// [DEPRECATED] Nezha 兼容字段已迁移到 extensions，保留用于数据库迁移
 	NezhaCompatEnabled bool   `json:"nezha_compat_enabled" gorm:"default:false"`
 	NezhaCompatListen  string `json:"nezha_compat_listen" gorm:"type:varchar(100);default:''"` // 例如 0.0.0.0:5555
 	// OAuth 配置
@@ -118,6 +108,15 @@ type V1Struct struct {
 }
 
 func (cst *V1Struct) ToConfig() Config {
+	// 同步 V1 中的 Nezha 字段到 extensions
+	if IsFieldRegistered("nezha") {
+		nezhaCfg := map[string]interface{}{
+			"nezha_compat_enabled": cst.NezhaCompatEnabled,
+			"nezha_compat_listen":  cst.NezhaCompatListen,
+		}
+		SetCustomField("nezha", nezhaCfg)
+	}
+
 	return Config{
 		Site: Site{
 			Sitename:          cst.Sitename,
@@ -156,17 +155,11 @@ func (cst *V1Struct) ToConfig() Config {
 			RecordPreserveTime:     cst.RecordPreserveTime,
 			PingRecordPreserveTime: cst.PingRecordPreserveTime,
 		},
-		Compact: Compact{
-			Nezha: Nezha{
-				NezhaCompatEnabled: cst.NezhaCompatEnabled,
-				NezhaCompatListen:  cst.NezhaCompatListen,
-			},
-		},
 	}
 }
 
 func (cfg *Config) ToV1Format() V1Struct {
-	return V1Struct{
+	v1 := V1Struct{
 		ID:                         1,
 		Sitename:                   cfg.Site.Sitename,
 		Description:                cfg.Site.Description,
@@ -180,8 +173,6 @@ func (cfg *Config) ToV1Format() V1Struct {
 		EulaAccepted:               cfg.Site.EulaAccepted,
 		GeoIpEnabled:               cfg.GeoIp.GeoIpEnabled,
 		GeoIpProvider:              cfg.GeoIp.GeoIpProvider,
-		NezhaCompatEnabled:         cfg.Compact.Nezha.NezhaCompatEnabled,
-		NezhaCompatListen:          cfg.Compact.Nezha.NezhaCompatListen,
 		OAuthEnabled:               cfg.Login.OAuthEnabled,
 		OAuthProvider:              cfg.Login.OAuthProvider,
 		DisablePasswordLogin:       cfg.Login.DisablePasswordLogin,
@@ -200,4 +191,20 @@ func (cfg *Config) ToV1Format() V1Struct {
 		CreatedAt:                  time.Now(),
 		UpdatedAt:                  time.Now(),
 	}
+
+	// 从 extensions 中填充 Nezha 兼容字段
+	if cfg.Extensions != nil {
+		if nezha, ok := cfg.Extensions["nezha"]; ok {
+			if nezhaMap, ok := nezha.(map[string]interface{}); ok {
+				if enabled, ok := nezhaMap["nezha_compat_enabled"].(bool); ok {
+					v1.NezhaCompatEnabled = enabled
+				}
+				if listen, ok := nezhaMap["nezha_compat_listen"].(string); ok {
+					v1.NezhaCompatListen = listen
+				}
+			}
+		}
+	}
+
+	return v1
 }
