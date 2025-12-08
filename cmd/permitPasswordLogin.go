@@ -4,7 +4,7 @@ import (
 	"os"
 
 	"github.com/komari-monitor/komari/internal/conf"
-	"github.com/komari-monitor/komari/internal/database/dbcore"
+	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/spf13/cobra"
 	"gorm.io/gorm"
 )

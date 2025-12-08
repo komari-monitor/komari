@@ -3,29 +3,23 @@ package dbcore
 import (
 	"fmt"
 	"log"
-	"sync"
 
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/eventType"
-	logutil "github.com/komari-monitor/komari/internal/log"
+	logu "github.com/komari-monitor/komari/internal/log"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-var (
-	instance *gorm.DB
-	once     sync.Once
-)
-
-func GetDBInstance() *gorm.DB {
-	once.Do(func() {
+func init() {
+	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
 		var err error
 
 		logConfig := &gorm.Config{
-			Logger: logutil.NewGormLogger(),
+			Logger: logu.NewGormLogger(),
 		}
 
 		// 根据数据库类型选择不同的连接方式
@@ -41,7 +35,6 @@ func GetDBInstance() *gorm.DB {
 			if err := instance.Exec("PRAGMA journal_mode = WAL;").Error; err != nil {
 				log.Printf("Failed to enable WAL mode for SQLite: %v", err)
 			}
-			instance.Exec("VACUUM;")
 			instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 		case "mysql":
 			// MySQL 连接
@@ -53,11 +46,11 @@ func GetDBInstance() *gorm.DB {
 				conf.Conf.Database.DatabaseName)
 			instance, err = gorm.Open(mysql.Open(dsn), logConfig)
 			if err != nil {
-				log.Fatalf("Failed to connect to MySQL database: %v", err)
+				return fmt.Errorf("failed to connect to MySQL database: %w", err)
 			}
 			log.Printf("Using MySQL database: %s@%s:%s/%s", conf.Conf.Database.DatabaseUser, conf.Conf.Database.DatabaseHost, conf.Conf.Database.DatabasePort, conf.Conf.Database.DatabaseName)
 		default:
-			log.Fatalf("Unsupported database type: %s", conf.Conf.Database.DatabaseType)
+			return fmt.Errorf("unsupported database type: %s", conf.Conf.Database.DatabaseType)
 		}
 		// 自动迁移模型
 		err = instance.AutoMigrate(
@@ -105,13 +98,21 @@ func GetDBInstance() *gorm.DB {
 			log.Printf("Failed to create Task and TaskResult table, it may already exist: %v", err)
 		}
 
-	})
-	return instance
-}
+		return nil
+	}), event.Max+1)
 
-func init() {
 	event.On(eventType.SchedulerEvery5Minutes, event.ListenerFunc(func(e event.Event) error {
-		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+		if conf.Conf.Database.DatabaseType == "sqlite" {
+			instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+		}
 		return nil
 	}))
+
+	event.On(eventType.SchedulerEveryDay, event.ListenerFunc(func(e event.Event) error {
+		if conf.Conf.Database.DatabaseType == "sqlite" {
+			instance.Exec("VACUUM;")
+		}
+		return nil
+	}))
+
 }

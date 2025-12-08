@@ -3,8 +3,8 @@ package tasks
 import (
 	"time"
 
-	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/komari-monitor/komari/internal/pingSchedule"
 	"gorm.io/gorm"
 )
