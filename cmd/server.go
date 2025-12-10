@@ -48,19 +48,6 @@ func RunServer() {
 	r.Use(logutil.GinLogger())
 	r.Use(logutil.GinRecovery())
 
-	err, _ := event.Trigger(eventType.ServerInitializeStart, event.M{"engine": r})
-	if err != nil {
-		slog.Error("Something went wrong during ServerInitializeStart event.", slog.Any("error", err))
-		os.Exit(1)
-	}
-
-	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
-		newConf := e.Get("new").(conf.Config)
-		AllowCors = newConf.Site.AllowCors
-		public.UpdateIndex(newConf.ToV1Format())
-		return nil
-	}), event.High)
-
 	r.Use(func(c *gin.Context) {
 		if AllowCors {
 			c.Header("Access-Control-Allow-Origin", "*")
@@ -76,6 +63,19 @@ func RunServer() {
 		}
 		c.Next()
 	})
+
+	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
+		newConf := e.Get("new").(conf.Config)
+		AllowCors = newConf.Site.AllowCors
+		public.UpdateIndex(newConf.ToV1Format())
+		return nil
+	}), event.High)
+
+	err, _ := event.Trigger(eventType.ServerInitializeStart, event.M{"engine": r})
+	if err != nil {
+		slog.Error("Something went wrong during ServerInitializeStart event.", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	public.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(handlers...)
