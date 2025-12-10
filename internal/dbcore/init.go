@@ -6,7 +6,6 @@ import (
 
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/conf"
-	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/eventType"
 	logu "github.com/komari-monitor/komari/internal/log"
 	"gorm.io/driver/mysql"
@@ -19,7 +18,8 @@ func init() {
 		var err error
 
 		logConfig := &gorm.Config{
-			Logger: logu.NewGormLogger(),
+			Logger:                                   logu.NewGormLogger(),
+			DisableForeignKeyConstraintWhenMigrating: true, // 禁用外键约束，避免迁移时的问题
 		}
 
 		// 根据数据库类型选择不同的连接方式
@@ -49,53 +49,22 @@ func init() {
 				return fmt.Errorf("failed to connect to MySQL database: %w", err)
 			}
 			log.Printf("Using MySQL database: %s@%s:%s/%s", conf.Conf.Database.DatabaseUser, conf.Conf.Database.DatabaseHost, conf.Conf.Database.DatabasePort, conf.Conf.Database.DatabaseName)
+			// 设置数据库默认字符集为 utf8mb4
+			instance.Exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci")
 		default:
 			return fmt.Errorf("unsupported database type: %s", conf.Conf.Database.DatabaseType)
 		}
-		// 自动迁移模型
-		err = instance.AutoMigrate(
-			&models.User{},
-			&models.Client{},
-			&models.Record{},
-			&models.GPURecord{},
-			//&conf.V1Struct{},
-			&models.Log{},
-			&models.Clipboard{},
-			&models.LoadNotification{},
-			&models.OfflineNotification{},
-			&models.PingRecord{},
-			&models.PingTask{},
-			&models.OidcProvider{},
-			&models.MessageSenderProvider{},
-			&models.ThemeConfiguration{},
-		)
-		if err != nil {
-			log.Fatalf("Failed to create tables: %v", err)
-		}
-		err = instance.Table("records_long_term").AutoMigrate(
-			&models.Record{},
-		)
-		if err != nil {
-			log.Printf("Failed to create records_long_term table, it may already exist: %v", err)
-		}
-		err = instance.Table("gpu_records_long_term").AutoMigrate(
-			&models.GPURecord{},
-		)
-		if err != nil {
-			log.Printf("Failed to create gpu_records_long_term table, it may already exist: %v", err)
-		}
-		err = instance.AutoMigrate(
-			&models.Session{},
-		)
-		if err != nil {
-			log.Printf("Failed to create Session table, it may already exist: %v", err)
-		}
-		err = instance.AutoMigrate(
-			&models.Task{},
-			&models.TaskResult{},
-		)
-		if err != nil {
-			log.Printf("Failed to create Task and TaskResult table, it may already exist: %v", err)
+
+		// 检查版本号决定是否需要迁移
+		if needsMigration(instance) {
+			log.Println("Version changed, running database migration...")
+			if err := runMigrations(instance); err != nil {
+				log.Fatalf("Failed to run migrations: %v", err)
+			}
+			updateSchemaVersion(instance)
+			log.Println("Database migration completed")
+		} else {
+			log.Println("Version unchanged, skipping migration")
 		}
 
 		return nil

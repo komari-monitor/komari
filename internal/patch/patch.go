@@ -6,20 +6,16 @@ import (
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/models"
-	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/komari-monitor/komari/internal/eventType"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func init() {
-	// 1.1.4 迁移配置表 - 在 ProcessStart 事件之前执行，在数据库初始化前进行
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
-		v1_1_4_PreMigration()
-		return nil
-	}), event.Max+4) // Max+4 在备份恢复之后，配置加载之前
-	// 1.1.5 迁移 compact.nezha 到 extensions.nezha
-
-	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
-		db := dbcore.GetDBInstance()
+		db, _ := gorm.Open(sqlite.Open("./data/komari.db"), &gorm.Config{})
+		sqlDB, _ := db.DB()
+		defer sqlDB.Close()
 		// 0.0.5 迁移ClientInfo
 		if db.Migrator().HasTable("client_infos") {
 			v0_0_5(db)
@@ -45,6 +41,8 @@ func init() {
 		if db.Migrator().HasTable(&conf.V1Struct{}) {
 			v1_1_4(db)
 		}
+		v1_1_4_PreMigration()
+
 		return nil
-	}), event.Max)
+	}), event.Max+4)
 }

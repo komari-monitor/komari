@@ -30,6 +30,6 @@ type ManagedThemeConfigurationItem struct {
 }
 
 type ThemeConfiguration struct {
-	Short string `json:"short" gorm:"primaryKey;unique;not null"`
+	Short string `json:"short" gorm:"primaryKey;type:varchar(100);not null"`
 	Data  string `json:"data" gorm:"type:longtext" default:"{}"`
 }

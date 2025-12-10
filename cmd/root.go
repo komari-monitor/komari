@@ -94,4 +94,5 @@ func detectDeprecatedFlags() {
 func init() {
 	// 设置命令行参数，提供环境变量作为默认值
 	RootCmd.PersistentFlags().StringVarP(&flags.ConfigFile, "config", "c", configFileEnv, "Configuration file path [env: KOMARI_CONFIG_FILE]")
+	RootCmd.PersistentFlags().StringVarP(&flags.Listen, "listen", "l", GetEnv("KOMARI_LISTEN", ":8080"), "Listen address [env: KOMARI_LISTEN]")
 }
