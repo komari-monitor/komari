@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/komari-monitor/komari/internal/conf"
+	"github.com/komari-monitor/komari/internal/database/models"
 	_ "github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
 )
@@ -186,4 +189,204 @@ func v1_1_4(db *gorm.DB) {
 	slog.Info("[>1.1.4] Dropping configs table...")
 	db.Migrator().DropTable(&conf.V1Struct{})
 	slog.Info("[>1.1.4] Configs table dropped.")
+}
+
+// v1_1_4_MigrateToUTC converts all datetime columns from local timezone to UTC.
+// This is a one-time migration that should run before the application starts.
+// The migration is idempotent - it checks for a marker to avoid re-running.
+func v1_1_4_MigrateToUTC() {
+	// Check if database file exists
+	if _, err := os.Stat("./data/komari.db"); os.IsNotExist(err) {
+		return
+	}
+
+	// Check if migration marker exists
+	if _, err := os.Stat("./data/.utc_migrated"); err == nil {
+		return
+	}
+
+	// Get the display timezone (what was previously used for storage)
+	loc := models.GetDisplayLocation()
+	if loc == time.UTC {
+		// Already using UTC, just create marker
+		createUTCMigrationMarker()
+		return
+	}
+
+	slog.Info("[>1.2.0] Starting UTC migration...", slog.String("from_timezone", loc.String()))
+
+	db, err := sql.Open("sqlite3", "./data/komari.db")
+	if err != nil {
+		slog.Error("[>1.2.0] Failed to open database for UTC migration.", slog.Any("error", err))
+		return
+	}
+	defer db.Close()
+
+	// Tables and their datetime columns to migrate
+	migrations := []struct {
+		table   string
+		columns []string
+	}{
+		{"clients", []string{"expired_at", "created_at", "updated_at"}},
+		{"users", []string{"created_at", "updated_at"}},
+		{"sessions", []string{"latest_online", "expires", "created_at"}},
+		{"logs", []string{"time"}},
+		{"records", []string{"time"}},
+		{"records_long_term", []string{"time"}},
+		{"gpu_records", []string{"time"}},
+		{"gpu_records_long_term", []string{"time"}},
+		{"tasks", []string{"finished_at", "created_at"}},
+		{"ping_records", []string{"time"}},
+	}
+
+	for _, m := range migrations {
+		if !tableExists(db, m.table) {
+			continue
+		}
+
+		for _, col := range m.columns {
+			if !columnExists(db, m.table, col) {
+				continue
+			}
+
+			err := migrateColumnToUTC(db, m.table, col, loc)
+			if err != nil {
+				slog.Error("[>1.2.0] Failed to migrate column to UTC.",
+					slog.String("table", m.table),
+					slog.String("column", col),
+					slog.Any("error", err))
+			} else {
+				slog.Info("[>1.2.0] Migrated column to UTC.",
+					slog.String("table", m.table),
+					slog.String("column", col))
+			}
+		}
+	}
+
+	createUTCMigrationMarker()
+	slog.Info("[>1.2.0] UTC migration completed.")
+}
+
+func tableExists(db *sql.DB, table string) bool {
+	var exists bool
+	row := db.QueryRow(`SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?`, table)
+	if err := row.Scan(&exists); err != nil {
+		return false
+	}
+	return exists
+}
+
+func columnExists(db *sql.DB, table, column string) bool {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, typeStr string
+		var notNull, pk int
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typeStr, &notNull, &dfltValue, &pk); err != nil {
+			continue
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
+func migrateColumnToUTC(db *sql.DB, table, column string, fromLoc *time.Location) error {
+	// Read all rows with non-null datetime values
+	query := `SELECT rowid, ` + column + ` FROM ` + table + ` WHERE ` + column + ` IS NOT NULL AND ` + column + ` != ''`
+	rows, err := db.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type update struct {
+		rowid    int64
+		newValue string
+	}
+	var updates []update
+
+	layouts := []string{
+		time.RFC3339Nano, time.RFC3339,
+		"2006-01-02 15:04:05.0000000-07:00", "2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05.0000000", "2006-01-02 15:04:05", "2006-01-02",
+	}
+
+	for rows.Next() {
+		var rowid int64
+		var timeStr string
+		if err := rows.Scan(&rowid, &timeStr); err != nil {
+			continue
+		}
+
+		timeStr = strings.TrimSpace(timeStr)
+		if timeStr == "" {
+			continue
+		}
+
+		// Parse the time as local time (how it was stored before)
+		var parsedTime time.Time
+		var parseErr error
+		for _, layout := range layouts {
+			parsedTime, parseErr = time.ParseInLocation(layout, timeStr, fromLoc)
+			if parseErr == nil {
+				break
+			}
+		}
+
+		if parseErr != nil {
+			// Could not parse, skip
+			continue
+		}
+
+		// Convert to UTC
+		utcTime := parsedTime.UTC()
+		newValue := utcTime.Format("2006-01-02 15:04:05.0000000")
+
+		updates = append(updates, update{rowid: rowid, newValue: newValue})
+	}
+
+	// Apply updates in a transaction
+	if len(updates) == 0 {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+
+	stmt, err := tx.Prepare(`UPDATE ` + table + ` SET ` + column + ` = ? WHERE rowid = ?`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+
+	for _, u := range updates {
+		_, err := stmt.Exec(u.newValue, u.rowid)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func createUTCMigrationMarker() {
+	f, err := os.Create("./data/.utc_migrated")
+	if err != nil {
+		slog.Error("[>1.2.0] Failed to create UTC migration marker.", slog.Any("error", err))
+		return
+	}
+	f.WriteString("UTC migration completed at " + time.Now().Format(time.RFC3339))
+	f.Close()
 }

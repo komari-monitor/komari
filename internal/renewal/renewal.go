@@ -30,18 +30,18 @@ func CheckAndAutoRenewal(client models.Client) {
 		return
 	}
 
-	clientExpireTime := client.ExpiredAt.ToTime()
-	checkTime := time.Now()
+	clientExpireTime := client.ExpiredAt.ToTime() // Already in UTC
+	checkTime := time.Now().UTC()
 
 	// 如果到期时间小于0002年，跳过
 	if clientExpireTime.Year() < 2 {
 		return
 	}
 
-	// 检查是否已过期或当天过期
+	// 检查是否已过期或当天过期 (比较 UTC 日期)
 	if clientExpireTime.Before(checkTime) || clientExpireTime.Format("2006-01-02") == checkTime.Format("2006-01-02") {
 		// 计算过期时间距离创建时间的总天数，判断是否为长期账单
-		now := time.Now()
+		now := time.Now().UTC()
 		hundredYearsFromNow := now.AddDate(100, 0, 0)
 
 		// 如果过期时间超过当前时间100年，视为长期/一次性账单，不续费

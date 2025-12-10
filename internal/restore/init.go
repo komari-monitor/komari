@@ -11,5 +11,5 @@ func init() {
 			return RestoreBackup()
 		}
 		return nil
-	}), event.Max+5)
+	}), event.Max+10)
 }

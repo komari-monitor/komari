@@ -2,6 +2,7 @@ package patch
 
 import (
 	"log"
+	"os"
 
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/conf"
@@ -13,6 +14,9 @@ import (
 
 func init() {
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
+		if _, err := os.Stat("./data/komari.db"); os.IsNotExist(err) {
+			return nil
+		}
 		db, _ := gorm.Open(sqlite.Open("./data/komari.db"), &gorm.Config{})
 		sqlDB, _ := db.DB()
 		defer sqlDB.Close()
@@ -43,6 +47,9 @@ func init() {
 		}
 		v1_1_4_PreMigration()
 
+		// 迁移所有时间字段到 UTC
+		v1_1_4_MigrateToUTC()
+
 		return nil
-	}), event.Max+4)
+	}), event.Max+8)
 }

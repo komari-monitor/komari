@@ -49,7 +49,7 @@ func init() {
 			return nil
 		}
 		return nil
-	}), event.Max+20)
+	}), event.Max+7)
 }
 
 // InstallGuideFS 用于存储安装引导页面的静态文件系统，由外部包注入以避免循环引用
