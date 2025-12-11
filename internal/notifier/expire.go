@@ -5,8 +5,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/conf"
-	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/models"
 	messageevent "github.com/komari-monitor/komari/internal/database/models/messageEvent"
 	"github.com/komari-monitor/komari/internal/messageSender"
@@ -30,7 +30,7 @@ func CheckExpireScheduledWork() {
 			continue
 		}
 
-		clients_all, err := clients.GetAllClientBasicInfo()
+		clients_all, err := client.GetAllClientBasicInfo()
 		if err != nil {
 			time.Sleep(time.Second)
 			continue

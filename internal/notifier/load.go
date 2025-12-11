@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/komari-monitor/komari/internal/database/clients"
+	"github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/database/models"
 	messageevent "github.com/komari-monitor/komari/internal/database/models/messageEvent"
 	"github.com/komari-monitor/komari/internal/database/records"
@@ -140,7 +140,7 @@ func checkMetricThreshold(records []models.Record, task models.LoadNotification)
 
 // getMetricValue 根据指标名称获取记录中的对应值
 func getMetricValue(record models.Record, metric string) float32 {
-	client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
+	client, err := client.GetClientByUUID(record.Client) // 确保客户端信息已加载
 	if err != nil {
 		log.Printf("Failed to get client info for %s: %v", record.Client, err)
 		return 0
@@ -191,7 +191,7 @@ func getMetricValue(record models.Record, metric string) float32 {
 func sendLoadNotification(clientUUIDs []string, task models.LoadNotification) {
 	ex_clients := []models.Client{}
 	for _, clientUUID := range clientUUIDs {
-		cl, err := clients.GetClientByUUID(clientUUID)
+		cl, err := client.GetClientByUUID(clientUUID)
 		if err == nil {
 			ex_clients = append(ex_clients, cl)
 		}

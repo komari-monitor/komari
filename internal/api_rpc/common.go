@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/internal/api_v1/vars"
+	"github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/common"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database"
-	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/database/tasks"
 	"github.com/komari-monitor/komari/internal/dbcore"
@@ -222,7 +222,7 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 		UUID string `json:"uuid"`
 	}
 	req.BindParams(&params)
-	cinfo, err := clients.GetAllClientBasicInfo()
+	cinfo, err := client.GetAllClientBasicInfo()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", cinfo)
 	}
@@ -296,7 +296,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 
 	// Hidden 过滤
 	if meta.Permission != "admin" {
-		cinfo, err := clients.GetAllClientBasicInfo()
+		cinfo, err := client.GetAllClientBasicInfo()
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
 		}
@@ -439,7 +439,7 @@ func getMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) 
 		resp.SSOType = "client"
 		resp.Username = "client"
 		resp.UUID = meta.ClientToken
-		client, err := clients.GetClientUUIDByToken(meta.ClientToken)
+		client, err := client.GetClientUUIDByToken(meta.ClientToken)
 		if err != nil {
 			resp.UUID = client
 		}

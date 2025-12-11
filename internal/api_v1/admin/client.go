@@ -5,8 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gookit/event"
+	clients "github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
-	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/records"
 	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/ws"
@@ -51,7 +51,7 @@ func EditClient(c *gin.Context) {
 		return
 	}
 	req["uuid"] = uuid
-	err := clients.SaveClient(req)
+	err := clients.PartialUpdate(req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
 		return

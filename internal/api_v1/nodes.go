@@ -3,8 +3,8 @@ package api_v1
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/internal/api_v1/resp"
+	clients "github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/database/accounts"
-	"github.com/komari-monitor/komari/internal/database/clients"
 )
 
 func GetNodesInformation(c *gin.Context) {

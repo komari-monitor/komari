@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/gookit/event"
+	clients "github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
-	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/models"
 	messageevent "github.com/komari-monitor/komari/internal/database/models/messageEvent"
 	"github.com/komari-monitor/komari/internal/eventType"
@@ -93,7 +93,7 @@ func CheckAndAutoRenewal(client models.Client) {
 				"expired_at": models.FromTime(newExpireTime),
 			}
 
-			err := clients.SaveClient(updates)
+			err := clients.PartialUpdate(updates)
 			if err != nil {
 				auditlog.EventLog("renewal", fmt.Sprintf("Failed to renew client %s (%s): %v", client.Name, client.UUID, err))
 				return

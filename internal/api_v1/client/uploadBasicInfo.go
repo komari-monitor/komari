@@ -4,8 +4,8 @@ import (
 	"net"
 
 	"github.com/gookit/event"
+	clients "github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/conf"
-	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/geoip"
 
@@ -78,7 +78,7 @@ func UploadBasicInfo(c *gin.Context) {
 		}
 	}
 
-	if err := clients.SaveClientInfo(cbi); err != nil {
+	if err := clients.PartialUpdate(cbi); err != nil {
 		c.JSON(500, gin.H{"status": "error", "error": err})
 		return
 	}

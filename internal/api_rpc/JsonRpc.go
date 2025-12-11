@@ -11,9 +11,9 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/accounts"
-	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/ws"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
@@ -124,7 +124,7 @@ func OnRpcRequest(c *gin.Context) {
 func detectPermissionGroup(c *gin.Context) string {
 	permissionGroup := "guest"
 	token := c.Query("token")
-	if _, err := clients.GetClientUUIDByToken(token); err == nil {
+	if _, err := client.GetClientUUIDByToken(token); err == nil {
 		permissionGroup = GroupClient
 	}
 	if session_token, _ := c.Cookie("session_token"); session_token != "" {
@@ -152,7 +152,7 @@ func buildContextMeta(c *gin.Context, permissionGroup string) *rpc.ContextMeta {
 		}
 	}
 	if token != "" {
-		if uuid, err := clients.GetClientUUIDByToken(token); err == nil {
+		if uuid, err := client.GetClientUUIDByToken(token); err == nil {
 			meta.ClientToken = token
 			meta.ClientUUID = uuid
 		}
