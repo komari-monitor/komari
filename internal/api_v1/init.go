@@ -24,7 +24,7 @@ func init() {
 		config, _ := conf.GetWithV1Format()
 		LoadApiV1Routes(r, config)
 		return nil
-	}), event.Normal)
+	}), event.Normal+5)
 
 	event.On(eventType.SchedulerEveryMinute, event.ListenerFunc(func(e event.Event) error {
 		SaveClientReportToDB()
@@ -71,7 +71,8 @@ func LoadApiV1Routes(r *gin.Engine, conf conf.V1Struct) {
 		tokenAuthrized.POST("/task/result", client.TaskResult)
 	}
 	// #region 管理员
-	adminAuthrized := r.Group("/api/admin", AdminAuthMiddleware())
+	r.Use(AdminAuthMiddleware())
+	adminAuthrized := r.Group("/api/admin")
 	{
 		adminAuthrized.GET("/download/backup", admin.DownloadBackup)
 		adminAuthrized.POST("/upload/backup", admin.UploadBackup)
