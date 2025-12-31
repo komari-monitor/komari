@@ -168,13 +168,22 @@ func (e *EmailSender) SendTextMessage(message, title string) error {
 		return fmt.Errorf("failed to finalize body encoding: %w", err)
 	}
 
+	contentType := "text/plain; charset=UTF-8"
+	// 检测模板是否包含HTML
+	trimmedMsg := strings.TrimSpace(message)
+	if strings.Contains(strings.ToLower(trimmedMsg), "<html") ||
+		strings.Contains(strings.ToLower(trimmedMsg), "<!doctype") ||
+		(strings.Contains(trimmedMsg, "<div") && strings.Contains(trimmedMsg, "</div>")) {
+		contentType = "text/html; charset=UTF-8"
+	}
+
 	// Compose headers
 	headers := []string{
 		"To: " + strings.Join(rcptHeaderParts, ", "),
 		"From: " + senderHeader,
 		"Subject: " + encodedSubject,
 		"MIME-Version: 1.0",
-		"Content-Type: text/plain; charset=UTF-8",
+		"Content-Type: " + contentType,
 		"Content-Transfer-Encoding: quoted-printable",
 		"Date: " + time.Now().Format(time.RFC1123Z),
 		fmt.Sprintf("Message-ID: <%d@%s>", time.Now().UnixNano(), e.Addition.Host),
