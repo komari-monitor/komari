@@ -2,7 +2,6 @@ package conf
 
 import (
 	"encoding/json"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -46,6 +45,14 @@ func init() {
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
 		if _, err := os.Stat(flags.ConfigFile); os.IsNotExist(err) {
 			installGuide()
+			// 写入默认配置文件
+			b, err := json.MarshalIndent(Default(), "", "  ")
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(flags.ConfigFile, b, 0644); err != nil {
+				return err
+			}
 			return nil
 		}
 		return nil
@@ -56,64 +63,67 @@ func init() {
 var InstallGuideFS fs.FS
 
 func installGuide() {
-	listen := flags.Listen
-	if envListen := os.Getenv("LISTEN"); envListen != "" {
-		listen = envListen
-	}
-	if listen == "" {
-		listen = "0.0.0.0:25774"
-	}
-
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(gin.Recovery())
-
-	if InstallGuideFS == nil {
-		panic("InstallGuideFS is not set, please inject it before starting the server")
-	}
-
-	// 注册 API handlers
-	api := r.Group("/api/init")
-	api.POST("/set_https", handleSetHTTPS)
-
-	// 处理所有请求
-	r.NoRoute(func(c *gin.Context) {
-		path := c.Request.URL.Path
-
-		cleanPath := strings.TrimPrefix(path, "/")
-		file, err := InstallGuideFS.Open(cleanPath)
-		if err == nil {
-			defer file.Close()
-			data, err := io.ReadAll(file)
-			if err == nil {
-				c.Data(http.StatusOK, getContentType(path), data)
-				return
-			}
+	// 未来支持
+	/*
+		listen := flags.Listen
+		if envListen := os.Getenv("LISTEN"); envListen != "" {
+			listen = envListen
+		}
+		if listen == "" {
+			listen = "0.0.0.0:25774"
 		}
 
-		// 文件不存在，如果是 GET 请求返回 index.html（SPA 路由）
-		if c.Request.Method == "GET" && strings.HasPrefix(path, "/init") {
-			indexFile, err := InstallGuideFS.Open("index.html")
+		gin.SetMode(gin.ReleaseMode)
+		r := gin.New()
+		r.Use(gin.Recovery())
+
+		if InstallGuideFS == nil {
+			panic("InstallGuideFS is not set, please inject it before starting the server")
+		}
+
+		// 注册 API handlers
+		api := r.Group("/api/init")
+		api.POST("/set_https", handleSetHTTPS)
+
+		// 处理所有请求
+		r.NoRoute(func(c *gin.Context) {
+			path := c.Request.URL.Path
+
+			cleanPath := strings.TrimPrefix(path, "/")
+			file, err := InstallGuideFS.Open(cleanPath)
 			if err == nil {
-				defer indexFile.Close()
-				data, err := io.ReadAll(indexFile)
+				defer file.Close()
+				data, err := io.ReadAll(file)
 				if err == nil {
-					c.Header("Content-Type", "text/html")
-					c.Data(http.StatusOK, "text/html", data)
+					c.Data(http.StatusOK, getContentType(path), data)
 					return
 				}
 			}
+
+			// 文件不存在，如果是 GET 请求返回 index.html（SPA 路由）
+			if c.Request.Method == "GET" && strings.HasPrefix(path, "/init") {
+				indexFile, err := InstallGuideFS.Open("index.html")
+				if err == nil {
+					defer indexFile.Close()
+					data, err := io.ReadAll(indexFile)
+					if err == nil {
+						c.Header("Content-Type", "text/html")
+						c.Data(http.StatusOK, "text/html", data)
+						return
+					}
+				}
+			}
+
+			// 其他情况返回 404
+			c.Redirect(302, "/init")
+		})
+
+		// 启动服务器（阻塞）
+		slog.Info("Starting install guide server...", slog.String("listen", listen))
+		if err := r.Run(listen); err != nil {
+			panic("failed to start install guide server: " + err.Error())
 		}
-
-		// 其他情况返回 404
-		c.Redirect(302, "/init")
-	})
-
-	// 启动服务器（阻塞）
-	slog.Info("Starting install guide server...", slog.String("listen", listen))
-	if err := r.Run(listen); err != nil {
-		panic("failed to start install guide server: " + err.Error())
-	}
+	*/
 
 }
 
