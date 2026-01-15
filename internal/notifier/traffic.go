@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/conf"
-	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/messageSender"
 	"github.com/komari-monitor/komari/internal/ws"
@@ -46,7 +46,7 @@ func CheckTraffic() {
 		baseStep = 100
 	}
 
-	allClients, err := clients.GetAllClientBasicInfo()
+	allClients, err := client.GetAllClientBasicInfo()
 	if err != nil {
 		return
 	}

@@ -1,8 +1,8 @@
 package database
 
 import (
-	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/dbcore"
 )
 
 func GetAllMessageSenderConfigs() []models.MessageSenderProvider {

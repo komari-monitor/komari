@@ -5,8 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/internal/api_v1/resp"
-	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/dbcore"
 )
 
 func GetLogs(c *gin.Context) {

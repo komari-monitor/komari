@@ -19,8 +19,8 @@ import (
 	"github.com/komari-monitor/komari/internal/common"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
-	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/komari-monitor/komari/internal/eventType"
 	"github.com/komari-monitor/komari/internal/geoip"
 	"github.com/komari-monitor/komari/internal/notifier"
@@ -33,13 +33,34 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+type NezhaConfig struct {
+	NezhaCompatEnabled bool   `json:"nezha_compat_enabled"`
+	NezhaCompatListen  string `json:"nezha_compat_listen"`
+}
+
+var config = NezhaConfig{
+	NezhaCompatEnabled: false,
+	NezhaCompatListen:  "0.0.0.0:5555",
+}
+
+var configKey = "nezha"
+
 func init() {
+	err := conf.RegisterSimpleField(configKey, config)
+	if err != nil {
+		log.Fatalf("Failed to register Nezha config field: %v", err)
+	}
+
 	event.On(eventType.ConfigUpdated, event.ListenerFunc(func(e event.Event) error {
-		Old, New, _ := conf.FromEvent(e)
-		if New.Compact.Nezha.NezhaCompatEnabled != Old.Compact.Nezha.NezhaCompatEnabled || New.Compact.Nezha.NezhaCompatListen != Old.Compact.Nezha.NezhaCompatListen {
-			if New.Compact.Nezha.NezhaCompatEnabled {
+		oldCfg, newCfg, ok := conf.FromEventExtensionAs[NezhaConfig](e, configKey)
+		if !ok {
+			return nil
+		}
+
+		if newCfg.NezhaCompatEnabled != oldCfg.NezhaCompatEnabled || newCfg.NezhaCompatListen != oldCfg.NezhaCompatListen {
+			if newCfg.NezhaCompatEnabled {
 				StopNezhaCompat()
-				if err := StartNezhaCompat(New.Compact.Nezha.NezhaCompatListen); err != nil {
+				if err := StartNezhaCompat(newCfg.NezhaCompatListen); err != nil {
 					return fmt.Errorf("start Nezha compat server error: %w", err)
 				}
 				event.Trigger(eventType.ServerListenGrpcStart, nil)

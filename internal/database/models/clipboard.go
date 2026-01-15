@@ -1,7 +1,7 @@
 package models
 
 type Clipboard struct {
-	Id        int       `json:"id" gorm:"primaryKey;autoIncrement;unique"`
+	Id        int       `json:"id" gorm:"primaryKey;autoIncrement"`
 	Text      string    `json:"text" gorm:"type:longtext"`
 	Name      string    `json:"name" gorm:"type:varchar(255)"`
 	Weight    int       `json:"weight" gorm:"type:int"`

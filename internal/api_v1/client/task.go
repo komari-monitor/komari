@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gookit/event"
-	"github.com/komari-monitor/komari/internal/database/clients"
+	clients "github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/database/tasks"
 	"github.com/komari-monitor/komari/internal/eventType"

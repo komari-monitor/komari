@@ -6,11 +6,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/conf"
-	"github.com/komari-monitor/komari/internal/database/clients"
-	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 	messageevent "github.com/komari-monitor/komari/internal/database/models/messageEvent"
+	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/komari-monitor/komari/internal/messageSender"
 	"github.com/komari-monitor/komari/internal/renewal"
 )
@@ -56,7 +56,7 @@ func getOrInitState(clientID string) *notificationState {
 
 // OfflineNotification 在启用通知且未在宽限期内发送的情况下，发送客户端离线通知。
 func OfflineNotification(clientID string, endedConnectionID int64) {
-	client, err := clients.GetClientByUUID(clientID)
+	client, err := client.GetClientByUUID(clientID)
 	if err != nil {
 		return
 	}
@@ -129,7 +129,7 @@ func OfflineNotification(clientID string, endedConnectionID int64) {
 
 // OnlineNotification 在启用通知的情况下，发送客户端上线通知。
 func OnlineNotification(clientID string, connectionID int64) {
-	client, err := clients.GetClientByUUID(clientID)
+	client, err := client.GetClientByUUID(clientID)
 	if err != nil {
 		return
 	}

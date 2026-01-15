@@ -9,10 +9,10 @@ import (
 
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
-	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/eventType"
 )
 
+// 返回默认配置对象
 func Default() Config {
 	return Config{
 		Site: Site{
@@ -26,18 +26,36 @@ func Default() Config {
 			GeoIpProvider: GeoIp_IPInfo,
 		},
 		Notification: Notification{
-			NotificationEnabled:    true,
-			TrafficLimitPercentage: 80.00,
+			NotificationEnabled:        true,
+			TrafficLimitPercentage:     80.00,
+			NotificationTemplate:       "{{emoji}}{{emoji}}{{emoji}}\n{{event}}\n{{client}}\n{{message}}\n{{time}}",
+			NotificationMethod:         "empty",
+			ExpireNotificationEnabled:  true,
+			ExpireNotificationLeadDays: 7,
+			LoginNotification:          true,
+		},
+		Login: Login{
+			OAuthEnabled:  false,
+			OAuthProvider: "github",
 		},
 		Record: Record{
 			RecordEnabled:          true,
 			RecordPreserveTime:     720,
 			PingRecordPreserveTime: 24,
 		},
+		Database: Database{
+			DatabaseType: "sqlite",
+			DatabaseFile: "./data/komari.db",
+		},
+		Listen:     "0.0.0.0:25774",
+		Extensions: map[string]interface{}{},
 	}
 }
 
+// 强制覆盖当前内存中的配置并写入配置文件
 func Override(cst Config) error {
+	ensureExtensionsDefaults(&cst)
+
 	b, err := json.MarshalIndent(cst, "", "  ")
 	if err != nil {
 		return err
@@ -45,6 +63,7 @@ func Override(cst Config) error {
 
 	oldConf := *Conf
 	Conf = &cst
+
 	err, _ = event.Trigger(eventType.ConfigUpdated, event.M{
 		"old": oldConf,
 		"new": cst,
@@ -54,7 +73,8 @@ func Override(cst Config) error {
 		Conf = &oldConf
 		b, _ = json.MarshalIndent(oldConf, "", "  ")
 
-		auditlog.EventLog("error", fmt.Sprintf("Configuration update reverted due to error in ConfigUpdated event: %v", err))
+		//TODO: 循环引用，解耦dbcore与其他数据库模块
+		//auditlog.EventLog("error", fmt.Sprintf("Configuration update reverted due to error in ConfigUpdated event: %v", err))
 		slog.Error("Configuration update reverted due to error in ConfigUpdated event.", slog.Any("error", err))
 	}
 	if err := os.WriteFile(flags.ConfigFile, b, 0644); err != nil {
@@ -63,6 +83,7 @@ func Override(cst Config) error {
 	return err
 }
 
+// 保存部分配置更改到文件，会对V1的旧字段进行转换
 func SavePartial(cst map[string]interface{}) error {
 	// 将当前内存中的配置转换为通用 map，便于合并
 	baseBytes, err := json.Marshal(Conf)
@@ -104,27 +125,30 @@ func EditAndTrigger(fn func()) error {
 	return nil
 }
 
+// 保存完整配置到文件 同Override
 func SaveFull(cst Config) error {
 	return Override(cst)
 }
 
-// GetWithV1Format 以 v1 API 格式获取配置对象,使用 Conf 直接获取对象引用
+// 以 v1 API 格式获取配置对象,使用 Conf 直接获取对象引用
 func GetWithV1Format() (V1Struct, error) {
 	return Conf.ToV1Format(), nil
 }
 
+// 以 v1 API 格式保存配置对象
 func Save(cst V1Struct) error {
 	cfg := cst.ToConfig()
 	return Override(cfg)
 }
 
+// 语义等同于 SavePartial，保持对旧数据格式兼容
 func Update(cst map[string]interface{}) error {
 	// Update 的语义等同于 SavePartial，保持对旧数据格式兼容
 	return SavePartial(cst)
 }
 
-// normalizePartialMap 将可能包含旧版扁平字段的输入映射为新版分组结构。
-// 若已是分组结构（包含 site/login/...），则原样保留并与映射结果合并。
+// 将V1字段的输入映射为Config结构。
+// 包含 site/login/... 等嵌套结构，则原样保留并与映射结果合并。
 func normalizePartialMap(in map[string]interface{}) map[string]interface{} {
 	if in == nil {
 		return map[string]interface{}{}
@@ -158,21 +182,7 @@ func normalizePartialMap(in map[string]interface{}) map[string]interface{} {
 	geo := ensureGroup("geo_ip")
 	notif := ensureGroup("notification")
 	record := ensureGroup("record")
-	compact := ensureGroup("compact")
-	nezha := func() map[string]interface{} {
-		v, ok := compact["nezha"]
-		if !ok || v == nil {
-			m := map[string]interface{}{}
-			compact["nezha"] = m
-			return m
-		}
-		if m, ok := v.(map[string]interface{}); ok {
-			return m
-		}
-		m := map[string]interface{}{}
-		compact["nezha"] = m
-		return m
-	}()
+	extensions := ensureGroup("extensions")
 
 	// 扁平 -> 分组字段映射表
 	move := func(flatKey string, group map[string]interface{}, groupKey string) {
@@ -219,14 +229,16 @@ func normalizePartialMap(in map[string]interface{}) map[string]interface{} {
 	move("record_preserve_time", record, "record_preserve_time")
 	move("ping_record_preserve_time", record, "ping_record_preserve_time")
 
-	// Compact.Nezha
+	// Nezha 兼容字段
+	nezha := map[string]interface{}{}
 	move("nezha_compat_enabled", nezha, "nezha_compat_enabled")
 	move("nezha_compat_listen", nezha, "nezha_compat_listen")
+	extensions["nezha"] = nezha
 
 	return out
 }
 
-// deepMerge 以 dst 为基础，将 src 合并覆盖到 dst。仅对 map[string]interface{} 递归。
+// = 以src更新dst，返回合并结果
 func deepMerge(dst, src map[string]interface{}) map[string]interface{} {
 	if dst == nil {
 		dst = map[string]interface{}{}

@@ -5,8 +5,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/conf"
-	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/database/models"
 	messageevent "github.com/komari-monitor/komari/internal/database/models/messageEvent"
 	"github.com/komari-monitor/komari/internal/messageSender"
@@ -15,8 +15,9 @@ import (
 
 func CheckExpireScheduledWork() {
 	for {
-		now := time.Now()
-		next := time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, now.Location()) // UTC 9AM = CST 17PM
+		now := time.Now().UTC()
+		// Schedule at 01:00 UTC (corresponds to 09:00 CST)
+		next := time.Date(now.Year(), now.Month(), now.Day(), 1, 0, 0, 0, time.UTC)
 		if now.After(next) {
 			next = next.Add(24 * time.Hour)
 		}
@@ -29,13 +30,13 @@ func CheckExpireScheduledWork() {
 			continue
 		}
 
-		clients_all, err := clients.GetAllClientBasicInfo()
+		clients_all, err := client.GetAllClientBasicInfo()
 		if err != nil {
 			time.Sleep(time.Second)
 			continue
 		}
 
-		checkTime := time.Now()
+		checkTime := time.Now().UTC()
 
 		// 过期提醒检查（仅当启用过期通知时）
 		if cfg.ExpireNotificationEnabled {

@@ -57,8 +57,8 @@ type User struct {
 
 // Session manages user sessions
 type Session struct {
-	UUID            string    `json:"uuid" gorm:"type:varchar(36)"`
-	Session         string    `json:"session" gorm:"type:varchar(255);primaryKey;uniqueIndex:idx_sessions_session;not null"`
+	UUID            string    `json:"uuid" gorm:"type:varchar(36);index"`
+	Session         string    `json:"session" gorm:"type:varchar(255);primaryKey;not null"`
 	UserAgent       string    `json:"user_agent" gorm:"type:text"`
 	Ip              string    `json:"ip" gorm:"type:varchar(100)"`
 	LoginMethod     string    `json:"login_method" gorm:"type:varchar(50)"`
@@ -95,14 +95,14 @@ type Record struct {
 
 // GPURecord logs individual GPU metrics over time
 type GPURecord struct {
-	Client      string    `json:"client" gorm:"type:varchar(36);index"`           // 客户端UUID
-	Time        LocalTime `json:"time" gorm:"index"`                              // 记录时间
-	DeviceIndex int       `json:"device_index" gorm:"index"`                      // GPU设备索引 (0,1,2...)
-	DeviceName  string    `json:"device_name" gorm:"type:varchar(100)"`           // GPU型号
-	MemTotal    int64     `json:"mem_total" gorm:"type:bigint"`                   // 显存总量(字节)
-	MemUsed     int64     `json:"mem_used" gorm:"type:bigint"`                    // 显存使用(字节)
-	Utilization float32   `json:"utilization" gorm:"type:decimal(5,2)"`           // GPU使用率(%)
-	Temperature int       `json:"temperature"`                                    // GPU温度(°C)
+	Client      string    `json:"client" gorm:"type:varchar(36);index"` // 客户端UUID
+	Time        LocalTime `json:"time" gorm:"index"`                    // 记录时间
+	DeviceIndex int       `json:"device_index" gorm:"index"`            // GPU设备索引 (0,1,2...)
+	DeviceName  string    `json:"device_name" gorm:"type:varchar(100)"` // GPU型号
+	MemTotal    int64     `json:"mem_total" gorm:"type:bigint"`         // 显存总量(字节)
+	MemUsed     int64     `json:"mem_used" gorm:"type:bigint"`          // 显存使用(字节)
+	Utilization float32   `json:"utilization" gorm:"type:decimal(5,2)"` // GPU使用率(%)
+	Temperature int       `json:"temperature"`                          // GPU温度(°C)
 }
 
 // StringArray represents a slice of strings stored as JSON in the database

@@ -25,6 +25,16 @@ var RawIndexFile string
 
 var IndexFile string
 
+func init() {
+	// 注入静态文件系统到 conf 包，用于安装引导页面
+	distFS, err := fs.Sub(PublicFS, "dist")
+	if err != nil {
+		log.Println("Failed to create dist subdirectory for install guide:", err)
+		return
+	}
+	conf.InstallGuideFS = distFS
+}
+
 func initIndex() {
 	err := os.MkdirAll("./data/theme", 0755)
 	if err != nil {

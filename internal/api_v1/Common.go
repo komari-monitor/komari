@@ -11,8 +11,8 @@ import (
 
 	"strconv"
 
-	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
+	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/komari-monitor/komari/pkg/utils"
 )
 

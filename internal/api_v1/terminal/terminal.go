@@ -10,8 +10,8 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/gin-gonic/gin"
+	clients "github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
-	"github.com/komari-monitor/komari/internal/database/clients"
 	"github.com/komari-monitor/komari/internal/ws"
 	"github.com/komari-monitor/komari/pkg/utils"
 )

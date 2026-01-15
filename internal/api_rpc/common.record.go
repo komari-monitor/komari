@@ -7,11 +7,11 @@ import (
 	"sort"
 	"time"
 
-	"github.com/komari-monitor/komari/internal/database/clients"
-	"github.com/komari-monitor/komari/internal/database/dbcore"
+	"github.com/komari-monitor/komari/internal/client"
 	"github.com/komari-monitor/komari/internal/database/models"
 	recordsdb "github.com/komari-monitor/komari/internal/database/records"
 	"github.com/komari-monitor/komari/internal/database/tasks"
+	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -73,7 +73,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	isAdmin := meta.Permission == "admin"
 	hidden := map[string]bool{}
 	if !isAdmin {
-		cinfo, err := clients.GetAllClientBasicInfo()
+		cinfo, err := client.GetAllClientBasicInfo()
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
 		}

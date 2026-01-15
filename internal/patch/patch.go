@@ -2,20 +2,24 @@ package patch
 
 import (
 	"log"
+	"os"
 
 	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/internal/conf"
-	"github.com/komari-monitor/komari/internal/database/dbcore"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/eventType"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func init() {
-	// 1.1.4 迁移配置表 - 在 ProcessStart 事件之前执行，在数据库初始化前进行
-	v1_1_4_PreMigration()
-
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
-		db := dbcore.GetDBInstance()
+		if _, err := os.Stat("./data/komari.db"); os.IsNotExist(err) {
+			return nil
+		}
+		db, _ := gorm.Open(sqlite.Open("./data/komari.db"), &gorm.Config{})
+		sqlDB, _ := db.DB()
+		defer sqlDB.Close()
 		// 0.0.5 迁移ClientInfo
 		if db.Migrator().HasTable("client_infos") {
 			v0_0_5(db)
@@ -41,6 +45,11 @@ func init() {
 		if db.Migrator().HasTable(&conf.V1Struct{}) {
 			v1_1_4(db)
 		}
+		v1_1_4_PreMigration()
+
+		// 迁移所有时间字段到 UTC
+		v1_1_4_MigrateToUTC()
+
 		return nil
-	}), event.Max)
+	}), event.Max+8)
 }

@@ -8,8 +8,8 @@ import (
 func init() {
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
 		if NeedBackupRestore() {
-			RestoreBackup()
+			return RestoreBackup()
 		}
 		return nil
-	}))
+	}), event.Max+10)
 }

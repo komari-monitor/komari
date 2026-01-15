@@ -2,6 +2,7 @@ package api_v1
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/komari-monitor/komari/internal/api_v1/resp"
 	"github.com/komari-monitor/komari/internal/database/accounts"
@@ -11,6 +12,10 @@ import (
 
 func AdminAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !strings.HasPrefix(c.Request.URL.Path, "/api/admin") {
+			c.Next()
+			return
+		}
 		// API key authentication
 		apiKey := c.GetHeader("Authorization")
 		if isApiKeyValid(apiKey) {
