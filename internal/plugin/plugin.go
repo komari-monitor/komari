@@ -22,6 +22,7 @@ var (
 )
 
 func init() {
+	// 初始化插件系统, 新建KV内存缓存，建立ID目录索引
 	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
 		if err := os.MkdirAll("./data/plugins", os.ModePerm); err != nil {
 			return err
@@ -35,6 +36,7 @@ func init() {
 	}))
 	event.On(eventType.ServerInitializeStart, event.ListenerFunc(func(e event.Event) error {
 		r := e.Get("engine").(*gin.Engine)
+		// 获取所有插件信息
 		r.GET("/api/admin/plugins", func(c *gin.Context) {
 			manifests, err := getPluginManifest()
 			if err != nil {
@@ -43,6 +45,7 @@ func init() {
 			}
 			resp.RespondSuccess(c, manifests)
 		})
+		// 激活指定插件，根据 ID 列表
 		r.POST("/api/admin/plugin/activate", func(c *gin.Context) {
 			var req struct {
 				Id []string `json:"id"`
@@ -98,6 +101,7 @@ func getPluginManifest() ([]struct {
 			continue
 		}
 
+		// 构建临时的 Runtime 用于读取 Manifest
 		builder := jsruntime.NewBuilder().WithNodejs()
 		if kv != nil {
 			builder = builder.WithMemoryKv(kv)
@@ -109,40 +113,63 @@ func getPluginManifest() ([]struct {
 			continue
 		}
 
-		if _, err := rt.RunScript(string(content)); err != nil {
-			slog.Error("failed to execute plugin script", slog.String("file", path), slog.Any("err", err))
-			continue
-		}
+		// 确保在循环结束时停止 Runtime，释放 EventLoop 线程
+		// 使用匿名函数包装处理逻辑以便使用 defer (或者手动在 continue 前调用 Stop)
+		func() {
+			defer rt.Stop()
 
-		manifestVal := rt.GetVM().Get("Manifest")
-		if manifestVal == nil || goja.IsUndefined(manifestVal) || goja.IsNull(manifestVal) {
-			slog.Warn("plugin manifest not found", slog.String("file", path))
-			continue
-		}
+			if _, err := rt.RunScript(string(content)); err != nil {
+				slog.Error("failed to execute plugin script", slog.String("file", path), slog.Any("err", err))
+				return
+			}
 
-		var manifest Manifest
-		if err := rt.GetVM().ExportTo(manifestVal, &manifest); err != nil {
-			slog.Error("failed to parse plugin manifest", slog.String("file", path), slog.Any("err", err))
-			continue
-		}
+			// 使用 channel 从 EventLoop 线程同步获取 Manifest 数据
+			type manifestResult struct {
+				m   Manifest
+				err error
+			}
+			ch := make(chan manifestResult, 1)
 
-		if id2Path != nil {
-			id2Path.Set(manifest.Id, path, cache.NoExpiration)
-		}
+			rt.RunOnLoop(func(vm *goja.Runtime) {
+				manifestVal := vm.Get("Manifest")
+				if manifestVal == nil || goja.IsUndefined(manifestVal) || goja.IsNull(manifestVal) {
+					ch <- manifestResult{err: fmt.Errorf("manifest not found or empty")}
+					return
+				}
 
-		active := false
-		if _, found := activePlugins.Get(manifest.Id); found {
-			active = true
-		}
-		manifests = append(manifests, struct {
-			Manifest
-			Active   bool   `json:"active"`
-			FileName string `json:"fileName"`
-		}{
-			Manifest: manifest,
-			Active:   active,
-			FileName: entry.Name(),
-		})
+				var m Manifest
+				if err := vm.ExportTo(manifestVal, &m); err != nil {
+					ch <- manifestResult{err: err}
+					return
+				}
+				ch <- manifestResult{m: m}
+			})
+
+			res := <-ch
+			if res.err != nil {
+				slog.Warn("failed to parse plugin manifest", slog.String("file", path), slog.Any("err", res.err))
+				return
+			}
+			manifest := res.m
+
+			if id2Path != nil {
+				id2Path.Set(manifest.Id, path, cache.NoExpiration)
+			}
+
+			active := false
+			if _, found := activePlugins.Get(manifest.Id); found {
+				active = true
+			}
+			manifests = append(manifests, struct {
+				Manifest
+				Active   bool   `json:"active"`
+				FileName string `json:"fileName"`
+			}{
+				Manifest: manifest,
+				Active:   active,
+				FileName: entry.Name(),
+			})
+		}()
 	}
 
 	return manifests, nil
@@ -159,7 +186,7 @@ func activePlugin(id string) error {
 	}
 	pathVal, found := id2Path.Get(id)
 	if !found {
-		return fmt.Errorf("plugin not found.%s(%s)", id, pathVal.(string))
+		return fmt.Errorf("plugin not found.%s", id)
 	}
 	path := pathVal.(string)
 
@@ -167,17 +194,32 @@ func activePlugin(id string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create js runtime for plugin %s(%s)", id, path)
 	}
+
+	// 定义清理函数，如果激活失败则停止 Runtime
+	success := false
+	defer func() {
+		if !success {
+			runtime.Stop()
+		}
+	}()
+
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("failed to read plugin file %s(%s)", id, path)
 	}
+
+	// 此时 RunScript 已经是线程安全并在 Loop 中执行的
 	if _, err := runtime.RunScript(string(content)); err != nil {
 		return fmt.Errorf("failed to execute plugin script %s(%s): %v", id, path, err)
 	}
 
+	// 将 Runtime 存入缓存
 	activePlugins.Set(id, runtime, cache.NoExpiration)
 
+	// 调用 onLoad
+	// HasFunction 内部已经处理了 RunOnLoop
 	if runtime.HasFunction("onLoad") {
+		// Call 内部已经处理了 RunOnLoop
 		_, err := runtime.Call("onLoad")
 		if err != nil {
 			activePlugins.Delete(id)
@@ -185,5 +227,6 @@ func activePlugin(id string) error {
 		}
 	}
 
+	success = true
 	return nil
 }

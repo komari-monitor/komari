@@ -1,165 +1,190 @@
 package jsruntime
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/console"
-	"github.com/dop251/goja_nodejs/require"
+	"github.com/dop251/goja_nodejs/eventloop"
 )
-
-// Builder 构建 JsRuntime 的配置入口
-type Builder struct {
-	enableNodejs bool
-	kv           *RamKv
-	injectors    []Injector
-}
-
-// Injector 允许在构建时注入自定义能力
-type Injector func(r *JsRuntime) error
 
 // JsRuntime 封装了 JS 虚拟机环境
 type JsRuntime struct {
-	vm       *goja.Runtime
-	mu       sync.Mutex // Goja 不是线程安全的
-	registry *require.Registry
+	loop *eventloop.EventLoop
 }
 
-// NewBuilder 返回 JsRuntime 的 builder
-func NewBuilder() *Builder {
-	return &Builder{}
-}
-
-// WithNodejs 启用 Node.js 风格的模块和 console 支持
-func (b *Builder) WithNodejs() *Builder {
-	b.enableNodejs = true
-	return b
-}
-
-// WithMemoryKv 向运行时注入内存 KV 存储对象
-func (b *Builder) WithMemoryKv(kv ...*RamKv) *Builder {
-	if len(kv) > 0 && kv[0] != nil {
-		b.kv = kv[0]
-	} else {
-		b.kv = NewRamKv()
-	}
-	return b
-}
-
-// WithInjector 注册自定义注入函数，在 Build 时依次执行
-func (b *Builder) WithInjector(inj Injector) *Builder {
-	if inj != nil {
-		b.injectors = append(b.injectors, inj)
-	}
-	return b
-}
-
-// Build 构建并返回 JsRuntime，同时返回可能的错误
-func (b *Builder) Build() (*JsRuntime, error) {
-	registry := new(require.Registry)
-	vm := goja.New()
-
-	r := &JsRuntime{
-		vm:       vm,
-		registry: registry,
-	}
-
-	if b.enableNodejs {
-		b.enableNodeSupport(r)
-	}
-
-	if b.kv != nil {
-		b.injectMemoryKv(r, b.kv)
-	}
-
-	for _, inj := range b.injectors {
-		if err := inj(r); err != nil {
-			return nil, err
-		}
-	}
-
-	return r, nil
-}
-
-func (b *Builder) enableNodeSupport(r *JsRuntime) {
-	r.registry.Enable(r.vm)
-	console.Enable(r.vm)
-}
-
-func (b *Builder) injectMemoryKv(r *JsRuntime, kv *RamKv) {
-	obj := r.vm.NewObject()
-
-	// kv.set(key, value)
-	obj.Set("set", func(call goja.FunctionCall) goja.Value {
-		key := call.Argument(0).String()
-		val := call.Argument(1).Export()
-		if err := kv.Set(key, val); err != nil {
-			return r.vm.NewGoError(err)
-		}
-		return goja.Undefined()
-	})
-
-	// kv.get(key, defaultValue)
-	obj.Set("get", func(call goja.FunctionCall) goja.Value {
-		key := call.Argument(0).String()
-		defaultValue := call.Argument(1)
-		val, exists := kv.Get(key)
-		if !exists {
-			if defaultValue != nil {
-				return defaultValue
-			}
-			return goja.Undefined()
-		}
-		return r.vm.ToValue(val)
-	})
-
-	// kv.del(key)
-	obj.Set("del", func(call goja.FunctionCall) goja.Value {
-		key := call.Argument(0).String()
-		kv.Del(key)
-		return goja.Undefined()
-	})
-
-	// kv.has(key)
-	obj.Set("has", func(call goja.FunctionCall) goja.Value {
-		key := call.Argument(0).String()
-		return r.vm.ToValue(kv.Has(key))
-	})
-}
-
-func (r *JsRuntime) GetVM() *goja.Runtime {
-	return r.vm
-}
-
+// RunScript 在 EventLoop 中执行脚本
 func (r *JsRuntime) RunScript(script string) (goja.Value, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	v, err := r.vm.RunString(script)
-	if err != nil {
-		return nil, err
+	type result struct {
+		val goja.Value
+		err error
 	}
-	return v, nil
+	ch := make(chan result, 1)
+
+	r.loop.RunOnLoop(func(vm *goja.Runtime) {
+		v, err := vm.RunString(script)
+		ch <- result{val: v, err: err}
+	})
+
+	res := <-ch
+	return res.val, res.err
 }
 
-func (r *JsRuntime) Call(functicon string, params ...any) (goja.Value, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// RunScriptWithTimeout 带超时的脚本执行
+func (r *JsRuntime) RunScriptWithTimeout(script string, timeout time.Duration) (goja.Value, error) {
+	type result struct {
+		val goja.Value
+		err error
+	}
+	ch := make(chan result, 1)
 
-	fn, ok := goja.AssertFunction(r.vm.Get(functicon))
-	if !ok {
-		return nil, nil
+	// 提交任务
+	r.loop.RunOnLoop(func(vm *goja.Runtime) {
+		v, err := vm.RunString(script)
+		ch <- result{val: v, err: err}
+	})
+
+	select {
+	case res := <-ch:
+		return res.val, res.err
+	case <-time.After(timeout):
+		// 注意：如果不终止 Loop，之前的 RunString 还会继续占用资源
+		// 真正的超时中断需要 vm.Interrupt，但这比较复杂，这里仅返回超时错误
+		return nil, errors.New("execution timed out")
 	}
-	vals := make([]goja.Value, len(params))
-	for i, p := range params {
-		vals[i] = r.vm.ToValue(p)
-	}
-	return fn(goja.Undefined(), vals...)
 }
 
-func (r *JsRuntime) HasFunction(functicon string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// Call 调用 JS 全局函数
+func (r *JsRuntime) Call(functionName string, params ...any) (goja.Value, error) {
+	resCh := r.CallAsync(functionName, params...)
+	res := <-resCh
+	return res.Value, res.Err
+}
 
-	return r.vm.Get(functicon) != nil
+type CallResult struct {
+	Value goja.Value
+	Err   error
+}
+
+// CallAsync 异步调用 JS 全局函数。
+// - 如果函数返回普通值：channel 立刻返回结果
+// - 如果函数返回 Promise/thenable：channel 在 resolve/reject 后返回结果
+func (r *JsRuntime) CallAsync(functionName string, params ...any) <-chan CallResult {
+	ch := make(chan CallResult, 1)
+	var once sync.Once
+	finish := func(v goja.Value, err error) {
+		once.Do(func() {
+			ch <- CallResult{Value: v, Err: err}
+			close(ch)
+		})
+	}
+
+	r.loop.RunOnLoop(func(vm *goja.Runtime) {
+		fnObj := vm.Get(functionName)
+		fn, ok := goja.AssertFunction(fnObj)
+		if !ok {
+			finish(nil, fmt.Errorf("function not found: %s", functionName))
+			return
+		}
+
+		vals := make([]goja.Value, len(params))
+		for i, p := range params {
+			vals[i] = vm.ToValue(p)
+		}
+
+		v, err := fn(goja.Undefined(), vals...)
+		if err != nil {
+			finish(nil, err)
+			return
+		}
+
+		if isThenable(vm, v) {
+			thenObj := v.ToObject(vm)
+			thenVal := thenObj.Get("then")
+			thenFn, ok := goja.AssertFunction(thenVal)
+			if !ok {
+				finish(nil, fmt.Errorf("thenable missing then(): %s", functionName))
+				return
+			}
+
+			onFulfilled := vm.ToValue(func(call goja.FunctionCall) goja.Value {
+				finish(call.Argument(0), nil)
+				return goja.Undefined()
+			})
+			onRejected := vm.ToValue(func(call goja.FunctionCall) goja.Value {
+				finish(nil, promiseRejectionToError(call.Argument(0)))
+				return goja.Undefined()
+			})
+
+			// 绑定 then(resolve, reject)
+			if _, err := thenFn(v, onFulfilled, onRejected); err != nil {
+				finish(nil, err)
+				return
+			}
+
+			// 对“立即 resolve/reject”的 Promise，主动触发一次微任务队列推进
+			_, _ = vm.RunString("void 0")
+			return
+		}
+
+		finish(v, nil)
+	})
+
+	return ch
+}
+
+func isThenable(vm *goja.Runtime, v goja.Value) bool {
+	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+		return false
+	}
+	obj := v.ToObject(vm)
+	if obj == nil {
+		return false
+	}
+	thenVal := obj.Get("then")
+	_, ok := goja.AssertFunction(thenVal)
+	return ok
+}
+
+func promiseRejectionToError(reason goja.Value) error {
+	if reason == nil || goja.IsUndefined(reason) || goja.IsNull(reason) {
+		return errors.New("promise rejected")
+	}
+
+	// Error 对象通常有 message
+	if obj, ok := reason.(*goja.Object); ok {
+		if msg := obj.Get("message"); msg != nil && !goja.IsUndefined(msg) && !goja.IsNull(msg) {
+			m := strings.TrimSpace(msg.String())
+			if m != "" {
+				return errors.New(m)
+			}
+		}
+	}
+
+	return errors.New(reason.String())
+}
+
+// HasFunction 检查函数是否存在
+func (r *JsRuntime) HasFunction(functionName string) bool {
+	ch := make(chan bool, 1)
+	r.loop.RunOnLoop(func(vm *goja.Runtime) {
+		fn := vm.Get(functionName)
+		_, ok := goja.AssertFunction(fn)
+		ch <- ok
+	})
+	return <-ch
+}
+
+func (r *JsRuntime) RunOnLoop(fn func(vm *goja.Runtime)) {
+	r.loop.RunOnLoop(func(vm *goja.Runtime) {
+		fn(vm)
+	})
+}
+
+// Stop 停止 EventLoop
+func (r *JsRuntime) Stop() {
+	r.loop.Stop()
 }
