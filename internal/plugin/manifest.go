@@ -10,6 +10,7 @@ type Manifest struct {
 	Dependencies map[string]string `json:"dependencies"`
 	Config       []Config          `json:"config"`
 	Url          string            `json:"url"`
+	//Permissions  []string          `json:"permissions"`
 }
 
 type Config struct {

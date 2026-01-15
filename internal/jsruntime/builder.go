@@ -14,6 +14,7 @@ import (
 // Builder 构建 JsRuntime 的配置入口
 type Builder struct {
 	enableNodejs bool
+	enableEvent  bool
 	enableFetch  bool
 	fetchClient  *http.Client
 	enableXHR    bool
@@ -34,6 +35,14 @@ func NewBuilder() *Builder {
 // WithNodejs 启用 Node.js 风格的模块和 console 支持
 func (b *Builder) WithNodejs() *Builder {
 	b.enableNodejs = true
+	return b
+}
+
+// WithEvent 向运行时注入全局 event/Event 对象。
+//
+// 注：触发为同步执行（不支持异步触发）。
+func (b *Builder) WithEvent() *Builder {
+	b.enableEvent = true
 	return b
 }
 
@@ -71,6 +80,7 @@ func (b *Builder) WithInjector(inj Injector) *Builder {
 func (b *Builder) Build() (*JsRuntime, error) {
 	// 1. 创建 EventLoop
 	loop := eventloop.NewEventLoop()
+	rt := &JsRuntime{loop: loop}
 
 	// 2. 启动 EventLoop 后台协程
 	loop.Start()
@@ -118,6 +128,15 @@ func (b *Builder) Build() (*JsRuntime, error) {
 			}
 		}
 
+		if b.enableEvent {
+			st, injErr := injectEvent(vm, loop, &rt.stopped)
+			if injErr != nil {
+				err = injErr
+				return
+			}
+			rt.eventState = st
+		}
+
 		if b.kv != nil {
 			// 这里直接调用注入逻辑，注意传递的是 vm
 			b.injectMemoryKv(vm, b.kv)
@@ -136,9 +155,7 @@ func (b *Builder) Build() (*JsRuntime, error) {
 		return nil, err
 	}
 
-	return &JsRuntime{
-		loop: loop,
-	}, nil
+	return rt, nil
 }
 
 // injectMemoryKv 将 RamKv 注入到 goja.Runtime 中

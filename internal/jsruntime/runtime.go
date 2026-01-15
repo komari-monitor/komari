@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dop251/goja"
@@ -14,6 +15,9 @@ import (
 // JsRuntime 封装了 JS 虚拟机环境
 type JsRuntime struct {
 	loop *eventloop.EventLoop
+
+	stopped    uint32
+	eventState *runtimeEventState
 }
 
 // RunScript 在 EventLoop 中执行脚本
@@ -186,5 +190,16 @@ func (r *JsRuntime) RunOnLoop(fn func(vm *goja.Runtime)) {
 
 // Stop 停止 EventLoop
 func (r *JsRuntime) Stop() {
-	r.loop.Stop()
+	if r == nil {
+		return
+	}
+	if !atomic.CompareAndSwapUint32(&r.stopped, 0, 1) {
+		return
+	}
+	if r.eventState != nil {
+		r.eventState.cleanup()
+	}
+	if r.loop != nil {
+		r.loop.Stop()
+	}
 }
