@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"os"
 
+	"github.com/komari-monitor/komari/internal/app"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/spf13/cobra"
@@ -14,10 +16,13 @@ var Disable2FA = &cobra.Command{
 	Short: "Force disable 2FA",
 	Long:  `Force disable 2FA`,
 	Run: func(cmd *cobra.Command, args []string) {
-		db := dbcore.GetDBInstance()
-		err := db.Transaction(func(tx *gorm.DB) error {
-			return tx.Model(&models.User{}).Where("two_factor != ?", "").
-				Update("two_factor", "").Error
+		a := app.New().With(dbcore.NewDBModule())
+		err := a.RunWith(context.Background(), func(ctx context.Context) error {
+			db := dbcore.GetDBInstance()
+			return db.Transaction(func(tx *gorm.DB) error {
+				return tx.Model(&models.User{}).Where("two_factor != ?", "").
+					Update("two_factor", "").Error
+			})
 		})
 		if err != nil {
 			cmd.Println("Error:", err)

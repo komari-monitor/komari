@@ -8,7 +8,12 @@ var (
 )
 
 var (
-	Conf *Config // 当直接修改时，请手动触发 eventType.ConfigUpdated 事件，或者使用 EditAndTrigger(func() { ... } 包裹
+	// Conf is the global config for legacy code paths.
+	// Lifecycle-managed startup overwrites it by calling Boot().
+	Conf = func() *Config {
+		c := Default()
+		return &c
+	}()
 )
 
 type Config struct {

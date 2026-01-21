@@ -6,9 +6,7 @@ import (
 
 	"log/slog"
 
-	"github.com/gookit/event"
 	"github.com/komari-monitor/komari/cmd/flags"
-	"github.com/komari-monitor/komari/internal/eventType"
 
 	"github.com/spf13/cobra"
 )
@@ -31,22 +29,17 @@ var RootCmd = &cobra.Command{
 	Short: "Komari is a simple server monitoring tool",
 	Long: `Komari is a simple server monitoring tool. 
 Made by Akizon77 with love.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		cmd.SetArgs([]string{"server"})
-		cmd.Execute()
-	},
 }
 
 func Execute() {
 	detectDeprecatedFlags()
+	// Default to server when no subcommand is provided.
+	if len(os.Args) <= 1 {
+		RootCmd.SetArgs([]string{"server"})
+	}
 	// 创建目录
 	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
 		slog.Error("Failed to create theme directory", slog.Any("error", err))
-	}
-	err, _ := event.Trigger(eventType.ProcessStart, event.M{})
-	if err != nil {
-		slog.Error("Something went wrong during process start.", slog.Any("error", err))
-		os.Exit(1)
 	}
 	if err := RootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

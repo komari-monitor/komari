@@ -1,62 +1,17 @@
 package conf
 
 import (
-	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gookit/event"
-	"github.com/komari-monitor/komari/cmd/flags"
-	"github.com/komari-monitor/komari/internal/eventType"
+	"github.com/komari-monitor/komari/internal/app"
 )
 
 func init() {
-	temp := Default()
-	Conf = &temp
-	// 以最高优先级启动程序时加载配置文件
-	// Extensions的注册已经在相应模块的init中完成
-	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
-		b, err := os.ReadFile(flags.ConfigFile)
-		if err != nil {
-			return err
-		}
-		cst := &Config{}
-		if err := json.Unmarshal(b, cst); err != nil {
-			return err
-		}
-		// 确保 Extensions 包含所有已注册字段的默认值
-		ensureExtensionsDefaults(cst)
-		Conf = cst
-		return nil
-	}), event.Max+2)
-
-	event.On(eventType.ServerInitializeDone, event.ListenerFunc(func(e event.Event) error {
-		event.Trigger(eventType.ConfigUpdated, event.M{
-			"old": Config{},
-			"new": *Conf,
-		})
-		return nil
-	}), event.Low)
-
-	event.On(eventType.ProcessStart, event.ListenerFunc(func(e event.Event) error {
-		if _, err := os.Stat(flags.ConfigFile); os.IsNotExist(err) {
-			installGuide()
-			// 写入默认配置文件
-			b, err := json.MarshalIndent(Default(), "", "  ")
-			if err != nil {
-				return err
-			}
-			if err := os.WriteFile(flags.ConfigFile, b, 0644); err != nil {
-				return err
-			}
-			return nil
-		}
-		return nil
-	}), event.Max+7)
+	app.RegisterModuleFactory(NewConfigModule().Name(), NewConfigModule)
 }
 
 // InstallGuideFS 用于存储安装引导页面的静态文件系统，由外部包注入以避免循环引用
