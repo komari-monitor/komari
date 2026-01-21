@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"os"
 
+	"github.com/komari-monitor/komari/internal/app"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/spf13/cobra"
@@ -14,10 +16,13 @@ var PermitPasswordLoginCmd = &cobra.Command{
 	Short: "Force permit password login",
 	Long:  `Force permit password login`,
 	Run: func(cmd *cobra.Command, args []string) {
-		db := dbcore.GetDBInstance()
-		err := db.Transaction(func(tx *gorm.DB) error {
-			return tx.Model(&conf.V1Struct{}).Where("id = ?", 1).
-				Update("disable_password_login", false).Error
+		a := app.New().With(dbcore.NewDBModule())
+		err := a.RunWith(context.Background(), func(ctx context.Context) error {
+			db := dbcore.GetDBInstance()
+			return db.Transaction(func(tx *gorm.DB) error {
+				return tx.Model(&conf.V1Struct{}).Where("id = ?", 1).
+					Update("disable_password_login", false).Error
+			})
 		})
 		if err != nil {
 			cmd.Println("Error:", err)

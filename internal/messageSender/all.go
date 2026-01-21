@@ -5,6 +5,7 @@ import (
 	_ "github.com/komari-monitor/komari/internal/messageSender/email"
 	_ "github.com/komari-monitor/komari/internal/messageSender/empty"
 	_ "github.com/komari-monitor/komari/internal/messageSender/javascript"
+	_ "github.com/komari-monitor/komari/internal/messageSender/meow"
 	_ "github.com/komari-monitor/komari/internal/messageSender/serverchan3"
 	_ "github.com/komari-monitor/komari/internal/messageSender/serverchanturbo"
 	_ "github.com/komari-monitor/komari/internal/messageSender/telegram"
