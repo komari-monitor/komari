@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="_图层_1" data-name="图层_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" viewBox="0 0 144 144">
+  <!-- Generator: Adobe Illustrator 29.6.1, SVG Export Plug-In . SVG Version: 2.1.1 Build 9)  -->
+  <defs>
+    <style>
+      .st0 {
+        fill: url(#_未命名的渐变_9);
+      }
+
+      .st1 {
+        fill: #fff;
+      }
+    </style>
+    <linearGradient id="_未命名的渐变_9" data-name="未命名的渐变 9" x1="72" y1="143.87" x2="71.82" y2=".3" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1a54a5"/>
+      <stop offset="1" stop-color="#298ecf"/>
+    </linearGradient>
+  </defs>
+  <rect class="st0" x="-.09" y="0" width="144" height="144" rx="28.71" ry="28.71"/>
+  <path class="st1" d="M85.39,91.91h-35.36v-48.04h43.93v38.21s15.99,4.15,23.35,11.62c.48-1.67.76-3.43.76-5.25v-40.95c0-10.39-8.42-18.81-18.81-18.81h-54.52c-10.39,0-18.81,8.42-18.81,18.81v40.95c0,10.39,8.42,18.81,18.81,18.81h54.52s-1.9-7.86-13.87-15.36Z"/>
+  <path class="st1" d="M74.86,81.02s24.46,13.75,29.11,26.25h20s-9.29-21.07-49.11-26.25Z"/>
+</svg>
