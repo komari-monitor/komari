@@ -59,6 +59,7 @@ func LoadApiV1Routes(r *gin.Engine, conf conf.V1Struct) {
 	r.GET("/api/records/load", record.GetRecordsByUUID)
 	r.GET("/api/records/ping", record.GetPingRecords)
 	r.GET("/api/task/ping", task.GetPublicPingTasks)
+	r.GET("/api/mjpeg_live", MjpegLiveHandler)
 
 	// #region Agent
 	r.POST("/api/clients/register", client.RegisterClient)

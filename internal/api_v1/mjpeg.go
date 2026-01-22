@@ -1,4 +1,4 @@
-package mjpeg
+package api_v1
 
 import (
 	"archive/zip"
