@@ -3,13 +3,14 @@ package cmd
 import (
 	"context"
 	"os"
+	"time"
 
-	"github.com/komari-monitor/komari/internal/app"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/accounts"
 	"github.com/komari-monitor/komari/internal/database/models"
 	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/spf13/cobra"
+	"go.uber.org/fx"
 )
 
 var (
@@ -27,8 +28,12 @@ var ChpasswdCmd = &cobra.Command{
 			cmd.Help()
 			return
 		}
-		a := app.New().With(dbcore.NewDBModule())
-		err := a.RunWith(context.Background(), func(ctx context.Context) error {
+		fxApp := fx.New(
+			conf.FxModule(),
+			dbcore.FxModule(),
+			fx.NopLogger,
+		)
+		err := runFxWith(context.Background(), fxApp, 5*time.Second, func(ctx context.Context) error {
 			if _, err := os.Stat(conf.Conf.Database.DatabaseFile); os.IsNotExist(err) {
 				cmd.Println("Database file does not exist.")
 				return nil

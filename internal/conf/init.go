@@ -7,12 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/internal/app"
 )
-
-func init() {
-	app.RegisterModuleFactory(NewConfigModule().Name(), NewConfigModule)
-}
 
 // InstallGuideFS 用于存储安装引导页面的静态文件系统，由外部包注入以避免循环引用
 var InstallGuideFS fs.FS

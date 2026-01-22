@@ -7,42 +7,40 @@ import (
 	"log/slog"
 
 	"github.com/gookit/event"
-	"github.com/komari-monitor/komari/internal/app"
 	"github.com/komari-monitor/komari/internal/conf"
 	"github.com/komari-monitor/komari/internal/database/auditlog"
 	"github.com/komari-monitor/komari/internal/database/records"
 	"github.com/komari-monitor/komari/internal/database/tasks"
-	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/komari-monitor/komari/internal/eventType"
+	"go.uber.org/fx"
+	"gorm.io/gorm"
 )
 
 type Module struct {
 	stops []StopFunc
 }
 
-var _ app.Module = (*Module)(nil)
-
-func NewModule() *Module { return &Module{} }
-
-func (m *Module) Name() string { return "scheduler" }
-func (m *Module) Depends() []string {
-	// These scheduled tasks depend on DB being available.
-	return []string{dbcore.NewDBModule().Name()}
+func FxModule() fx.Option {
+	return fx.Options(
+		fx.Provide(func() *Module { return &Module{} }),
+		fx.Invoke(registerSchedulerLifecycle),
+	)
 }
 
-func (m *Module) Provide(r app.Registry) error { return nil }
-
-func (m *Module) Hooks() app.Hooks {
-	return app.Hooks{
-		Start: func(ctx context.Context) {
+func registerSchedulerLifecycle(lc fx.Lifecycle, m *Module, _ *gorm.DB) {
+	// _ *gorm.DB ensures DB is initialized before scheduler starts.
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
 			_ = ctx
 			m.start()
+			return nil
 		},
-		Stop: func(ctx context.Context) {
+		OnStop: func(ctx context.Context) error {
 			_ = ctx
 			m.stop()
+			return nil
 		},
-	}
+	})
 }
 
 func (m *Module) start() {

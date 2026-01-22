@@ -5,10 +5,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/komari-monitor/komari/internal/app"
+	"github.com/komari-monitor/komari/internal/conf"
+	"github.com/komari-monitor/komari/internal/dbcore"
 	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/internal/server"
 	"github.com/spf13/cobra"
+	"go.uber.org/fx"
 )
 
 var ServerCmd = &cobra.Command{
@@ -16,11 +18,14 @@ var ServerCmd = &cobra.Command{
 	Short: "Start the server",
 	Long:  `Start the server`,
 	Run: func(cmd *cobra.Command, args []string) {
-		a := app.New().
-			WithShutdownTimeout(5 * time.Second).
-			With(server.NewHTTPModule()).
-			With(scheduler.NewModule())
-		if err := a.RunUntilSignal(context.Background()); err != nil {
+		fxApp := fx.New(
+			conf.FxModule(),
+			dbcore.FxModule(),
+			server.FxModule(),
+			scheduler.FxModule(),
+			fx.NopLogger,
+		)
+		if err := runFxUntilSignal(context.Background(), fxApp, 5*time.Second); err != nil {
 			cmd.PrintErrln(err)
 			os.Exit(1)
 		}
