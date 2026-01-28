@@ -397,9 +397,9 @@ func DoScheduledWork() {
 	minute := time.NewTicker(60 * time.Second)
 	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
 	records.CompactRecord()
-	cfg, _ := config.Get()
 	go notifier.CheckExpireScheduledWork()
 	for {
+		cfg, _ := config.Get()
 		select {
 		case <-ticker.C:
 			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
