@@ -140,22 +140,31 @@ func checkMetricThreshold(records []models.Record, task models.LoadNotification)
 
 // getMetricValue 根据指标名称获取记录中的对应值
 func getMetricValue(record models.Record, metric string) float32 {
-	client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
-	if err != nil {
-		log.Printf("Failed to get client info for %s: %v", record.Client, err)
-		return 0
-	}
 	switch metric {
 	case "cpu":
 		return record.Cpu
 	case "gpu":
 		return record.Gpu
+	case "net_in", "netin":
+		return bytesPerSecondToMbps(record.NetIn)
+	case "net_out", "netout":
+		return bytesPerSecondToMbps(record.NetOut)
 	case "ram":
+		client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
+		if err != nil {
+			log.Printf("Failed to get client info for %s: %v", record.Client, err)
+			return 0
+		}
 		if record.RamTotal > 0 {
 			return float32(record.Ram) / float32(client.MemTotal) * 100
 		}
 		return 0
 	case "swap":
+		client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
+		if err != nil {
+			log.Printf("Failed to get client info for %s: %v", record.Client, err)
+			return 0
+		}
 		if record.SwapTotal > 0 {
 			return float32(record.Swap) / float32(client.SwapTotal) * 100
 		}
@@ -165,6 +174,11 @@ func getMetricValue(record models.Record, metric string) float32 {
 	case "temp":
 		return record.Temp
 	case "disk":
+		client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
+		if err != nil {
+			log.Printf("Failed to get client info for %s: %v", record.Client, err)
+			return 0
+		}
 		if record.DiskTotal > 0 {
 			return float32(record.Disk) / float32(client.DiskTotal) * 100
 		}
@@ -185,6 +199,15 @@ func getMetricValue(record models.Record, metric string) float32 {
 		}
 		return 0
 	}
+}
+
+func bytesPerSecondToMbps(bytesPerSecond int64) float32 {
+	if bytesPerSecond <= 0 {
+		return 0
+	}
+
+	// 采用十进制 Mbps：1 Mbps = 1,000,000 bit/s
+	return float32(float64(bytesPerSecond) * 8 / 1_000_000)
 }
 
 // sendLoadNotification 发送负载通知
