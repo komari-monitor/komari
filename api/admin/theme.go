@@ -14,7 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/database/config"
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 )
@@ -133,12 +133,7 @@ func SetTheme(c *gin.Context) {
 		}
 	}
 
-	// 更新配置
-	updateData := map[string]interface{}{
-		"theme": themeName,
-	}
-
-	if err := config.Update(updateData); err != nil {
+	if err := config.Set("theme", themeName); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "更新主题设置失败: "+err.Error())
 		return
 	}

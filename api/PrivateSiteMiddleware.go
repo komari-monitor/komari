@@ -3,8 +3,8 @@ package api
 import (
 	"net/http"
 
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/database/config"
 
 	"github.com/gin-gonic/gin"
 )
@@ -45,14 +45,14 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		conf, err := config.Get()
+		PrivateSite, err := config.GetAs[bool](config.PrivateSiteKey, false)
 		if err != nil {
 			RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
 			c.Abort()
 			return
 		}
 		// 验证私有, 如果不是私有站点，直接放行
-		if !conf.PrivateSite {
+		if !PrivateSite {
 			c.Next()
 			return
 		}

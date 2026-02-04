@@ -8,16 +8,81 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/database/config"
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 )
 
 func GetPublicInfo() (any, error) {
-	cst, err := config.Get()
+	cstPtr, err := config.GetManyAs[models.Config]()
 	if err != nil {
 		return nil, err
 	}
+	cst := *cstPtr
+
+	all, allErr := config.GetAll()
+	hasKey := func(k string) bool {
+		if allErr != nil {
+			return false
+		}
+		_, ok := all[k]
+		return ok
+	}
+
+	// Apply defaults only when a key is missing.
+	if !hasKey("sitename") {
+		cst.Sitename = "Komari"
+	}
+	if !hasKey("description") {
+		cst.Description = "Komari Monitor, a simple server monitoring tool."
+	}
+	if !hasKey("theme") {
+		cst.Theme = "default"
+	}
+	if !hasKey("o_auth_provider") {
+		cst.OAuthProvider = "github"
+	}
+	if !hasKey("geo_ip_enabled") {
+		cst.GeoIpEnabled = true
+	}
+	if !hasKey("geo_ip_provider") {
+		cst.GeoIpProvider = "ip-api"
+	}
+	if !hasKey("notification_method") {
+		cst.NotificationMethod = "none"
+	}
+	if !hasKey("record_enabled") {
+		cst.RecordEnabled = true
+	}
+	if !hasKey("record_preserve_time") {
+		cst.RecordPreserveTime = 720
+	}
+	if !hasKey("ping_record_preserve_time") {
+		cst.PingRecordPreserveTime = 24
+	}
+
+	// Fallback defaults if we couldn't enumerate keys.
+	if allErr != nil {
+		if cst.Sitename == "" {
+			cst.Sitename = "Komari"
+		}
+		if cst.Description == "" {
+			cst.Description = "Komari Monitor, a simple server monitoring tool."
+		}
+		if cst.Theme == "" {
+			cst.Theme = "default"
+		}
+		if cst.OAuthProvider == "" {
+			cst.OAuthProvider = "github"
+		}
+		if cst.RecordPreserveTime == 0 {
+			cst.RecordPreserveTime = 720
+		}
+		if cst.PingRecordPreserveTime == 0 {
+			cst.PingRecordPreserveTime = 24
+		}
+	}
+
 	db := dbcore.GetDBInstance()
 	tc := models.ThemeConfiguration{}
 	err = db.Model(&models.ThemeConfiguration{}).Where("short = ?", cst.Theme).First(&tc).Error

@@ -3,8 +3,8 @@ package admin
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
-	"github.com/komari-monitor/komari/database/config"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
@@ -50,9 +50,10 @@ func SetMessageSenderProvider(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to save message sender provider configuration: "+err.Error())
 		return
 	}
-	cfg, _ := config.Get()
+	NotificationMethod, _ := config.GetAs[string](config.NotificationMethodKey, "none")
+
 	// 正在使用，重载
-	if cfg.NotificationMethod == senderConfig.Name {
+	if NotificationMethod == senderConfig.Name {
 		err := messageSender.LoadProvider(senderConfig.Name, senderConfig.Addition)
 		if err != nil {
 			api.RespondError(c, 500, "Failed to load message sender provider: "+err.Error())

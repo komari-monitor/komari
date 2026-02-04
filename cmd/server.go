@@ -25,10 +25,11 @@ import (
 	"github.com/komari-monitor/komari/api/record"
 	"github.com/komari-monitor/komari/api/task"
 	"github.com/komari-monitor/komari/cmd/flags"
+
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/database/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
@@ -78,7 +79,7 @@ func RunServer() {
 	if utils.VersionHash != "unknown" {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	conf, err := config.Get()
+	conf, err := config.GetManyAs[config.Legacy]()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -98,8 +99,11 @@ func RunServer() {
 	}
 
 	config.Subscribe(func(event config.ConfigEvent) {
-		if event.New.OAuthProvider != event.Old.OAuthProvider {
-			oidcProvider, err := database.GetOidcConfigByName(event.New.OAuthProvider)
+		if ok, t := config.IsChangedT[string](event, config.OAuthProviderKey); ok {
+			if t == "" || t == "none" {
+				t = "github"
+			}
+			oidcProvider, err := database.GetOidcConfigByName(t)
 			if err != nil {
 				log.Printf("Failed to get OIDC provider config: %v", err)
 			} else {
@@ -110,12 +114,11 @@ func RunServer() {
 				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
 			}
 		}
-		if event.New.NotificationMethod != event.Old.NotificationMethod {
-			messageSender.Initialize()
-		}
-		if event.New.NezhaCompatEnabled != event.Old.NezhaCompatEnabled {
-			if event.New.NezhaCompatEnabled {
-				if err := StartNezhaCompat(event.New.NezhaCompatListen); err != nil {
+
+		if ok, t := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey); ok {
+			if t {
+				l, _ := config.GetAs[string](config.NezhaCompatListenKey)
+				if err := StartNezhaCompat(l); err != nil {
 					log.Printf("start Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
 				}
@@ -144,13 +147,17 @@ func RunServer() {
 
 	DynamicCorsEnabled = conf.AllowCors
 	config.Subscribe(func(event config.ConfigEvent) {
-		DynamicCorsEnabled = event.New.AllowCors
-		if event.New.GeoIpProvider != event.Old.GeoIpProvider {
+		if ok, t := config.IsChangedT[bool](event, config.AllowCorsKey); ok {
+			DynamicCorsEnabled = t
+		}
+		if event.IsChanged(config.GeoIpProviderKey) {
 			go geoip.InitGeoIp()
 		}
-		if event.New.NotificationMethod != event.Old.NotificationMethod {
+
+		if event.IsChanged(config.NotificationMethodKey) {
 			go messageSender.Initialize()
 		}
+
 	})
 	r.Use(func(c *gin.Context) {
 		if DynamicCorsEnabled {
@@ -339,9 +346,9 @@ func RunServer() {
 		r.NoRoute(handlers...)
 	})
 	// #region 静态文件服务
-	public.UpdateIndex(conf)
+	public.UpdateIndex()
 	config.Subscribe(func(event config.ConfigEvent) {
-		public.UpdateIndex(event.New)
+		public.UpdateIndex()
 	})
 
 	srv := &http.Server{
@@ -400,7 +407,7 @@ func DoScheduledWork() {
 	records.CompactRecord()
 	go notifier.CheckExpireScheduledWork()
 	for {
-		cfg, _ := config.Get()
+		cfg, _ := config.GetManyAs[config.Legacy]()
 		select {
 		case <-ticker.C:
 			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))

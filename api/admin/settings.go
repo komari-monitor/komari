@@ -1,12 +1,9 @@
 package admin
 
 import (
-	"database/sql"
-
 	"github.com/komari-monitor/komari/api"
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/database/config"
-	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
 
@@ -15,20 +12,10 @@ import (
 
 // GetSettings 获取自定义配置
 func GetSettings(c *gin.Context) {
-	cst, err := config.Get()
+	cst, err := config.GetAll()
 	if err != nil {
-		if err == sql.ErrNoRows {
-			//override
-			cst = models.Config{Sitename: "Komari"}
-			cst.ID = 1
-			config.Save(cst)
-			api.RespondSuccess(c, cst)
-			return
-		}
-		c.JSON(500, gin.H{
-			"status":  "error",
-			"message": "Internal Server Error: " + err.Error(),
-		})
+		api.RespondError(c, 500, "Failed to get settings: "+err.Error())
+		return
 	}
 	api.RespondSuccess(c, cst)
 }
@@ -41,8 +28,7 @@ func EditSettings(c *gin.Context) {
 		return
 	}
 
-	cfg["id"] = 1 // Only one record
-	if err := config.Update(cfg); err != nil {
+	if err := config.SetMany(cfg); err != nil {
 		api.RespondError(c, 500, "Failed to update settings: "+err.Error())
 		return
 	}
@@ -50,10 +36,6 @@ func EditSettings(c *gin.Context) {
 	uuid, _ := c.Get("uuid")
 	message := "update settings: "
 	for key := range cfg {
-		ignoredKeys := []string{"id", "updated_at"}
-		if contains(ignoredKeys, key) {
-			continue
-		}
 		message += key + ", "
 	}
 	if len(message) > 2 {

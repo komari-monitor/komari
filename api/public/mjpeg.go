@@ -22,7 +22,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api/jsonRpc"
-	conf "github.com/komari-monitor/komari/database/config"
+	conf "github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/models"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
@@ -665,11 +665,7 @@ func renderStatusTable(ctx context.Context, lang string, tzOffset *int, fontErr 
 	y := padding
 
 	// 标题
-	c, _ := conf.Get()
-	siteName := c.Sitename
-	if siteName == "" {
-		siteName = "Komari Monitor"
-	}
+	siteName, _ := conf.GetAs[string](conf.SitenameKey, "Komari Monitor")
 	fontMutex.RLock()
 	boldFace := fontFaceBold
 	normalFace := fontFace
@@ -837,11 +833,7 @@ func renderStatusTableWithBasicFont(ctx context.Context, lang string, tzOffset *
 	y := padding
 
 	// 标题
-	c, _ := conf.Get()
-	siteName := c.Sitename
-	if siteName == "" {
-		siteName = "Komari Monitor"
-	}
+	siteName, _ := conf.GetAs[string](conf.SitenameKey, "Komari Monitor")
 
 	drawStringBasic(img, siteName, padding+5, y+titleFontSize, color.Black)
 	y += headerHeight

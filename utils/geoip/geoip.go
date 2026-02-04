@@ -1,13 +1,13 @@
 package geoip
 
 import (
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
 	"unicode"
 
-	"github.com/komari-monitor/komari/database/config"
+	"github.com/komari-monitor/komari/config"
 	"github.com/patrickmn/go-cache"
 )
 
@@ -52,60 +52,63 @@ func GetRegionUnicodeEmoji(isoCode string) string {
 }
 
 func InitGeoIp() {
-	conf, err := config.Get()
+	conf, err := config.GetMany(map[string]any{
+		config.GeoIpEnabledKey:  true,
+		config.GeoIpProviderKey: "ipinfo",
+	})
 	if err != nil {
 		panic("Failed to get configuration for GeoIP: " + err.Error())
 	}
-	if !conf.GeoIpEnabled {
+	if !conf[config.GeoIpEnabledKey].(bool) {
 		return
 	}
-	switch conf.GeoIpProvider {
+	switch conf[config.GeoIpProviderKey].(string) {
 	case "mmdb":
 		NewCurrentProvider, err := NewMaxMindGeoIPService()
 		if err != nil {
-			log.Printf("Failed to initialize MaxMind GeoIP service: " + err.Error())
+			slog.Error("Failed to initialize MaxMind GeoIP service: " + err.Error())
 		}
 		if NewCurrentProvider != nil {
 			CurrentProvider = NewCurrentProvider
 		} else {
 			CurrentProvider = &EmptyProvider{}
-			log.Println("Failed to initialize MaxMind GeoIP service, using EmptyProvider instead.")
+			slog.Error("Failed to initialize MaxMind GeoIP service, using EmptyProvider instead.")
 		}
 	case "ip-api":
 		NewCurrentProvider, err := NewIPAPIService()
 		if err != nil {
-			log.Printf("Failed to initialize ip-api service: " + err.Error())
+			slog.Error("Failed to initialize ip-api service: " + err.Error())
 		}
 		if NewCurrentProvider != nil {
 			CurrentProvider = NewCurrentProvider
-			log.Println("Using ip-api.com as GeoIP provider.")
+			slog.Info("Using ip-api.com as GeoIP provider.")
 		} else {
 			CurrentProvider = &EmptyProvider{}
-			log.Println("Failed to initialize ip-api service, using EmptyProvider instead.")
+			slog.Info("Failed to initialize ip-api service, using EmptyProvider instead.")
 		}
 	case "geojs":
 		NewCurrentProvider, err := NewGeoJSService()
 		if err != nil {
-			log.Printf("Failed to initialize GeoJS service: " + err.Error())
+			slog.Error("Failed to initialize GeoJS service: " + err.Error())
 		}
 		if NewCurrentProvider != nil {
 			CurrentProvider = NewCurrentProvider
-			log.Println("Using geojs.io as GeoIP provider.")
+			slog.Info("Using geojs.io as GeoIP provider.")
 		} else {
 			CurrentProvider = &EmptyProvider{}
-			log.Println("Failed to initialize GeoJS service, using EmptyProvider instead.")
+			slog.Info("Failed to initialize GeoJS service, using EmptyProvider instead.")
 		}
 	case "ipinfo":
 		NewCurrentProvider, err := NewIPInfoService()
 		if err != nil {
-			log.Printf("Failed to initialize IPInfo service: " + err.Error())
+			slog.Error("Failed to initialize IPInfo service: " + err.Error())
 		}
 		if NewCurrentProvider != nil {
 			CurrentProvider = NewCurrentProvider
-			log.Println("Using ipinfo.io as GeoIP provider.")
+			slog.Info("Using ipinfo.io as GeoIP provider.")
 		} else {
 			CurrentProvider = &EmptyProvider{}
-			log.Println("Failed to initialize IPInfo service, using EmptyProvider instead.")
+			slog.Info("Failed to initialize IPInfo service, using EmptyProvider instead.")
 		}
 	default:
 		CurrentProvider = &EmptyProvider{}
@@ -133,7 +136,7 @@ func UpdateDatabase() error {
 	err := CurrentProvider.UpdateDatabase()
 	if err == nil {
 		geoCache.Flush()
-		log.Println("GeoIP cache cleared due to database update.")
+		slog.Info("GeoIP cache cleared due to database update.")
 	}
 	return err
 }

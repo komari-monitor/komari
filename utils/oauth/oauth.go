@@ -6,8 +6,8 @@ import (
 	"log"
 	"sync"
 
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
-	"github.com/komari-monitor/komari/database/config"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/oauth/factory"
 )
@@ -70,15 +70,15 @@ func Initialize() error {
 			}
 		}
 	})
-	cfg, _ := config.Get()
-	if cfg.OAuthProvider == "" || cfg.OAuthProvider == "none" {
-		LoadProvider("empty", "{}")
+	cfg, _ := config.GetAs[string](config.OAuthProviderKey, "github")
+	if cfg == "" || cfg == "none" {
+		LoadProvider("github", "{}")
 		return nil
 	}
-	provider, err := database.GetOidcConfigByName(cfg.OAuthProvider)
+	provider, err := database.GetOidcConfigByName(cfg)
 	if err != nil {
-		// 如果没有找到配置，使用empty provider
-		LoadProvider("empty", "{}")
+		// 如果没有找到配置，使用github provider
+		LoadProvider("github", "{}")
 		return nil
 	}
 	err = LoadProvider(provider.Name, provider.Addition)

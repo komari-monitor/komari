@@ -5,9 +5,9 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/database/config"
 
 	"github.com/gin-gonic/gin"
 )
@@ -19,8 +19,8 @@ type LoginRequest struct {
 }
 
 func Login(c *gin.Context) {
-	conf, _ := config.Get()
-	if conf.DisablePasswordLogin {
+	DisablePasswordLogin, _ := config.GetAs[bool](config.DisablePasswordLoginKey, false)
+	if DisablePasswordLogin {
 		RespondError(c, http.StatusForbidden, "Password login is disabled")
 		return
 	}

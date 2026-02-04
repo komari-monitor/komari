@@ -3,8 +3,8 @@ package client
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/config"
 	"github.com/komari-monitor/komari/utils"
 )
 
@@ -14,15 +14,14 @@ func RegisterClient(c *gin.Context) {
 		api.RespondError(c, 403, "Invalid AutoDiscovery Key")
 		return
 	}
-	cfg, err := config.Get()
+	AutoDiscoveryKey, err := config.GetAs[string](config.AutoDiscoveryKeyKey, "")
 	if err != nil {
-		api.RespondError(c, 500, "Failed to get configuration: "+err.Error())
+		api.RespondError(c, 500, "Failed to get AutoDiscovery Key: "+err.Error())
 		return
 	}
-
-	if cfg.AutoDiscoveryKey == "" ||
-		len(cfg.AutoDiscoveryKey) < 12 ||
-		"Bearer "+cfg.AutoDiscoveryKey != auth {
+	if AutoDiscoveryKey == "" ||
+		len(AutoDiscoveryKey) < 12 ||
+		"Bearer "+AutoDiscoveryKey != auth {
 
 		api.RespondError(c, 403, "Invalid AutoDiscovery Key")
 		return
