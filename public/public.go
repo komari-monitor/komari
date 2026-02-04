@@ -14,8 +14,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/database/config"
-	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/config"
 )
 
 //go:embed dist
@@ -54,24 +53,32 @@ func initIndex() {
 	}
 	RawIndexFile = string(index)
 }
-func UpdateIndex(cfg models.Config) {
-	IndexFile = applyCustomizations(RawIndexFile, cfg)
+func UpdateIndex() {
+	IndexFile = applyCustomizations(RawIndexFile)
 }
 
 // applyCustomizations 应用自定义内容到HTML字符串
-func applyCustomizations(htmlContent string, cfg models.Config) string {
+func applyCustomizations(htmlContent string) string {
 	var titleReplacement string
-	if cfg.Sitename == "Komari" {
+	if Sitename, err := config.GetAs[string](config.SitenameKey, "Komari Monitor"); err != nil || Sitename == "Komari Monitor" {
 		titleReplacement = "<title>Komari Monitor</title>"
 	} else {
-		titleReplacement = fmt.Sprintf("<title>%s - Komari Monitor</title>", html.EscapeString(cfg.Sitename))
+		titleReplacement = fmt.Sprintf("<title>%s - Komari Monitor</title>", html.EscapeString(Sitename))
 	}
 
+	cfg, err := config.GetMany(map[string]any{
+		config.DescriptionKey: "A simple server monitor tool.",
+		config.CustomHeadKey:  "",
+		config.CustomBodyKey:  "",
+	})
+	if err != nil {
+		return htmlContent
+	}
 	replaceMap := map[string]string{
 		"<title>Komari Monitor</title>": titleReplacement,
-		"A simple server monitor tool.": cfg.Description,
-		"</head>":                       cfg.CustomHead + "</head>",
-		"</body>":                       cfg.CustomBody + "</body>",
+		"A simple server monitor tool.": cfg[config.DescriptionKey].(string),
+		"</head>":                       cfg[config.CustomHeadKey].(string) + "</head>",
+		"</body>":                       cfg[config.CustomBodyKey].(string) + "</body>",
 	}
 
 	updated := htmlContent
@@ -144,15 +151,15 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		}
 
 		// 获取当前主题配置
-		cfg, err := config.Get()
-		if err != nil || cfg.Theme == "default" || cfg.Theme == "" {
+		Theme, err := config.GetAs[string](config.ThemeKey, "default")
+		if err != nil || Theme == "default" || Theme == "" {
 			// 使用默认主题（embedded文件）
 			serveFromEmbedded(c, path)
 			return
 		}
 
 		// 使用自定义主题
-		serveFromTheme(c, path, cfg.Theme)
+		serveFromTheme(c, path, Theme)
 	})
 }
 
@@ -268,17 +275,8 @@ func serveThemeIndexWithCustomizations(c *gin.Context, indexPath string) {
 		return
 	}
 
-	// 获取配置以应用自定义内容
-	cfg, err := config.Get()
-	if err != nil {
-		// 如果获取配置失败，直接返回原始文件
-		c.Header("Content-Type", "text/html")
-		c.Data(http.StatusOK, "text/html", data)
-		return
-	}
-
 	// 使用通用的自定义内容应用函数
-	content := applyCustomizations(string(data), cfg)
+	content := applyCustomizations(string(data))
 
 	c.Header("Content-Type", "text/html")
 	c.Data(http.StatusOK, "text/html", []byte(content))

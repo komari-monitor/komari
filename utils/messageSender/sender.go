@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/database/config"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
 )
@@ -52,21 +52,21 @@ func Initialize() {
 			}
 		})
 	}()
-	cfg, _ := config.Get()
+	NotificationMethod, _ := config.GetAs[string](config.NotificationMethodKey, "none")
 
-	if cfg.NotificationMethod == "" || cfg.NotificationMethod == "none" {
+	if NotificationMethod == "" || NotificationMethod == "none" {
 		LoadProvider("empty", "{}")
 		return
 	}
 
 	// 尝试从数据库加载配置
-	senderConfig, err := database.GetMessageSenderConfigByName(cfg.NotificationMethod)
+	senderConfig, err := database.GetMessageSenderConfigByName(NotificationMethod)
 	if err != nil {
 		// 如果没有找到配置，使用empty provider
 		LoadProvider("empty", "{}")
 		return
 	}
-	LoadProvider(cfg.NotificationMethod, senderConfig.Addition)
+	LoadProvider(NotificationMethod, senderConfig.Addition)
 }
 
 func SendTextMessage(message string, title string) error {
@@ -74,11 +74,11 @@ func SendTextMessage(message string, title string) error {
 		return fmt.Errorf("message sender provider is not initialized")
 	}
 	var err error
-	cfg, err := config.Get()
+	NotificationEnabled, err := config.GetAs[bool](config.NotificationEnabledKey, false)
 	if err != nil {
 		return err
 	}
-	if !cfg.NotificationEnabled {
+	if !NotificationEnabled {
 		return nil
 	}
 	for i := 0; i < 3; i++ {
@@ -96,11 +96,14 @@ func SendEvent(event models.EventMessage) error {
 		return fmt.Errorf("message sender provider is not initialized")
 	}
 	var err error
-	cfg, err := config.Get()
+	cfg, err := config.GetMany(map[string]any{
+		config.NotificationEnabledKey:  false,
+		config.NotificationTemplateKey: "{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}",
+	})
 	if err != nil {
 		return err
 	}
-	if !cfg.NotificationEnabled {
+	if !cfg[config.NotificationEnabledKey].(bool) {
 		return nil
 	}
 
@@ -119,10 +122,8 @@ func SendEvent(event models.EventMessage) error {
 	}
 
 	// 如果没有实现,使用模板格式化为文本消息
-	messageTemplate := cfg.NotificationTemplate
-	if messageTemplate == "" {
-		messageTemplate = "{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}"
-	}
+	messageTemplate := cfg[config.NotificationTemplateKey].(string)
+
 	messageTemplate = parseTemplate(messageTemplate, event)
 
 	for i := 0; i < 3; i++ {

@@ -5,8 +5,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/config"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -23,7 +23,10 @@ func CheckExpireScheduledWork() {
 		duration := next.Sub(now)
 		time.Sleep(duration)
 
-		cfg, err := config.Get()
+		cfg, err := config.GetMany(map[string]any{
+			config.ExpireNotificationEnabledKey:  false,
+			config.ExpireNotificationLeadDaysKey: 7,
+		})
 		if err != nil {
 			time.Sleep(time.Second)
 			continue
@@ -38,8 +41,8 @@ func CheckExpireScheduledWork() {
 		checkTime := time.Now()
 
 		// 过期提醒检查（仅当启用过期通知时）
-		if cfg.ExpireNotificationEnabled {
-			notificationLeadDays := cfg.ExpireNotificationLeadDays
+		if cfg[config.ExpireNotificationEnabledKey].(bool) {
+			notificationLeadDays := cfg[config.ExpireNotificationLeadDaysKey].(int)
 
 			type clientToExpireInfo struct {
 				Name     string

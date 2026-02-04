@@ -11,10 +11,9 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/config"
-	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/rpc"
 	"github.com/komari-monitor/komari/ws"
 )
@@ -25,9 +24,9 @@ import (
 // params: 方法参数
 func OnInternalRequest(ctx context.Context, group string, method string, params interface{}) *rpc.JsonRpcResponse {
 	// 检查私有站点
-	conf, _ := config.Get()
+	PrivateSite, _ := config.GetAs[bool](config.PrivateSiteKey)
 
-	if conf.PrivateSite && group == "guest" {
+	if PrivateSite && group == "guest" {
 		return rpc.ErrorResponse(nil, rpc.PermissionDenied, "Private site enabled, please login first", nil)
 	}
 
@@ -64,12 +63,12 @@ func OnInternalRequest(ctx context.Context, group string, method string, params 
 
 // Json Rpc2 over websocket, /api/rpc2
 func OnRpcRequest(c *gin.Context) {
-	cfg, _ := config.Get()
+	AllowCors, _ := config.GetAs[bool](config.AllowCorsKey)
 
 	// GET -> WebSocket
 	if c.Request.Method == http.MethodGet {
 		_conn, err := ws.UpgradeRequest(c, func(r *http.Request) bool {
-			if cfg.AllowCors {
+			if AllowCors {
 				return true
 			}
 			return ws.CheckOrigin(r)
@@ -79,7 +78,7 @@ func OnRpcRequest(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket"})
 			return
 		}
-		permissionGroup := detectPermissionGroup(c, cfg)
+		permissionGroup := detectPermissionGroup(c)
 		meta := buildContextMeta(c, permissionGroup)
 		defer conn.Close()
 		for {
@@ -120,7 +119,7 @@ func OnRpcRequest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, jerr.Response())
 		return
 	}
-	permissionGroup := detectPermissionGroup(c, cfg)
+	permissionGroup := detectPermissionGroup(c)
 	meta := buildContextMeta(c, permissionGroup)
 	// 批量
 	responses := make([]*rpc.JsonRpcResponse, 0, len(requests))
@@ -161,7 +160,7 @@ func OnRpcRequest(c *gin.Context) {
 }
 
 // detectPermissionGroup 提取权限分组，与原逻辑保持一致
-func detectPermissionGroup(c *gin.Context, cfg models.Config) string {
+func detectPermissionGroup(c *gin.Context) string {
 	permissionGroup := "guest"
 	token := c.Query("Authorization")
 	if _, err := clients.GetClientUUIDByToken(token); err == nil {
@@ -173,7 +172,11 @@ func detectPermissionGroup(c *gin.Context, cfg models.Config) string {
 		}
 	}
 	apiKey := c.GetHeader("Authorization")
-	if apiKey == "Bearer "+cfg.ApiKey {
+	if len(apiKey) <= len("Bearer ") {
+		return permissionGroup
+	}
+	cfg, _ := config.GetAs[string](config.ApiKeyKey, "")
+	if len(cfg) > 8 && apiKey == "Bearer "+cfg {
 		permissionGroup = "admin"
 	}
 	return permissionGroup

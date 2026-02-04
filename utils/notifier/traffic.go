@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/config"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/ws"
@@ -27,17 +27,17 @@ func CheckTraffic() {
 		return
 	}
 
-	cfg, err := config.Get()
+	cfg, err := config.GetAs[float64](config.TrafficLimitPercentageKey, 0)
 	if err != nil {
 		return
 	}
 
-	if cfg.TrafficLimitPercentage <= 0 {
+	if cfg <= 0 {
 		return
 	}
 
 	// 起始阈值：例如 80%，非5的倍数则从上取整到最近的5的倍数，例如 83->85
-	startThreshold := cfg.TrafficLimitPercentage
+	startThreshold := cfg
 	if startThreshold < 0 {
 		startThreshold = 0
 	}

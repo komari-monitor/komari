@@ -13,7 +13,7 @@ import (
 
 	"strconv"
 
-	"github.com/komari-monitor/komari/database/config"
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
@@ -146,12 +146,13 @@ func GetVersion(c *gin.Context) {
 }
 
 func isApiKeyValid(apiKey string) bool {
-	cfg, err := config.Get()
+	apiKeyConfig, err := config.GetAs[string](config.ApiKeyKey, "")
 	if err != nil {
 		return false
 	}
-	if cfg.ApiKey == "" || len(cfg.ApiKey) < 12 {
+
+	if apiKeyConfig == "" || len(apiKeyConfig) < 12 {
 		return false
 	}
-	return apiKey == "Bearer "+cfg.ApiKey
+	return apiKey == "Bearer "+apiKeyConfig
 }

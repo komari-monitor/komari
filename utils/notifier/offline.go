@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
@@ -32,8 +32,8 @@ var clientStates sync.Map
 // getNotificationConfig 获取指定客户端的通知配置。
 // 返回配置对象和一个布尔值，指示全局和该客户端是否启用通知。
 func getNotificationConfig(clientID string) (*models.OfflineNotification, bool) {
-	conf, err := config.Get()
-	if err != nil || !conf.NotificationEnabled {
+	conf, err := config.GetAs[bool](config.NotificationEnabledKey, false)
+	if err != nil || !conf {
 		return nil, false
 	}
 
