@@ -345,11 +345,6 @@ func RunServer() {
 	public.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(handlers...)
 	})
-	// #region 静态文件服务
-	public.UpdateIndex()
-	config.Subscribe(func(event config.ConfigEvent) {
-		public.UpdateIndex()
-	})
 
 	srv := &http.Server{
 		Addr:    flags.Listen,

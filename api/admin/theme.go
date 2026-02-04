@@ -17,6 +17,7 @@ import (
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/public"
 )
 
 // UploadTheme 上传主题
@@ -69,6 +70,15 @@ func ListThemes(c *gin.Context) {
 	}
 
 	var themes []models.Theme
+	defaultTheme, err := public.PublicFS.ReadFile("defaultTheme/komari-theme.json")
+	if err == nil {
+		dt := models.Theme{}
+		err := json.Unmarshal(defaultTheme, &dt)
+		if err == nil {
+			themes = append(themes, dt)
+		}
+
+	}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			themeConfigPath := filepath.Join(dataDir, entry.Name(), "komari-theme.json")
@@ -586,8 +596,8 @@ func UpdateTheme(c *gin.Context) {
 
 func UpdateThemeSettings(c *gin.Context) {
 	theme := c.Query("theme")
-	if theme == "" || theme == "default" {
-		api.RespondError(c, http.StatusBadRequest, "主题名称不能为空或不能是默认主题")
+	if theme == "" {
+		api.RespondError(c, http.StatusBadRequest, "主题名称不能为空")
 		return
 	}
 
