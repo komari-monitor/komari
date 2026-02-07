@@ -15,18 +15,18 @@ type Theme struct {
 type Configuration struct {
 	Type string `json:"type"` // managed
 	Icon string `json:"icon"` // 图标
-	Name string `json:"name"`
+	Name any    `json:"name"`
 	Data any    `json:"data"` // 配置数据
 }
 
 type ManagedThemeConfigurationItem struct {
 	Key      string `json:"key"`
-	Name     string `json:"name"`
+	Name     any    `json:"name"`
 	Required bool   `json:"required"`
 	Type     string `json:"type"` // string number select switch title
 	Options  string `json:"options"`
 	Default  any    `json:"default"`
-	Help     string `json:"help"`
+	Help     any    `json:"help"`
 }
 
 type ThemeConfiguration struct {
