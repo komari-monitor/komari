@@ -33,6 +33,37 @@ func init() {
 	_ = os.MkdirAll("./data/theme", 0755)
 }
 
+// isSafePath 验证路径是否在指定的基础目录内，防止路径穿透攻击
+func isSafePath(basePath, targetPath string) bool {
+	// 获取基础目录的绝对路径
+	absBase, err := filepath.Abs(basePath)
+	if err != nil {
+		return false
+	}
+
+	// 清理目标路径，移除 ../ 等
+	cleanTarget := filepath.Clean(targetPath)
+
+	// 拼接完整路径
+	fullPath := filepath.Join(absBase, cleanTarget)
+
+	// 获取绝对路径
+	absTarget, err := filepath.Abs(fullPath)
+	if err != nil {
+		return false
+	}
+
+	// 检查目标路径是否以基础路径开头
+	// 使用 filepath.Rel 更可靠地检查路径关系
+	rel, err := filepath.Rel(absBase, absTarget)
+	if err != nil {
+		return false
+	}
+
+	// 如果相对路径以 .. 开头，说明目标在基础目录之外
+	return !strings.HasPrefix(rel, "..") && rel != ".."
+}
+
 // Static 注册静态资源和 SPA 路由处理
 func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	// 初始化嵌入式文件系统，指向 defaultTheme 根目录
@@ -57,12 +88,22 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	// filePath: 相对于主题根目录的路径 (例如 "theme.json" 或 "dist/assets/a.js")
 	// 返回: content, contentType, exists
 	getFileContent := func(themeID string, relativePath string) ([]byte, string, bool) {
-		// 为了安全和 embed 兼容性，移除开头的 /
 		cleanPath := strings.TrimPrefix(relativePath, "/")
 
-		// 1. 尝试从本地 ./data/themes/{themeID}/{cleanPath} 读取
+		cleanPath = filepath.Clean(cleanPath)
+
 		if themeID != DefaultTheme {
-			localPath := filepath.Join(DataDir, ThemesDir, themeID, cleanPath)
+			if strings.Contains(themeID, "..") || strings.Contains(themeID, "/") || strings.Contains(themeID, "\\") {
+				return nil, "", false
+			}
+
+			themeBasePath := filepath.Join(DataDir, ThemesDir, themeID)
+
+			if !isSafePath(themeBasePath, cleanPath) {
+				return nil, "", false
+			}
+
+			localPath := filepath.Join(themeBasePath, cleanPath)
 			// 检查文件是否存在且不是目录
 			if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
 				content, err := os.ReadFile(localPath)
@@ -76,6 +117,11 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		// 2. 尝试从嵌入式 defaultTheme/{cleanPath} 读取
 		// fs.ReadFile 处理 embed 路径时使用 "/"
 		embedPath := filepath.ToSlash(cleanPath)
+
+		if strings.Contains(embedPath, "..") {
+			return nil, "", false
+		}
+
 		if content, err := fs.ReadFile(defaultThemeFS, embedPath); err == nil {
 			return content, mime.TypeByExtension(filepath.Ext(embedPath)), true
 		}
