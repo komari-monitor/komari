@@ -2,14 +2,11 @@ package public
 
 import (
 	"embed"
-	"errors"
-	"fmt"
-	"html"
-	"io"
 	"io/fs"
-	"log"
+	"mime"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -17,291 +14,184 @@ import (
 	"github.com/komari-monitor/komari/config"
 )
 
-//go:embed dist
+//go:embed defaultTheme
 var PublicFS embed.FS
 
-var DistFS fs.FS
-var RawIndexFile string
+// 常量定义
+const (
+	DataDir      = "./data"
+	ThemesDir    = "theme"
+	FaviconFile  = "favicon.ico"
+	DefaultTheme = "default"
 
-var IndexFile string
+	// 主题内部结构定义
+	DistDir   = "dist"       // 静态资源存放目录
+	IndexFile = "index.html" // 相对于 DistDir
+)
 
-func initIndex() {
-	err := os.MkdirAll("./data/theme", 0755)
-	if err != nil {
-		log.Println("Failed to create theme directory:", err)
-		return
-	}
-	dist, err := fs.Sub(PublicFS, "dist")
-	if err != nil {
-		log.Println("Failed to create dist subdirectory:", err)
-	}
-	DistFS = dist
-
-	indexFile, err := dist.Open("index.html")
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			log.Println("index.html not exist, you may forget to put dist of frontend to public/dist")
-		}
-		log.Println("Failed to open index.html:", err)
-	}
-	defer func() {
-		_ = indexFile.Close()
-	}()
-	index, err := io.ReadAll(indexFile)
-	if err != nil {
-		log.Println("Failed to read index.html:", err)
-	}
-	RawIndexFile = string(index)
-}
-func UpdateIndex() {
-	IndexFile = applyCustomizations(RawIndexFile)
+func init() {
+	_ = os.MkdirAll("./data/theme", 0755)
 }
 
-// applyCustomizations 应用自定义内容到HTML字符串
-func applyCustomizations(htmlContent string) string {
-	var titleReplacement string
-	if Sitename, err := config.GetAs[string](config.SitenameKey, "Komari Monitor"); err != nil || Sitename == "Komari Monitor" {
-		titleReplacement = "<title>Komari Monitor</title>"
-	} else {
-		titleReplacement = fmt.Sprintf("<title>%s - Komari Monitor</title>", html.EscapeString(Sitename))
-	}
-
-	cfg, err := config.GetMany(map[string]any{
-		config.DescriptionKey: "A simple server monitor tool.",
-		config.CustomHeadKey:  "",
-		config.CustomBodyKey:  "",
-	})
-	if err != nil {
-		return htmlContent
-	}
-	replaceMap := map[string]string{
-		"<title>Komari Monitor</title>": titleReplacement,
-		"A simple server monitor tool.": cfg[config.DescriptionKey].(string),
-		"</head>":                       cfg[config.CustomHeadKey].(string) + "</head>",
-		"</body>":                       cfg[config.CustomBodyKey].(string) + "</body>",
-	}
-
-	updated := htmlContent
-	for k, v := range replaceMap {
-		updated = strings.Replace(updated, k, v, -1)
-	}
-	return updated
-}
-
+// Static 注册静态资源和 SPA 路由处理
 func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
-	initIndex()
+	// 初始化嵌入式文件系统，指向 defaultTheme 根目录
+	// 假设 defaultTheme 内部结构也是: dist/, theme.json 等
+	defaultThemeFS, err := fs.Sub(PublicFS, "defaultTheme")
+	if err != nil {
+		panic("you may forget to put dist of frontend to public/defaultTheme/dist")
+	}
 
-	// Serve favicon.ico: use local file if exists, fallback to embedded
-	r.GET("/favicon.ico", func(c *gin.Context) {
-		if _, err := os.Stat("data/favicon.ico"); err == nil {
-			c.File("data/favicon.ico")
+	getConfig := func() map[string]any {
+		cfg, _ := config.GetMany(map[string]any{
+			config.DescriptionKey: "A simple server monitor tool.",
+			config.CustomHeadKey:  "",
+			config.CustomBodyKey:  "",
+			config.SitenameKey:    "Komari Monitor",
+			config.ThemeKey:       DefaultTheme,
+		})
+		return cfg
+	}
+
+	// 核心逻辑：获取文件内容
+	// filePath: 相对于主题根目录的路径 (例如 "theme.json" 或 "dist/assets/a.js")
+	// 返回: content, contentType, exists
+	getFileContent := func(themeID string, relativePath string) ([]byte, string, bool) {
+		// 为了安全和 embed 兼容性，移除开头的 /
+		cleanPath := strings.TrimPrefix(relativePath, "/")
+
+		// 1. 尝试从本地 ./data/themes/{themeID}/{cleanPath} 读取
+		if themeID != DefaultTheme {
+			localPath := filepath.Join(DataDir, ThemesDir, themeID, cleanPath)
+			// 检查文件是否存在且不是目录
+			if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
+				content, err := os.ReadFile(localPath)
+				if err == nil {
+					return content, mime.TypeByExtension(filepath.Ext(localPath)), true
+				}
+			}
+			// 本地文件不存在，或读取失败 -> 继续向下回退
+		}
+
+		// 2. 尝试从嵌入式 defaultTheme/{cleanPath} 读取
+		// fs.ReadFile 处理 embed 路径时使用 "/"
+		embedPath := filepath.ToSlash(cleanPath)
+		if content, err := fs.ReadFile(defaultThemeFS, embedPath); err == nil {
+			return content, mime.TypeByExtension(filepath.Ext(embedPath)), true
+		}
+
+		return nil, "", false
+	}
+
+	// 核心逻辑：渲染 Index.html
+	serveIndex := func(c *gin.Context) {
+		reqPath := c.Request.URL.Path
+		cfg := getConfig()
+
+		currentTheme := cfg[config.ThemeKey].(string)
+		shouldReplace := true
+
+		// 特殊页面：强制使用 default 主题，且不进行内容替换
+		if strings.HasPrefix(reqPath, "/admin") || strings.HasPrefix(reqPath, "/terminal") {
+			currentTheme = DefaultTheme
+			shouldReplace = false
+		}
+
+		// 获取 dist/index.html (相对于主题根目录)
+		targetFile := path.Join(DistDir, IndexFile)
+		content, _, exists := getFileContent(currentTheme, targetFile)
+
+		if !exists {
+			c.String(http.StatusNotFound, "Index file missing (checked %s/dist/index.html and default).", currentTheme)
 			return
 		}
-		f, err := DistFS.Open("favicon.ico")
-		if err != nil {
+
+		// 如果不替换，直接返回原始内容
+		if !shouldReplace {
+			c.Data(http.StatusOK, "text/html; charset=utf-8", content)
+			return
+		}
+
+		// 执行 HTML 内容替换
+		htmlStr := string(content)
+		replacer := strings.NewReplacer(
+			"<title>Komari Monitor</title>", "<title>"+cfg[config.SitenameKey].(string)+"</title>",
+			"A simple server monitor tool.", cfg[config.DescriptionKey].(string),
+			"</head>", cfg[config.CustomHeadKey].(string)+"</head>",
+			"</body>", cfg[config.CustomBodyKey].(string)+"</body>",
+		)
+
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(replacer.Replace(htmlStr)))
+	}
+
+	// ================= 路由定义 =================
+
+	// 1. Favicon 优先策略
+	r.GET("/favicon.ico", func(c *gin.Context) {
+		// 优先：./data/favicon.ico
+		localFavicon := filepath.Join(DataDir, FaviconFile)
+		if _, err := os.Stat(localFavicon); err == nil {
+			c.File(localFavicon)
+			return
+		}
+
+		// 其次：当前主题的 dist/favicon.ico 或 theme_root/favicon.ico ?
+		// 通常构建后的资源在 dist 中，这里假设优先找 dist 内的，如果你的 favicon 在根目录，去掉 DistDir 拼接即可
+		cfg := getConfig()
+		themeFaviconPath := path.Join(DistDir, FaviconFile)
+		content, mimeType, exists := getFileContent(cfg[config.ThemeKey].(string), themeFaviconPath)
+		if exists {
+			c.Data(http.StatusOK, mimeType, content)
+			return
+		}
+
+		c.Status(http.StatusNotFound)
+	})
+
+	// 2. 静态资源路由 /themes/:id/*path
+	// 允许访问 /themes/MyTheme/theme.json 和 /themes/MyTheme/dist/assets/a.js
+	r.GET("/themes/:id/*path", func(c *gin.Context) {
+		themeID := c.Param("id")
+		// c.Param("path") 包含了开头的 /，getFileContent 会处理
+		filePath := c.Param("path")
+
+		content, mimeType, exists := getFileContent(themeID, filePath)
+		if exists {
+			c.Data(http.StatusOK, mimeType, content)
+			return
+		}
+		c.Status(http.StatusNotFound)
+	})
+
+	// 3. SPA 路由 (noRoute)
+	noRoute(func(c *gin.Context) {
+		if c.Request.Method != http.MethodGet {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		defer f.Close()
-		data, err := io.ReadAll(f)
-		if err != nil {
-			c.Status(http.StatusInternalServerError)
+
+		reqPath := c.Request.URL.Path
+		cfg := getConfig()
+		currentTheme := cfg[config.ThemeKey].(string)
+
+		// SPA 静态资源回退
+		distPath := path.Join(DistDir, reqPath)
+
+		content, mimeType, exists := getFileContent(currentTheme, distPath)
+		if exists {
+			c.Data(http.StatusOK, mimeType, content)
 			return
 		}
-		c.Data(http.StatusOK, "image/x-icon", data)
+
+		// 如果资源不存在，且路径包含扩展名 (如 .js, .css, .png)，则返回 404
+		// 避免将 index.html 作为 js 文件返回导致 "Failed to fetch dynamically imported module"
+		//ext := filepath.Ext(reqPath)
+		//if ext != "" && ext != ".html" {
+		//	c.Status(http.StatusNotFound)
+		//	return
+		//}
+
+		// 路由 (如 /dashboard, /settings) -> 返回 index.html
+		serveIndex(c)
 	})
-	// r.GET("/manifest.json", func(c *gin.Context) {
-	// 	cfg, err := config.Get()
-	// 	if cfg.Theme == "default" || cfg.Theme == "" || err != nil {
-	// 		// 使用默认主题的manifest.json
-	// 		f, err := DistFS.Open("manifest.json")
-	// 		if err != nil {
-	// 			c.Status(http.StatusNotFound)
-	// 			return
-	// 		}
-	// 		defer f.Close()
-	// 		data, err := io.ReadAll(f)
-	// 		if err != nil {
-	// 			c.Status(http.StatusInternalServerError)
-	// 			return
-	// 		}
-	// 		c.Data(http.StatusOK, "application/json", data)
-	// 	} else {
-	// 		// 使用自定义主题的manifest.json
-	// 		themePath := filepath.Join("./data/theme", cfg.Theme, "dist", "manifest.json")
-	// 		if _, err := os.Stat(themePath); os.IsNotExist(err) {
-	// 			c.JSON(http.StatusNotFound, gin.H{"error": "Manifest not found"})
-	// 		} else {
-	// 			c.File(themePath)
-	// 		}
-	// 	}
-	// })
-
-	// Serve theme files from data/theme directory (for theme previews and static assets)
-	r.Static("/themes", "./data/theme")
-
-	// 使用传入的noRoute函数来处理未匹配的路由
-	noRoute(func(c *gin.Context) {
-		path := c.Request.URL.Path
-
-		// 对于admin页面，直接使用embedded文件
-		if strings.HasPrefix(path, "/admin") || strings.HasPrefix(path, "/terminal") {
-			serveFromEmbedded(c, path)
-			return
-		}
-
-		// 获取当前主题配置
-		Theme, err := config.GetAs[string](config.ThemeKey, "default")
-		if err != nil || Theme == "default" || Theme == "" {
-			// 使用默认主题（embedded文件）
-			serveFromEmbedded(c, path)
-			return
-		}
-
-		// 使用自定义主题
-		serveFromTheme(c, path, Theme)
-	})
-}
-
-// serveFromEmbedded 从嵌入的文件系统服务文件
-func serveFromEmbedded(c *gin.Context, path string) {
-	// 处理静态资源文件夹
-	// folders := []string{"assets", "images", "streamer", "static"}
-	// for _, folder := range folders {
-	// 	if strings.HasPrefix(path, "/"+folder+"/") {
-	// 		c.Header("Cache-Control", "public, max-age=15552000")
-	// 		sub, err := fs.Sub(DistFS, folder)
-	// 		if err == nil {
-	// 			relativePath := strings.TrimPrefix(path, "/"+folder+"/")
-	// 			file, err := sub.Open(relativePath)
-	// 			if err == nil {
-	// 				defer file.Close()
-	// 				data, err := io.ReadAll(file)
-	// 				if err == nil {
-	// 					// 设置正确的Content-Type
-	// 					contentType := getContentType(path)
-	// 					c.Header("Content-Type", contentType)
-	// 					c.Data(http.StatusOK, contentType, data)
-	// 					return
-	// 				}
-	// 			}
-	// 		}
-	// 	}
-	// }
-	// 如果文件存在，直接返回文件内容
-	cleanPath := strings.TrimPrefix(path, "/")
-	file, err := DistFS.Open(cleanPath)
-	if err == nil {
-		defer file.Close()
-		data, err := io.ReadAll(file)
-		if err == nil {
-			contentType := getContentType(path)
-			c.Header("Content-Type", contentType)
-			// 静态资源设置缓存
-			if strings.Contains(path, "/assets/") || strings.Contains(path, "/static/") {
-				c.Header("Cache-Control", "public, max-age=15552000")
-			}
-			c.Data(http.StatusOK, contentType, data)
-			return
-		}
-	}
-
-	// 处理HTML页面
-	if c.Request.Method != "GET" && c.Request.Method != "POST" {
-		c.Status(405)
-		return
-	}
-
-	c.Header("Content-Type", "text/html")
-	c.Status(200)
-
-	if strings.HasPrefix(path, "/admin") || strings.HasPrefix(path, "/terminal") {
-		c.Writer.WriteString(RawIndexFile)
-	} else {
-		c.Writer.WriteString(IndexFile)
-	}
-
-	c.Writer.Flush()
-	c.Writer.WriteHeaderNow()
-}
-
-// serveFromTheme 从主题目录服务文件
-func serveFromTheme(c *gin.Context, path string, themeName string) {
-	themeDir := filepath.Join("./data/theme", themeName, "dist")
-
-	// 构建完整的文件路径
-	var filePath string
-	if path == "/" || path == "" {
-		filePath = filepath.Join(themeDir, "index.html")
-	} else {
-		filePath = filepath.Join(themeDir, strings.TrimPrefix(path, "/"))
-	}
-
-	// 检查文件是否存在
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		// 如果文件不存在，尝试serve index.html（用于SPA路由）
-		if !strings.Contains(path, ".") {
-			indexPath := filepath.Join(themeDir, "index.html")
-			if _, err := os.Stat(indexPath); err == nil {
-				serveThemeIndexWithCustomizations(c, indexPath)
-				return
-			}
-		}
-		// 回退到默认主题
-		serveFromEmbedded(c, path)
-		return
-	}
-
-	// 设置缓存头
-	if strings.Contains(path, "/assets/") || strings.Contains(path, "/static/") {
-		c.Header("Cache-Control", "public, max-age=15552000")
-	}
-
-	// 如果是index.html文件，需要处理自定义内容
-	if strings.HasSuffix(filePath, "index.html") {
-		serveThemeIndexWithCustomizations(c, filePath)
-		return
-	}
-
-	c.File(filePath)
-}
-
-// serveThemeIndexWithCustomizations 服务主题的index.html并应用自定义内容
-func serveThemeIndexWithCustomizations(c *gin.Context, indexPath string) {
-	// 读取主题的index.html文件
-	data, err := os.ReadFile(indexPath)
-	if err != nil {
-		c.Status(http.StatusNotFound)
-		return
-	}
-
-	// 使用通用的自定义内容应用函数
-	content := applyCustomizations(string(data))
-
-	c.Header("Content-Type", "text/html")
-	c.Data(http.StatusOK, "text/html", []byte(content))
-}
-
-// getContentType 根据文件扩展名返回Content-Type
-func getContentType(path string) string {
-	if strings.HasSuffix(path, ".css") {
-		return "text/css"
-	} else if strings.HasSuffix(path, ".js") {
-		return "application/javascript"
-	} else if strings.HasSuffix(path, ".png") {
-		return "image/png"
-	} else if strings.HasSuffix(path, ".jpg") || strings.HasSuffix(path, ".jpeg") {
-		return "image/jpeg"
-	} else if strings.HasSuffix(path, ".gif") {
-		return "image/gif"
-	} else if strings.HasSuffix(path, ".svg") {
-		return "image/svg+xml"
-	} else if strings.HasSuffix(path, ".ico") {
-		return "image/x-icon"
-	} else if strings.HasSuffix(path, ".woff") {
-		return "font/woff"
-	} else if strings.HasSuffix(path, ".woff2") {
-		return "font/woff2"
-	}
-	return "application/octet-stream"
 }

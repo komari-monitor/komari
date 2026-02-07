@@ -33,8 +33,15 @@ jobs:
           npm install
           npm run build
           cd ..
-          mkdir -p public/dist
-          cp -r web/dist/* public/dist/
+          mkdir -p public/defaultTheme/dist
+          rm -rf public/defaultTheme/dist/*
+          cp -r web/dist/* public/defaultTheme/dist/
+          cp -f web/komari-theme.json public/defaultTheme/
+          if [ -f web/preview.png ]; then cp -f web/preview.png public/defaultTheme/; fi
+          if [ -f web/perview.png ]; then cp -f web/perview.png public/defaultTheme/; fi
+          # Compatibility: ensure both filenames exist if only one is present
+          if [ -f public/defaultTheme/preview.png ] && [ ! -f public/defaultTheme/perview.png ]; then cp -f public/defaultTheme/preview.png public/defaultTheme/perview.png; fi
+          if [ -f public/defaultTheme/perview.png ] && [ ! -f public/defaultTheme/preview.png ]; then cp -f public/defaultTheme/perview.png public/defaultTheme/preview.png; fi
 
       - name: Set up Go
         uses: actions/setup-go@v5
