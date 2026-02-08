@@ -2,6 +2,7 @@ package notifier
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -26,10 +27,9 @@ func CheckTraffic() {
 	if len(reports) == 0 {
 		return
 	}
-
-	cfg, err := config.GetAs[float64](config.TrafficLimitPercentageKey, 0)
+	cfg, err := config.GetAs[float64](config.TrafficLimitPercentageKey, 80.0)
 	if err != nil {
-		return
+		slog.Error("failed to get traffic limit percentage", "error", err)
 	}
 
 	if cfg <= 0 {
