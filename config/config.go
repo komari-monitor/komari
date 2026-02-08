@@ -111,7 +111,10 @@ func GetAs[T any](key string, defaul ...any) (T, error) {
 	err := db.First(&item, "key = ?", key).Error
 	if err != nil {
 		if len(defaul) > 0 {
-			v := defaul[0].(T)
+			v, ok := defaul[0].(T)
+			if !ok {
+				return t, fmt.Errorf("default value type mismatch: expected %T, got %T", t, defaul[0])
+			}
 			err = Set(key, v)
 			return v, err
 		}
