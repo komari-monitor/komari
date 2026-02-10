@@ -22,6 +22,10 @@ Komari 是一款轻量级的自托管服务器监控工具，旨在提供简单�
 
 [![](https://rainyun-apps.cn-nb1.rains3.com/materials/deploy-on-rainyun-cn.svg)](https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_)
 
+- 1Panel 应用商店
+
+已上架1Panel应用商店，应用商店-实用工具-Komari 即可安装
+
 ### 1. 使用一键安装脚本
 
 适用于使用了 systemd 的发行版（Ubuntu、Debian...）。
