@@ -112,6 +112,10 @@ sudo ./install-komari.sh
 
 ## 鳴謝
 
+### 破碎工坊雲
+
+[破碎工坊雲 - 專業雲計算服務平台，提供高效、穩定、安全的高防伺服器與CDN解決方案](https://www.crash.work/)
+
 ### DreamCloud
 
 [DreamCloud - 極高性價比解鎖直連亞太高防](https://as211392.com/)
