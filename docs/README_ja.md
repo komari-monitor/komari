@@ -22,6 +22,10 @@ Komariは、サーバーのパフォーマンスを監視するためのシン�
 
 [![](https://rainyun-apps.cn-nb1.rains3.com/materials/deploy-on-rainyun-cn.svg)](https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_)
 
+- 1Panel アプリストア
+
+1Panel アプリストアで利用可能です。「アプリストア」>「ユーティリティ」>「Komari」からインストールしてください。
+
 ### 1. ワンクリックインストールスクリプトを使用する
 
 systemdを使用するディストリビューション（Ubuntu、Debianなど）に適しています。

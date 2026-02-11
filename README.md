@@ -25,6 +25,10 @@ Komari is a lightweight, self-hosted server monitoring tool designed to provide 
 
 [![](https://rainyun-apps.cn-nb1.rains3.com/materials/deploy-on-rainyun-cn.svg)](https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_)
 
+- 1Panel App Store
+
+Available on 1Panel App Store. Install via **App Store > Utilities > Komari**.
+
 ### 1. Use the One-click Install Script
 
 Suitable for distributions using systemd (Ubuntu, Debian...).
