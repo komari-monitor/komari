@@ -75,7 +75,7 @@ func OnRpcRequest(c *gin.Context) {
 		})
 		conn := ws.NewSafeConn(_conn)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket"})
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 			return
 		}
 		permissionGroup := detectPermissionGroup(c)

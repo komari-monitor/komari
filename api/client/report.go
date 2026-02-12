@@ -77,7 +77,7 @@ func WebSocketReport(c *gin.Context) {
 	// Upgrade the HTTP connection to a WebSocket connection
 	unsafeConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket"})
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
 	conn := ws.NewSafeConn(unsafeConn)
