@@ -42,7 +42,7 @@ func CheckExpireScheduledWork() {
 
 		// 过期提醒检查（仅当启用过期通知时）
 		if cfg[config.ExpireNotificationEnabledKey].(bool) {
-			notificationLeadDays := cfg[config.ExpireNotificationLeadDaysKey].(int)
+			notificationLeadDays := int(cfg[config.ExpireNotificationLeadDaysKey].(float64)) // Json unmarshal 会将数字解析为 float64
 
 			type clientToExpireInfo struct {
 				Name     string
