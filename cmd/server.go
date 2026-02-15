@@ -68,10 +68,6 @@ func init() {
 
 func RunServer() {
 	// #region 初始化
-	if err := os.MkdirAll("./data", os.ModePerm); err != nil {
-		log.Fatalf("Failed to create data directory: %v", err)
-	}
-	// 创建主题目录
 	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
 		log.Fatalf("Failed to create theme directory: %v", err)
 	}
