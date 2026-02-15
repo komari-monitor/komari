@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/accounts"
@@ -56,6 +57,33 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		// 临时访问许可
+		if func() bool {
+			tempKey, err := c.Cookie("temp_key")
+			if err != nil {
+				return false
+			}
+			allowTempKey, err := config.GetAs[string]("tempory_share_token", "")
+			if err != nil {
+				return false
+			}
+			if tempKey != allowTempKey || allowTempKey == "" {
+				return false
+			}
+			tempKeyExipreTime, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
+			if err != nil {
+				return false
+			}
+			if tempKeyExipreTime < time.Now().Unix() {
+				return false
+			}
+			c.SetCookie("temp_key", tempKey, int(tempKeyExipreTime-time.Now().Unix()), "/", "", false, false)
+			return true
+		}() {
+			c.Next()
+			return
+		}
+
 		// 如果是私有站点，检查是否有 session
 		session, err := c.Cookie("session_token")
 		if err != nil {

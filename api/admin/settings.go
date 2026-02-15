@@ -45,15 +45,6 @@ func EditSettings(c *gin.Context) {
 	api.RespondSuccess(c, nil)
 }
 
-func contains(slice []string, item string) bool {
-	for _, v := range slice {
-		if v == item {
-			return true
-		}
-	}
-	return false
-}
-
 func ClearAllRecords(c *gin.Context) {
 	records.DeleteAll()
 	tasks.DeleteAllPingRecords()
