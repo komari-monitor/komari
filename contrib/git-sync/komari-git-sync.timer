@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Komari git sync every 1 hour (default)
+
+[Timer]
+OnBootSec=2min
+# 默认每 1 小时同步一次（可按需改成 15min / 30min / 6h 等）
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

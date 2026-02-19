@@ -1,0 +1,8 @@
+[Unit]
+Description=Sync Komari node IP snapshot to Git
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/komari-git-sync.sh
