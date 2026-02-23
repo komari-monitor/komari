@@ -3,16 +3,17 @@ package config
 import "time"
 
 type Legacy struct {
-	ID                uint   `json:"id,omitempty"`                                        // 1
-	Sitename          string `json:"sitename" default:"Komari"`                           // 站点名称，默认 "Komari"
-	Description       string `json:"description" default:"A simple server monitor tool."` // 站点描述
-	AllowCors         bool   `json:"allow_cors" default:"false"`                          // 是否允许跨域，默认 false
-	Theme             string `json:"theme" default:"default"`                             // 主题名称，默认 'default'
-	PrivateSite       bool   `json:"private_site" default:"false"`                        // 是否为私有站点，默认 false
-	ApiKey            string `json:"api_key" default:""`                                  // API 密钥，默认空字符串
-	AutoDiscoveryKey  string `json:"auto_discovery_key" default:""`                       // 自动发现密钥
-	ScriptDomain      string `json:"script_domain" default:""`                            // 自定义脚本域名
-	SendIpAddrToGuest bool   `json:"send_ip_addr_to_guest" default:"false"`               // 是否向访客页面发送 IP 地址，默认 false
+	ID                uint   `json:"id,omitempty"`                                                                                              // 1
+	Sitename          string `json:"sitename" default:"Komari"`                                                                                 // 站点名称，默认 "Komari"
+	Description       string `json:"description" default:"A simple server monitor tool."`                                                       // 站点描述
+	AllowCors         bool   `json:"allow_cors" default:"false"`                                                                                // 是否允许跨域，默认 false
+	Theme             string `json:"theme" default:"default"`                                                                                   // 主题名称，默认 'default'
+	PrivateSite       bool   `json:"private_site" default:"false"`                                                                              // 是否为私有站点，默认 false
+	ApiKey            string `json:"api_key" default:""`                                                                                        // API 密钥，默认空字符串
+	AutoDiscoveryKey  string `json:"auto_discovery_key" default:""`                                                                             // 自动发现密钥
+	ScriptDomain      string `json:"script_domain" default:""`                                                                                  // 自定义脚本域名
+	BaseScriptsURL    string `json:"base_scripts_url" default:"https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/"` // 基础脚本仓库地址
+	SendIpAddrToGuest bool   `json:"send_ip_addr_to_guest" default:"false"`                                                                     // 是否向访客页面发送 IP 地址，默认 false
 	EulaAccepted      bool   `json:"eula_accepted" default:"false"`
 	// GeoIP 配置
 	GeoIpEnabled  bool   `json:"geo_ip_enabled" default:"true"`
@@ -51,6 +52,7 @@ const (
 	ApiKeyKey                     = "api_key"
 	AutoDiscoveryKeyKey           = "auto_discovery_key"
 	ScriptDomainKey               = "script_domain"
+	BaseScriptsURLKey             = "base_scripts_url"
 	SendIpAddrToGuestKey          = "send_ip_addr_to_guest"
 	EulaAcceptedKey               = "eula_accepted"
 	GeoIpEnabledKey               = "geo_ip_enabled"
