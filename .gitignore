@@ -8,7 +8,7 @@
 *.so
 *.dylib
 __debug*
-
+/.idea/
 # local development data
 komari.db
 /data
