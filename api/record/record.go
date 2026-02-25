@@ -131,13 +131,13 @@ func GetRecordsByUUID(c *gin.Context) {
 // filterRecordsByLoadType 根据 load_type 过滤记录，只返回相关字段
 func filterRecordsByLoadType(records []models.Record, loadType string) []gin.H {
 	filteredRecords := make([]gin.H, 0, len(records))
-	
+
 	for _, r := range records {
 		record := gin.H{
 			"client": r.Client,
 			"time":   r.Time,
 		}
-		
+
 		switch loadType {
 		case "cpu":
 			record["cpu"] = r.Cpu
@@ -177,10 +177,10 @@ func filterRecordsByLoadType(records []models.Record, loadType string) []gin.H {
 			record["connections_udp"] = r.ConnectionsUdp
 			record["connections_tcp"] = r.Connections - r.ConnectionsUdp
 		}
-		
+
 		filteredRecords = append(filteredRecords, record)
 	}
-	
+
 	return filteredRecords
 }
 
@@ -341,7 +341,7 @@ func GetPingRecords(c *gin.Context) {
 				Max:    stats.max,
 			})
 		}
-		
+
 		// 如果同时指定了 uuid 和 task_id，BasicInfo 应该只有一条记录
 		// 这种情况下可以在响应中标记查询模式
 		if uuid != "" && taskId != -1 && len(response.BasicInfo) == 1 {
@@ -396,7 +396,7 @@ func GetPingRecords(c *gin.Context) {
 				if uuid != "" && r.Client != uuid {
 					continue
 				}
-				
+
 				totalCount++
 				if r.Value < 0 {
 					lossCount++
@@ -431,12 +431,12 @@ func GetPingRecords(c *gin.Context) {
 				"avg":      avgLatency,
 				"total":    totalCount,
 			}
-			
+
 			// 如果是仅 task_id 查询，添加客户端列表信息
 			if uuid == "" && taskId != -1 {
 				taskInfo["clients"] = t.Clients
 			}
-			
+
 			tasksList = append(tasksList, taskInfo)
 		}
 		response.Tasks = tasksList
