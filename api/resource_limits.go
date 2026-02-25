@@ -1,14 +1,11 @@
 package api
 
 import (
-	"log"
 	"net/http"
-	"os"
-	"strconv"
-	"sync"
 	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/cmd/flags"
 )
 
 // ResourceLimits 资源限制配置
@@ -27,26 +24,18 @@ func DefaultResourceLimits() *ResourceLimits {
 	}
 }
 
-// LoadResourceLimitsFromEnv 从环境变量加载资源限制
-func LoadResourceLimitsFromEnv() *ResourceLimits {
+// LoadResourceLimitsFromFlags 从命令行参数加载资源限制
+func LoadResourceLimitsFromFlags() *ResourceLimits {
 	limits := DefaultResourceLimits()
 
-	if v := os.Getenv("KOMARI_MAX_TERMINAL_SESSIONS"); v != "" {
-		if i, err := strconv.ParseInt(v, 10, 32); err == nil && i > 0 {
-			limits.MaxTerminalSessions = int32(i)
-		}
+	if flags.MaxTerminalSessions > 0 {
+		limits.MaxTerminalSessions = int32(flags.MaxTerminalSessions)
 	}
-
-	if v := os.Getenv("KOMARI_MAX_WEBSOCKET_CONNS"); v != "" {
-		if i, err := strconv.ParseInt(v, 10, 32); err == nil && i > 0 {
-			limits.MaxWebSocketConns = int32(i)
-		}
+	if flags.MaxWebSocketConns > 0 {
+		limits.MaxWebSocketConns = int32(flags.MaxWebSocketConns)
 	}
-
-	if v := os.Getenv("KOMARI_MAX_RECORDS_CACHE"); v != "" {
-		if i, err := strconv.Atoi(v); err == nil && i > 0 {
-			limits.MaxRecordsCacheSize = i
-		}
+	if flags.MaxRecordsCacheSize > 0 {
+		limits.MaxRecordsCacheSize = flags.MaxRecordsCacheSize
 	}
 
 	return limits
@@ -54,15 +43,21 @@ func LoadResourceLimitsFromEnv() *ResourceLimits {
 
 // ResourceManager 资源管理器
 type ResourceManager struct {
-	limits             *ResourceLimits
-	terminalSessions   int32 // 当前终端会话数
-	webSocketConns     int32 // 当前 WebSocket 连接数
-	terminalSessionsMu sync.RWMutex
+	limits           *ResourceLimits
+	terminalSessions int32 // 当前终端会话数
+	webSocketConns   int32 // 当前 WebSocket 连接数
 }
 
 // globalResourceManager 全局资源管理器实例
 var globalResourceManager = &ResourceManager{
-	limits: LoadResourceLimitsFromEnv(),
+	limits: DefaultResourceLimits(),
+}
+
+// InitResourceManager 初始化资源管理器（在命令行参数解析后调用）
+func InitResourceManager() {
+	globalResourceManager = &ResourceManager{
+		limits: LoadResourceLimitsFromFlags(),
+	}
 }
 
 // GetResourceManager 获取全局资源管理器
@@ -80,7 +75,6 @@ func (rm *ResourceManager) GetLimits() *ResourceLimits {
 func (rm *ResourceManager) TryAcquireTerminalSession() bool {
 	current := atomic.LoadInt32(&rm.terminalSessions)
 	if current >= rm.limits.MaxTerminalSessions {
-		log.Printf("[ResourceLimit] Terminal session limit reached: %d/%d", current, rm.limits.MaxTerminalSessions)
 		return false
 	}
 	atomic.AddInt32(&rm.terminalSessions, 1)
@@ -102,7 +96,6 @@ func (rm *ResourceManager) GetTerminalSessionCount() int32 {
 func (rm *ResourceManager) TryAcquireWebSocketConn() bool {
 	current := atomic.LoadInt32(&rm.webSocketConns)
 	if current >= rm.limits.MaxWebSocketConns {
-		log.Printf("[ResourceLimit] WebSocket connection limit reached: %d/%d", current, rm.limits.MaxWebSocketConns)
 		return false
 	}
 	atomic.AddInt32(&rm.webSocketConns, 1)

@@ -72,6 +72,7 @@ func RunServer() {
 		log.Fatalf("Failed to create theme directory: %v", err)
 	}
 	InitDatabase()
+	api.InitResourceManager()
 	if utils.VersionHash != "unknown" {
 		gin.SetMode(gin.ReleaseMode)
 	}
