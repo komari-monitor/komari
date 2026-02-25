@@ -21,8 +21,8 @@ type Client struct {
 	IPv4             string    `json:"ipv4,omitempty" gorm:"type:varchar(100)"`
 	IPv6             string    `json:"ipv6,omitempty" gorm:"type:varchar(100)"`
 	Region           string    `json:"region" gorm:"type:varchar(100)"`
-	Remark           string    `json:"remark,omitempty" gorm:"type:longtext"`
-	PublicRemark     string    `json:"public_remark,omitempty" gorm:"type:longtext"`
+	Remark           string    `json:"remark,omitempty" gorm:"type:text"`
+	PublicRemark     string    `json:"public_remark,omitempty" gorm:"type:text"`
 	MemTotal         int64     `json:"mem_total" gorm:"type:bigint"`
 	SwapTotal        int64     `json:"swap_total" gorm:"type:bigint"`
 	DiskTotal        int64     `json:"disk_total" gorm:"type:bigint"`
@@ -95,14 +95,14 @@ type Record struct {
 
 // GPURecord logs individual GPU metrics over time
 type GPURecord struct {
-	Client      string    `json:"client" gorm:"type:varchar(36);index"`           // 客户端UUID
-	Time        LocalTime `json:"time" gorm:"index"`                              // 记录时间
-	DeviceIndex int       `json:"device_index" gorm:"index"`                      // GPU设备索引 (0,1,2...)
-	DeviceName  string    `json:"device_name" gorm:"type:varchar(100)"`           // GPU型号
-	MemTotal    int64     `json:"mem_total" gorm:"type:bigint"`                   // 显存总量(字节)
-	MemUsed     int64     `json:"mem_used" gorm:"type:bigint"`                    // 显存使用(字节)
-	Utilization float32   `json:"utilization" gorm:"type:decimal(5,2)"`           // GPU使用率(%)
-	Temperature int       `json:"temperature"`                                    // GPU温度(°C)
+	Client      string    `json:"client" gorm:"type:varchar(36);index"` // 客户端UUID
+	Time        LocalTime `json:"time" gorm:"index"`                    // 记录时间
+	DeviceIndex int       `json:"device_index" gorm:"index"`            // GPU设备索引 (0,1,2...)
+	DeviceName  string    `json:"device_name" gorm:"type:varchar(100)"` // GPU型号
+	MemTotal    int64     `json:"mem_total" gorm:"type:bigint"`         // 显存总量(字节)
+	MemUsed     int64     `json:"mem_used" gorm:"type:bigint"`          // 显存使用(字节)
+	Utilization float32   `json:"utilization" gorm:"type:decimal(5,2)"` // GPU使用率(%)
+	Temperature int       `json:"temperature"`                          // GPU温度(°C)
 }
 
 // StringArray represents a slice of strings stored as JSON in the database
@@ -110,9 +110,14 @@ type GPURecord struct {
 type StringArray []string
 
 func (sa *StringArray) Scan(value interface{}) error {
-	bytes, ok := value.([]byte)
-	if !ok {
-		return fmt.Errorf("failed to scan StringArray: value is not []byte")
+	var bytes []byte
+	switch v := value.(type) {
+	case []byte:
+		bytes = v
+	case string:
+		bytes = []byte(v)
+	default:
+		return fmt.Errorf("failed to scan StringArray: value is not []byte or string, got %T", value)
 	}
 	return json.Unmarshal(bytes, sa)
 }

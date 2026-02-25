@@ -42,8 +42,8 @@ type ClientInfo struct {
 	IPv4           string    `json:"ipv4,omitempty" gorm:"type:varchar(100)"`
 	IPv6           string    `json:"ipv6,omitempty" gorm:"type:varchar(100)"`
 	Region         string    `json:"region" gorm:"type:varchar(100)"`
-	Remark         string    `json:"remark,omitempty" gorm:"type:longtext"`
-	PublicRemark   string    `json:"public_remark,omitempty" gorm:"type:longtext"`
+	Remark         string    `json:"remark,omitempty" gorm:"type:text"`
+	PublicRemark   string    `json:"public_remark,omitempty" gorm:"type:text"`
 	MemTotal       int64     `json:"mem_total" gorm:"type:bigint"`
 	SwapTotal      int64     `json:"swap_total" gorm:"type:bigint"`
 	DiskTotal      int64     `json:"disk_total" gorm:"type:bigint"`
@@ -86,18 +86,18 @@ type CPUReport struct {
 
 // GPUDetailReport 详细GPU信息报告
 type GPUDetailReport struct {
-	Count          int                 `json:"count"`          // GPU数量
-	AverageUsage   float64             `json:"average_usage"`  // 平均使用率
-	DetailedInfo   []GPUDeviceInfo     `json:"detailed_info"`  // 每个GPU的详细信息
+	Count        int             `json:"count"`         // GPU数量
+	AverageUsage float64         `json:"average_usage"` // 平均使用率
+	DetailedInfo []GPUDeviceInfo `json:"detailed_info"` // 每个GPU的详细信息
 }
 
 // GPUDeviceInfo 单个GPU设备信息
 type GPUDeviceInfo struct {
-	Name         string  `json:"name"`          // GPU型号名称
-	MemoryTotal  int64   `json:"memory_total"`  // 显存总量(字节)
-	MemoryUsed   int64   `json:"memory_used"`   // 显存已用(字节)
-	Utilization  float64 `json:"utilization"`   // GPU使用率(%)
-	Temperature  int     `json:"temperature"`   // GPU温度(°C)
+	Name        string  `json:"name"`         // GPU型号名称
+	MemoryTotal int64   `json:"memory_total"` // 显存总量(字节)
+	MemoryUsed  int64   `json:"memory_used"`  // 显存已用(字节)
+	Utilization float64 `json:"utilization"`  // GPU使用率(%)
+	Temperature int     `json:"temperature"`  // GPU温度(°C)
 }
 
 // 保持向后兼容的旧GPUReport结构
