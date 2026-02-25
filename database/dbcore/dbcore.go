@@ -411,40 +411,34 @@ func GetDBInstance() *gorm.DB {
 			Logger: logutil.NewGormLogger(),
 		}
 
-		// 根据数据库类型选择不同的连接方式
-		switch flags.DatabaseType {
-		case "sqlite", "":
-			// SQLite 连接 - 使用连接池优化配置
-			// SQLiteConn: _busy_timeout 设置等待锁的超时时间，_journal_mode=WAL 启用预写日志
-			dsn := fmt.Sprintf("%s?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL", flags.DatabaseFile)
-			instance, err = gorm.Open(sqlite.Open(dsn), logConfig)
-			if err != nil {
-				log.Fatalf("Failed to connect to SQLite3 database: %v", err)
-			}
-			log.Printf("Using SQLite database file: %s", flags.DatabaseFile)
-
-			// 配置连接池参数
-			sqlDB, err := instance.DB()
-			if err != nil {
-				log.Printf("Failed to get underlying sql.DB: %v", err)
-			} else {
-				// SQLite 推荐使用较小的连接池
-				// WAL 模式下支持并发读，但写操作仍然是串行的
-				sqlDB.SetMaxOpenConns(10)                  // 最大打开连接数
-				sqlDB.SetMaxIdleConns(5)                   // 最大空闲连接数
-				sqlDB.SetConnMaxLifetime(time.Hour)        // 连接最大生命周期
-				sqlDB.SetConnMaxIdleTime(10 * time.Minute) // 空闲连接最大生命周期
-			}
-
-			// 执行 SQLite 优化 PRAGMA
-			instance.Exec("PRAGMA cache_size = -64000;")   // 64MB 缓存
-			instance.Exec("PRAGMA temp_store = MEMORY;")   // 临时表存储在内存
-			instance.Exec("PRAGMA mmap_size = 268435456;") // 256MB mmap
-			instance.Exec("VACUUM;")
-			instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
-		default:
-			log.Fatalf("Unsupported database type: %s", flags.DatabaseType)
+		// SQLite 连接 - 使用连接池优化配置
+		// SQLiteConn: _busy_timeout 设置等待锁的超时时间，_journal_mode=WAL 启用预写日志
+		dsn := fmt.Sprintf("%s?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL", flags.DatabaseFile)
+		instance, err = gorm.Open(sqlite.Open(dsn), logConfig)
+		if err != nil {
+			log.Fatalf("Failed to connect to SQLite3 database: %v", err)
 		}
+		log.Printf("Using SQLite database file: %s", flags.DatabaseFile)
+
+		// 配置连接池参数
+		sqlDB, err := instance.DB()
+		if err != nil {
+			log.Printf("Failed to get underlying sql.DB: %v", err)
+		} else {
+			// SQLite 推荐使用较小的连接池
+			// WAL 模式下支持并发读，但写操作仍然是串行的
+			sqlDB.SetMaxOpenConns(10)                  // 最大打开连接数
+			sqlDB.SetMaxIdleConns(5)                   // 最大空闲连接数
+			sqlDB.SetConnMaxLifetime(time.Hour)        // 连接最大生命周期
+			sqlDB.SetConnMaxIdleTime(10 * time.Minute) // 空闲连接最大生命周期
+		}
+
+		// 执行 SQLite 优化 PRAGMA
+		instance.Exec("PRAGMA cache_size = -64000;")   // 64MB 缓存
+		instance.Exec("PRAGMA temp_store = MEMORY;")   // 临时表存储在内存
+		instance.Exec("PRAGMA mmap_size = 268435456;") // 256MB mmap
+		instance.Exec("VACUUM;")
+		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 		config.SetDb(instance)
 		MergeDatabase(instance)
 		// 自动迁移模型

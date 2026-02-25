@@ -8,7 +8,6 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 )
@@ -172,12 +171,10 @@ func CompactRecord() error {
 		return err
 	}
 
-	if flags.DatabaseType == "sqlite" {
-		if err := db.Exec("VACUUM").Error; err != nil {
-			log.Printf("Error vacuuming database: %v", err)
-		}
-		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	if err := db.Exec("VACUUM").Error; err != nil {
+		log.Printf("Error vacuuming database: %v", err)
 	}
+	db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	//log.Printf("Record compaction completed")
 	return nil
 }

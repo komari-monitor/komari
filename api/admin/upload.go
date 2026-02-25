@@ -2,7 +2,6 @@ package admin
 
 import (
 	"archive/zip"
-	"bufio"
 	"fmt"
 	"io"
 	"log"
@@ -16,7 +15,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/cmd/flags"
-	"gorm.io/gorm"
 )
 
 // 只有一个备份恢复操作在进行
@@ -49,38 +47,11 @@ func parseBackupMarkup(zr *zip.ReadCloser) (dbType string, backupTime string, er
 				if strings.HasPrefix(line, "Backup Time:") {
 					backupTime = strings.TrimSpace(strings.TrimPrefix(line, "Backup Time:"))
 				}
-				// 兼容旧版双语格式
-				if strings.HasPrefix(line, "数据库类型 / Database Type:") {
-					dbType = strings.TrimSpace(strings.TrimPrefix(line, "数据库类型 / Database Type:"))
-				}
-				if strings.HasPrefix(line, "备份时间 / Backup Time:") {
-					backupTime = strings.TrimSpace(strings.TrimPrefix(line, "备份时间 / Backup Time:"))
-				}
 			}
 			return dbType, backupTime, nil
 		}
 	}
 	return dbType, backupTime, nil
-}
-
-// hasSQLiteBackup 检查备份是否包含 SQLite 数据库文件
-func hasSQLiteBackup(zr *zip.ReadCloser) bool {
-	for _, f := range zr.File {
-		if f.Name == "komari.db" {
-			return true
-		}
-	}
-	return false
-}
-
-// hasPostgreSQLBackup 检查备份是否包含 PostgreSQL SQL 文件
-func hasPostgreSQLBackup(zr *zip.ReadCloser) bool {
-	for _, f := range zr.File {
-		if f.Name == "komari.sql" {
-			return true
-		}
-	}
-	return false
 }
 
 // UploadBackup 用于接收上传的备份文件并将其内容恢复到原始位置
@@ -159,31 +130,6 @@ func UploadBackup(c *gin.Context) {
 		return
 	}
 
-	// 检查当前数据库类型
-	currentDBType := flags.DatabaseType
-	if currentDBType == "" {
-		currentDBType = "sqlite"
-	}
-
-	// 兼容性检查
-	hasSQLite := hasSQLiteBackup(zr)
-	// 重新打开 zip 进行检查
-	zr2, _ := zip.OpenReader(tempFilePath)
-	hasPostgreSQL := hasPostgreSQLBackup(zr2)
-	zr2.Close()
-
-	// 数据库类型不匹配时的警告
-	var warningMsg string
-	if backupDBType == "sqlite" && currentDBType == "postgres" {
-		if hasSQLite {
-			warningMsg = "警告：备份来自 SQLite 数据库，但当前使用 PostgreSQL。将尝试迁移数据，但可能存在兼容性问题。"
-		}
-	} else if backupDBType == "postgres" && currentDBType == "sqlite" {
-		if hasPostgreSQL {
-			warningMsg = "警告：备份来自 PostgreSQL 数据库，但当前使用 SQLite。将尝试迁移数据，但可能存在兼容性问题。"
-		}
-	}
-
 	// 将校验通过的临时文件移动到固定路径 ./data/backup.zip
 	finalPath := filepath.Join(".", "data", "backup.zip")
 	// 如存在旧文件，先删除
@@ -211,15 +157,11 @@ func UploadBackup(c *gin.Context) {
 
 	// 返回：已保存备份，重启后将自动恢复
 	response := gin.H{
-		"status":       "success",
-		"message":      "Backup uploaded successfully. The service will restart and apply the backup.",
-		"path":         "./data/backup.zip",
-		"backup_type":  backupDBType,
-		"backup_time":  backupTime,
-		"current_type": currentDBType,
-	}
-	if warningMsg != "" {
-		response["warning"] = warningMsg
+		"status":      "success",
+		"message":     "Backup uploaded successfully. The service will restart and apply the backup.",
+		"path":        "./data/backup.zip",
+		"backup_type": backupDBType,
+		"backup_time": backupTime,
 	}
 	c.JSON(http.StatusOK, response)
 
@@ -231,7 +173,7 @@ func UploadBackup(c *gin.Context) {
 }
 
 // RestoreFromBackup 从备份文件恢复数据（在启动时调用）
-func RestoreFromBackup(db *gorm.DB) error {
+func RestoreFromBackup() error {
 	backupZipPath := "./data/backup.zip"
 	if _, err := os.Stat(backupZipPath); os.IsNotExist(err) {
 		return nil // 没有备份文件，无需恢复
@@ -247,23 +189,12 @@ func RestoreFromBackup(db *gorm.DB) error {
 
 	// 解析备份类型
 	backupDBType, _, _ := parseBackupMarkup(zr)
-	currentDBType := flags.DatabaseType
-	if currentDBType == "" {
-		currentDBType = "sqlite"
-	}
-
-	log.Printf("[restore] Backup database type: %s, Current database type: %s", backupDBType, currentDBType)
+	log.Printf("[restore] Backup database type: %s", backupDBType)
 
 	// 解压非数据库文件
-	tempDir, err := os.MkdirTemp("", "komari-restore-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
 	for _, f := range zr.File {
 		// 跳过数据库文件和标记文件
-		if f.Name == "komari.db" || f.Name == "komari.sql" || f.Name == "komari-backup-markup" {
+		if f.Name == "komari.db" || f.Name == "komari-backup-markup" {
 			continue
 		}
 
@@ -295,89 +226,31 @@ func RestoreFromBackup(db *gorm.DB) error {
 		rc.Close()
 	}
 
-	// 处理数据库恢复
-	switch currentDBType {
-	case "sqlite", "":
-		// SQLite 恢复
-		for _, f := range zr.File {
-			if f.Name == "komari.db" {
-				// 解压 SQLite 数据库文件
-				rc, err := f.Open()
-				if err != nil {
-					return fmt.Errorf("failed to open komari.db from backup: %v", err)
-				}
+	// 恢复 SQLite 数据库
+	for _, f := range zr.File {
+		if f.Name == "komari.db" {
+			// 解压 SQLite 数据库文件
+			rc, err := f.Open()
+			if err != nil {
+				return fmt.Errorf("failed to open komari.db from backup: %v", err)
+			}
 
-				// 删除现有数据库文件
-				os.Remove(flags.DatabaseFile)
+			// 删除现有数据库文件
+			os.Remove(flags.DatabaseFile)
 
-				outFile, err := os.Create(flags.DatabaseFile)
-				if err != nil {
-					rc.Close()
-					return fmt.Errorf("failed to create database file: %v", err)
-				}
-				_, err = io.Copy(outFile, rc)
-				outFile.Close()
+			outFile, err := os.Create(flags.DatabaseFile)
+			if err != nil {
 				rc.Close()
-				if err != nil {
-					return fmt.Errorf("failed to copy database: %v", err)
-				}
-				log.Printf("[restore] SQLite database restored from backup")
-				break
+				return fmt.Errorf("failed to create database file: %v", err)
 			}
-		}
-
-	case "postgres", "postgresql":
-		// PostgreSQL 恢复
-		for _, f := range zr.File {
-			if f.Name == "komari.sql" {
-				// 执行 SQL 文件
-				rc, err := f.Open()
-				if err != nil {
-					return fmt.Errorf("failed to open komari.sql from backup: %v", err)
-				}
-
-				scanner := bufio.NewScanner(rc)
-				var sqlBatch strings.Builder
-
-				for scanner.Scan() {
-					line := scanner.Text()
-					sqlBatch.WriteString(line + "\n")
-
-					// 以分号结尾的语句执行
-					if strings.HasSuffix(strings.TrimSpace(line), ";") {
-						sql := sqlBatch.String()
-						if strings.TrimSpace(sql) != "" {
-							if err := db.Exec(sql).Error; err != nil {
-								log.Printf("[restore] SQL error: %v, SQL: %s", err, sql[:min(100, len(sql))])
-							}
-						}
-						sqlBatch.Reset()
-					}
-				}
-
-				rc.Close()
-
-				// 执行剩余的 SQL
-				if sqlBatch.Len() > 0 {
-					sql := sqlBatch.String()
-					if strings.TrimSpace(sql) != "" {
-						if err := db.Exec(sql).Error; err != nil {
-							log.Printf("[restore] SQL error: %v", err)
-						}
-					}
-				}
-
-				log.Printf("[restore] PostgreSQL database restored from backup")
-				break
+			_, err = io.Copy(outFile, rc)
+			outFile.Close()
+			rc.Close()
+			if err != nil {
+				return fmt.Errorf("failed to copy database: %v", err)
 			}
-
-			// 如果备份是 SQLite，尝试迁移到 PostgreSQL
-			if f.Name == "komari.db" && backupDBType == "sqlite" {
-				log.Println("[restore] Migrating SQLite backup to PostgreSQL...")
-				// 这里需要先恢复到临时 SQLite 数据库，然后迁移数据
-				// 简化处理：提示用户手动迁移
-				log.Println("[restore] WARNING: SQLite to PostgreSQL migration is not fully supported. Please migrate data manually.")
-			}
+			log.Printf("[restore] SQLite database restored from backup")
+			break
 		}
 	}
 
@@ -391,11 +264,4 @@ func RestoreFromBackup(db *gorm.DB) error {
 
 	log.Println("[restore] Restore completed successfully")
 	return nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
