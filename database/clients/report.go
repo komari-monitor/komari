@@ -144,8 +144,9 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 		return fmt.Errorf("failed to save Record: %v", err)
 	}
 
-	// 保存GPU详细记录到独立表
+	// 保存GPU详细记录到独立表（批量插入）
 	currentTime := time.Now()
+	var gpuRecords []models.GPURecord
 	if report.GPU != nil && len(report.GPU.DetailedInfo) > 0 {
 		for idx, gpu := range report.GPU.DetailedInfo {
 			gpuRecord := models.GPURecord{
@@ -158,9 +159,7 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 				Utilization: float32(gpu.Utilization),
 				Temperature: gpu.Temperature,
 			}
-			if err := db.Create(&gpuRecord).Error; err != nil {
-				return fmt.Errorf("failed to save GPU record: %v", err)
-			}
+			gpuRecords = append(gpuRecords, gpuRecord)
 		}
 	}
 
@@ -193,11 +192,17 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 		//Uptime:         report.Uptime,
 	}
 
-	// 使用事务确保 Record 和 ClientsInfo 一致性
+	// 使用事务确保 Record 和 GPURecord 一致性
 	err = db.Transaction(func(tx *gorm.DB) error {
 		// 保存 Record
 		if err := tx.Create(&Record).Error; err != nil {
 			return fmt.Errorf("failed to save Record: %v", err)
+		}
+		// 批量保存 GPU 记录
+		if len(gpuRecords) > 0 {
+			if err := tx.Create(&gpuRecords).Error; err != nil {
+				return fmt.Errorf("failed to save GPU records: %v", err)
+			}
 		}
 		return nil
 	})

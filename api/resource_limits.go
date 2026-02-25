@@ -194,8 +194,9 @@ func ResourceLimitMiddleware() gin.HandlerFunc {
 				return
 			}
 
-			// 设置资源释放钩子
-			c.Set("ws_resource_acquired", true)
+			// 设置资源释放钩子，使用 defer 确保在请求结束时释放资源
+			// 无论请求是正常完成还是因为 panic 异常退出，都会执行释放
+			defer rm.ReleaseWebSocketConn()
 		}
 		c.Next()
 	}

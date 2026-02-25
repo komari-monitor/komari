@@ -314,7 +314,7 @@ func DownloadBackup(c *gin.Context) {
 	}
 
 	// 5) 追加备份标记文件（放在 zip 根目录），包含数据库类型信息
-	markupContent := fmt.Sprintf("此文件为 Komari 备份标记文件，请勿删除。\nThis is a Komari backup markup file, please do not delete.\n\n备份时间 / Backup Time: %s\n数据库类型 / Database Type: %s\n", time.Now().Format(time.RFC3339), dbType)
+	markupContent := fmt.Sprintf("This is a Komari backup markup file, please do not delete.\n\nBackup Time: %s\nDatabase Type: %s\n", time.Now().Format(time.RFC3339), dbType)
 	markupWriter, err := zipWriter.CreateHeader(&zip.FileHeader{
 		Name:     "komari-backup-markup",
 		Method:   zip.Deflate,

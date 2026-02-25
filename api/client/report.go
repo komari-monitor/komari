@@ -207,8 +207,21 @@ func SaveClientReport(uuid string, report common.Report) error {
 	if report.CPU.Usage < 0.01 {
 		report.CPU.Usage = 0.01
 	}
-	reports = append(reports.([]common.Report), report)
-	api.Records.Set(uuid, reports, cache.DefaultExpiration)
+
+	reportList := reports.([]common.Report)
+	reportList = append(reportList, report)
+
+	// 限制缓存大小，保留最近的 60 条记录（约1分钟的上报数据）
+	// 防止高频上报场景下内存无限增长
+	maxCacheSize := api.GetResourceManager().GetLimits().MaxRecordsCacheSize
+	if maxCacheSize <= 0 {
+		maxCacheSize = 60 // 默认值
+	}
+	if len(reportList) > maxCacheSize {
+		reportList = reportList[len(reportList)-maxCacheSize:]
+	}
+
+	api.Records.Set(uuid, reportList, cache.DefaultExpiration)
 
 	return nil
 }

@@ -41,7 +41,7 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	uuid, success := accounts.CheckPassword(data.Username, data.Password)
+	uuid, success, needsMigration := accounts.CheckPassword(data.Username, data.Password)
 	if !success {
 		RespondError(c, http.StatusUnauthorized, "Invalid credentials")
 		return
@@ -66,7 +66,13 @@ func Login(c *gin.Context) {
 	}
 	c.SetCookie("session_token", session, 2592000, "/", "", false, true)
 	auditlog.Log(c.ClientIP(), uuid, "logged in (password)", "login")
-	RespondSuccess(c, gin.H{"set-cookie": gin.H{"session_token": session}})
+
+	// 返回登录信息，包含是否需要密码迁移提示
+	response := gin.H{"set-cookie": gin.H{"session_token": session}}
+	if needsMigration {
+		response["password_migration_required"] = true
+	}
+	RespondSuccess(c, response)
 }
 func Logout(c *gin.Context) {
 	session, _ := c.Cookie("session_token")

@@ -93,7 +93,7 @@ func RequestTerminal(c *gin.Context) {
 	})
 
 	if ws.GetConnectedClients()[uuid] == nil {
-		conn.WriteMessage(1, []byte("Client offline!\n被控端离线!"))
+		conn.WriteMessage(1, []byte("Client offline!"))
 		cleanupSession()
 		return
 	}
@@ -105,7 +105,7 @@ func RequestTerminal(c *gin.Context) {
 		cleanupSession()
 		return
 	}
-	conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent..."))
+	conn.WriteMessage(1, []byte("Waiting for agent connection..."))
 	// 如果没有连接上，则关闭连接
 	time.AfterFunc(30*time.Second, func() {
 		TerminalSessionsMutex.Lock()

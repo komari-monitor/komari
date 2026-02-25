@@ -414,31 +414,34 @@ func GetDBInstance() *gorm.DB {
 		// 根据数据库类型选择不同的连接方式
 		switch flags.DatabaseType {
 		case "sqlite", "":
-			// SQLite 连接
-			instance, err = gorm.Open(sqlite.Open(flags.DatabaseFile), logConfig)
+			// SQLite 连接 - 使用连接池优化配置
+			// SQLiteConn: _busy_timeout 设置等待锁的超时时间，_journal_mode=WAL 启用预写日志
+			dsn := fmt.Sprintf("%s?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL", flags.DatabaseFile)
+			instance, err = gorm.Open(sqlite.Open(dsn), logConfig)
 			if err != nil {
 				log.Fatalf("Failed to connect to SQLite3 database: %v", err)
 			}
 			log.Printf("Using SQLite database file: %s", flags.DatabaseFile)
-			instance.Exec("PRAGMA wal = ON;")
-			if err := instance.Exec("PRAGMA journal_mode = WAL;").Error; err != nil {
-				log.Printf("Failed to enable WAL mode for SQLite: %v", err)
+
+			// 配置连接池参数
+			sqlDB, err := instance.DB()
+			if err != nil {
+				log.Printf("Failed to get underlying sql.DB: %v", err)
+			} else {
+				// SQLite 推荐使用较小的连接池
+				// WAL 模式下支持并发读，但写操作仍然是串行的
+				sqlDB.SetMaxOpenConns(10)                  // 最大打开连接数
+				sqlDB.SetMaxIdleConns(5)                   // 最大空闲连接数
+				sqlDB.SetConnMaxLifetime(time.Hour)        // 连接最大生命周期
+				sqlDB.SetConnMaxIdleTime(10 * time.Minute) // 空闲连接最大生命周期
 			}
+
+			// 执行 SQLite 优化 PRAGMA
+			instance.Exec("PRAGMA cache_size = -64000;")   // 64MB 缓存
+			instance.Exec("PRAGMA temp_store = MEMORY;")   // 临时表存储在内存
+			instance.Exec("PRAGMA mmap_size = 268435456;") // 256MB mmap
 			instance.Exec("VACUUM;")
 			instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
-		// case "mysql":
-		// 	// MySQL 连接
-		// 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=True&loc=Local",
-		// 		flags.DatabaseUser,
-		// 		flags.DatabasePass,
-		// 		flags.DatabaseHost,
-		// 		flags.DatabasePort,
-		// 		flags.DatabaseName)
-		// 	instance, err = gorm.Open(mysql.Open(dsn), logConfig)
-		// 	if err != nil {
-		// 		log.Fatalf("Failed to connect to MySQL database: %v", err)
-		// 	}
-		// 	log.Printf("Using MySQL database: %s@%s:%s/%s", flags.DatabaseUser, flags.DatabaseHost, flags.DatabasePort, flags.DatabaseName)
 		default:
 			log.Fatalf("Unsupported database type: %s", flags.DatabaseType)
 		}

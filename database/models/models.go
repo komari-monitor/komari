@@ -71,8 +71,8 @@ type Session struct {
 
 // Record logs client metrics over time
 type Record struct {
-	Client         string    `json:"client" gorm:"type:varchar(36);index"`
-	Time           LocalTime `json:"time" gorm:"index"`
+	Client         string    `json:"client" gorm:"type:varchar(36);index;index:idx_client_time"`
+	Time           LocalTime `json:"time" gorm:"index;index:idx_client_time"`
 	Cpu            float32   `json:"cpu" gorm:"type:decimal(5,2)"` // e.g., 75.50%
 	Gpu            float32   `json:"gpu" gorm:"type:decimal(5,2)"`
 	Ram            int64     `json:"ram" gorm:"type:bigint"`
@@ -95,9 +95,9 @@ type Record struct {
 
 // GPURecord logs individual GPU metrics over time
 type GPURecord struct {
-	Client      string    `json:"client" gorm:"type:varchar(36);index"` // 客户端UUID
-	Time        LocalTime `json:"time" gorm:"index"`                    // 记录时间
-	DeviceIndex int       `json:"device_index" gorm:"index"`            // GPU设备索引 (0,1,2...)
+	Client      string    `json:"client" gorm:"type:varchar(36);index;index:idx_gpu_client_time"` // 客户端UUID
+	Time        LocalTime `json:"time" gorm:"index;index:idx_gpu_client_time"`                    // 记录时间
+	DeviceIndex int       `json:"device_index" gorm:"index"`                                      // GPU设备索引 (0,1,2...)
 	DeviceName  string    `json:"device_name" gorm:"type:varchar(100)"` // GPU型号
 	MemTotal    int64     `json:"mem_total" gorm:"type:bigint"`         // 显存总量(字节)
 	MemUsed     int64     `json:"mem_used" gorm:"type:bigint"`          // 显存使用(字节)

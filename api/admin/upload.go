@@ -42,6 +42,14 @@ func parseBackupMarkup(zr *zip.ReadCloser) (dbType string, backupTime string, er
 
 			lines := strings.Split(string(content), "\n")
 			for _, line := range lines {
+				// 支持新版英文格式
+				if strings.HasPrefix(line, "Database Type:") {
+					dbType = strings.TrimSpace(strings.TrimPrefix(line, "Database Type:"))
+				}
+				if strings.HasPrefix(line, "Backup Time:") {
+					backupTime = strings.TrimSpace(strings.TrimPrefix(line, "Backup Time:"))
+				}
+				// 兼容旧版双语格式
 				if strings.HasPrefix(line, "数据库类型 / Database Type:") {
 					dbType = strings.TrimSpace(strings.TrimPrefix(line, "数据库类型 / Database Type:"))
 				}

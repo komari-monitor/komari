@@ -1342,14 +1342,14 @@ func formatBytes(b int64) string {
 func formatUptime(seconds int64) string {
 	days := seconds / 86400
 	if days > 0 {
-		return fmt.Sprintf("%d天", days)
+		return fmt.Sprintf("%dd", days)
 	}
 	hours := seconds / 3600
 	if hours > 0 {
-		return fmt.Sprintf("%d时", hours)
+		return fmt.Sprintf("%dh", hours)
 	}
 	minutes := seconds / 60
-	return fmt.Sprintf("%d分", minutes)
+	return fmt.Sprintf("%dm", minutes)
 }
 
 func formatUptimeL(seconds int64, lp langPack) string {
@@ -1367,10 +1367,10 @@ func formatUptimeL(seconds int64, lp langPack) string {
 
 func formatPrice(price float64, cycle int, currency string) string {
 	if price < 0 {
-		return "免费/一次性"
+		return "Free/One-time"
 	}
 	if price == 0 {
-		return "免费"
+		return "Free"
 	}
 
 	if currency == "" {
@@ -1380,20 +1380,20 @@ func formatPrice(price float64, cycle int, currency string) string {
 	var cycleStr string
 	switch cycle {
 	case 30:
-		cycleStr = "月"
+		cycleStr = "mo"
 	case 90:
-		cycleStr = "季"
+		cycleStr = "qtr"
 	case 180:
-		cycleStr = "半年"
+		cycleStr = "half"
 	case 360, 365:
-		cycleStr = "年"
+		cycleStr = "yr"
 	case -1:
-		cycleStr = "年"
+		cycleStr = "yr"
 	default:
 		if cycle > 0 {
-			cycleStr = fmt.Sprintf("%d天", cycle)
+			cycleStr = fmt.Sprintf("%dd", cycle)
 		} else {
-			cycleStr = "年"
+			cycleStr = "yr"
 		}
 	}
 
@@ -1445,25 +1445,25 @@ func formatPriceL(price float64, cycle int, currency string, lp langPack) string
 
 func formatRemaining(expiredAt time.Time, autoRenewal bool) string {
 	if autoRenewal {
-		return "长期"
+		return "Long-term"
 	}
 
 	now := time.Now()
 	if expiredAt.IsZero() || expiredAt.Year() > 2200 {
-		return "长期"
+		return "Long-term"
 	}
 
 	diff := expiredAt.Sub(now)
 	if diff <= 0 {
-		return "已过期"
+		return "Expired"
 	}
 
 	days := int(diff.Hours() / 24)
 	if days > 365 {
 		years := days / 365
-		return fmt.Sprintf("%d年+", years)
+		return fmt.Sprintf("%dy+", years)
 	}
-	return fmt.Sprintf("%d天", days)
+	return fmt.Sprintf("%dd", days)
 }
 
 func formatRemainingL(expiredAt time.Time, autoRenewal bool, lp langPack) string {

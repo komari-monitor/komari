@@ -12,31 +12,58 @@ import (
 	"github.com/komari-monitor/komari/utils"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
-const constantSalt = "06Wm4Jv1Hkxx"
+const bcryptCost = 12 // bcrypt cost 参数，12 是推荐的安全值
+
+// 旧版 SHA256 的固定盐（用于向后兼容验证）
+const legacySalt = "06Wm4Jv1Hkxx"
 
 // CheckPassword 检查密码是否正确
-//
-// 如果密码正确，返回用户的 UUID 和 true；否则返回空字符串和 false
-func CheckPassword(username, passwd string) (uuid string, success bool) {
+// 返回: uuid, success, needsMigration
+// needsMigration 表示密码使用旧版哈希，需要前端提示用户修改密码
+func CheckPassword(username, passwd string) (uuid string, success bool, needsMigration bool) {
 	db := dbcore.GetDBInstance()
 	var user models.User
 	result := db.Where("username = ?", username).First(&user)
 	if result.Error != nil {
 		// 静默处理错误，不显示日志
-		return "", false
+		return "", false, false
 	}
-	if hashPasswd(passwd) != user.Passwd {
-		return "", false
+
+	// 检查密码并判断是否需要迁移
+	valid, migrationNeeded := checkPasswordHashWithMigration(passwd, user.Passwd)
+	if !valid {
+		return "", false, false
 	}
-	return user.UUID, true
+
+	// 如果需要迁移，在后台静默升级密码哈希
+	if migrationNeeded {
+		go migratePasswordHash(user.UUID, passwd)
+	}
+
+	return user.UUID, true, migrationNeeded
+}
+
+// migratePasswordHash 静默迁移密码哈希到 bcrypt
+func migratePasswordHash(uuid, passwd string) {
+	db := dbcore.GetDBInstance()
+	hashedPassword, err := hashPasswd(passwd)
+	if err != nil {
+		return
+	}
+	db.Model(&models.User{}).Where("uuid = ?", uuid).Update("passwd", hashedPassword)
 }
 
 // ForceResetPassword 强制重置用户密码
 func ForceResetPassword(username, passwd string) (err error) {
 	db := dbcore.GetDBInstance()
-	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashPasswd(passwd))
+	hashedPassword, err := hashPasswd(passwd)
+	if err != nil {
+		return fmt.Errorf("密码哈希失败: %v", err)
+	}
+	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashedPassword)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -46,18 +73,45 @@ func ForceResetPassword(username, passwd string) (err error) {
 	return nil
 }
 
-// hashPasswd 对密码进行加盐哈希
-func hashPasswd(passwd string) string {
-	saltedPassword := passwd + constantSalt
-	hash := sha256.New()
-	hash.Write([]byte(saltedPassword))
-	hashedPassword := base64.StdEncoding.EncodeToString(hash.Sum(nil))
-	return hashedPassword
+// hashPasswd 使用 bcrypt 对密码进行哈希
+func hashPasswd(passwd string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(passwd), bcryptCost)
+	return string(bytes), err
+}
+
+// checkPasswordHashWithMigration 验证密码是否匹配哈希值
+// 返回: valid, needsMigration
+// 支持旧版 SHA256 哈希（向后兼容）和新的 bcrypt 哈希
+func checkPasswordHashWithMigration(passwd, hash string) (bool, bool) {
+	// 检查是否是 bcrypt 哈希（bcrypt 哈希以 $2a$ 或 $2b$ 开头）
+	if len(hash) > 4 && (hash[:4] == "$2a$" || hash[:4] == "$2b$") {
+		err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(passwd))
+		return err == nil, false
+	}
+
+	// 向后兼容：旧版 SHA256 哈希验证
+	if validateLegacyHash(passwd, hash) {
+		return true, true // 验证成功，但需要迁移
+	}
+
+	return false, false
+}
+
+// validateLegacyHash 使用旧版 SHA256 方式验证密码
+func validateLegacyHash(passwd, hash string) bool {
+	// 旧版哈希计算方式: base64(sha256(passwd + salt))
+	saltedPassword := passwd + legacySalt
+	h := sha256.New()
+	h.Write([]byte(saltedPassword))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil)) == hash
 }
 
 func CreateAccount(username, passwd string) (user models.User, err error) {
 	db := dbcore.GetDBInstance()
-	hashedPassword := hashPasswd(passwd)
+	hashedPassword, err := hashPasswd(passwd)
+	if err != nil {
+		return models.User{}, fmt.Errorf("密码哈希失败: %v", err)
+	}
 	user = models.User{
 		UUID:     uuid.New().String(),
 		Username: username,
@@ -93,7 +147,10 @@ func CreateDefaultAdminAccount() (username, passwd string, err error) {
 		passwd = utils.GeneratePassword()
 	}
 
-	hashedPassword := hashPasswd(passwd)
+	hashedPassword, err := hashPasswd(passwd)
+	if err != nil {
+		return "", "", fmt.Errorf("密码哈希失败: %v", err)
+	}
 
 	user := models.User{
 		UUID:      uuid.New().String(),
@@ -166,7 +223,11 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 		updates["username"] = *name
 	}
 	if password != nil {
-		updates["passwd"] = hashPasswd(*password)
+		hashedPassword, err := hashPasswd(*password)
+		if err != nil {
+			return fmt.Errorf("密码哈希失败: %v", err)
+		}
+		updates["passwd"] = hashedPassword
 	}
 	if sso_type != nil {
 		updates["sso_type"] = *sso_type

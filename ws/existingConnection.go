@@ -4,13 +4,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/common"
 )
 
 var (
 	connectedClients = make(map[string]*SafeConn)
-	ConnectedUsers   = []*websocket.Conn{}
 	latestReport     = make(map[string]*common.Report)
 	// presenceOnly stores online state for non-WebSocket agents (e.g., Nezha gRPC)
 	// value keeps connectionID and a soft expiration to avoid flicker
