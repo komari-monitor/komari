@@ -17,9 +17,7 @@ import (
 func TokenAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// API key authentication
-		apiKey := c.GetHeader("Authorization")
-		if isApiKeyValid(apiKey) {
-			c.Set("api_key", apiKey)
+		if ValidateAPIKeyFromRequest(c) {
 			c.Next()
 			return
 		}
