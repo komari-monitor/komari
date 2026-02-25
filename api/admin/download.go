@@ -71,7 +71,8 @@ func copyDataToTempExcludingDB(tempDir string) error {
 		name := info.Name()
 		if strings.HasSuffix(strings.ToLower(name), ".db") ||
 			strings.HasSuffix(strings.ToLower(name), ".db-wal") ||
-			strings.HasSuffix(strings.ToLower(name), ".db-shm") {
+			strings.HasSuffix(strings.ToLower(name), ".db-shm") ||
+			strings.HasSuffix(strings.ToLower(name), ".sql") {
 			return nil
 		}
 
@@ -103,6 +104,112 @@ func backupSQLiteTo(destDBPath string) error {
 	return nil
 }
 
+// backupPostgreSQLTo 将 PostgreSQL 数据库导出为 SQL 文件
+func backupPostgreSQLTo(destSQLPath string) error {
+	if err := os.MkdirAll(filepath.Dir(destSQLPath), 0o755); err != nil {
+		return fmt.Errorf("failed to create parent directory for sql: %v", err)
+	}
+
+	db := dbcore.GetDBInstance()
+
+	// 获取所有表名
+	var tables []string
+	if err := db.Raw(`
+		SELECT table_name 
+		FROM information_schema.tables 
+		WHERE table_schema = 'public' 
+		AND table_type = 'BASE TABLE'
+	`).Scan(&tables).Error; err != nil {
+		return fmt.Errorf("failed to get table list: %v", err)
+	}
+
+	// 创建 SQL 文件
+	f, err := os.Create(destSQLPath)
+	if err != nil {
+		return fmt.Errorf("failed to create sql file: %v", err)
+	}
+	defer f.Close()
+
+	// 写入头部注释
+	fmt.Fprintf(f, "-- Komari PostgreSQL Backup\n")
+	fmt.Fprintf(f, "-- Generated at: %s\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(f, "-- Database: %s\n\n", flags.DatabaseName)
+
+	// 导出每个表的数据
+	for _, table := range tables {
+		// 获取表结构
+		var createStmt string
+		if err := db.Raw(fmt.Sprintf(`
+			SELECT 'CREATE TABLE ' || table_name || ' (' || 
+			string_agg(column_name || ' ' || data_type || 
+				CASE 
+					WHEN character_maximum_length IS NOT NULL THEN '(' || character_maximum_length || ')'
+					WHEN numeric_precision IS NOT NULL AND numeric_scale IS NOT NULL THEN '(' || numeric_precision || ',' || numeric_scale || ')'
+					WHEN numeric_precision IS NOT NULL THEN '(' || numeric_precision || ')'
+					ELSE ''
+				END ||
+				CASE WHEN is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END ||
+				CASE WHEN column_default IS NOT NULL THEN ' DEFAULT ' || column_default ELSE '' END
+			, ', ') || ');'
+			FROM information_schema.columns 
+			WHERE table_name = '%s' AND table_schema = 'public'
+		`, table)).Scan(&createStmt).Error; err == nil && createStmt != "" {
+			fmt.Fprintf(f, "-- Table: %s\n", table)
+			fmt.Fprintf(f, "DROP TABLE IF EXISTS %s CASCADE;\n", table)
+			fmt.Fprintf(f, "%s\n\n", createStmt)
+		}
+
+		// 获取表数据
+		rows, err := db.Raw(fmt.Sprintf("SELECT * FROM %s", table)).Rows()
+		if err != nil {
+			continue
+		}
+
+		columns, _ := rows.Columns()
+		if len(columns) == 0 {
+			rows.Close()
+			continue
+		}
+
+		for rows.Next() {
+			values := make([]interface{}, len(columns))
+			valuePtrs := make([]interface{}, len(columns))
+			for i := range values {
+				valuePtrs[i] = &values[i]
+			}
+
+			if err := rows.Scan(valuePtrs...); err != nil {
+				continue
+			}
+
+			// 构建 INSERT 语句
+			valueStrs := make([]string, len(columns))
+			for i, v := range values {
+				if v == nil {
+					valueStrs[i] = "NULL"
+				} else {
+					switch val := v.(type) {
+					case []byte:
+						valueStrs[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(string(val), "'", "''"))
+					case string:
+						valueStrs[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(val, "'", "''"))
+					case time.Time:
+						valueStrs[i] = fmt.Sprintf("'%s'", val.Format("2006-01-02 15:04:05"))
+					default:
+						valueStrs[i] = fmt.Sprintf("%v", val)
+					}
+				}
+			}
+
+			fmt.Fprintf(f, "INSERT INTO %s (%s) VALUES (%s);\n", table, strings.Join(columns, ", "), strings.Join(valueStrs, ", "))
+		}
+		rows.Close()
+		fmt.Fprintf(f, "\n")
+	}
+
+	return nil
+}
+
 // DownloadBackup 用于打包 ./data 目录及数据库文件为 zip 并通过 HTTP 下载
 func DownloadBackup(c *gin.Context) {
 	// 1) 创建临时目录
@@ -113,31 +220,44 @@ func DownloadBackup(c *gin.Context) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// 2) 复制 ./data 下除 .db/.db-wal/.db-shm 外的所有文件到临时目录
+	// 2) 复制 ./data 下除 .db/.db-wal/.db-shm/.sql 外的所有文件到临时目录
 	if err := copyDataToTempExcludingDB(tempDir); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error copying data to temp: %v", err))
 		return
 	}
 
-	// 3) 处理数据库备份 -> 临时目录/komari.db
-	destDB := filepath.Join(tempDir, "komari.db")
-	dbFilePath := flags.DatabaseFile
+	// 3) 处理数据库备份
+	dbType := flags.DatabaseType
+	if dbType == "" {
+		dbType = "sqlite"
+	}
 
-	if flags.DatabaseType == "sqlite" || flags.DatabaseType == "" {
+	switch dbType {
+	case "sqlite", "":
+		// SQLite: 导出为 komari.db
+		destDB := filepath.Join(tempDir, "komari.db")
 		if err := backupSQLiteTo(destDB); err != nil {
 			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error backing up sqlite database: %v", err))
 			return
 		}
-	} else if dbFilePath != "" {
-		// 非 sqlite 的情况：若配置了文件路径且存在，则直接复制（按用户需求仍然将名称固定为 komari.db）
-		if _, err := os.Stat(dbFilePath); err == nil {
-			if err := copyFile(dbFilePath, destDB); err != nil {
-				api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error copying database file: %v", err))
-				return
-			}
-		} else if !os.IsNotExist(err) {
-			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error stating database file: %v", err))
+	case "postgres", "postgresql":
+		// PostgreSQL: 导出为 komari.sql
+		destSQL := filepath.Join(tempDir, "komari.sql")
+		if err := backupPostgreSQLTo(destSQL); err != nil {
+			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error backing up postgresql database: %v", err))
 			return
+		}
+	default:
+		// 其他数据库类型：尝试复制数据库文件（如果有）
+		dbFilePath := flags.DatabaseFile
+		if dbFilePath != "" {
+			if _, err := os.Stat(dbFilePath); err == nil {
+				destDB := filepath.Join(tempDir, "komari.db")
+				if err := copyFile(dbFilePath, destDB); err != nil {
+					api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error copying database file: %v", err))
+					return
+				}
+			}
 		}
 	}
 
@@ -175,16 +295,17 @@ func DownloadBackup(c *gin.Context) {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
 		w, err := zipWriter.CreateHeader(&zip.FileHeader{
 			Name:     zipPath,
 			Method:   zip.Deflate,
 			Modified: info.ModTime(),
 		})
 		if err != nil {
+			f.Close()
 			return err
 		}
 		_, err = io.Copy(w, f)
+		f.Close()
 		return err
 	})
 	if err != nil {
@@ -192,8 +313,8 @@ func DownloadBackup(c *gin.Context) {
 		return
 	}
 
-	// 5) 追加备份标记文件（放在 zip 根目录）
-	markupContent := "此文件为 Komari 备份标记文件，请勿删除。\nThis is a Komari backup markup file, please do not delete.\n\n备份时间 / Backup Time: " + time.Now().Format(time.RFC3339)
+	// 5) 追加备份标记文件（放在 zip 根目录），包含数据库类型信息
+	markupContent := fmt.Sprintf("此文件为 Komari 备份标记文件，请勿删除。\nThis is a Komari backup markup file, please do not delete.\n\n备份时间 / Backup Time: %s\n数据库类型 / Database Type: %s\n", time.Now().Format(time.RFC3339), dbType)
 	markupWriter, err := zipWriter.CreateHeader(&zip.FileHeader{
 		Name:     "komari-backup-markup",
 		Method:   zip.Deflate,

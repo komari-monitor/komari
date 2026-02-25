@@ -3,6 +3,7 @@ package api
 import (
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,14 +19,26 @@ func RequestTerminal(c *gin.Context) {
 	user_uuid, _ := c.Get("uuid")
 	_, err := clients.GetClientByUUID(uuid)
 	if err != nil {
-		c.JSON(400, gin.H{
+		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  "error",
 			"message": "Client not found",
 		})
 		return
 	}
+
+	// 检查终端会话资源限制
+	rm := GetResourceManager()
+	if !rm.TryAcquireTerminalSession() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status":  "error",
+			"message": "Terminal session limit reached, please try again later",
+		})
+		return
+	}
+
 	// 建立ws
 	if !websocket.IsWebSocketUpgrade(c.Request) {
+		rm.ReleaseTerminalSession()
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Require WebSocket upgrade"})
 		return
 	}
@@ -34,6 +47,7 @@ func RequestTerminal(c *gin.Context) {
 	}
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
+		rm.ReleaseTerminalSession()
 		return
 	}
 	// 新建一个终端连接
@@ -49,24 +63,38 @@ func RequestTerminal(c *gin.Context) {
 	TerminalSessionsMutex.Lock()
 	TerminalSessions[id] = session
 	TerminalSessionsMutex.Unlock()
-	conn.SetCloseHandler(func(code int, text string) error {
-		log.Println("Terminal connection closed:", code, text)
+
+	// 使用原子标记防止重复清理
+	var cleanedUp atomic.Bool
+
+	// 确保在连接关闭时释放资源
+	cleanupSession := func() {
+		// 防止重复清理
+		if cleanedUp.Swap(true) {
+			return
+		}
+
 		TerminalSessionsMutex.Lock()
 		delete(TerminalSessions, id)
 		TerminalSessionsMutex.Unlock()
-		// 通知 Agent 关闭终端连接
+		rm.ReleaseTerminalSession()
 		if session.Agent != nil {
 			session.Agent.Close()
 		}
+		if session.Browser != nil {
+			session.Browser.Close()
+		}
+	}
+
+	conn.SetCloseHandler(func(code int, text string) error {
+		log.Println("Terminal connection closed:", code, text)
+		cleanupSession()
 		return nil
 	})
 
 	if ws.GetConnectedClients()[uuid] == nil {
 		conn.WriteMessage(1, []byte("Client offline!\n被控端离线!"))
-		conn.Close()
-		TerminalSessionsMutex.Lock()
-		delete(TerminalSessions, id)
-		TerminalSessionsMutex.Unlock()
+		cleanupSession()
 		return
 	}
 	err = ws.GetConnectedClients()[uuid].WriteJSON(gin.H{
@@ -74,23 +102,16 @@ func RequestTerminal(c *gin.Context) {
 		"request_id": id,
 	})
 	if err != nil {
-		conn.Close()
-		TerminalSessionsMutex.Lock()
-		delete(TerminalSessions, id)
-		TerminalSessionsMutex.Unlock()
+		cleanupSession()
 		return
 	}
 	conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent..."))
 	// 如果没有连接上，则关闭连接
 	time.AfterFunc(30*time.Second, func() {
 		TerminalSessionsMutex.Lock()
-		if session.Agent == nil {
-			if session.Browser != nil {
-				session.Browser.WriteMessage(1, []byte("被控端连接超时 timeout"))
-				session.Browser.Close()
-			}
-			conn.Close()
-			delete(TerminalSessions, id)
+		// 再次检查 session 状态
+		if s, exists := TerminalSessions[id]; exists && s.Agent == nil {
+			cleanupSession()
 		}
 		TerminalSessionsMutex.Unlock()
 	})
@@ -103,6 +124,9 @@ func ForwardTerminal(id string) {
 	if !exists || session == nil || session.Agent == nil || session.Browser == nil {
 		return
 	}
+
+	rm := GetResourceManager()
+
 	auditlog.Log(session.RequesterIp, session.UserUUID, "established, terminal id:"+id, "terminal")
 	established_time := time.Now()
 	errChan := make(chan error, 1)
@@ -164,4 +188,7 @@ func ForwardTerminal(id string) {
 	TerminalSessionsMutex.Lock()
 	delete(TerminalSessions, id)
 	TerminalSessionsMutex.Unlock()
+
+	// 释放终端会话资源
+	rm.ReleaseTerminalSession()
 }

@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"net/http"
+
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
@@ -12,11 +14,11 @@ func GetSessions(c *gin.Context) {
 
 	ss, err := accounts.GetAllSessions()
 	if err != nil {
-		api.RespondError(c, 500, "Failed to retrieve sessions: "+err.Error())
+		api.RespondError(c, http.StatusInternalServerError, "Failed to retrieve sessions: "+err.Error())
 		return
 	}
 	current, _ := c.Cookie("session_token")
-	c.JSON(200, gin.H{"status": "success", "current": current, "data": ss})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "current": current, "data": ss})
 }
 
 func DeleteSession(c *gin.Context) {
@@ -24,12 +26,12 @@ func DeleteSession(c *gin.Context) {
 		Session string `json:"session" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		api.RespondError(c, 400, "Invalid request: "+err.Error())
+		api.RespondError(c, http.StatusBadRequest, "Invalid request: "+err.Error())
 		return
 	}
 	err := accounts.DeleteSession(req.Session)
 	if err != nil {
-		api.RespondError(c, 500, "Failed to delete session: "+err.Error())
+		api.RespondError(c, http.StatusInternalServerError, "Failed to delete session: "+err.Error())
 		return
 	}
 	uuid, _ := c.Get("uuid")
@@ -41,7 +43,7 @@ func DeleteAllSession(c *gin.Context) {
 
 	err := accounts.DeleteAllSessions()
 	if err != nil {
-		api.RespondError(c, 500, "Failed to delete all sessions: "+err.Error())
+		api.RespondError(c, http.StatusInternalServerError, "Failed to delete all sessions: "+err.Error())
 		return
 	}
 	uuid, _ := c.Get("uuid")

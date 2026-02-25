@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"net/http"
 	"slices"
 
 	"github.com/gin-gonic/gin"
@@ -16,7 +17,7 @@ import (
 func OAuth(c *gin.Context) {
 	OAuthEnabled, _ := config.GetAs[bool](config.OAuthEnabledKey, false)
 	if !OAuthEnabled {
-		c.JSON(403, gin.H{"status": "error", "error": "OAuth is not enabled"})
+		c.JSON(http.StatusForbidden, gin.H{"status": "error", "error": "OAuth is not enabled"})
 		return
 	}
 
@@ -24,7 +25,7 @@ func OAuth(c *gin.Context) {
 
 	c.SetCookie("oauth_state", state, 3600, "/", "", false, true)
 
-	c.Redirect(302, authURL)
+	c.Redirect(http.StatusFound, authURL)
 }
 
 // /api/oauth_callback
@@ -42,13 +43,13 @@ func OAuthCallback(c *gin.Context) {
 		// 对于QQ登录，由于是通过QQ聚合登录平台中转，state可能会不匹配
 		// 但我们仍然需要验证state的存在性（不能是空的）
 		if state == "" {
-			c.JSON(400, gin.H{"status": "error", "error": "Invalid state"})
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Invalid state"})
 			return
 		}
 	} else {
 		// 对于其他提供商，严格验证state匹配
 		if state == "" || state != c.Query("state") {
-			c.JSON(400, gin.H{"status": "error", "error": "Invalid state"})
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Invalid state"})
 			return
 		}
 	}
@@ -61,7 +62,7 @@ func OAuthCallback(c *gin.Context) {
 	}
 	oidcUser, err := oauth.CurrentProvider().OnCallback(c, state, queries, utils.GetCallbackURL(c))
 	if err != nil {
-		c.JSON(500, gin.H{"status": "error", "error": "Failed to get user info: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "Failed to get user info: " + err.Error()})
 		return
 	}
 
@@ -77,23 +78,23 @@ func OAuthCallback(c *gin.Context) {
 		session, _ := c.Cookie("session_token")
 		user, err := accounts.GetUserBySession(session)
 		if err != nil || user.UUID != uuid {
-			c.JSON(500, gin.H{"status": "error", "message": "Binding failed"})
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Binding failed"})
 			return
 		}
 		err = accounts.BindingExternalAccount(user.UUID, sso_id)
 		if err != nil {
-			c.JSON(500, gin.H{"status": "error", "message": "Binding failed"})
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Binding failed"})
 			return
 		}
 		auditlog.Log(c.ClientIP(), user.UUID, "bound external account (OAuth)"+fmt.Sprintf(",sso_id: %s", sso_id), "login")
-		c.Redirect(302, "/admin")
+		c.Redirect(http.StatusFound, "/admin")
 		return
 	}
 
 	// 尝试获取用户
 	user, err := accounts.GetUserBySSO(sso_id)
 	if err != nil {
-		c.JSON(401, gin.H{
+		c.JSON(http.StatusUnauthorized, gin.H{
 			"status":  "error",
 			"message": "please log in and bind your external account first.",
 		})
@@ -103,12 +104,12 @@ func OAuthCallback(c *gin.Context) {
 	// 创建会话
 	session, err := accounts.CreateSession(user.UUID, 2592000, c.Request.UserAgent(), c.ClientIP(), "oauth")
 	if err != nil {
-		c.JSON(500, gin.H{"status": "error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
 		return
 	}
 
 	// 设置cookie并返回
 	c.SetCookie("session_token", session, 2592000, "/", "", false, true)
 	auditlog.Log(c.ClientIP(), user.UUID, "logged in (OAuth)", "login")
-	c.Redirect(302, "/admin")
+	c.Redirect(http.StatusFound, "/admin")
 }

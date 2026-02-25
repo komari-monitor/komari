@@ -12,7 +12,7 @@ func EstablishConnection(c *gin.Context) {
 	session_id := c.Query("id")
 	session, exists := api.TerminalSessions[session_id]
 	if !exists || session == nil || session.Browser == nil {
-		c.JSON(404, gin.H{"status": "error", "error": "Session not found"})
+		c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "Session not found"})
 		return
 	}
 	// Upgrade the connection to WebSocket

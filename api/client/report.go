@@ -60,7 +60,7 @@ func UploadReport(c *gin.Context) {
 	ws.SetLatestReport(report.UUID, &report)
 
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Restore the body for further use
-	c.JSON(200, gin.H{"status": "success"})
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
 func WebSocketReport(c *gin.Context) {

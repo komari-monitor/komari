@@ -59,7 +59,7 @@ func RemoveClient(c *gin.Context) {
 	uuid := c.Param("uuid")
 	err := clients.DeleteClient(uuid)
 	if err != nil {
-		c.JSON(500, gin.H{
+		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": "error",
 			"error":  "Failed to delete client" + err.Error(),
 		})
@@ -67,14 +67,14 @@ func RemoveClient(c *gin.Context) {
 	}
 	user_uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), user_uuid.(string), "delete client:"+uuid, "warn")
-	c.JSON(200, gin.H{"status": "success"})
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
 	ws.DeleteConnectedClients(uuid)
 	ws.DeleteLatestReport(uuid)
 }
 
 func ClearRecord(c *gin.Context) {
 	if err := records.DeleteAll(); err != nil {
-		c.JSON(500, gin.H{
+		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  "error",
 			"message": "Failed to delete Record" + err.Error(),
 		})
@@ -82,13 +82,13 @@ func ClearRecord(c *gin.Context) {
 	}
 	user_uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), user_uuid.(string), "clear records", "warn")
-	c.JSON(200, gin.H{"status": "success"})
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
 func GetClient(c *gin.Context) {
 	uuid := c.Param("uuid")
 	if uuid == "" {
-		c.JSON(400, gin.H{
+		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  "error",
 			"message": "Invalid or missing UUID",
 		})
@@ -120,7 +120,7 @@ func ListClients(c *gin.Context) {
 func GetClientToken(c *gin.Context) {
 	uuid := c.Param("uuid")
 	if uuid == "" {
-		c.JSON(400, gin.H{
+		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  "error",
 			"message": "Invalid or missing UUID",
 		})

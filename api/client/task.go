@@ -1,6 +1,7 @@
 package client
 
 import (
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,7 +14,7 @@ func TaskResult(c *gin.Context) {
 	token := c.Query("token")
 	clientId, _ := clients.GetClientUUIDByToken(token)
 	if clientId == "" {
-		c.JSON(400, gin.H{"status": "error", "message": "Invalid or missing token"})
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid or missing token"})
 		return
 	}
 	var req struct {
@@ -23,14 +24,14 @@ func TaskResult(c *gin.Context) {
 		FinishedAt time.Time `json:"finished_at" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"status": "error", "message": "Invalid request"})
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid request"})
 		return
 	}
 
 	if err := tasks.SaveTaskResult(req.TaskId, clientId, req.Result, req.ExitCode, models.FromTime(req.FinishedAt)); err != nil {
-		c.JSON(500, gin.H{"status": "error", "message": "Failed to update task result: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Failed to update task result: " + err.Error()})
 		return
 	}
 
-	c.JSON(200, gin.H{"status": "success", "message": "Task result updated successfully"})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Task result updated successfully"})
 }
