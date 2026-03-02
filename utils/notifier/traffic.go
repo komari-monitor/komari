@@ -85,9 +85,14 @@ func CheckTraffic() {
 		last, _ := trafficCache.Get(key)
 		lastStep, _ := last.(int)
 
+		// 修复：当检测到当前进度小于历史记录时，说明流量已重置，将基准归零
+		if curStep < lastStep {
+			lastStep = 0
+		}
+
 		if curStep > lastStep { // 只在进入新步进时提醒一次
 			trafficCache.SetDefault(key, curStep)
-
+		
 			msg := fmt.Sprintf("used %d%% (%s / %s), type=%s", curStep, humanBytes(used), humanBytes(c.TrafficLimit), strings.ToLower(c.TrafficLimitType))
 			// 发送通知（内部会检查 NotificationEnabled）
 			_ = messageSender.SendEvent(models.EventMessage{
