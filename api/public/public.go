@@ -1,9 +1,10 @@
-package api
+package public
 
 import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
 )
@@ -11,7 +12,7 @@ import (
 func GetPublicSettings(c *gin.Context) {
 	p, e := database.GetPublicInfo()
 	if e != nil {
-		RespondError(c, 500, e.Error())
+		api.RespondError(c, 500, e.Error())
 		return
 	}
 	// 临时访问许可
@@ -42,5 +43,5 @@ func GetPublicSettings(c *gin.Context) {
 	}() {
 		p["private_site"] = false
 	}
-	RespondSuccess(c, p)
+	api.RespondSuccess(c, p)
 }

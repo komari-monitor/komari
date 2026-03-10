@@ -3,11 +3,9 @@ package api
 import (
 	"log"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/common"
 	"github.com/patrickmn/go-cache"
 
@@ -22,17 +20,6 @@ import (
 var (
 	Records = cache.New(1*time.Minute, 1*time.Minute)
 )
-
-type TerminalSession struct {
-	UUID        string
-	UserUUID    string
-	Browser     *websocket.Conn
-	Agent       *websocket.Conn
-	RequesterIp string
-}
-
-var TerminalSessionsMutex = &sync.Mutex{}
-var TerminalSessions = make(map[string]*TerminalSession)
 
 func SaveClientReportToDB() error {
 	lastMinute := time.Now().Add(-time.Minute).Unix()
@@ -137,12 +124,6 @@ func RespondSuccessMessage(c *gin.Context, message string, data interface{}) {
 // RespondError sends an error response with message.
 func RespondError(c *gin.Context, httpStatus int, message string) {
 	Respond(c, httpStatus, "error", message, nil)
-}
-func GetVersion(c *gin.Context) {
-	RespondSuccess(c, gin.H{
-		"version": utils.CurrentVersion,
-		"hash":    utils.VersionHash,
-	})
 }
 
 func isApiKeyValid(apiKey string) bool {

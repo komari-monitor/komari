@@ -1,4 +1,4 @@
-package api
+package terminal
 
 import (
 	"log"
@@ -7,7 +7,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/ws"
@@ -62,7 +61,7 @@ func RequestTerminal(c *gin.Context) {
 	})
 
 	if ws.GetConnectedClients()[uuid] == nil {
-		conn.WriteMessage(1, []byte("Client offline!\n被控端离线!"))
+		conn.WriteMessage(1, []byte("Client offline!\n被控端离线!\n"))
 		conn.Close()
 		TerminalSessionsMutex.Lock()
 		delete(TerminalSessions, id)
@@ -80,13 +79,13 @@ func RequestTerminal(c *gin.Context) {
 		TerminalSessionsMutex.Unlock()
 		return
 	}
-	conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent..."))
+	conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent...\n"))
 	// 如果没有连接上，则关闭连接
 	time.AfterFunc(30*time.Second, func() {
 		TerminalSessionsMutex.Lock()
 		if session.Agent == nil {
 			if session.Browser != nil {
-				session.Browser.WriteMessage(1, []byte("被控端连接超时 timeout"))
+				session.Browser.WriteMessage(1, []byte("被控端连接超时 timeout\n"))
 				session.Browser.Close()
 			}
 			conn.Close()
@@ -95,73 +94,4 @@ func RequestTerminal(c *gin.Context) {
 		TerminalSessionsMutex.Unlock()
 	})
 	//auditlog.Log(c.ClientIP(), user_uuid.(string), "request, terminal id:"+id+",client:"+session.UUID, "terminal")
-}
-
-func ForwardTerminal(id string) {
-	session, exists := TerminalSessions[id]
-
-	if !exists || session == nil || session.Agent == nil || session.Browser == nil {
-		return
-	}
-	auditlog.Log(session.RequesterIp, session.UserUUID, "established, terminal id:"+id, "terminal")
-	established_time := time.Now()
-	errChan := make(chan error, 1)
-
-	go func() {
-		for {
-			messageType, data, err := session.Browser.ReadMessage()
-			if err != nil {
-				errChan <- err
-				return
-			}
-
-			if messageType == websocket.TextMessage {
-				if session.Agent != nil && string(data[0:1]) == "{" {
-					err = session.Agent.WriteMessage(websocket.TextMessage, data)
-				} else if session.Agent != nil {
-					err = session.Agent.WriteMessage(websocket.BinaryMessage, data)
-				}
-			} else if session.Agent != nil {
-				// 二进制消息，原样传递
-				err = session.Agent.WriteMessage(websocket.BinaryMessage, data)
-			}
-
-			if err != nil {
-				errChan <- err
-				return
-			}
-		}
-	}()
-
-	go func() {
-		for {
-			_, data, err := session.Agent.ReadMessage()
-			if err != nil {
-				errChan <- err
-				return
-			}
-			if session.Browser != nil {
-				err = session.Browser.WriteMessage(websocket.BinaryMessage, data)
-				if err != nil {
-					errChan <- err
-					return
-				}
-			}
-		}
-	}()
-
-	// 等待错误或主动关闭
-	<-errChan
-	// 关闭连接
-	if session.Agent != nil {
-		session.Agent.Close()
-	}
-	if session.Browser != nil {
-		session.Browser.Close()
-	}
-	disconnect_time := time.Now()
-	auditlog.Log(session.RequesterIp, session.UserUUID, "disconnected, terminal id:"+id+", duration:"+disconnect_time.Sub(established_time).String(), "terminal")
-	TerminalSessionsMutex.Lock()
-	delete(TerminalSessions, id)
-	TerminalSessionsMutex.Unlock()
 }

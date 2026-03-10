@@ -1,7 +1,8 @@
-package api
+package public
 
 import (
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -11,7 +12,7 @@ func GetClientRecentRecords(c *gin.Context) {
 	uuid := c.Param("uuid")
 
 	if uuid == "" {
-		RespondError(c, 400, "UUID is required")
+		api.RespondError(c, 400, "UUID is required")
 		return
 	}
 
@@ -34,11 +35,11 @@ func GetClientRecentRecords(c *gin.Context) {
 		}
 
 		if hiddenMap[uuid] {
-			RespondError(c, 400, "UUID is required") //防止未登录用户获取隐藏客户端数据
+			api.RespondError(c, 400, "UUID is required") //防止未登录用户获取隐藏客户端数据
 			return
 		}
 	}
 
-	records, _ := Records.Get(uuid)
-	RespondSuccess(c, records)
+	records, _ := api.Records.Get(uuid)
+	api.RespondSuccess(c, records)
 }

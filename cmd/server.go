@@ -22,8 +22,7 @@ import (
 	"github.com/komari-monitor/komari/api/client"
 	"github.com/komari-monitor/komari/api/jsonRpc"
 	public_api "github.com/komari-monitor/komari/api/public"
-	"github.com/komari-monitor/komari/api/record"
-	"github.com/komari-monitor/komari/api/task"
+	"github.com/komari-monitor/komari/api/terminal"
 	"github.com/komari-monitor/komari/cmd/flags"
 
 	"github.com/komari-monitor/komari/config"
@@ -184,20 +183,20 @@ func RunServer() {
 		c.String(200, "pong")
 	})
 	// #region 公开路由
-	r.POST("/api/login", api.Login)
-	r.GET("/api/me", api.GetMe)
+	r.POST("/api/login", public_api.Login)
+	r.GET("/api/me", public_api.GetMe)
 	r.GET("/api/clients", api.GetClients)
-	r.GET("/api/nodes", api.GetNodesInformation)
-	r.GET("/api/public", api.GetPublicSettings)
-	r.GET("/api/oauth", api.OAuth)
-	r.GET("/api/oauth_callback", api.OAuthCallback)
-	r.GET("/api/logout", api.Logout)
-	r.GET("/api/version", api.GetVersion)
-	r.GET("/api/recent/:uuid", api.GetClientRecentRecords)
+	r.GET("/api/nodes", public_api.GetNodesInformation)
+	r.GET("/api/public", public_api.GetPublicSettings)
+	r.GET("/api/oauth", public_api.OAuth)
+	r.GET("/api/oauth_callback", public_api.OAuthCallback)
+	r.GET("/api/logout", public_api.Logout)
+	r.GET("/api/version", public_api.GetVersion)
+	r.GET("/api/recent/:uuid", public_api.GetClientRecentRecords)
 
-	r.GET("/api/records/load", record.GetRecordsByUUID)
-	r.GET("/api/records/ping", record.GetPingRecords)
-	r.GET("/api/task/ping", task.GetPublicPingTasks)
+	r.GET("/api/records/load", public_api.GetRecordsByUUID)
+	r.GET("/api/records/ping", public_api.GetPingRecords)
+	r.GET("/api/task/ping", public_api.GetPublicPingTasks)
 	r.GET("/api/rpc2", jsonRpc.OnRpcRequest)
 	r.POST("/api/rpc2", jsonRpc.OnRpcRequest)
 	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
@@ -208,7 +207,7 @@ func RunServer() {
 		tokenAuthrized.GET("/report", client.WebSocketReport) // websocket
 		tokenAuthrized.POST("/uploadBasicInfo", client.UploadBasicInfo)
 		tokenAuthrized.POST("/report", client.UploadReport)
-		tokenAuthrized.GET("/terminal", client.EstablishConnection)
+		tokenAuthrized.GET("/terminal", terminal.EstablishConnection)
 		tokenAuthrized.POST("/task/result", client.TaskResult)
 		tokenAuthrized.GET("/ping/tasks", client.GetPingTasks)
 		tokenAuthrized.POST("/ping/result", client.UploadPingResult)
@@ -274,7 +273,7 @@ func RunServer() {
 			clientGroup.GET("/:uuid/token", admin.GetClientToken)
 			clientGroup.POST("/order", admin.OrderWeight)
 			// client terminal
-			clientGroup.GET("/:uuid/terminal", api.RequestTerminal)
+			clientGroup.GET("/:uuid/terminal", terminal.RequestTerminal)
 		}
 
 		// records
