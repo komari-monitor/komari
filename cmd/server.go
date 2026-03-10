@@ -170,6 +170,7 @@ func RunServer() {
 		c.Next()
 	})
 
+	r.Use(api.IdentityMiddleware())
 	r.Use(api.PrivateSiteMiddleware())
 
 	r.Use(func(c *gin.Context) {
@@ -202,7 +203,7 @@ func RunServer() {
 	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
 	// #region Agent
 	r.POST("/api/clients/register", client.RegisterClient)
-	tokenAuthrized := r.Group("/api/clients", api.TokenAuthMiddleware())
+	tokenAuthrized := r.Group("/api/clients", api.RequireRole(api.RoleAdmin, api.RoleClient))
 	{
 		tokenAuthrized.GET("/report", client.WebSocketReport) // websocket
 		tokenAuthrized.POST("/uploadBasicInfo", client.UploadBasicInfo)
@@ -213,7 +214,7 @@ func RunServer() {
 		tokenAuthrized.POST("/ping/result", client.UploadPingResult)
 	}
 	// #region 管理员
-	adminAuthrized := r.Group("/api/admin", api.AdminAuthMiddleware())
+	adminAuthrized := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
 	{
 		adminAuthrized.GET("/download/backup", admin.DownloadBackup)
 		adminAuthrized.POST("/upload/backup", admin.UploadBackup)
