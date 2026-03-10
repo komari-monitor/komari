@@ -309,6 +309,14 @@ func SaveClient(updates map[string]interface{}) error {
 		return fmt.Errorf("no fields to update")
 	}
 
+	if v, exists := updates["traffic_limit"]; exists {
+		if val, ok := v.(float64); ok {
+			if val < 0 || val > math.MaxInt64-1 {
+				return fmt.Errorf("traffic_limit must be a valid non-negative int64 value, got %v", val)
+			}
+		}
+	}
+
 	updates["updated_at"] = time.Now()
 
 	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
