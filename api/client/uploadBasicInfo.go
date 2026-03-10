@@ -37,7 +37,7 @@ func UploadBasicInfo(c *gin.Context) {
 	}
 
 	cbi["uuid"] = uuid
-
+	// 如果没有传入 IP 信息，尝试从请求中获取
 	if (func() bool {
 		if v4, ok := cbi["ipv4"].(string); !ok || v4 == "" {
 			if v6, ok := cbi["ipv6"].(string); !ok || v6 == "" {
@@ -52,9 +52,9 @@ func UploadBasicInfo(c *gin.Context) {
 
 		switch ipType {
 		case 0:
-			cbi["ipv4"] = ip
+			cbi["ipv4"] = ipStr
 		case 1:
-			cbi["ipv6"] = ip
+			cbi["ipv6"] = ipStr
 		default:
 			break
 		}
