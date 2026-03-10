@@ -1,4 +1,4 @@
-package api
+package public
 
 import (
 	"github.com/komari-monitor/komari/database/accounts"
