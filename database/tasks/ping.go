@@ -11,8 +11,13 @@ import (
 
 func AddPingTask(clients []string, name string, target, task_type string, interval int) (uint, error) {
 	db := dbcore.GetDBInstance()
+	var maxWeight int
+	if err := db.Model(&models.PingTask{}).Select("COALESCE(MAX(weight), -1)").Scan(&maxWeight).Error; err != nil {
+		return 0, err
+	}
 	task := models.PingTask{
 		Clients:  clients,
+		Weight:   maxWeight + 1,
 		Name:     name,
 		Type:     task_type,
 		Target:   target,
@@ -50,7 +55,7 @@ func EditPingTask(tasks []*models.PingTask) error {
 func GetAllPingTasks() ([]models.PingTask, error) {
 	db := dbcore.GetDBInstance()
 	var tasks []models.PingTask
-	if err := db.Find(&tasks).Error; err != nil {
+	if err := db.Order("weight ASC").Order("id ASC").Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	return tasks, nil
@@ -63,6 +68,23 @@ func GetPingTasksByClient(uuid string) []models.PingTask {
 		return nil
 	}
 	return tasks
+}
+
+func UpdatePingTaskOrder(order map[uint]int) error {
+	db := dbcore.GetDBInstance()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		for id, weight := range order {
+			if err := tx.Model(&models.PingTask{}).Where("id = ?", id).Update("weight", weight).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	ReloadPingSchedule()
+	return nil
 }
 
 func SavePingRecord(record models.PingRecord) error {
