@@ -18,7 +18,23 @@ func AddPingTask(clients []string, name string, target, task_type string, interv
 		Target:   target,
 		Interval: interval,
 	}
-	if err := db.Create(&task).Error; err != nil {
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&task).Error; err != nil {
+			return err
+		}
+
+		// Append by id to avoid races between concurrent create requests.
+		result := tx.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("weight", int(task.Id))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+
+		return nil
+	})
+	if err != nil {
 		return 0, err
 	}
 	ReloadPingSchedule()
@@ -50,7 +66,7 @@ func EditPingTask(tasks []*models.PingTask) error {
 func GetAllPingTasks() ([]models.PingTask, error) {
 	db := dbcore.GetDBInstance()
 	var tasks []models.PingTask
-	if err := db.Find(&tasks).Error; err != nil {
+	if err := db.Order("weight ASC").Order("id ASC").Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	return tasks, nil
@@ -63,6 +79,27 @@ func GetPingTasksByClient(uuid string) []models.PingTask {
 		return nil
 	}
 	return tasks
+}
+
+func UpdatePingTaskOrder(order map[uint]int) error {
+	db := dbcore.GetDBInstance()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		for id, weight := range order {
+			result := tx.Model(&models.PingTask{}).Where("id = ?", id).Update("weight", weight)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				return gorm.ErrRecordNotFound
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	ReloadPingSchedule()
+	return nil
 }
 
 func SavePingRecord(record models.PingRecord) error {

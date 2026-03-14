@@ -336,6 +336,7 @@ func RunServer() {
 			pingTaskGroup.POST("/add", admin.AddPingTask)
 			pingTaskGroup.POST("/delete", admin.DeletePingTask)
 			pingTaskGroup.POST("/edit", admin.EditPingTask)
+			pingTaskGroup.POST("/order", admin.OrderPingTask)
 
 		}
 

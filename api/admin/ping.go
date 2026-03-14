@@ -2,6 +2,7 @@ package admin
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
@@ -77,4 +78,29 @@ func GetAllPingTasks(c *gin.Context) {
 	}
 
 	api.RespondSuccess(c, tasks)
+}
+
+func OrderPingTask(c *gin.Context) {
+	var req map[string]int
+	if err := c.ShouldBindJSON(&req); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid or missing request body: "+err.Error())
+		return
+	}
+
+	order := make(map[uint]int, len(req))
+	for idStr, weight := range req {
+		id, err := strconv.ParseUint(idStr, 10, 64)
+		if err != nil {
+			api.RespondError(c, http.StatusBadRequest, "Invalid task id: "+idStr)
+			return
+		}
+		order[uint(id)] = weight
+	}
+
+	if err := tasks.UpdatePingTaskOrder(order); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, nil)
 }
