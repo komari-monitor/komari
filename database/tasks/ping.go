@@ -9,14 +9,17 @@ import (
 	"gorm.io/gorm"
 )
 
-func AddPingTask(clients []string, name string, target, task_type string, interval int) (uint, error) {
+// AddPingTask 创建延迟监测任务，并保存是否覆盖全部服务器的开关。
+func AddPingTask(clients []string, allClients bool, name string, target, task_type string, interval int) (uint, error) {
 	db := dbcore.GetDBInstance()
+	normalizedClients := normalizePingClients(models.StringArray(clients))
 	task := models.PingTask{
-		Clients:  clients,
-		Name:     name,
-		Type:     task_type,
-		Target:   target,
-		Interval: interval,
+		Clients:    normalizedClients,
+		AllClients: allClients,
+		Name:       name,
+		Type:       task_type,
+		Target:     target,
+		Interval:   interval,
 	}
 	err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&task).Error; err != nil {
@@ -51,16 +54,35 @@ func DeletePingTask(id []uint) error {
 	return result.Error
 }
 
+// EditPingTask 批量更新延迟监测任务配置。
 func EditPingTask(tasks []*models.PingTask) error {
 	db := dbcore.GetDBInstance()
 	for _, task := range tasks {
-		result := db.Model(&models.PingTask{}).Where("id = ?", task.Id).Updates(task)
+		task.Clients = normalizePingClients(task.Clients)
+		// 使用 map 显式更新，避免 GORM struct Updates 跳过 false/0/空切片等零值。
+		updates := map[string]interface{}{
+			"name":        task.Name,
+			"clients":     task.Clients,
+			"all_clients": task.AllClients,
+			"type":        task.Type,
+			"target":      task.Target,
+			"interval":    task.Interval,
+		}
+		result := db.Model(&models.PingTask{}).Where("id = ?", task.Id).Updates(updates)
 		if result.RowsAffected == 0 {
 			return gorm.ErrRecordNotFound
 		}
 	}
 	ReloadPingSchedule()
 	return nil
+}
+
+// normalizePingClients 保持 clients 字段序列化为 JSON 数组，避免空值变成 null。
+func normalizePingClients(clients models.StringArray) models.StringArray {
+	if clients == nil {
+		return models.StringArray{}
+	}
+	return clients
 }
 
 func GetAllPingTasks() ([]models.PingTask, error) {
@@ -72,10 +94,11 @@ func GetAllPingTasks() ([]models.PingTask, error) {
 	return tasks, nil
 }
 
+// GetPingTasksByClient 获取指定服务器需要执行的延迟监测任务，包含全部服务器任务。
 func GetPingTasksByClient(uuid string) []models.PingTask {
 	db := dbcore.GetDBInstance()
 	var tasks []models.PingTask
-	if err := db.Where("clients LIKE ?", `%"`+uuid+`"%`).Find(&tasks).Error; err != nil {
+	if err := db.Where("all_clients = ? OR clients LIKE ?", true, `%"`+uuid+`"%`).Find(&tasks).Error; err != nil {
 		return nil
 	}
 	return tasks

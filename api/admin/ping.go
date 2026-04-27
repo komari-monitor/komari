@@ -10,22 +10,28 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 )
 
-// POST body: clients []string, target, task_type string, interval int
+// AddPingTask 处理新增延迟监测任务请求。
+// POST body: clients []string, all_clients bool, target, task_type string, interval int
 func AddPingTask(c *gin.Context) {
 	var req struct {
-		Clients  []string `json:"clients" binding:"required"`
-		Name     string   `json:"name" binding:"required"`
-		Target   string   `json:"target" binding:"required"`
-		TaskType string   `json:"type" binding:"required"`     // icmp, tcp, http
-		Interval int      `json:"interval" binding:"required"` // 间隔时间，单位秒
+		Clients    []string `json:"clients"`
+		AllClients bool     `json:"all_clients"`
+		Name       string   `json:"name" binding:"required"`
+		Target     string   `json:"target" binding:"required"`
+		TaskType   string   `json:"type" binding:"required"`     // icmp, tcp, http
+		Interval   int      `json:"interval" binding:"required"` // 间隔时间，单位秒
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !req.AllClients && len(req.Clients) == 0 {
+		api.RespondError(c, http.StatusBadRequest, "clients is required when all_clients is false")
+		return
+	}
 
-	if taskID, err := tasks.AddPingTask(req.Clients, req.Name, req.Target, req.TaskType, req.Interval); err != nil {
+	if taskID, err := tasks.AddPingTask(req.Clients, req.AllClients, req.Name, req.Target, req.TaskType, req.Interval); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		api.RespondSuccess(c, gin.H{"task_id": taskID})
@@ -49,6 +55,7 @@ func DeletePingTask(c *gin.Context) {
 	}
 }
 
+// EditPingTask 处理延迟监测任务编辑请求。
 // POST body: id []uint, updates map[string]interface{}
 func EditPingTask(c *gin.Context) {
 	var req struct {
@@ -58,6 +65,13 @@ func EditPingTask(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid request data")
 		return
+	}
+	for _, task := range req.Tasks {
+		// 编辑时只拦截空任务对象，允许把任务临时保存为未绑定服务器状态。
+		if task == nil {
+			api.RespondError(c, http.StatusBadRequest, "Invalid request data")
+			return
+		}
 	}
 
 	if err := tasks.EditPingTask(req.Tasks); err != nil {

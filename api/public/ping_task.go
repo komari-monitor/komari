@@ -8,12 +8,14 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 )
 
+// PublicPingTask 是对外暴露的延迟监测任务信息。
 type PublicPingTask struct {
-	Id       uint     `json:"id"`
-	Name     string   `json:"name"`
-	Clients  []string `json:"clients"`
-	Type     string   `json:"type"`
-	Interval int      `json:"interval"`
+	Id         uint     `json:"id"`
+	Name       string   `json:"name"`
+	Clients    []string `json:"clients"`
+	AllClients bool     `json:"all_clients"`
+	Type       string   `json:"type"`
+	Interval   int      `json:"interval"`
 }
 
 func GetPublicPingTasks(c *gin.Context) {
@@ -26,11 +28,12 @@ func GetPublicPingTasks(c *gin.Context) {
 	publicTasks := make([]PublicPingTask, len(tasks))
 	for i, task := range tasks {
 		publicTasks[i] = PublicPingTask{
-			Id:       task.Id,
-			Name:     task.Name,
-			Clients:  task.Clients,
-			Type:     task.Type,
-			Interval: task.Interval,
+			Id:         task.Id,
+			Name:       task.Name,
+			Clients:    task.Clients,
+			AllClients: task.AllClients,
+			Type:       task.Type,
+			Interval:   task.Interval,
 		}
 	}
 

@@ -90,7 +90,7 @@ func executePingTask(ctx context.Context, task models.PingTask, onlineClients ma
 	message.Type = task.Type
 	message.Target = task.Target
 
-	for _, clientUUID := range task.Clients {
+	for _, clientUUID := range targetPingClientUUIDs(task, onlineClients) {
 		select {
 		case <-ctx.Done():
 			// Context was canceled, stop sending pings.
@@ -105,6 +105,18 @@ func executePingTask(ctx context.Context, task models.PingTask, onlineClients ma
 			}
 		}
 	}
+}
+
+// targetPingClientUUIDs 根据任务配置计算本次调度需要下发的在线服务器列表。
+func targetPingClientUUIDs(task models.PingTask, onlineClients map[string]*ws.SafeConn) []string {
+	if task.AllClients {
+		clients := make([]string, 0, len(onlineClients))
+		for clientUUID := range onlineClients {
+			clients = append(clients, clientUUID)
+		}
+		return clients
+	}
+	return task.Clients
 }
 
 // ReloadPingSchedule 加载或重载时间表

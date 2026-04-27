@@ -50,11 +50,9 @@ func getPingStatsForNode(uuid string, pingTasks []models.PingTask) map[string]pi
 	// 筛选属于该节点的任务
 	assigned := make([]models.PingTask, 0, 4)
 	for _, t := range pingTasks {
-		for _, c := range t.Clients {
-			if c == uuid {
-				assigned = append(assigned, t)
-				break
-			}
+		// all_clients=true 的任务也需要参与该节点的 ping 统计。
+		if t.AppliesToClient(uuid) {
+			assigned = append(assigned, t)
 		}
 	}
 	if len(assigned) == 0 {
