@@ -394,6 +394,9 @@ func InitDatabase() {
 
 // #region 定时任务
 func DoScheduledWork() {
+	if err := tasks.MigrateAllClientsExpansion(); err != nil {
+		log.Println("Failed to migrate ping task all_clients expansion:", err)
+	}
 	tasks.ReloadPingSchedule()
 	d_notification.ReloadLoadNotificationSchedule()
 	ticker := time.NewTicker(time.Minute * 30)

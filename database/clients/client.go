@@ -1,12 +1,14 @@
 package clients
 
 import (
+	"log"
 	"math"
 	"time"
 
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -219,6 +221,9 @@ func CreateClient() (clientUUID, token string, err error) {
 	if err != nil {
 		return "", "", err
 	}
+	if err := tasks.AddDefaultOnClientUUID(clientUUID); err != nil {
+		log.Println("Failed to apply default-on ping tasks to new client:", err)
+	}
 	return clientUUID, token, nil
 }
 
@@ -240,6 +245,9 @@ func CreateClientWithName(name string) (clientUUID, token string, err error) {
 	err = db.Create(&client).Error
 	if err != nil {
 		return "", "", err
+	}
+	if err := tasks.AddDefaultOnClientUUID(clientUUID); err != nil {
+		log.Println("Failed to apply default-on ping tasks to new client:", err)
 	}
 	return clientUUID, token, nil
 }

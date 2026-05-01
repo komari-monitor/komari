@@ -11,27 +11,27 @@ import (
 )
 
 // AddPingTask 处理新增延迟监测任务请求。
-// POST body: clients []string, all_clients bool, target, task_type string, interval int
+// POST body: clients []string, default_on bool, target, task_type string, interval int
 func AddPingTask(c *gin.Context) {
 	var req struct {
-		Clients    []string `json:"clients"`
-		AllClients bool     `json:"all_clients"`
-		Name       string   `json:"name" binding:"required"`
-		Target     string   `json:"target" binding:"required"`
-		TaskType   string   `json:"type" binding:"required"`     // icmp, tcp, http
-		Interval   int      `json:"interval" binding:"required"` // 间隔时间，单位秒
+		Clients   []string `json:"clients"`
+		DefaultOn bool     `json:"default_on"`
+		Name      string   `json:"name" binding:"required"`
+		Target    string   `json:"target" binding:"required"`
+		TaskType  string   `json:"type" binding:"required"`     // icmp, tcp, http
+		Interval  int      `json:"interval" binding:"required"` // 间隔时间，单位秒
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !req.AllClients && len(req.Clients) == 0 {
-		api.RespondError(c, http.StatusBadRequest, "clients is required when all_clients is false")
+	if !req.DefaultOn && len(req.Clients) == 0 {
+		api.RespondError(c, http.StatusBadRequest, "clients is required when default_on is false")
 		return
 	}
 
-	if taskID, err := tasks.AddPingTask(req.Clients, req.AllClients, req.Name, req.Target, req.TaskType, req.Interval); err != nil {
+	if taskID, err := tasks.AddPingTask(req.Clients, req.DefaultOn, req.Name, req.Target, req.TaskType, req.Interval); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		api.RespondSuccess(c, gin.H{"task_id": taskID})

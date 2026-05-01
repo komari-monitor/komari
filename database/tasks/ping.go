@@ -9,17 +9,17 @@ import (
 	"gorm.io/gorm"
 )
 
-// AddPingTask 创建延迟监测任务，并保存是否覆盖全部服务器的开关。
-func AddPingTask(clients []string, allClients bool, name string, target, task_type string, interval int) (uint, error) {
+// AddPingTask 创建延迟监测任务。defaultOn 表示新加入的服务器是否自动开启此监测。
+func AddPingTask(clients []string, defaultOn bool, name string, target, task_type string, interval int) (uint, error) {
 	db := dbcore.GetDBInstance()
 	normalizedClients := normalizePingClients(models.StringArray(clients))
 	task := models.PingTask{
-		Clients:    normalizedClients,
-		AllClients: allClients,
-		Name:       name,
-		Type:       task_type,
-		Target:     target,
-		Interval:   interval,
+		Clients:   normalizedClients,
+		DefaultOn: defaultOn,
+		Name:      name,
+		Type:      task_type,
+		Target:    target,
+		Interval:  interval,
 	}
 	err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&task).Error; err != nil {
@@ -63,7 +63,7 @@ func EditPingTask(tasks []*models.PingTask) error {
 		updates := map[string]interface{}{
 			"name":        task.Name,
 			"clients":     task.Clients,
-			"all_clients": task.AllClients,
+			"all_clients": task.DefaultOn,
 			"type":        task.Type,
 			"target":      task.Target,
 			"interval":    task.Interval,
@@ -94,11 +94,11 @@ func GetAllPingTasks() ([]models.PingTask, error) {
 	return tasks, nil
 }
 
-// GetPingTasksByClient 获取指定服务器需要执行的延迟监测任务，包含全部服务器任务。
+// GetPingTasksByClient 获取指定服务器需要执行的延迟监测任务。
 func GetPingTasksByClient(uuid string) []models.PingTask {
 	db := dbcore.GetDBInstance()
 	var tasks []models.PingTask
-	if err := db.Where("all_clients = ? OR clients LIKE ?", true, `%"`+uuid+`"%`).Find(&tasks).Error; err != nil {
+	if err := db.Where("clients LIKE ?", `%"`+uuid+`"%`).Find(&tasks).Error; err != nil {
 		return nil
 	}
 	return tasks
@@ -160,6 +160,79 @@ func ReloadPingSchedule() error {
 		return err
 	}
 	return utils.ReloadPingSchedule(pingTasks)
+}
+
+// AddDefaultOnClientUUID 在新客户端注册后，把该 UUID 追加到所有 default_on=true 的任务的 clients 中（去重）。
+func AddDefaultOnClientUUID(uuid string) error {
+	if uuid == "" {
+		return nil
+	}
+	db := dbcore.GetDBInstance()
+	var tasks []models.PingTask
+	if err := db.Where("all_clients = ?", true).Find(&tasks).Error; err != nil {
+		return err
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	changed := false
+	for _, task := range tasks {
+		exists := false
+		for _, c := range task.Clients {
+			if c == uuid {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			continue
+		}
+		next := append(models.StringArray{}, task.Clients...)
+		next = append(next, uuid)
+		if err := db.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("clients", next).Error; err != nil {
+			return err
+		}
+		changed = true
+	}
+	if changed {
+		return ReloadPingSchedule()
+	}
+	return nil
+}
+
+// MigrateAllClientsExpansion 启动时把旧版 default_on=true 且 clients 为空的任务展开为当前所有客户端 UUID。
+// 迁移后 clients 始终是显式列表，调度路径不再依赖 default_on。
+func MigrateAllClientsExpansion() error {
+	db := dbcore.GetDBInstance()
+	var tasks []models.PingTask
+	if err := db.Where("all_clients = ?", true).Find(&tasks).Error; err != nil {
+		return err
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	var clients []models.Client
+	if err := db.Select("uuid").Find(&clients).Error; err != nil {
+		return err
+	}
+	if len(clients) == 0 {
+		return nil
+	}
+	allUUIDs := make(models.StringArray, 0, len(clients))
+	for _, c := range clients {
+		if c.UUID != "" {
+			allUUIDs = append(allUUIDs, c.UUID)
+		}
+	}
+	for _, task := range tasks {
+		if len(task.Clients) > 0 {
+			continue
+		}
+		if err := db.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("clients", allUUIDs).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {

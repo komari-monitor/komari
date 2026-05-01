@@ -294,7 +294,6 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 				continue
 			}
 			if params.UUID != "" { // ensure task assigned to specific client when filtering by uuid
-				// all_clients=true 的任务对任意服务器生效，避免按 clients 列表漏掉统计。
 				if !t.AppliesToClient(params.UUID) {
 					continue
 				}
@@ -385,7 +384,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 				"name":          t.Name,
 				"type":          t.Type,
 				"interval":      t.Interval,
-				"all_clients":   t.AllClients,
+				"default_on":    t.DefaultOn,
 				"loss":          lossRate,
 				"min":           minLat,
 				"max":           maxLat,

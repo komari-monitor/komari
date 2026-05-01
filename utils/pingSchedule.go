@@ -109,13 +109,7 @@ func executePingTask(ctx context.Context, task models.PingTask, onlineClients ma
 
 // targetPingClientUUIDs 根据任务配置计算本次调度需要下发的在线服务器列表。
 func targetPingClientUUIDs(task models.PingTask, onlineClients map[string]*ws.SafeConn) []string {
-	if task.AllClients {
-		clients := make([]string, 0, len(onlineClients))
-		for clientUUID := range onlineClients {
-			clients = append(clients, clientUUID)
-		}
-		return clients
-	}
+	_ = onlineClients
 	return task.Clients
 }
 
