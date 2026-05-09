@@ -92,8 +92,7 @@ func normalizeXtermJSSettings(input XtermJSSettings) (XtermJSSettings, error) {
 
 		if fontFamily := strings.TrimSpace(input.TerminalOptions.FontFamily); fontFamily != "" {
 			options.FontFamily = fontFamily
-		}
-		if options.FontFamily == "" {
+		} else {
 			options.FontFamily = defaultXtermJSFontFamily
 		}
 
