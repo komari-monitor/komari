@@ -243,6 +243,8 @@ func RunServer() {
 		{
 			settingsGroup.GET("/", admin.GetSettings)
 			settingsGroup.POST("/", admin.EditSettings)
+			settingsGroup.GET("/xtermjs", admin.GetXtermJSSettings)
+			settingsGroup.POST("/xtermjs", admin.SetXtermJSSettings)
 			settingsGroup.POST("/oidc", admin.SetOidcProvider)
 			settingsGroup.GET("/oidc", admin.GetOidcProvider)
 			settingsGroup.POST("/message-sender", admin.SetMessageSenderProvider)

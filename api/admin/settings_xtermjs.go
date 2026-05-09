@@ -3,6 +3,11 @@ package admin
 import (
 	"errors"
 	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/api"
+	"github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/database/auditlog"
 )
 
 const (
@@ -223,4 +228,44 @@ func themeIsEmpty(theme *ThemeConfig) bool {
 		theme.BrightCyan == "" &&
 		theme.BrightWhite == "" &&
 		len(theme.ExtendedAnsi) == 0
+}
+
+func GetXtermJSSettings(c *gin.Context) {
+	defaultSettings := defaultXtermJSSettings()
+	settings, err := config.GetAs[XtermJSSettings](config.XtermjsSettingsKey, defaultSettings)
+	if err != nil {
+		_ = config.Set(config.XtermjsSettingsKey, defaultSettings)
+		settings = defaultSettings
+	}
+
+	normalized, err := normalizeXtermJSSettings(settings)
+	if err != nil {
+		api.RespondError(c, 500, "Failed to get xtermjs settings: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, normalized)
+}
+
+func SetXtermJSSettings(c *gin.Context) {
+	var settings XtermJSSettings
+	if err := c.ShouldBindJSON(&settings); err != nil {
+		api.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
+		return
+	}
+
+	normalized, err := normalizeXtermJSSettings(settings)
+	if err != nil {
+		api.RespondError(c, 400, "Invalid xtermjs settings: "+err.Error())
+		return
+	}
+
+	if err := config.Set(config.XtermjsSettingsKey, normalized); err != nil {
+		api.RespondError(c, 500, "Failed to save settings: "+err.Error())
+		return
+	}
+
+	uuid, _ := c.Get("uuid")
+	auditlog.Log(c.ClientIP(), uuid.(string), "update xtermjs settings", "info")
+	api.RespondSuccessMessage(c, "settings saved", nil)
 }
