@@ -2,10 +2,10 @@ package admin
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/web/api"
 )
 
 func OrderWeight(c *gin.Context) {

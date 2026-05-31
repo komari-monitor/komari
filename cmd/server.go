@@ -12,9 +12,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/web/api"
 
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
@@ -23,6 +23,7 @@ import (
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
 	"github.com/komari-monitor/komari/utils/geoip"
@@ -220,38 +221,49 @@ func DoScheduledWork() {
 	if err := tasks.MigrateAllClientsExpansion(); err != nil {
 		log.Println("Failed to migrate ping task all_clients expansion:", err)
 	}
-	tasks.ReloadPingSchedule()
-	d_notification.ReloadLoadNotificationSchedule()
-	ticker := time.NewTicker(time.Minute * 30)
-	minute := time.NewTicker(60 * time.Second)
-	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
-	records.CompactRecord()
-	go notifier.CheckExpireScheduledWork()
-	for {
-		cfg, _ := config.GetManyAs[config.Legacy]()
-		select {
-		case <-ticker.C:
-			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			records.CompactRecord()
-			tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
-			auditlog.RemoveOldLogs()
-			accounts.RemoveExpiredSessions()
-		case <-minute.C:
-			api.SaveClientReportToDB()
-			if !cfg.RecordEnabled {
-				records.DeleteAll()
-				tasks.DeleteAllPingRecords()
-			}
-			// 每分钟检查一次流量提醒
-			go notifier.CheckTraffic()
-		}
+	if err := tasks.ReloadPingSchedule(); err != nil {
+		log.Println("Failed to reload ping schedule:", err)
 	}
+	if err := d_notification.ReloadLoadNotificationSchedule(); err != nil {
+		log.Println("Failed to reload load notification schedule:", err)
+	}
+	records.CompactRecord()
 
+	if err := corn.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
+		log.Println("Failed to add cleanup scheduled task:", err)
+	}
+	if err := corn.AddFunc("records:minute", "@every 1m", minuteScheduledWork); err != nil {
+		log.Println("Failed to add minute scheduled task:", err)
+	}
+	if err := corn.AddFunc("notifier:expire", "0 0 9 * * *", notifier.CheckExpireScheduledWork); err != nil {
+		log.Println("Failed to add expire notification scheduled task:", err)
+	}
+}
+
+func cleanupScheduledData() {
+	cfg, _ := config.GetManyAs[config.Legacy]()
+	records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
+	records.CompactRecord()
+	tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
+	tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
+	auditlog.RemoveOldLogs()
+	accounts.RemoveExpiredSessions()
+}
+
+func minuteScheduledWork() {
+	cfg, _ := config.GetManyAs[config.Legacy]()
+	api.SaveClientReportToDB()
+	if !cfg.RecordEnabled {
+		records.DeleteAll()
+		tasks.DeleteAllPingRecords()
+	}
+	// 每分钟检查一次流量提醒
+	notifier.CheckTraffic()
 }
 
 func OnShutdown() {
 	auditlog.Log("", "", "server is shutting down", "info")
+	corn.StopAll()
 	cloudflared.Shutdown()
 }
 

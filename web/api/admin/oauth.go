@@ -2,11 +2,11 @@ package admin
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/web/api"
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/oauth"
 	"github.com/komari-monitor/komari/web/oauth/factory"
 )

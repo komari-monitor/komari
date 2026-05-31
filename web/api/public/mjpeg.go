@@ -21,9 +21,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	conf "github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/models"
-	jsonRpc "github.com/komari-monitor/komari/rpc/jsonrpc"
+	conf "github.com/komari-monitor/komari/pkg/config"
+	jsonRpc "github.com/komari-monitor/komari/pkg/rpc/jsonrpc"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/font/opentype"

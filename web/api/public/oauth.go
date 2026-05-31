@@ -5,9 +5,9 @@ import (
 	"slices"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/web/oauth"
 )

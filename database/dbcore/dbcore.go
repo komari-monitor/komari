@@ -14,8 +14,8 @@ import (
 
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/common"
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/config"
 	logutil "github.com/komari-monitor/komari/utils/log"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"

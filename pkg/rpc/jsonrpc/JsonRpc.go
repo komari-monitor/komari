@@ -11,10 +11,10 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/rpc"
+	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/ws"
 )
 

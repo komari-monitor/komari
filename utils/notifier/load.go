@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"fmt"
 	"log"
 	"reflect"
 	"sync"
@@ -11,21 +12,18 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/database/records"
+	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/utils/messageSender"
 )
 
 // LoadNotificationService 管理定时器和任务
 type LoadNotificationService struct {
-	mu       sync.Mutex
-	tickers  map[int]*time.Ticker
-	tasks    map[int][]models.LoadNotification
-	stopChan chan struct{}
+	mu    sync.Mutex
+	tasks map[int][]models.LoadNotification
 }
 
 var LoadNotificationManager = &LoadNotificationService{
-	tickers:  make(map[int]*time.Ticker),
-	tasks:    make(map[int][]models.LoadNotification),
-	stopChan: make(chan struct{}),
+	tasks: make(map[int][]models.LoadNotification),
 }
 
 // Reload 重载时间表
@@ -33,11 +31,7 @@ func (m *LoadNotificationService) Reload(loadNotifications []models.LoadNotifica
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 停止所有现有定时器
-	for _, ticker := range m.tickers {
-		ticker.Stop()
-	}
-	m.tickers = make(map[int]*time.Ticker)
+	corn.RemovePrefix("load-notification:")
 	m.tasks = make(map[int][]models.LoadNotification)
 
 	// 按Interval分组任务
@@ -48,22 +42,16 @@ func (m *LoadNotificationService) Reload(loadNotifications []models.LoadNotifica
 
 	// 为每个唯一的Interval创建定时器
 	for interval, tasks := range taskGroups {
-		ticker := time.NewTicker(time.Duration(interval) * time.Minute)
-		m.tickers[interval] = ticker
+		interval := interval
+		tasks := append([]models.LoadNotification(nil), tasks...)
 		m.tasks[interval] = tasks
-
-		go func(ticker *time.Ticker, tasks []models.LoadNotification) {
-			for {
-				select {
-				case <-ticker.C:
-					for _, task := range tasks {
-						go executeLoadNotificationTask(task)
-					}
-				case <-m.stopChan:
-					return
-				}
+		if err := corn.AddFunc(fmt.Sprintf("load-notification:%d", interval), corn.Every(time.Duration(interval)*time.Minute), func() {
+			for _, task := range tasks {
+				go executeLoadNotificationTask(task)
 			}
-		}(ticker, tasks)
+		}); err != nil {
+			return err
+		}
 	}
 
 	return nil

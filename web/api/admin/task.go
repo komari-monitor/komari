@@ -2,8 +2,8 @@ package admin
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/web/api"
 )
 
 func GetTasks(c *gin.Context) {

@@ -2,7 +2,7 @@ package router
 
 import (
 	"github.com/gin-gonic/gin"
-	jsonRpc "github.com/komari-monitor/komari/rpc/jsonrpc"
+	jsonRpc "github.com/komari-monitor/komari/pkg/rpc/jsonrpc"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/api/admin"
 	"github.com/komari-monitor/komari/web/api/admin/clipboard"

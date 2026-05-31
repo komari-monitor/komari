@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils/secureconfig"
 )
 

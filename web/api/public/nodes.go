@@ -2,9 +2,9 @@ package public
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/web/api"
 )
 
 func GetNodesInformation(c *gin.Context) {

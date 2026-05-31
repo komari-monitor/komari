@@ -5,9 +5,9 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/web/api"
 )
 
 // AddPingTask 处理新增延迟监测任务请求。

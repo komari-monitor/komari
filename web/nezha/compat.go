@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/common"
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/notifier"
 	apiClient "github.com/komari-monitor/komari/web/api/client"

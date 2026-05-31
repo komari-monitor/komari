@@ -13,12 +13,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils/notifier"
+	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/ws"
 	"github.com/patrickmn/go-cache"
 )

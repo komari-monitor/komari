@@ -2,18 +2,19 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/web/ws"
 )
 
 // PingTaskManager 管理定时器和任务
 type PingTaskManager struct {
-	mu         sync.Mutex
-	cancelFunc context.CancelFunc
-	tasks      map[int][]models.PingTask
+	mu    sync.Mutex
+	tasks map[int][]models.PingTask
 }
 
 var manager = &PingTaskManager{
@@ -25,12 +26,7 @@ func (m *PingTaskManager) Reload(pingTasks []models.PingTask) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.cancelFunc != nil {
-		m.cancelFunc()
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelFunc = cancel
-
+	corn.RemovePrefix("ping:")
 	m.tasks = make(map[int][]models.PingTask)
 
 	// 按Interval分组任务
@@ -44,36 +40,19 @@ func (m *PingTaskManager) Reload(pingTasks []models.PingTask) error {
 
 	// 为每个唯一的Interval创建协程
 	for interval, tasks := range taskGroups {
+		interval := interval
+		tasks := append([]models.PingTask(nil), tasks...)
 		m.tasks[interval] = tasks
-		go m.runPreciseLoop(ctx, time.Duration(interval)*time.Second, tasks)
-	}
-	return nil
-}
-
-func (m *PingTaskManager) runPreciseLoop(ctx context.Context, interval time.Duration, tasks []models.PingTask) {
-	// Start the first timer.
-	timer := time.NewTimer(interval)
-
-	// This will be the reference point for all future ticks.
-	// By adding the interval to this time, we avoid accumulating execution delays.
-	nextTick := time.Now().Add(interval)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-timer.C:
+		if err := corn.AddContextFunc(fmt.Sprintf("ping:%d", interval), corn.Every(time.Duration(interval)*time.Second), false, func(ctx context.Context) {
 			onlineClients := ws.GetConnectedClients()
 			for _, task := range tasks {
 				go executePingTask(ctx, task, onlineClients)
 			}
-
-			nextTick = nextTick.Add(interval)
-			timer.Reset(time.Until(nextTick))
-
-		case <-ctx.Done():
-			return
+		}); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 // executePingTask 执行单个PingTask

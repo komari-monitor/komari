@@ -4,8 +4,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/web/api"
 )
 
 // PublicPingTask 是对外暴露的延迟监测任务信息。

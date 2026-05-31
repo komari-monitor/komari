@@ -14,8 +14,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/cmd/flags"
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"

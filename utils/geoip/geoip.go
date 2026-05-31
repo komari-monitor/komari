@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/patrickmn/go-cache"
 )
 

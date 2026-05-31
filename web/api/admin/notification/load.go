@@ -4,9 +4,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/notification"
+	"github.com/komari-monitor/komari/web/api"
 )
 
 // POST body: clients []string, name string, metric string, threshold float32, ratio float32, interval int
