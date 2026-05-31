@@ -12,6 +12,7 @@ import (
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/web/api"
+	agent_api "github.com/komari-monitor/komari/web/api/agent"
 	"github.com/komari-monitor/komari/web/ws"
 )
 
@@ -24,6 +25,7 @@ func Exec(c *gin.Context) {
 		Clients []string `json:"clients" binding:"required"`
 	}
 	var onlineClients []string
+	var queuedClients []string
 	var offlineClients []string
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
@@ -41,16 +43,20 @@ func Exec(c *gin.Context) {
 	for _, uuid := range req.Clients {
 		if client := ws.GetConnectedClients()[uuid]; client != nil {
 			onlineClients = append(onlineClients, uuid)
+		} else if agent_api.IsAgentOnline(uuid) {
+			queuedClients = append(queuedClients, uuid)
 		} else {
 			offlineClients = append(offlineClients, uuid)
 		}
 	}
-	if len(onlineClients) == 0 {
+	if len(onlineClients) == 0 && len(queuedClients) == 0 {
 		api.RespondError(c, 400, "No clients connected")
 		return
 	}
 	taskId := utils.GenerateRandomString(16)
-	if err := tasks.CreateTask(taskId, append(onlineClients, offlineClients...), req.Command); err != nil {
+	taskClients := append(append([]string{}, onlineClients...), queuedClients...)
+	taskClients = append(taskClients, offlineClients...)
+	if err := tasks.CreateTask(taskId, taskClients, req.Command); err != nil {
 		api.RespondError(c, 500, "Failed to create task: "+err.Error())
 		return
 	}
@@ -75,11 +81,15 @@ func Exec(c *gin.Context) {
 			return
 		}
 	}
+	for _, uuid := range queuedClients {
+		agent_api.DispatchV2Event(uuid, v2.MethodAgentExec, v2.ExecParams{TaskID: taskId, Command: req.Command})
+	}
 	uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), uuid.(string), "REC, task id: "+taskId, "warn")
 	api.RespondSuccess(c, gin.H{
-		"task_id": taskId,
-		"clients": onlineClients,
+		"task_id":        taskId,
+		"clients":        onlineClients,
+		"queued_clients": queuedClients,
 	})
 	if len(offlineClients) > 0 {
 		for _, uuid := range offlineClients {

@@ -17,6 +17,7 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils/notifier"
+	agent_api "github.com/komari-monitor/komari/web/api/agent"
 	"github.com/komari-monitor/komari/web/ws"
 )
 
@@ -41,7 +42,7 @@ func bindV2Params[T any](raw any, target *T) error {
 	return json.Unmarshal(b, target)
 }
 
-func handleV2RPC(uuid string, req v2.Request) v2.Response {
+func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 	if req.JSONRPC != v2.Version {
 		return v2.Error(req.ID, -32600, "invalid jsonrpc version", nil)
 	}
@@ -59,7 +60,11 @@ func handleV2RPC(uuid string, req v2.Request) v2.Response {
 		}
 		ws.SetLatestReport(uuid, &report)
 		refreshPostPresence(uuid)
-		return v2.Success(req.ID, gin.H{"status": "success"})
+		ws.SetClientProtocolVersion(uuid, 2)
+		return v2.Success(req.ID, gin.H{
+			"status": "success",
+			"events": agent_api.TakeV2Events(uuid, params.AckEventIDs, 8),
+		})
 	case v2.MethodAgentBasicInfo:
 		var params v2.BasicInfoParams
 		if err := bindV2Params(req.Params, &params); err != nil {
@@ -91,6 +96,20 @@ func handleV2RPC(uuid string, req v2.Request) v2.Response {
 			Time:   models.FromTime(finishedAt),
 		})
 		return v2.Success(req.ID, gin.H{"status": "success"})
+	case v2.MethodAgentPull:
+		var params v2.PullParams
+		if err := bindV2Params(req.Params, &params); err != nil {
+			return v2.Error(req.ID, -32602, "invalid pull params", err.Error())
+		}
+		refreshPostPresence(uuid)
+		ws.SetClientProtocolVersion(uuid, 2)
+		timeout := 0 * time.Second
+		if allowWait {
+			timeout = 25 * time.Second
+		}
+		return v2.Success(req.ID, gin.H{
+			"events": agent_api.WaitV2Events(uuid, params.AckEventIDs, timeout),
+		})
 	default:
 		return v2.Error(req.ID, -32601, "method not found", req.Method)
 	}
@@ -112,7 +131,7 @@ func UploadV2RPC(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, v2.Error(req.ID, -32001, "invalid token", nil))
 		return
 	}
-	resp := handleV2RPC(uuid, req)
+	resp := handleV2RPC(uuid, req, true)
 	status := http.StatusOK
 	if resp.Error != nil {
 		status = http.StatusBadRequest
@@ -168,7 +187,7 @@ func WebSocketV2RPC(c *gin.Context) {
 			conn.WriteJSON(v2.Error(nil, -32700, "parse error", err.Error()))
 			continue
 		}
-		resp := handleV2RPC(uuid, req)
+		resp := handleV2RPC(uuid, req, false)
 		if req.ID != nil {
 			if err := conn.WriteJSON(resp); err != nil {
 				log.Printf("failed to write v2 rpc response: %v", err)

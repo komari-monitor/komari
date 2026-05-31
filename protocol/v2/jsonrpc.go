@@ -13,6 +13,7 @@ const (
 	MethodAgentMessage    = "agent.message"
 	MethodAgentEvent      = "agent.event"
 	MethodAgentTerminal   = "agent.terminal.request"
+	MethodAgentPull       = "agent.pull"
 )
 
 type Request struct {
@@ -29,6 +30,14 @@ type Response struct {
 	Error   *RPCError `json:"error,omitempty"`
 }
 
+type Event struct {
+	ID        string `json:"id"`
+	Method    string `json:"method"`
+	Params    any    `json:"params,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
 type RPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -36,7 +45,8 @@ type RPCError struct {
 }
 
 type ReportParams struct {
-	Report v1.Report `json:"report"`
+	Report      v1.Report `json:"report"`
+	AckEventIDs []string  `json:"ack_event_ids,omitempty"`
 }
 
 type BasicInfoParams struct {
@@ -48,6 +58,12 @@ type PingResultParams struct {
 	PingType   string `json:"ping_type"`
 	Value      int    `json:"value"`
 	FinishedAt string `json:"finished_at"`
+}
+
+type PullParams struct {
+	Capabilities []string `json:"capabilities,omitempty"`
+	AckEventIDs  []string `json:"ack_event_ids,omitempty"`
+	LastEventID  string   `json:"last_event_id,omitempty"`
 }
 
 type ExecParams struct {

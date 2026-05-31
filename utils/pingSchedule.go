@@ -9,7 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/corn"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
-	"github.com/komari-monitor/komari/web/ws"
+	agent_api "github.com/komari-monitor/komari/web/api/agent"
 )
 
 // PingTaskManager 管理定时器和任务
@@ -45,9 +45,8 @@ func (m *PingTaskManager) Reload(pingTasks []models.PingTask) error {
 		tasks := append([]models.PingTask(nil), tasks...)
 		m.tasks[interval] = tasks
 		if err := corn.AddContextFunc(fmt.Sprintf("ping:%d", interval), corn.Every(time.Duration(interval)*time.Second), false, func(ctx context.Context) {
-			onlineClients := ws.GetConnectedClients()
 			for _, task := range tasks {
-				go executePingTask(ctx, task, onlineClients)
+				go executePingTask(ctx, task)
 			}
 		}); err != nil {
 			return err
@@ -57,7 +56,7 @@ func (m *PingTaskManager) Reload(pingTasks []models.PingTask) error {
 }
 
 // executePingTask 执行单个PingTask
-func executePingTask(ctx context.Context, task models.PingTask, onlineClients map[string]*ws.SafeConn) {
+func executePingTask(ctx context.Context, task models.PingTask) {
 	var message struct {
 		TaskID  uint   `json:"ping_task_id"`
 		Message string `json:"message"`
@@ -70,7 +69,7 @@ func executePingTask(ctx context.Context, task models.PingTask, onlineClients ma
 	message.Type = task.Type
 	message.Target = task.Target
 
-	for _, clientUUID := range targetPingClientUUIDs(task, onlineClients) {
+	for _, clientUUID := range targetPingClientUUIDs(task) {
 		select {
 		case <-ctx.Done():
 			// Context was canceled, stop sending pings.
@@ -79,21 +78,12 @@ func executePingTask(ctx context.Context, task models.PingTask, onlineClients ma
 			// Context is still active, continue.
 		}
 
-		if conn, exists := onlineClients[clientUUID]; exists && conn != nil {
-			payload := any(message)
-			if ws.IsV2Client(clientUUID) {
-				payload = v2.Request{JSONRPC: v2.Version, Method: v2.MethodAgentPing, Params: v2.PingParams{TaskID: task.Id, Type: task.Type, Target: task.Target}}
-			}
-			if err := conn.WriteJSON(payload); err != nil {
-				continue
-			}
-		}
+		agent_api.DispatchPing(clientUUID, message, v2.PingParams{TaskID: task.Id, Type: task.Type, Target: task.Target})
 	}
 }
 
 // targetPingClientUUIDs 根据任务配置计算本次调度需要下发的在线服务器列表。
-func targetPingClientUUIDs(task models.PingTask, onlineClients map[string]*ws.SafeConn) []string {
-	_ = onlineClients
+func targetPingClientUUIDs(task models.PingTask) []string {
 	return task.Clients
 }
 
