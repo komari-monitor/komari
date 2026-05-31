@@ -11,7 +11,7 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/messageSender"
-	"github.com/komari-monitor/komari/ws"
+	"github.com/komari-monitor/komari/web/ws"
 	cache "github.com/patrickmn/go-cache"
 )
 

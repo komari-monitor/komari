@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/ws"
+	"github.com/komari-monitor/komari/web/ws"
 )
 
 // PingTaskManager 管理定时器和任务

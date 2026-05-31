@@ -9,7 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/utils/messageSender"
-	"github.com/komari-monitor/komari/ws"
+	"github.com/komari-monitor/komari/web/ws"
 )
 
 func CheckAndAutoRenewal(client models.Client) {
