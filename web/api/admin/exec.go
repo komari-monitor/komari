@@ -9,6 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/ws"
@@ -54,16 +55,15 @@ func Exec(c *gin.Context) {
 		return
 	}
 	for _, uuid := range onlineClients {
-		var send struct {
+		legacy := struct {
 			Message string `json:"message"`
 			Command string `json:"command"`
 			TaskId  string `json:"task_id"`
+		}{Message: "exec", Command: req.Command, TaskId: taskId}
+		payload, _ := json.Marshal(legacy)
+		if ws.IsV2Client(uuid) {
+			payload, _ = json.Marshal(v2.Request{JSONRPC: v2.Version, Method: v2.MethodAgentExec, Params: v2.ExecParams{TaskID: taskId, Command: req.Command}})
 		}
-		send.Message = "exec"
-		send.Command = req.Command
-		send.TaskId = taskId
-
-		payload, _ := json.Marshal(send)
 		client := ws.GetConnectedClients()[uuid]
 		if client != nil {
 			if err := client.WriteMessage(websocket.TextMessage, payload); err != nil {

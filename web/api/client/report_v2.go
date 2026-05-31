@@ -1,0 +1,205 @@
+package client
+
+import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/tasks"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
+	"github.com/komari-monitor/komari/utils/notifier"
+	"github.com/komari-monitor/komari/web/ws"
+)
+
+func readMaybeCompressedBody(r *http.Request) ([]byte, error) {
+	defer r.Body.Close()
+	if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+		zr, err := gzip.NewReader(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		return io.ReadAll(zr)
+	}
+	return io.ReadAll(r.Body)
+}
+
+func bindV2Params[T any](raw any, target *T) error {
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, target)
+}
+
+func handleV2RPC(uuid string, req v2.Request) v2.Response {
+	if req.JSONRPC != v2.Version {
+		return v2.Error(req.ID, -32600, "invalid jsonrpc version", nil)
+	}
+	switch req.Method {
+	case v2.MethodAgentReport:
+		var params v2.ReportParams
+		if err := bindV2Params(req.Params, &params); err != nil {
+			return v2.Error(req.ID, -32602, "invalid report params", err.Error())
+		}
+		report := params.Report
+		report.UUID = uuid
+		report.UpdatedAt = time.Now()
+		if err := SaveClientReport(uuid, report); err != nil {
+			return v2.Error(req.ID, -32000, "failed to save report", err.Error())
+		}
+		ws.SetLatestReport(uuid, &report)
+		refreshPostPresence(uuid)
+		return v2.Success(req.ID, gin.H{"status": "success"})
+	case v2.MethodAgentBasicInfo:
+		var params v2.BasicInfoParams
+		if err := bindV2Params(req.Params, &params); err != nil {
+			return v2.Error(req.ID, -32602, "invalid basic info params", err.Error())
+		}
+		if params.Info == nil {
+			params.Info = map[string]interface{}{}
+		}
+		params.Info["uuid"] = uuid
+		if err := clients.SaveClientInfo(params.Info); err != nil {
+			return v2.Error(req.ID, -32000, "failed to save basic info", err.Error())
+		}
+		return v2.Success(req.ID, gin.H{"status": "success"})
+	case v2.MethodAgentPingResult:
+		var params v2.PingResultParams
+		if err := bindV2Params(req.Params, &params); err != nil {
+			return v2.Error(req.ID, -32602, "invalid ping result params", err.Error())
+		}
+		finishedAt := time.Now()
+		if params.FinishedAt != "" {
+			if t, err := time.Parse(time.RFC3339Nano, params.FinishedAt); err == nil {
+				finishedAt = t
+			}
+		}
+		tasks.SavePingRecord(models.PingRecord{
+			Client: uuid,
+			TaskId: params.TaskID,
+			Value:  params.Value,
+			Time:   models.FromTime(finishedAt),
+		})
+		return v2.Success(req.ID, gin.H{"status": "success"})
+	default:
+		return v2.Error(req.ID, -32601, "method not found", req.Method)
+	}
+}
+
+func UploadV2RPC(c *gin.Context) {
+	bytesBody, err := readMaybeCompressedBody(c.Request)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, v2.Error(nil, -32700, "invalid compressed body", err.Error()))
+		return
+	}
+	var req v2.Request
+	if err := json.Unmarshal(bytesBody, &req); err != nil {
+		c.JSON(http.StatusBadRequest, v2.Error(nil, -32700, "parse error", err.Error()))
+		return
+	}
+	uuid, ok := clientUUIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, v2.Error(req.ID, -32001, "invalid token", nil))
+		return
+	}
+	resp := handleV2RPC(uuid, req)
+	status := http.StatusOK
+	if resp.Error != nil {
+		status = http.StatusBadRequest
+	}
+	c.JSON(status, resp)
+}
+
+func WebSocketV2RPC(c *gin.Context) {
+	if !websocket.IsWebSocketUpgrade(c.Request) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
+		return
+	}
+	upgrader := websocket.Upgrader{
+		EnableCompression: true,
+		CheckOrigin:       func(r *http.Request) bool { return true },
+	}
+	unsafeConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
+		return
+	}
+	conn := ws.NewSafeConn(unsafeConn)
+	defer conn.Close()
+
+	uuid, ok := clientUUIDFromContext(c)
+	if !ok {
+		conn.WriteJSON(v2.Error(nil, -32001, "invalid token", nil))
+		return
+	}
+	if oldConn, exists := ws.GetConnectedClients()[uuid]; exists {
+		go oldConn.Close()
+	}
+	ws.SetConnectedClients(uuid, conn)
+	ws.SetClientProtocolVersion(uuid, 2)
+	go notifierOnline(uuid, conn.ID)
+	defer func() {
+		ws.DeleteClientConditionally(uuid, conn)
+		notifierOffline(uuid, conn.ID)
+	}()
+
+	for {
+		conn.SetReadDeadline(time.Now().Add(readWait))
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("Client %s v2 connection error: %v", uuid, err)
+			}
+			return
+		}
+		message = bytes.TrimSpace(message)
+		var req v2.Request
+		if err := json.Unmarshal(message, &req); err != nil {
+			conn.WriteJSON(v2.Error(nil, -32700, "parse error", err.Error()))
+			continue
+		}
+		resp := handleV2RPC(uuid, req)
+		if req.ID != nil {
+			if err := conn.WriteJSON(resp); err != nil {
+				log.Printf("failed to write v2 rpc response: %v", err)
+				return
+			}
+		}
+	}
+}
+
+func clientUUIDFromContext(c *gin.Context) (string, bool) {
+	if v, ok := c.Get("client_uuid"); ok {
+		if uuid, ok := v.(string); ok && uuid != "" {
+			return uuid, true
+		}
+	}
+	token := c.Query("token")
+	if token == "" {
+		return "", false
+	}
+	uuid, err := clients.GetClientUUIDByToken(token)
+	return uuid, err == nil && uuid != ""
+}
+
+func notifierOnline(uuid string, connID int64) {
+	go func() {
+		defer func() { _ = recover() }()
+		notifier.OnlineNotification(uuid, connID)
+	}()
+}
+
+func notifierOffline(uuid string, connID int64) {
+	defer func() { _ = recover() }()
+	notifier.OfflineNotification(uuid, connID)
+}

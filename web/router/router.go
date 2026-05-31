@@ -46,6 +46,8 @@ func Register(r *gin.Engine) {
 		tokenAuthrized.GET("/report", client.WebSocketReport) // websocket
 		tokenAuthrized.POST("/uploadBasicInfo", client.UploadBasicInfo)
 		tokenAuthrized.POST("/report", client.UploadReport)
+		tokenAuthrized.GET("/v2/rpc", client.WebSocketV2RPC)
+		tokenAuthrized.POST("/v2/rpc", client.UploadV2RPC)
 		tokenAuthrized.GET("/terminal", terminal.EstablishConnection)
 		tokenAuthrized.POST("/task/result", client.TaskResult)
 		tokenAuthrized.GET("/ping/tasks", client.GetPingTasks)

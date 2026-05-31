@@ -5,13 +5,14 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/komari-monitor/komari/common"
+	v1 "github.com/komari-monitor/komari/protocol/v1"
 )
 
 var (
-	connectedClients = make(map[string]*SafeConn)
-	ConnectedUsers   = []*websocket.Conn{}
-	latestReport     = make(map[string]*common.Report)
+	connectedClients  = make(map[string]*SafeConn)
+	connectedClientV2 = make(map[string]bool)
+	ConnectedUsers    = []*websocket.Conn{}
+	latestReport      = make(map[string]*v1.Report)
 	// presenceOnly stores online state for non-WebSocket agents (e.g., Nezha gRPC)
 	// value keeps connectionID and a soft expiration to avoid flicker
 	presenceOnly = make(map[string]struct {
@@ -36,6 +37,19 @@ func SetConnectedClients(uuid string, conn *SafeConn) {
 	defer mu.Unlock()
 	connectedClients[uuid] = conn
 }
+
+func SetClientProtocolVersion(uuid string, version int) {
+	mu.Lock()
+	defer mu.Unlock()
+	connectedClientV2[uuid] = version >= 2
+}
+
+func IsV2Client(uuid string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return connectedClientV2[uuid]
+}
+
 func DeleteClientConditionally(uuid string, connToRemove *SafeConn) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -43,6 +57,7 @@ func DeleteClientConditionally(uuid string, connToRemove *SafeConn) {
 	// 检查当前 map 里的 conn 是否就是要删除的这一个
 	if currentConn, exists := connectedClients[uuid]; exists && currentConn == connToRemove {
 		delete(connectedClients, uuid)
+		delete(connectedClientV2, uuid)
 	}
 }
 func DeleteConnectedClients(uuid string) {
@@ -50,6 +65,7 @@ func DeleteConnectedClients(uuid string) {
 	defer mu.Unlock()
 	// 只从 map 中删除，不再负责关闭连接
 	delete(connectedClients, uuid)
+	delete(connectedClientV2, uuid)
 }
 
 // SetPresence sets or clears presence for non-WebSocket agents.
@@ -102,16 +118,16 @@ func GetAllOnlineUUIDs() []string {
 	}
 	return res
 }
-func GetLatestReport() map[string]*common.Report {
+func GetLatestReport() map[string]*v1.Report {
 	mu.RLock()
 	defer mu.RUnlock()
-	reportCopy := make(map[string]*common.Report)
+	reportCopy := make(map[string]*v1.Report)
 	for k, v := range latestReport {
 		reportCopy[k] = v
 	}
 	return reportCopy
 }
-func SetLatestReport(uuid string, report *common.Report) {
+func SetLatestReport(uuid string, report *v1.Report) {
 	mu.Lock()
 	defer mu.Unlock()
 	latestReport[uuid] = report

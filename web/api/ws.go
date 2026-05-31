@@ -6,7 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -64,11 +64,11 @@ func GetClients(c *gin.Context) {
 	for {
 		var resp struct {
 			Online []string                 `json:"online"` // 已建立连接的客户端uuid列表
-			Data   map[string]common.Report `json:"data"`   // 最后上报的数据
+			Data   map[string]v1.Report `json:"data"`   // 最后上报的数据
 		}
 
 		resp.Online = []string{}
-		resp.Data = map[string]common.Report{}
+		resp.Data = map[string]v1.Report{}
 
 		_, data, err := conn.ReadMessage()
 		if err != nil {

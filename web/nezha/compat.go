@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -324,7 +324,7 @@ func upsertClientFromHost(uuid, secret string, h *proto.Host) error {
 	}).Create(&c).Error
 }
 
-// ingestState maps Nezha State into common.Report then saves a Record
+// ingestState maps Nezha State into v1.Report then saves a Record
 func ingestState(uuid string, st *proto.State) error {
 	// we may need totals from client
 	db := dbcore.GetDBInstance()
@@ -335,13 +335,13 @@ func ingestState(uuid string, st *proto.State) error {
 		auditlog.EventLog("info", "auto created client "+client.Name)
 		_ = db.Create(&client).Error
 	}
-	rep := common.Report{
-		CPU:  common.CPUReport{Usage: st.Cpu},
-		Ram:  common.RamReport{Total: client.MemTotal, Used: int64(st.MemUsed)},
-		Swap: common.RamReport{Total: client.SwapTotal, Used: int64(st.SwapUsed)},
-		Load: common.LoadReport{Load1: st.Load1, Load5: st.Load5, Load15: st.Load15},
-		Disk: common.DiskReport{Total: client.DiskTotal, Used: int64(st.DiskUsed)},
-		Network: common.NetworkReport{
+	rep := v1.Report{
+		CPU:  v1.CPUReport{Usage: st.Cpu},
+		Ram:  v1.RamReport{Total: client.MemTotal, Used: int64(st.MemUsed)},
+		Swap: v1.RamReport{Total: client.SwapTotal, Used: int64(st.SwapUsed)},
+		Load: v1.LoadReport{Load1: st.Load1, Load5: st.Load5, Load15: st.Load15},
+		Disk: v1.DiskReport{Total: client.DiskTotal, Used: int64(st.DiskUsed)},
+		Network: v1.NetworkReport{
 			Up:        int64(st.NetOutSpeed),
 			Down:      int64(st.NetInSpeed),
 			TotalUp:   int64(st.NetOutTransfer),

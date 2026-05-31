@@ -1,32 +1,20 @@
 package clients
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"time"
 
-	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
-
-	"fmt"
 
 	"github.com/google/uuid"
 )
 
-// Deprecated: DeleteClientConfig is deprecated and will be removed in a future release. Use DeleteClient instead.
-func DeleteClientConfig(clientUuid string) error {
-	db := dbcore.GetDBInstance()
-	err := db.Delete(&common.ClientConfig{ClientUUID: clientUuid}).Error
-	if err != nil {
-		return err
-	}
-	return nil
-}
 func DeleteClient(clientUuid string) error {
 	db := dbcore.GetDBInstance()
 	err := db.Delete(&models.Client{}, "uuid = ?", clientUuid).Error
@@ -36,79 +24,6 @@ func DeleteClient(clientUuid string) error {
 	return nil
 }
 
-// Deprecated: UpdateOrInsertBasicInfo is deprecated and will be removed in a future release. Use SaveClientInfo instead.
-func UpdateOrInsertBasicInfo(cbi common.ClientInfo) error {
-	db := dbcore.GetDBInstance()
-	updates := make(map[string]interface{})
-
-	if cbi.Name != "" {
-		updates["name"] = cbi.Name
-	}
-	if cbi.CpuName != "" {
-		updates["cpu_name"] = cbi.CpuName
-	}
-	if cbi.Arch != "" {
-		updates["arch"] = cbi.Arch
-	}
-	if cbi.CpuCores > 0 || cbi.CpuCores < math.MaxInt-1 {
-		updates["cpu_cores"] = cbi.CpuCores
-	}
-	if cbi.OS != "" {
-		updates["os"] = cbi.OS
-	}
-	if cbi.GpuName != "" {
-		updates["gpu_name"] = cbi.GpuName
-	}
-	if cbi.IPv4 != "" {
-		updates["ipv4"] = cbi.IPv4
-	}
-	if cbi.IPv6 != "" {
-		updates["ipv6"] = cbi.IPv6
-	}
-	if cbi.Region != "" {
-		updates["region"] = cbi.Region
-	}
-	if cbi.Remark != "" {
-		updates["remark"] = cbi.Remark
-	}
-	updates["mem_total"] = cbi.MemTotal
-	updates["swap_total"] = cbi.SwapTotal
-	updates["disk_total"] = cbi.DiskTotal
-	updates["version"] = cbi.Version
-	updates["updated_at"] = time.Now()
-
-	// 转换为更新Client表
-	client := models.Client{
-		UUID: cbi.UUID,
-	}
-
-	err := db.Model(&client).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "uuid"}},
-		DoUpdates: clause.Assignments(updates),
-	}).Create(map[string]interface{}{
-		"uuid":       cbi.UUID,
-		"name":       cbi.Name,
-		"cpu_name":   cbi.CpuName,
-		"arch":       cbi.Arch,
-		"cpu_cores":  cbi.CpuCores,
-		"os":         cbi.OS,
-		"gpu_name":   cbi.GpuName,
-		"ipv4":       cbi.IPv4,
-		"ipv6":       cbi.IPv6,
-		"region":     cbi.Region,
-		"remark":     cbi.Remark,
-		"mem_total":  cbi.MemTotal,
-		"swap_total": cbi.SwapTotal,
-		"disk_total": cbi.DiskTotal,
-		"version":    cbi.Version,
-		"updated_at": time.Now(),
-	}).Error
-
-	if err != nil {
-		return err
-	}
-	return nil
-}
 func SaveClientInfo(update map[string]interface{}) error {
 	db := dbcore.GetDBInstance()
 	clientUUID, ok := update["uuid"].(string)
@@ -160,16 +75,6 @@ func SaveClientInfo(update map[string]interface{}) error {
 	return nil
 }
 
-// 更新客户端设置
-func UpdateClientConfig(config common.ClientConfig) error {
-	db := dbcore.GetDBInstance()
-	err := db.Save(&config).Error
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 func EditClientName(clientUUID, clientName string) error {
 	db := dbcore.GetDBInstance()
 	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Update("name", clientName).Error
@@ -179,21 +84,6 @@ func EditClientName(clientUUID, clientName string) error {
 	return nil
 }
 
-/*
-// UpdateClientByUUID 更新指定 UUID 的客户端配置
-
-	func UpdateClientByUUID(config common.ClientConfig) error {
-		db := dbcore.GetDBInstance()
-		result := db.Model(&common.ClientConfig{}).Where("client_uuid = ?", config.ClientUUID).Updates(config)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return gorm.ErrRecordNotFound
-		}
-		return nil
-	}
-*/
 func EditClientToken(clientUUID, token string) error {
 	db := dbcore.GetDBInstance()
 	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Update("token", token).Error

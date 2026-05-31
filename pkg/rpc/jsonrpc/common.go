@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -285,7 +285,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	req.BindParams(&params)
 
 	meta := rpc.MetaFromContext(ctx)
-	latest := ws.GetLatestReport() // map[string]*common.Report (copy)
+	latest := ws.GetLatestReport() // map[string]*v1.Report (copy)
 	onlineUUIDs := ws.GetAllOnlineUUIDs()
 	onlineSet := make(map[string]bool, len(onlineUUIDs))
 	for _, uuid := range onlineUUIDs {
@@ -350,7 +350,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	// 预取所有 ping 任务
 	pingTasks, _ := tasks.GetAllPingTasks()
 
-	appendOne := func(uuid string, rep *common.Report) {
+	appendOne := func(uuid string, rep *v1.Report) {
 		if rep == nil {
 			return
 		}
@@ -488,7 +488,7 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	}
 
 	raw, _ := api.Records.Get(params.UUID)
-	reports, _ := raw.([]common.Report)
+	reports, _ := raw.([]v1.Report)
 
 	// 扁平化为 { count, records: [] }
 	type flatRecord struct {

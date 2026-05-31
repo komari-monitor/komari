@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/cmd/flags"
-	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/database/migrations"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
 	logutil "github.com/komari-monitor/komari/utils/log"
@@ -168,7 +168,7 @@ func unzipToDir(zipPath, dstDir string) error {
 
 // mergeClientInfo 将旧版ClientInfo数据迁移到新版Client表
 func mergeClientInfo(db *gorm.DB) {
-	var clientInfos []common.ClientInfo
+	var clientInfos []migrations.ClientInfo
 	if err := db.Find(&clientInfos).Error; err != nil {
 		log.Printf("Failed to read ClientInfo table: %v", err)
 		return

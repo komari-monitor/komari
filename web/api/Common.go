@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/patrickmn/go-cache"
 
 	"strconv"
@@ -31,14 +31,14 @@ func SaveClientReportToDB() error {
 			continue
 		}
 
-		reports, ok := x.Object.([]common.Report)
+		reports, ok := x.Object.([]v1.Report)
 		if !ok {
 			log.Printf("Invalid report type for UUID %s", uuid)
 			continue
 		}
 
 		// 过滤一分钟前的记录
-		var filtered []common.Report
+		var filtered []v1.Report
 		for _, r := range reports {
 			if r.UpdatedAt.Unix() >= lastMinute {
 				filtered = append(filtered, r)

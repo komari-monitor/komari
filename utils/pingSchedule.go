@@ -8,6 +8,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/corn"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/web/ws"
 )
 
@@ -79,7 +80,11 @@ func executePingTask(ctx context.Context, task models.PingTask, onlineClients ma
 		}
 
 		if conn, exists := onlineClients[clientUUID]; exists && conn != nil {
-			if err := conn.WriteJSON(message); err != nil {
+			payload := any(message)
+			if ws.IsV2Client(clientUUID) {
+				payload = v2.Request{JSONRPC: v2.Version, Method: v2.MethodAgentPing, Params: v2.PingParams{TaskID: task.Id, Type: task.Type, Target: task.Target}}
+			}
+			if err := conn.WriteJSON(payload); err != nil {
 				continue
 			}
 		}

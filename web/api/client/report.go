@@ -13,10 +13,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
+	v1 "github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/ws"
@@ -63,6 +63,7 @@ func refreshPostPresence(uuid string) {
 	// 新 POST 会话：生成 connID，标记在线，启动超时定时器
 	connID := time.Now().UnixNano()
 	ws.KeepAlivePresence(uuid, connID, readWait)
+	ws.SetClientProtocolVersion(uuid, 1)
 	go notifier.OnlineNotification(uuid, connID)
 
 	defaultGeneration := uint64(0)
@@ -111,7 +112,7 @@ func UploadReport(c *gin.Context) {
 		return
 	}
 	// Save report to database
-	var report common.Report
+	var report v1.Report
 	err = json.Unmarshal(bodyBytes, &report)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
@@ -246,7 +247,7 @@ func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
 
 	switch msgType.Type {
 	case "", "report":
-		report := common.Report{}
+		report := v1.Report{}
 		err = json.Unmarshal(message, &report)
 		if err != nil {
 			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid report format"})
@@ -284,15 +285,15 @@ func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
 	}
 }
 
-func SaveClientReport(uuid string, report common.Report) error {
+func SaveClientReport(uuid string, report v1.Report) error {
 	reports, _ := api.Records.Get(uuid)
 	if reports == nil {
-		reports = []common.Report{}
+		reports = []v1.Report{}
 	}
 	if report.CPU.Usage < 0.01 {
 		report.CPU.Usage = 0.01
 	}
-	reports = append(reports.([]common.Report), report)
+	reports = append(reports.([]v1.Report), report)
 	api.Records.Set(uuid, reports, cache.DefaultExpiration)
 
 	return nil

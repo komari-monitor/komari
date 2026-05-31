@@ -6,7 +6,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 
@@ -40,20 +40,20 @@ func GetClientUUIDByToken(token string) (clientUUID string, err error) {
 	return client.UUID, nil
 }
 
-func ParseReport(data map[string]interface{}) (report common.Report, err error) {
+func ParseReport(data map[string]interface{}) (report v1.Report, err error) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return common.Report{}, err
+		return v1.Report{}, err
 	}
 	err = json.Unmarshal(jsonData, &report)
 	if err != nil {
-		return common.Report{}, err
+		return v1.Report{}, err
 	}
 	return report, nil
 }
 
 // 检查数据防止异常数据导致数据库损坏
-func ReportVerify(report common.Report) error {
+func ReportVerify(report v1.Report) error {
 	// 防止输入不合理范围
 	if report.CPU.Usage < 0 || report.CPU.Usage > 100 {
 		return fmt.Errorf("CPU.Usage must be between 0 and 100")
@@ -137,7 +137,7 @@ func ReportVerify(report common.Report) error {
 }
 
 // SaveClientReport 保存客户端报告到 Record 表
-func SaveClientReport(clientUUID string, report common.Report) (err error) {
+func SaveClientReport(clientUUID string, report v1.Report) (err error) {
 	db := dbcore.GetDBInstance()
 
 	if err := ReportVerify(report); err != nil {
