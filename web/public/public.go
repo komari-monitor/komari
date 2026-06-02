@@ -71,7 +71,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	// 假设 defaultTheme 内部结构也是: dist/, theme.json 等
 	defaultThemeFS, err := fs.Sub(PublicFS, "defaultTheme")
 	if err != nil {
-		panic("you may forget to put dist of frontend to public/defaultTheme/dist")
+		panic("you may forget to put dist of frontend to web/public/defaultTheme/dist")
 	}
 
 	getConfig := func() map[string]any {

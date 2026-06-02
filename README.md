@@ -93,7 +93,7 @@ sudo ./install-komari.sh
    git clone https://github.com/komari-monitor/komari
    cd komari
    ```
-   Copy the static files generated in step 1 to the `/public/defaultTheme/dist` folder in the root of the `komari` project, and copy `komari-theme.json` + `preview.png`/`perview.png` to `/public/defaultTheme`.
+   Copy the static files generated in step 1 to the `/web/public/defaultTheme/dist` folder in the root of the `komari` project, and copy `komari-theme.json` + `preview.png`/`perview.png` to `/web/public/defaultTheme`.
    ```bash
    go build -o komari
    ```
