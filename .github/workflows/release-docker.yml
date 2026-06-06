@@ -31,20 +31,20 @@ jobs:
 
       - name: Clone and build frontend
         run: |
-          git clone https://github.com/komari-monitor/komari-web web
-          cd web
+          git clone https://github.com/komari-monitor/komari-web komari-web
+          cd komari-web
           npm install
           npm run build
           cd ..
-          mkdir -p public/defaultTheme/dist
-          rm -rf public/defaultTheme/dist/*
-          cp -r web/dist/* public/defaultTheme/dist/
-          cp -f web/komari-theme.json public/defaultTheme/
-          if [ -f web/preview.png ]; then cp -f web/preview.png public/defaultTheme/; fi
-          if [ -f web/perview.png ]; then cp -f web/perview.png public/defaultTheme/; fi
+          mkdir -p web/public/defaultTheme/dist
+          rm -rf web/public/defaultTheme/dist/*
+          cp -r komari-web/dist/* web/public/defaultTheme/dist/
+          cp -f komari-web/komari-theme.json web/public/defaultTheme/
+          if [ -f komari-web/preview.png ]; then cp -f komari-web/preview.png web/public/defaultTheme/; fi
+          if [ -f komari-web/perview.png ]; then cp -f komari-web/perview.png web/public/defaultTheme/; fi
           # Compatibility: ensure both filenames exist if only one is present
-          if [ -f public/defaultTheme/preview.png ] && [ ! -f public/defaultTheme/perview.png ]; then cp -f public/defaultTheme/preview.png public/defaultTheme/perview.png; fi
-          if [ -f public/defaultTheme/perview.png ] && [ ! -f public/defaultTheme/preview.png ]; then cp -f public/defaultTheme/perview.png public/defaultTheme/preview.png; fi
+          if [ -f web/public/defaultTheme/preview.png ] && [ ! -f web/public/defaultTheme/perview.png ]; then cp -f web/public/defaultTheme/preview.png web/public/defaultTheme/perview.png; fi
+          if [ -f web/public/defaultTheme/perview.png ] && [ ! -f web/public/defaultTheme/preview.png ]; then cp -f web/public/defaultTheme/perview.png web/public/defaultTheme/preview.png; fi
 
       - name: Set up Go
         uses: actions/setup-go@v5

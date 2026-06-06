@@ -90,7 +90,7 @@ sudo ./install-komari.sh
    git clone https://github.com/komari-monitor/komari
    cd komari
    ```
-   將步驟1中產生的靜態檔案複製到 `komari` 專案根目錄下的 `/public/defaultTheme/dist` 資料夾，並將 `komari-theme.json` 與 `preview.png`/`perview.png` 複製到 `/public/defaultTheme`。
+   將步驟1中產生的靜態檔案複製到 `komari` 專案根目錄下的 `/web/public/defaultTheme/dist` 資料夾，並將 `komari-theme.json` 與 `preview.png`/`perview.png` 複製到 `/web/public/defaultTheme`。
    ```bash
    go build -o komari
    ```
