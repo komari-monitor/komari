@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -38,27 +39,73 @@ func SaveClientInfo(update map[string]interface{}) error {
 
 	update["updated_at"] = time.Now()
 
-	checkInt64 := func(name string, val float64) error {
-		if val < 0 {
-			return fmt.Errorf("%s must be non-negative, got %d", name, int64(val))
+	toFloat64 := func(value interface{}) (float64, bool) {
+		switch typed := value.(type) {
+		case float64:
+			return typed, true
+		case float32:
+			return float64(typed), true
+		case int:
+			return float64(typed), true
+		case int8:
+			return float64(typed), true
+		case int16:
+			return float64(typed), true
+		case int32:
+			return float64(typed), true
+		case int64:
+			return float64(typed), true
+		case uint:
+			return float64(typed), true
+		case uint8:
+			return float64(typed), true
+		case uint16:
+			return float64(typed), true
+		case uint32:
+			return float64(typed), true
+		case uint64:
+			return float64(typed), true
+		case json.Number:
+			parsed, err := typed.Float64()
+			if err != nil {
+				return 0, false
+			}
+			return parsed, true
+		default:
+			return 0, false
 		}
-		if val > math.MaxInt64-1 {
-			return fmt.Errorf("%s exceeds int64 max limit: %d", name, int64(val))
+	}
+
+	checkOptionalInt := func(name, key string, maxValue float64) error {
+		value, exists := update[key]
+		if !exists || value == nil {
+			return nil
+		}
+
+		numericValue, ok := toFloat64(value)
+		if !ok {
+			return fmt.Errorf("%s must be a valid number", name)
+		}
+		if numericValue < 0 || numericValue > maxValue {
+			return fmt.Errorf("%s must be a valid non-negative number: %v", name, value)
 		}
 		return nil
 	}
 
 	verify := func(update map[string]interface{}) error {
-		if update["cpu_cores"].(float64) < 0 || update["cpu_cores"].(float64) > math.MaxInt-1 {
-			return fmt.Errorf("Cpu.Cores be not a valid int64 number: %d", update["cpu_cores"])
-		}
-		if err := checkInt64("Ram.Total", update["mem_total"].(float64)); err != nil {
+		if err := checkOptionalInt("Cpu.Cores", "cpu_cores", math.MaxInt-1); err != nil {
 			return err
 		}
-		if err := checkInt64("Swap.Total", update["swap_total"].(float64)); err != nil {
+		if err := checkOptionalInt("Cpu.PhysicalCores", "cpu_physical_cores", math.MaxInt-1); err != nil {
 			return err
 		}
-		if err := checkInt64("Disk.Total", update["disk_total"].(float64)); err != nil {
+		if err := checkOptionalInt("Ram.Total", "mem_total", math.MaxInt64-1); err != nil {
+			return err
+		}
+		if err := checkOptionalInt("Swap.Total", "swap_total", math.MaxInt64-1); err != nil {
+			return err
+		}
+		if err := checkOptionalInt("Disk.Total", "disk_total", math.MaxInt64-1); err != nil {
 			return err
 		}
 		return nil
