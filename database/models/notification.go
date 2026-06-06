@@ -21,3 +21,13 @@ type LoadNotification struct {
 	Interval     int         `json:"interval" gorm:"type:int;not null;default:15"`              // 监测间隔（分钟）
 	LastNotified LocalTime   `json:"last_notified"`                                             // 上次通知时间
 }
+
+// TrafficReportNotification 定义了流量定时报告的数据库模型
+type TrafficReportNotification struct {
+	Client     string `json:"client" gorm:"type:varchar(36);not null;index;unique;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;foreignKey:client;references:UUID"`
+	ClientInfo Client `json:"client_info,omitempty" gorm:"foreignKey:Client;references:UUID"`
+	Enable     bool   `json:"enable" gorm:"type:boolean;default:false"`
+	Daily      bool   `json:"daily" gorm:"type:boolean;default:false"`  // 日报
+	Weekly     bool   `json:"weekly" gorm:"type:boolean;default:false"` // 周报
+	Monthly    bool   `json:"monthly" gorm:"type:boolean;default:false"` // 月报
+}

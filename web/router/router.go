@@ -174,6 +174,14 @@ func Register(r *gin.Engine) {
 				loadAlertGroup.POST("/delete", notification.DeleteLoadNotification)
 				loadAlertGroup.POST("/edit", notification.EditLoadNotification)
 			}
+			// traffic report notifications
+			trafficReportGroup := notificationGroup.Group("/traffic-report")
+			{
+				trafficReportGroup.GET("/", notification.ListTrafficReportNotifications)
+				trafficReportGroup.POST("/edit", notification.EditTrafficReportNotifications)
+				trafficReportGroup.POST("/enable", notification.EnableTrafficReportNotifications)
+				trafficReportGroup.POST("/disable", notification.DisableTrafficReportNotifications)
+			}
 		}
 
 		pingTaskGroup := adminAuthrized.Group("/ping")
