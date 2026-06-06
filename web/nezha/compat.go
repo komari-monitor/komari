@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
+	v1 "github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/notifier"
 	apiClient "github.com/komari-monitor/komari/web/api/client"
@@ -287,36 +287,38 @@ func upsertClientFromHost(uuid, secret string, h *proto.Host) error {
 		return int64(v)
 	}
 	c := models.Client{
-		UUID:           uuid,
-		Token:          secret,
-		Name:           "nezha_" + uuid[0:8],
-		CpuName:        cpuName,
-		Arch:           h.Arch,
-		CpuCores:       len(h.Cpu),
-		OS:             osName,
-		KernelVersion:  h.PlatformVersion,
-		Virtualization: h.Virtualization,
-		GpuName:        gpuName,
-		MemTotal:       clamp(h.MemTotal),
-		SwapTotal:      clamp(h.SwapTotal),
-		DiskTotal:      clamp(h.DiskTotal),
-		Version:        h.Version,
-		UpdatedAt:      now,
+		UUID:             uuid,
+		Token:            secret,
+		Name:             "nezha_" + uuid[0:8],
+		CpuName:          cpuName,
+		Arch:             h.Arch,
+		CpuCores:         len(h.Cpu),
+		CpuPhysicalCores: 0, // Nezha 协议未提供物理核心数，0 表示未知
+		OS:               osName,
+		KernelVersion:    h.PlatformVersion,
+		Virtualization:   h.Virtualization,
+		GpuName:          gpuName,
+		MemTotal:         clamp(h.MemTotal),
+		SwapTotal:        clamp(h.SwapTotal),
+		DiskTotal:        clamp(h.DiskTotal),
+		Version:          h.Version,
+		UpdatedAt:        now,
 	}
 	// Upsert by UUID; don't override existing Token if already set
 	updates := map[string]interface{}{
-		"cpu_name":       c.CpuName,
-		"arch":           c.Arch,
-		"cpu_cores":      c.CpuCores,
-		"os":             c.OS,
-		"kernel_version": c.KernelVersion,
-		"virtualization": c.Virtualization,
-		"gpu_name":       c.GpuName,
-		"mem_total":      c.MemTotal,
-		"swap_total":     c.SwapTotal,
-		"disk_total":     c.DiskTotal,
-		"version":        c.Version,
-		"updated_at":     time.Now(),
+		"cpu_name":           c.CpuName,
+		"arch":               c.Arch,
+		"cpu_cores":          c.CpuCores,
+		"cpu_physical_cores": c.CpuPhysicalCores,
+		"os":                 c.OS,
+		"kernel_version":     c.KernelVersion,
+		"virtualization":     c.Virtualization,
+		"gpu_name":           c.GpuName,
+		"mem_total":          c.MemTotal,
+		"swap_total":         c.SwapTotal,
+		"disk_total":         c.DiskTotal,
+		"version":            c.Version,
+		"updated_at":         time.Now(),
 	}
 	return db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "uuid"}},

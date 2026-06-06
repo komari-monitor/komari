@@ -15,6 +15,7 @@ type Client struct {
 	Virtualization   string    `json:"virtualization" gorm:"type:varchar(50)"`
 	Arch             string    `json:"arch" gorm:"type:varchar(50)"`
 	CpuCores         int       `json:"cpu_cores" gorm:"type:int"`
+	CpuPhysicalCores int       `json:"cpu_physical_cores" gorm:"type:int"`
 	OS               string    `json:"os" gorm:"type:varchar(100)"`
 	KernelVersion    string    `json:"kernel_version" gorm:"type:varchar(100)"`
 	GpuName          string    `json:"gpu_name" gorm:"type:varchar(100)"`
