@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -98,4 +100,38 @@ func TestLogin(t *testing.T) {
 	// 清除测试数据
 	accounts.DeleteAccountByUsername("testuser")
 	accounts.DeleteAllSessions()
+}
+
+func TestSessionCookieIsSecureOnHTTPByDefault(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	original := utils.CurrentVersion
+	utils.CurrentVersion = "0.0.1"
+	defer func() {
+		utils.CurrentVersion = original
+	}()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "http://example.test/login", nil)
+
+	setSessionCookie(c, "test-session", sessionCookieMaxAge)
+
+	assert.Contains(t, strings.Join(w.Header().Values("Set-Cookie"), "\n"), "Secure")
+}
+
+func TestSessionCookieIsNotSecureOnHTTPWhenOverrideEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	original := utils.CurrentVersion
+	utils.CurrentVersion = "dev"
+	defer func() {
+		utils.CurrentVersion = original
+	}()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "http://example.test/login", nil)
+
+	setSessionCookie(c, "test-session", sessionCookieMaxAge)
+
+	assert.NotContains(t, strings.Join(w.Header().Values("Set-Cookie"), "\n"), "Secure")
 }
