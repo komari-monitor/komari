@@ -9,8 +9,9 @@
 ### Build Requirements
 
 1. Clone the frontend repository and build the static files
-2. Copy the generated static files to the `defaultTheme` folder in the Komari backend project root directory
-3. Ensure the `defaultTheme/dist` folder contains `index.html`
+2. Copy the generated `dist` files to `web/public/defaultTheme/dist` in the backend repository
+3. Copy `komari-theme.json` to `web/public/defaultTheme` if you want the default theme metadata and managed configuration to be available
+4. Ensure `web/public/defaultTheme/dist/index.html` exists before building the backend
 
 ### Important Note
 
@@ -27,8 +28,9 @@
 ### 构建要求
 
 1. 克隆前端仓库并构建静态文件
-2. 将生成的静态文件复制到 Komari 后端项目根目录下的 `defaultTheme` 文件夹
-3. 确保 `dist` 文件夹内包含 `index.html`
+2. 将生成的 `dist` 文件复制到后端仓库内的 `web/public/defaultTheme/dist`
+3. 如需让后台显示默认主题元数据和可管理配置，将 `komari-theme.json` 复制到 `web/public/defaultTheme`
+4. 构建后端前，确保 `web/public/defaultTheme/dist/index.html` 存在
 
 ### 重要提醒
 
@@ -45,8 +47,9 @@
 ### ビルド要件
 
 1. フロントエンドリポジトリをクローンして静的ファイルをビルドする
-2. 生成された静的ファイルを Komari バックエンドプロジェクトのルートディレクトリ下の `defaultTheme` フォルダーにコピーする
-3. `dist` フォルダー内に `index.html` が含まれていることを確認する
+2. 生成された `dist` ファイルをバックエンドリポジトリ内の `web/public/defaultTheme/dist` にコピーする
+3. デフォルトテーマのメタデータと管理設定を利用する場合は、`komari-theme.json` を `web/public/defaultTheme` にコピーする
+4. バックエンドをビルドする前に、`web/public/defaultTheme/dist/index.html` が存在することを確認する
 
 ### 重要な注意事項
 
@@ -65,6 +68,8 @@ cd komari-web
 npm install
 npm run build
 
-# Copy dist folder to Komari backend project / 将 dist 文件夹复制到 Komari 后端项目 / dist フォルダーを Komari バックエンドプロジェクトにコピー
-cp -r dist /path/to/komari/public/defaultTheme
+# Copy frontend assets into the backend embed directory / 复制到后端 embed 目录 / バックエンドの embed ディレクトリにコピー
+mkdir -p /path/to/komari/web/public/defaultTheme/dist
+cp -r dist/* /path/to/komari/web/public/defaultTheme/dist/
+cp komari-theme.json /path/to/komari/web/public/defaultTheme/
 ```
