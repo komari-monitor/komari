@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -29,6 +30,10 @@ func Exec(c *gin.Context) {
 	var offlineClients []string
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Command) == "" {
+		api.RespondError(c, 400, "Command cannot be empty")
 		return
 	}
 	// for uuid := range ws.GetConnectedClients() {
