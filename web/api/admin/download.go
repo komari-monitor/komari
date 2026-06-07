@@ -123,7 +123,7 @@ func DownloadBackup(c *gin.Context) {
 	destDB := filepath.Join(tempDir, "komari.db")
 	dbFilePath := flags.DatabaseFile
 
-	if flags.DatabaseType == "sqlite" || flags.DatabaseType == "" {
+	if flags.IsSQLite() {
 		if err := backupSQLiteTo(destDB); err != nil {
 			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error backing up sqlite database: %v", err))
 			return

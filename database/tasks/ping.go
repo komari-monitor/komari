@@ -200,41 +200,6 @@ func AddDefaultOnClientUUID(uuid string) error {
 	return nil
 }
 
-// MigrateAllClientsExpansion 启动时把旧版 default_on=true 且 clients 为空的任务展开为当前所有客户端 UUID。
-// 迁移后 clients 始终是显式列表，调度路径不再依赖 default_on。
-func MigrateAllClientsExpansion() error {
-	db := dbcore.GetDBInstance()
-	var tasks []models.PingTask
-	if err := db.Where("all_clients = ?", true).Find(&tasks).Error; err != nil {
-		return err
-	}
-	if len(tasks) == 0 {
-		return nil
-	}
-	var clients []models.Client
-	if err := db.Select("uuid").Find(&clients).Error; err != nil {
-		return err
-	}
-	if len(clients) == 0 {
-		return nil
-	}
-	allUUIDs := make(models.StringArray, 0, len(clients))
-	for _, c := range clients {
-		if c.UUID != "" {
-			allUUIDs = append(allUUIDs, c.UUID)
-		}
-	}
-	for _, task := range tasks {
-		if len(task.Clients) > 0 {
-			continue
-		}
-		if err := db.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("clients", allUUIDs).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
 	db := dbcore.GetDBInstance()
 	var records []models.PingRecord
