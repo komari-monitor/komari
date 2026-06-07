@@ -95,10 +95,26 @@ func TestNormalizeThemeRedirectTarget(t *testing.T) {
 			want:  "/nodes",
 			ok:    true,
 		},
+		"parent prefix points to root path": {
+			input: "../settings",
+			want:  "/settings",
+			ok:    true,
+		},
+		"multiple parent prefixes point to root path": {
+			input: "../../settings/site",
+			want:  "/settings/site",
+			ok:    true,
+		},
 		"query and fragment": {
 			input: "nodes?id=1#cpu",
 			want:  "/nodes?id=1#cpu",
 			ok:    true,
+		},
+		"absolute parent traversal": {
+			input: "/../admin",
+		},
+		"nested parent traversal": {
+			input: "nodes/../admin",
 		},
 		"protocol relative": {
 			input: "//example.com",

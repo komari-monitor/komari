@@ -26,7 +26,7 @@ type Theme struct {
 }
 
 type Configuration struct {
-	Type string `json:"type"` // managed
+	Type string `json:"type"` // managed raw redirect
 	Icon string `json:"icon"` // 图标
 	Name any    `json:"name"`
 	Data any    `json:"data"` // 配置数据
@@ -105,18 +105,31 @@ func NormalizeThemeRedirectTarget(data any) (string, bool) {
 		return "", false
 	}
 
-	for _, segment := range strings.Split(parsed.Path, "/") {
+	cleanInputPath := parsed.Path
+	if strings.HasPrefix(cleanInputPath, "/") {
+		cleanInputPath = strings.TrimLeft(cleanInputPath, "/")
+	} else {
+		for strings.HasPrefix(cleanInputPath, "../") {
+			cleanInputPath = strings.TrimPrefix(cleanInputPath, "../")
+		}
+	}
+
+	for _, segment := range strings.Split(cleanInputPath, "/") {
 		if segment == ".." {
 			return "", false
 		}
 	}
 
-	cleanPath := parsed.Path
+	cleanPath := cleanInputPath
 	if cleanPath == "" {
 		cleanPath = "/"
 	} else {
-		cleanPath = "/" + strings.TrimPrefix(cleanPath, "/")
 		cleanPath = path.Clean(cleanPath)
+		if cleanPath == "." {
+			cleanPath = "/"
+		} else {
+			cleanPath = "/" + strings.TrimPrefix(cleanPath, "/")
+		}
 	}
 
 	normalized := url.URL{
