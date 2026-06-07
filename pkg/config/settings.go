@@ -2,7 +2,7 @@ package config
 
 import "time"
 
-type Legacy struct {
+type Settings struct {
 	ID                uint   `json:"id,omitempty"`                                        // 1
 	Sitename          string `json:"sitename" default:"Komari"`                           // 站点名称，默认 "Komari"
 	Description       string `json:"description" default:"A simple server monitor tool."` // 站点描述
@@ -79,56 +79,3 @@ const (
 	UpdatedAtKey                  = "updated_at"
 	XtermjsSettingsKey            = "xtermjs_settings"
 )
-
-func (Legacy) TableName() string {
-	return "configs"
-}
-
-// Decrepted
-/*
-func Update(cst map[string]interface{}) error {
-	oldConfig, _ := GetManyAs[Legacy]()
-	// Proceed with update
-	cst["updated_at"] = time.Now().Unix()
-	delete(cst, "created_at")
-	delete(cst, "CreatedAt")
-
-	// 至少有一种登录方式启用
-	newDisablePasswordLogin := oldConfig.DisablePasswordLogin
-	newOAuthEnabled := oldConfig.OAuthEnabled
-	if val, exists := cst["disable_password_login"]; exists {
-		newDisablePasswordLogin = val.(bool)
-	}
-	if val, exists := cst["o_auth_enabled"]; exists {
-		newOAuthEnabled = val.(bool)
-	}
-	if newDisablePasswordLogin && !newOAuthEnabled {
-		return errors.New("at least one login method must be enabled (password/oauth)")
-	}
-	// 没绑定账号也不能禁用
-	if newDisablePasswordLogin {
-		usr := &models.User{}
-		if err := Db.Model(&models.User{}).First(usr).Error; err != nil {
-			return errors.Join(err, errors.New("failed to retrieve user"))
-		}
-		if usr.SSOID == "" {
-			return errors.New("cannot disable password login when no SSO-bound account exists")
-		}
-	}
-	err := Db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&models.Config{}).Where("id = ?", oldConfig.ID).Updates(cst).Error; err != nil {
-			return errors.Join(err, errors.New("failed to update configuration"))
-		}
-		newConfig := &models.Config{}
-		if err := tx.Where("id = ?", oldConfig.ID).First(newConfig).Error; err != nil {
-			return errors.Join(err, errors.New("failed to retrieve updated configuration"))
-		}
-		//publishEvent(oldConfig, *newConfig)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	return nil
-}
-*/

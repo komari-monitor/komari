@@ -172,7 +172,7 @@ func CompactRecord() error {
 		return err
 	}
 
-	if flags.DatabaseType == "sqlite" {
+	if flags.IsSQLite() {
 		db.Exec("PRAGMA wal_checkpoint(PASSIVE);")
 	}
 	//log.Printf("Record compaction completed")

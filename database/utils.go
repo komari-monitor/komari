@@ -14,7 +14,7 @@ import (
 )
 
 func GetPublicInfo() (map[string]interface{}, error) {
-	cstPtr, err := config.GetManyAs[config.Legacy]()
+	cstPtr, err := config.GetManyAs[config.Settings]()
 	if err != nil {
 		return nil, err
 	}

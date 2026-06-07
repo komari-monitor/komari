@@ -25,63 +25,11 @@ var (
 	db    *gorm.DB
 	SetDb = func(gdb *gorm.DB) {
 		db = gdb
-		migrateInPlace()
-	}
-)
-
-func migrateInPlace() {
-	if db.Migrator().HasTable("configs") && db.Migrator().HasColumn(&Legacy{}, "Sitename") {
-		slog.Info("[>1.1.4] Moving legacy config data...")
-
-		var oldData Legacy
-		if err := db.Order("id desc").First(&oldData).Error; err != nil {
-			db.Migrator().DropTable("configs")
-		} else {
-			var newRows []ConfigItem
-			val := reflect.ValueOf(oldData)
-			typ := reflect.TypeOf(oldData)
-
-			for i := 0; i < val.NumField(); i++ {
-				field := typ.Field(i)
-				tag := field.Tag.Get("json")
-				key := strings.Split(tag, ",")[0]
-
-				// 过滤 id 和无用字段
-				if key == "" || key == "-" || key == "id" {
-					continue
-				}
-
-				valInterface := val.Field(i).Interface()
-				jsonBytes, _ := json.Marshal(valInterface)
-
-				newRows = append(newRows, ConfigItem{
-					Key:   key,
-					Value: string(jsonBytes),
-				})
-			}
-
-			err := db.Transaction(func(tx *gorm.DB) error {
-				if err := tx.Migrator().DropTable("configs"); err != nil {
-					return err
-				}
-				if err := tx.AutoMigrate(&ConfigItem{}); err != nil {
-					return err
-				}
-				if len(newRows) > 0 {
-					return tx.Create(&newRows).Error
-				}
-				return nil
-			})
-
-			if err != nil {
-				panic("failed " + err.Error())
-			}
-			return
+		if err := db.AutoMigrate(&ConfigItem{}); err != nil {
+			panic("failed to migrate config item table: " + err.Error())
 		}
 	}
-
-	db.AutoMigrate(&ConfigItem{})
-}
+)
 
 // Get 获取原始值 (反序列化为 interface{})
 func Get(key string, defaul ...any) (any, error) {
@@ -601,8 +549,8 @@ func SetMany(cst map[string]any) error {
 }
 
 type ConfigEvent struct {
-	Old map[string]any // Old models.Config
-	New map[string]any // New models.Config
+	Old map[string]any
+	New map[string]any
 }
 
 func (e ConfigEvent) IsChanged(key string) bool {

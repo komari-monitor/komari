@@ -2,7 +2,7 @@ package migrations
 
 import "time"
 
-// ClientInfo is the legacy table shape for migrating pre-Client model databases.
+// ClientInfo is the legacy table shape for migrating pre-Client model data.
 type ClientInfo struct {
 	UUID           string    `json:"uuid,omitempty" gorm:"type:varchar(36);primaryKey;foreignKey:ClientUUID;references:UUID;constraint:OnDelete:CASCADE"`
 	Name           string    `json:"name" gorm:"type:varchar(100);not null"`

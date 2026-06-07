@@ -4,9 +4,8 @@ import (
 	"os"
 
 	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/spf13/cobra"
-	"gorm.io/gorm"
 )
 
 var PermitPasswordLoginCmd = &cobra.Command{
@@ -14,12 +13,8 @@ var PermitPasswordLoginCmd = &cobra.Command{
 	Short: "Force permit password login",
 	Long:  `Force permit password login`,
 	Run: func(cmd *cobra.Command, args []string) {
-		db := dbcore.GetDBInstance()
-		err := db.Transaction(func(tx *gorm.DB) error {
-			return tx.Model(&models.Config{}).Where("id = ?", 1).
-				Update("disable_password_login", false).Error
-		})
-		if err != nil {
+		dbcore.GetDBInstance()
+		if err := config.Set(config.DisablePasswordLoginKey, false); err != nil {
 			cmd.Println("Error:", err)
 			os.Exit(1)
 		}
