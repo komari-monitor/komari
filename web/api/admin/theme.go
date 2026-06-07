@@ -202,6 +202,10 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 		return themeInfo, fmt.Errorf("主题short字段格式无效，只允许字母、数字、下划线和连字符")
 	}
 
+	if err := themeInfo.ValidateConfiguration(); err != nil {
+		return themeInfo, err
+	}
+
 	// 创建主题目录
 	themeDir := filepath.Join("./data/theme", themeInfo.Short)
 
@@ -669,6 +673,10 @@ func peekThemeFromZip(zipPath string) (models.Theme, error) {
 
 	if !isValidThemeShort(themeInfo.Short) {
 		return themeInfo, fmt.Errorf("主题short字段格式无效，只允许字母、数字、下划线和连字符")
+	}
+
+	if err := themeInfo.ValidateConfiguration(); err != nil {
+		return themeInfo, err
 	}
 
 	return themeInfo, nil
