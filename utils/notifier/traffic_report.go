@@ -12,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	"gorm.io/gorm"
 )
 
 // InitTrafficReportSchedule 注册三个定时任务：日报、周报、月报
@@ -123,6 +124,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 
 	// 为每个服务器统计流量并拼接消息
 	var lines []string
+	eventClients := make([]models.Client, 0, len(notifications))
 	for _, n := range notifications {
 		c, ok := clientMap[n.Client]
 		if !ok {
@@ -136,6 +138,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 		}
 
 		lines = append(lines, fmt.Sprintf("%s%s：%s", c.Name, suffix, humanBytes(used)))
+		eventClients = append(eventClients, c)
 	}
 
 	if len(lines) == 0 {
@@ -155,6 +158,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 
 	if err := messageSender.SendEvent(models.EventMessage{
 		Event:   eventType,
+		Clients: eventClients,
 		Time:    now,
 		Emoji:   emoji,
 		Message: message,
@@ -164,44 +168,54 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 }
 
 // getClientTrafficInRange 查询某客户端在指定时间段内的流量增量
-// 通过取时间段内 NetTotalUp/NetTotalDown 的 max - min 计算增量
+// 通过累加持久化的精确流量增量字段计算用量
 func getClientTrafficInRange(clientUUID string, trafficType string, start, end time.Time) (int64, error) {
-	db := dbcore.GetDBInstance()
+	return getClientTrafficInRangeWithDB(dbcore.GetDBInstance(), clientUUID, trafficType, start, end)
+}
 
-	type minMax struct {
-		MinUp   int64 `gorm:"column:min_up"`
-		MaxUp   int64 `gorm:"column:max_up"`
-		MinDown int64 `gorm:"column:min_down"`
-		MaxDown int64 `gorm:"column:max_down"`
+func getClientTrafficInRangeWithDB(db *gorm.DB, clientUUID string, trafficType string, start, end time.Time) (int64, error) {
+	type trafficDeltaRecord struct {
+		Time        models.LocalTime `gorm:"column:time"`
+		TrafficUp   int64            `gorm:"column:traffic_up"`
+		TrafficDown int64            `gorm:"column:traffic_down"`
 	}
-	var result minMax
 
-	sql := `
-		SELECT
-			MIN(net_total_up)   AS min_up,
-			MAX(net_total_up)   AS max_up,
-			MIN(net_total_down) AS min_down,
-			MAX(net_total_down) AS max_down
-		FROM (
-			SELECT net_total_up, net_total_down FROM records
-			WHERE client = ? AND time >= ? AND time <= ?
-			UNION ALL
-			SELECT net_total_up, net_total_down FROM records_long_term
-			WHERE client = ? AND time >= ? AND time <= ?
-		) AS combined
-	`
-	if err := db.Raw(sql, clientUUID, start, end, clientUUID, start, end).Scan(&result).Error; err != nil {
+	var recentRecords []trafficDeltaRecord
+	if err := db.Table("records").
+		Select("time, traffic_up, traffic_down").
+		Where("client = ? AND time >= ? AND time <= ?", clientUUID, start, end).
+		Find(&recentRecords).Error; err != nil {
 		return 0, err
 	}
 
-	deltaUp := result.MaxUp - result.MinUp
-	if deltaUp < 0 {
-		deltaUp = result.MaxUp
-	}
-	deltaDown := result.MaxDown - result.MinDown
-	if deltaDown < 0 {
-		deltaDown = result.MaxDown
+	var longTermRecords []trafficDeltaRecord
+	if err := db.Table("records_long_term").
+		Select("time, traffic_up, traffic_down").
+		Where("client = ? AND time >= ? AND time <= ?", clientUUID, start, end).
+		Find(&longTermRecords).Error; err != nil {
+		return 0, err
 	}
 
-	return computeUsedByType(strings.ToLower(trafficType), deltaUp, deltaDown), nil
+	var totalUp int64
+	var totalDown int64
+	longTermSlots := make(map[time.Time]struct{}, len(longTermRecords))
+
+	for _, record := range longTermRecords {
+		totalUp += record.TrafficUp
+		totalDown += record.TrafficDown
+		longTermSlots[record.Time.ToTime()] = struct{}{}
+	}
+
+	for _, record := range recentRecords {
+		// records_long_term stores one aggregated row per 15-minute slot.
+		// Skip raw rows only when that exact slot is already present there.
+		slot := record.Time.ToTime().Truncate(15 * time.Minute)
+		if _, exists := longTermSlots[slot]; exists {
+			continue
+		}
+		totalUp += record.TrafficUp
+		totalDown += record.TrafficDown
+	}
+
+	return computeUsedByType(strings.ToLower(trafficType), totalUp, totalDown), nil
 }

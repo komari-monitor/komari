@@ -29,11 +29,9 @@ func EditTrafficReportNotifications(c *gin.Context) {
 		api.RespondError(c, 400, "At least one notification is required")
 		return
 	}
-	for _, n := range notifications {
-		if n.Client == "" {
-			api.RespondError(c, 400, "Client UUID cannot be empty")
-			return
-		}
+	if err := notification.ValidateTrafficReportNotifications(notifications); err != nil {
+		api.RespondError(c, 400, err.Error())
+		return
 	}
 	if err := notification.EditTrafficReportNotifications(notifications); err != nil {
 		api.RespondError(c, 500, "Failed to edit traffic report notifications: "+err.Error())
