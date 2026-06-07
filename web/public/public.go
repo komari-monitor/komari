@@ -20,10 +20,11 @@ var PublicFS embed.FS
 
 // 常量定义
 const (
-	DataDir      = "./data"
-	ThemesDir    = "theme"
-	FaviconFile  = "favicon.ico"
-	DefaultTheme = "default"
+	DataDir            = "./data"
+	ThemesDir          = "theme"
+	FaviconFile        = "favicon.ico"
+	DefaultTheme       = "default"
+	LanguageCookieName = "language"
 
 	// 主题内部结构定义
 	DistDir   = "dist"       // 静态资源存放目录
@@ -32,6 +33,46 @@ const (
 
 func init() {
 	_ = os.MkdirAll("./data/theme", 0755)
+}
+
+func normalizeHTMLLanguage(language string) string {
+	language = strings.TrimSpace(strings.ReplaceAll(language, "_", "-"))
+	if len(language) < 2 || len(language) > 32 {
+		return ""
+	}
+
+	for _, r := range language {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
+			continue
+		}
+		return ""
+	}
+
+	return language
+}
+
+func replaceHTMLLanguage(htmlStr, language string) string {
+	language = normalizeHTMLLanguage(language)
+	if language == "" {
+		return htmlStr
+	}
+
+	replacements := []struct {
+		old string
+		new string
+	}{
+		{`<html lang="en">`, `<html lang="` + language + `">`},
+		{`<html lang='en'>`, `<html lang='` + language + `'>`},
+		{`<html>`, `<html lang="` + language + `">`},
+	}
+
+	for _, replacement := range replacements {
+		if strings.Contains(htmlStr, replacement.old) {
+			return strings.Replace(htmlStr, replacement.old, replacement.new, 1)
+		}
+	}
+
+	return htmlStr
 }
 
 // isSafePath 验证路径是否在指定的基础目录内，防止路径穿透攻击
@@ -153,14 +194,18 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			return
 		}
 
-		// 如果不替换，直接返回原始内容
+		htmlStr := string(content)
+		if language, err := c.Cookie(LanguageCookieName); err == nil {
+			htmlStr = replaceHTMLLanguage(htmlStr, language)
+		}
+
+		// 如果不替换，保留系统内置页面内容，仅同步 html lang。
 		if !shouldReplace {
-			c.Data(http.StatusOK, "text/html; charset=utf-8", content)
+			c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(htmlStr))
 			return
 		}
 
 		// 执行 HTML 内容替换
-		htmlStr := string(content)
 		replacer := strings.NewReplacer(
 			"<title>Komari Monitor</title>", "<title>"+cfg[config.SitenameKey].(string)+"</title>",
 			"A simple server monitor tool.", cfg[config.DescriptionKey].(string),
