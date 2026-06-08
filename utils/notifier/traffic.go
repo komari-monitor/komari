@@ -11,7 +11,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils/messageSender"
-	"github.com/komari-monitor/komari/web/ws"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	cache "github.com/patrickmn/go-cache"
 )
 
@@ -23,7 +23,7 @@ var trafficCache = cache.New(30*24*time.Hour, time.Hour) // 30天缓存，1小�
 // 由外部协程每分钟调用一次
 func CheckTraffic() {
 	// 获取最新上报与客户端配置
-	reports := ws.GetLatestReport()
+	reports := agent_runtime.GetLatestReport()
 	if len(reports) == 0 {
 		return
 	}

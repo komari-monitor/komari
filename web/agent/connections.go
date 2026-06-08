@@ -1,17 +1,16 @@
-package ws
+package agent
 
 import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
+	"github.com/komari-monitor/komari/web/connection"
 )
 
 var (
-	connectedClients  = make(map[string]*SafeConn)
+	connectedClients  = make(map[string]*connection.SafeConn)
 	connectedClientV2 = make(map[string]bool)
-	ConnectedUsers    = []*websocket.Conn{}
 	latestReport      = make(map[string]*v1.Report)
 	// presenceOnly stores online state for non-WebSocket agents (e.g., Nezha gRPC)
 	// value keeps connectionID and a soft expiration to avoid flicker
@@ -22,17 +21,17 @@ var (
 	mu = sync.RWMutex{}
 )
 
-func GetConnectedClients() map[string]*SafeConn {
+func GetConnectedClients() map[string]*connection.SafeConn {
 	mu.RLock()
 	defer mu.RUnlock()
-	clientsCopy := make(map[string]*SafeConn)
+	clientsCopy := make(map[string]*connection.SafeConn)
 	for k, v := range connectedClients {
 		clientsCopy[k] = v
 	}
 	return clientsCopy
 }
 
-func SetConnectedClients(uuid string, conn *SafeConn) {
+func SetConnectedClients(uuid string, conn *connection.SafeConn) {
 	mu.Lock()
 	defer mu.Unlock()
 	connectedClients[uuid] = conn
@@ -50,7 +49,7 @@ func IsV2Client(uuid string) bool {
 	return connectedClientV2[uuid]
 }
 
-func DeleteClientConditionally(uuid string, connToRemove *SafeConn) {
+func DeleteClientConditionally(uuid string, connToRemove *connection.SafeConn) {
 	mu.Lock()
 	defer mu.Unlock()
 

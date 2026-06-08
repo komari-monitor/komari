@@ -9,7 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/utils/messageSender"
-	"github.com/komari-monitor/komari/web/ws"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
 func CheckAndAutoRenewal(client models.Client) {
@@ -24,7 +24,7 @@ func CheckAndAutoRenewal(client models.Client) {
 		return
 	}
 	// 不在线则不续费
-	if _, ok := ws.GetConnectedClients()[client.UUID]; !ok {
+	if _, ok := agent_runtime.GetConnectedClients()[client.UUID]; !ok {
 		return
 	}
 

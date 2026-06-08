@@ -13,6 +13,7 @@ func UpdateUser(c *gin.Context) {
 		Name     *string `json:"username"`
 		Password *string `json:"password"`
 		SsoType  *string `json:"sso_type"`
+		TwoFa    string  `json:"2fa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
@@ -29,6 +30,13 @@ func UpdateUser(c *gin.Context) {
 	if req.Password != nil && len(*req.Password) < 6 {
 		api.RespondError(c, 400, "Password must be at least 6 characters long")
 		return
+	}
+	if req.Password != nil {
+		c.Set("2fa_code", req.TwoFa)
+		if err := api.VerifySensitive2FA(c); err != nil {
+			api.RespondError(c, 401, err.Error())
+			return
+		}
 	}
 	if err := accounts.UpdateUser(req.Uuid, req.Name, req.Password, req.SsoType); err != nil {
 		api.RespondError(c, 500, "Failed to update user: "+err.Error())

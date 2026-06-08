@@ -5,32 +5,21 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
-	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/pkg/config"
-	"github.com/komari-monitor/komari/web/ws"
+	"github.com/komari-monitor/komari/protocol/v1"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
 func GetClients(c *gin.Context) {
 	// 升级到ws
-	if !websocket.IsWebSocketUpgrade(c.Request) {
+	if !IsWebSocketUpgrade(c) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
 		return
 	}
-	AllowCors, _ := config.GetAs[bool](config.AllowCorsKey, false)
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			if AllowCors {
-				return true
-			}
-			return ws.CheckOrigin(r)
-		},
-	}
 	// Upgrade the HTTP connection to a WebSocket connection
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := UpgradeWebSocket(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
@@ -63,7 +52,7 @@ func GetClients(c *gin.Context) {
 	// 请求
 	for {
 		var resp struct {
-			Online []string                 `json:"online"` // 已建立连接的客户端uuid列表
+			Online []string             `json:"online"` // 已建立连接的客户端uuid列表
 			Data   map[string]v1.Report `json:"data"`   // 最后上报的数据
 		}
 
@@ -88,7 +77,7 @@ func GetClients(c *gin.Context) {
 		}
 
 		// 在线客户端uuid列表（WebSocket 与非 WebSocket）
-		for _, key := range ws.GetAllOnlineUUIDs() {
+		for _, key := range agent_runtime.GetAllOnlineUUIDs() {
 			if !isLogin && hiddenMap[key] {
 				continue
 			}
@@ -99,7 +88,7 @@ func GetClients(c *gin.Context) {
 		}
 
 		//过往节点数据信息
-		for key, report := range ws.GetLatestReport() {
+		for key, report := range agent_runtime.GetLatestReport() {
 			if !isLogin && hiddenMap[key] {
 				continue
 			}

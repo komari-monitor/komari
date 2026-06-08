@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -16,9 +15,10 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/utils"
-	"github.com/komari-monitor/komari/web/api"
-	"github.com/komari-monitor/komari/web/ws"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
+	report_cache "github.com/komari-monitor/komari/web/report"
 
 	cache "github.com/patrickmn/go-cache"
 )
@@ -285,8 +285,8 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	req.BindParams(&params)
 
 	meta := rpc.MetaFromContext(ctx)
-	latest := ws.GetLatestReport() // map[string]*v1.Report (copy)
-	onlineUUIDs := ws.GetAllOnlineUUIDs()
+	latest := agent_runtime.GetLatestReport() // map[string]*v1.Report (copy)
+	onlineUUIDs := agent_runtime.GetAllOnlineUUIDs()
 	onlineSet := make(map[string]bool, len(onlineUUIDs))
 	for _, uuid := range onlineUUIDs {
 		onlineSet[uuid] = true
@@ -487,7 +487,7 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 		}
 	}
 
-	raw, _ := api.Records.Get(params.UUID)
+	raw, _ := report_cache.Records.Get(params.UUID)
 	reports, _ := raw.([]v1.Report)
 
 	// 扁平化为 { count, records: [] }

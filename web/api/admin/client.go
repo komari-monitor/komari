@@ -7,7 +7,7 @@ import (
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/records"
-	"github.com/komari-monitor/komari/web/ws"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
 func AddClient(c *gin.Context) {
@@ -68,8 +68,8 @@ func RemoveClient(c *gin.Context) {
 	user_uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), user_uuid.(string), "delete client:"+uuid, "warn")
 	c.JSON(200, gin.H{"status": "success"})
-	ws.DeleteConnectedClients(uuid)
-	ws.DeleteLatestReport(uuid)
+	agent_runtime.DeleteConnectedClients(uuid)
+	agent_runtime.DeleteLatestReport(uuid)
 }
 
 func ClearRecord(c *gin.Context) {

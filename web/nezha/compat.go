@@ -18,8 +18,8 @@ import (
 	v1 "github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/notifier"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	apiClient "github.com/komari-monitor/komari/web/api/client"
-	"github.com/komari-monitor/komari/web/ws"
 
 	"github.com/komari-monitor/komari/web/nezha/proto"
 	"google.golang.org/grpc"
@@ -187,10 +187,10 @@ func (s *nezhaCompatServer) ReportSystemState(stream proto.NezhaService_ReportSy
 	}
 	// presence start
 	connID := time.Now().UnixNano()
-	ws.SetPresence(uuid, connID, true)
+	agent_runtime.SetPresence(uuid, connID, true)
 	go notifier.OnlineNotification(uuid, connID)
 	defer func() {
-		ws.SetPresence(uuid, connID, false)
+		agent_runtime.SetPresence(uuid, connID, false)
 		notifier.OfflineNotification(uuid, connID)
 	}()
 	for {
@@ -202,7 +202,7 @@ func (s *nezhaCompatServer) ReportSystemState(stream proto.NezhaService_ReportSy
 			return err
 		}
 		// refresh presence TTL on every frame
-		ws.KeepAlivePresence(uuid, connID, 30*time.Second)
+		agent_runtime.KeepAlivePresence(uuid, connID, 30*time.Second)
 		if err := ingestState(uuid, st); err != nil {
 			// still ack to avoid client stuck; log error
 			log.Printf("Nezha ingest state error: %v", err)
@@ -223,8 +223,8 @@ func (s *nezhaCompatServer) RequestTask(stream proto.NezhaService_RequestTaskSer
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	connID := time.Now().UnixNano()
-	ws.SetPresence(uuid, connID, true)
-	defer ws.SetPresence(uuid, connID, false)
+	agent_runtime.SetPresence(uuid, connID, true)
+	defer agent_runtime.SetPresence(uuid, connID, false)
 	// receive results in background
 	recvErr := make(chan error, 1)
 	go func() {
@@ -239,7 +239,7 @@ func (s *nezhaCompatServer) RequestTask(stream proto.NezhaService_RequestTaskSer
 				return
 			}
 			// refresh presence TTL when result received
-			ws.KeepAlivePresence(uuid, connID, 30*time.Second)
+			agent_runtime.KeepAlivePresence(uuid, connID, 30*time.Second)
 		}
 	}()
 	// send heartbeat tasks periodically
@@ -354,7 +354,7 @@ func ingestState(uuid string, st *proto.State) error {
 		UpdatedAt: time.Now(),
 	}
 	// 更新实时缓存供前端使用
-	ws.SetLatestReport(uuid, &rep)
+	agent_runtime.SetLatestReport(uuid, &rep)
 	// 写入内存缓存，入库交由定时聚合任务处理
 	return apiClient.SaveClientReport(uuid, rep)
 }

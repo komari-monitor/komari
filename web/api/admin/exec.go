@@ -12,9 +12,8 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
-	agent_api "github.com/komari-monitor/komari/web/api/agent"
-	"github.com/komari-monitor/komari/web/ws"
 )
 
 // 接受数据类型：
@@ -36,7 +35,7 @@ func Exec(c *gin.Context) {
 		api.RespondError(c, 400, "Command cannot be empty")
 		return
 	}
-	// for uuid := range ws.GetConnectedClients() {
+	// for uuid := range agent_runtime.GetConnectedClients() {
 	// 	if contain(req.Clients, uuid) {
 	// 		onlineClients = append(onlineClients, uuid)
 	// 	}
@@ -46,9 +45,9 @@ func Exec(c *gin.Context) {
 	// 	// }
 	// }
 	for _, uuid := range req.Clients {
-		if client := ws.GetConnectedClients()[uuid]; client != nil {
+		if client := agent_runtime.GetConnectedClients()[uuid]; client != nil {
 			onlineClients = append(onlineClients, uuid)
-		} else if agent_api.IsAgentOnline(uuid) {
+		} else if agent_runtime.IsAgentOnline(uuid) {
 			queuedClients = append(queuedClients, uuid)
 		} else {
 			offlineClients = append(offlineClients, uuid)
@@ -72,10 +71,10 @@ func Exec(c *gin.Context) {
 			TaskId  string `json:"task_id"`
 		}{Message: "exec", Command: req.Command, TaskId: taskId}
 		payload, _ := json.Marshal(legacy)
-		if ws.IsV2Client(uuid) {
+		if agent_runtime.IsV2Client(uuid) {
 			payload, _ = json.Marshal(v2.Request{JSONRPC: v2.Version, Method: v2.MethodAgentExec, Params: v2.ExecParams{TaskID: taskId, Command: req.Command}})
 		}
-		client := ws.GetConnectedClients()[uuid]
+		client := agent_runtime.GetConnectedClients()[uuid]
 		if client != nil {
 			if err := client.WriteMessage(websocket.TextMessage, payload); err != nil {
 				api.RespondError(c, 400, "Client connection is broke: "+uuid)
@@ -87,7 +86,7 @@ func Exec(c *gin.Context) {
 		}
 	}
 	for _, uuid := range queuedClients {
-		agent_api.DispatchV2Event(uuid, v2.MethodAgentExec, v2.ExecParams{TaskID: taskId, Command: req.Command})
+		agent_runtime.DispatchV2Event(uuid, v2.MethodAgentExec, v2.ExecParams{TaskID: taskId, Command: req.Command})
 	}
 	uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), uuid.(string), "REC, task id: "+taskId, "warn")

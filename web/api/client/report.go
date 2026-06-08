@@ -18,8 +18,10 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/utils/notifier"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
-	"github.com/komari-monitor/komari/web/ws"
+	"github.com/komari-monitor/komari/web/connection"
+	report_cache "github.com/komari-monitor/komari/web/report"
 	"github.com/patrickmn/go-cache"
 )
 
@@ -56,14 +58,14 @@ func refreshPostPresence(uuid string) {
 		entry.timer = time.AfterFunc(readWait, func() {
 			postPresenceExpired(uuid, entry.connID, gen)
 		})
-		ws.KeepAlivePresence(uuid, entry.connID, readWait)
+		agent_runtime.KeepAlivePresence(uuid, entry.connID, readWait)
 		return
 	}
 
 	// 新 POST 会话：生成 connID，标记在线，启动超时定时器
 	connID := time.Now().UnixNano()
-	ws.KeepAlivePresence(uuid, connID, readWait)
-	ws.SetClientProtocolVersion(uuid, 1)
+	agent_runtime.KeepAlivePresence(uuid, connID, readWait)
+	agent_runtime.SetClientProtocolVersion(uuid, 1)
 	go notifier.OnlineNotification(uuid, connID)
 
 	defaultGeneration := uint64(0)
@@ -93,7 +95,7 @@ func postPresenceExpired(uuid string, connID int64, gen uint64) {
 	delete(postPresenceStates, uuid)
 	postPresenceMu.Unlock()
 
-	ws.SetPresence(uuid, connID, false)
+	agent_runtime.SetPresence(uuid, connID, false)
 	notifier.OfflineNotification(uuid, connID)
 }
 
@@ -140,7 +142,7 @@ func UploadReport(c *gin.Context) {
 	}
 	// Update report with method and token
 
-	ws.SetLatestReport(uuid, &report)
+	agent_runtime.SetLatestReport(uuid, &report)
 
 	// POST 上报后标记节点在线，超时未收到新 POST 则触发离线
 	refreshPostPresence(uuid)
@@ -151,22 +153,17 @@ func UploadReport(c *gin.Context) {
 
 func WebSocketReport(c *gin.Context) {
 	// 升级ws
-	if !websocket.IsWebSocketUpgrade(c.Request) {
+	if !api.IsWebSocketUpgrade(c) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
 		return
 	}
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true // 被控
-		},
-	}
 	// Upgrade the HTTP connection to a WebSocket connection
-	unsafeConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	unsafeConn, err := api.UpgradeWebSocket(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
-	conn := ws.NewSafeConn(unsafeConn)
+	conn := connection.NewSafeConn(unsafeConn)
 	defer conn.Close()
 
 	_, message, err := conn.ReadMessage()
@@ -202,17 +199,17 @@ func WebSocketReport(c *gin.Context) {
 	}
 
 	// 接受新连接，并处理旧连接
-	if oldConn, exists := ws.GetConnectedClients()[uuid]; exists {
+	if oldConn, exists := agent_runtime.GetConnectedClients()[uuid]; exists {
 		log.Printf("Client %s is reconnecting. Closing the old connection.", uuid)
 
 		// 强制关闭旧连接。这将导致旧连接的 ReadMessage() 循环出错退出。
 		go oldConn.Close()
 	}
-	ws.SetConnectedClients(uuid, conn)
+	agent_runtime.SetConnectedClients(uuid, conn)
 	log.Printf("Client %s is reconnect success, connID: %d", uuid, conn.ID)
 	go notifier.OnlineNotification(uuid, conn.ID)
 	defer func() {
-		ws.DeleteClientConditionally(uuid, conn)
+		agent_runtime.DeleteClientConditionally(uuid, conn)
 		notifier.OfflineNotification(uuid, conn.ID)
 	}()
 
@@ -234,7 +231,7 @@ func WebSocketReport(c *gin.Context) {
 }
 
 // 将消息处理逻辑提取到一个函数中，方便复用
-func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
+func processMessage(conn *connection.SafeConn, message []byte, uuid string) {
 	type MessageType struct {
 		Type string `json:"type"`
 	}
@@ -259,7 +256,7 @@ func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
 			conn.WriteJSON(gin.H{"status": "error", "error": fmt.Sprintf("%v", err)})
 			return
 		}
-		ws.SetLatestReport(uuid, &report)
+		agent_runtime.SetLatestReport(uuid, &report)
 	case "ping_result":
 		var reqBody struct {
 			PingTaskID uint      `json:"task_id"`
@@ -286,7 +283,7 @@ func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
 }
 
 func SaveClientReport(uuid string, report v1.Report) error {
-	reports, _ := api.Records.Get(uuid)
+	reports, _ := report_cache.Records.Get(uuid)
 	if reports == nil {
 		reports = []v1.Report{}
 	}
@@ -294,7 +291,7 @@ func SaveClientReport(uuid string, report v1.Report) error {
 		report.CPU.Usage = 0.01
 	}
 	reports = append(reports.([]v1.Report), report)
-	api.Records.Set(uuid, reports, cache.DefaultExpiration)
+	report_cache.Records.Set(uuid, reports, cache.DefaultExpiration)
 
 	return nil
 }

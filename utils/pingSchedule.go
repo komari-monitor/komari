@@ -9,7 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/corn"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
-	agent_api "github.com/komari-monitor/komari/web/api/agent"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
 // PingTaskManager 管理定时器和任务
@@ -78,7 +78,7 @@ func executePingTask(ctx context.Context, task models.PingTask) {
 			// Context is still active, continue.
 		}
 
-		agent_api.DispatchPing(clientUUID, message, v2.PingParams{TaskID: task.Id, Type: task.Type, Target: task.Target})
+		agent_runtime.DispatchPing(clientUUID, message, v2.PingParams{TaskID: task.Id, Type: task.Type, Target: task.Target})
 	}
 }
 

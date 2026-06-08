@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/utils"
-	"github.com/komari-monitor/komari/web/ws"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
+	"github.com/komari-monitor/komari/web/api"
 )
 
 func RequestTerminal(c *gin.Context) {
@@ -24,14 +24,11 @@ func RequestTerminal(c *gin.Context) {
 		return
 	}
 	// 建立ws
-	if !websocket.IsWebSocketUpgrade(c.Request) {
+	if !api.IsWebSocketUpgrade(c) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Require WebSocket upgrade"})
 		return
 	}
-	upgrader := websocket.Upgrader{
-		CheckOrigin: ws.CheckOrigin,
-	}
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := api.UpgradeWebSocket(c)
 	if err != nil {
 		return
 	}
@@ -60,7 +57,7 @@ func RequestTerminal(c *gin.Context) {
 		return nil
 	})
 
-	if ws.GetConnectedClients()[uuid] == nil {
+	if agent_runtime.GetConnectedClients()[uuid] == nil {
 		conn.WriteMessage(1, []byte("Client offline!\n被控端离线!\n"))
 		conn.Close()
 		TerminalSessionsMutex.Lock()
@@ -68,7 +65,7 @@ func RequestTerminal(c *gin.Context) {
 		TerminalSessionsMutex.Unlock()
 		return
 	}
-	err = ws.GetConnectedClients()[uuid].WriteJSON(gin.H{
+	err = agent_runtime.GetConnectedClients()[uuid].WriteJSON(gin.H{
 		"message":    "terminal",
 		"request_id": id,
 	})

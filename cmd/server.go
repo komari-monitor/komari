@@ -32,12 +32,10 @@ import (
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/nezha"
 	"github.com/komari-monitor/komari/web/oauth"
+	report_cache "github.com/komari-monitor/komari/web/report"
 	"github.com/komari-monitor/komari/web/router"
+	"github.com/komari-monitor/komari/web/security"
 	"github.com/spf13/cobra"
-)
-
-var (
-	DynamicCorsEnabled bool = false
 )
 
 var ServerCmd = &cobra.Command{
@@ -126,13 +124,7 @@ func RunServer() {
 	r.Use(logutil.GinLogger())
 	r.Use(logutil.GinRecovery())
 
-	// 动态 CORS 中间件
-
-	DynamicCorsEnabled = conf.AllowCors
 	config.Subscribe(func(event config.ConfigEvent) {
-		if ok, t := config.IsChangedT[bool](event, config.AllowCorsKey); ok {
-			DynamicCorsEnabled = t
-		}
 		if event.IsChanged(config.GeoIpProviderKey) {
 			go geoip.InitGeoIp()
 		}
@@ -142,21 +134,7 @@ func RunServer() {
 		}
 
 	})
-	r.Use(func(c *gin.Context) {
-		if DynamicCorsEnabled {
-			c.Header("Access-Control-Allow-Origin", "*")
-			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
-			c.Header("Access-Control-Allow-Headers", "Origin, Content-Length, Content-Type, Authorization, Accept, X-CSRF-Token, X-Requested-With, Set-Cookie")
-			c.Header("Access-Control-Expose-Headers", "Content-Length, Authorization, Set-Cookie")
-			c.Header("Access-Control-Allow-Credentials", "true")
-			c.Header("Access-Control-Max-Age", "43200") // 12 hours
-			if c.Request.Method == "OPTIONS" {
-				c.AbortWithStatus(204)
-				return
-			}
-		}
-		c.Next()
-	})
+	r.Use(security.CorsMiddleware(conf.AllowCors, conf.CorsAllowedOrigins))
 
 	r.Use(api.IdentityMiddleware())
 	r.Use(api.PrivateSiteMiddleware())
@@ -238,7 +216,7 @@ func cleanupScheduledData() {
 
 func minuteScheduledWork() {
 	cfg, _ := config.GetManyAs[config.Settings]()
-	api.SaveClientReportToDB()
+	report_cache.SaveClientReportToDB()
 	if !cfg.RecordEnabled {
 		records.DeleteAll()
 		tasks.DeleteAllPingRecords()

@@ -15,7 +15,8 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
-	"github.com/komari-monitor/komari/web/ws"
+	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/connection"
 )
 
 // OnInternalRequest 内部调用 RPC 方法，支持权限控制
@@ -63,21 +64,14 @@ func OnInternalRequest(ctx context.Context, group string, method string, params 
 
 // Json Rpc2 over websocket, /api/rpc2
 func OnRpcRequest(c *gin.Context) {
-	AllowCors, _ := config.GetAs[bool](config.AllowCorsKey)
-
 	// GET -> WebSocket
 	if c.Request.Method == http.MethodGet {
-		_conn, err := ws.UpgradeRequest(c, func(r *http.Request) bool {
-			if AllowCors {
-				return true
-			}
-			return ws.CheckOrigin(r)
-		})
-		conn := ws.NewSafeConn(_conn)
+		_conn, err := api.UpgradeWebSocket(c)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 			return
 		}
+		conn := connection.NewSafeConn(_conn)
 		permissionGroup := detectPermissionGroup(c)
 		meta := buildContextMeta(c, permissionGroup)
 		defer conn.Close()
@@ -213,7 +207,7 @@ func buildContextMeta(c *gin.Context, permissionGroup string) *rpc.ContextMeta {
 }
 
 // dispatchByPermissionWithMeta 与原函数类似，但会携带 meta 上下文给 handler
-func dispatchByPermissionWithMeta(conn *ws.SafeConn, permissionGroup string, meta *rpc.ContextMeta, req *rpc.JsonRpcRequest) {
+func dispatchByPermissionWithMeta(conn *connection.SafeConn, permissionGroup string, meta *rpc.ContextMeta, req *rpc.JsonRpcRequest) {
 	fc := strings.Split(req.Method, ":")
 	if len(fc) == 1 {
 		fc[0] = "common"

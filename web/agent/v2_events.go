@@ -9,7 +9,6 @@ import (
 	"time"
 
 	v2 "github.com/komari-monitor/komari/protocol/v2"
-	"github.com/komari-monitor/komari/web/ws"
 )
 
 const (
@@ -38,11 +37,11 @@ func getV2EventQueueLocked(uuid string) *v2EventQueue {
 }
 
 func DispatchV2Event(uuid, method string, params any) bool {
-	if conn := ws.GetConnectedClients()[uuid]; conn != nil {
+	if conn := GetConnectedClients()[uuid]; conn != nil {
 		payload := v2.Request{JSONRPC: v2.Version, Method: method, Params: params}
 		return conn.WriteJSON(payload) == nil
 	}
-	if !ws.IsV2Client(uuid) {
+	if !IsV2Client(uuid) {
 		return false
 	}
 	EnqueueV2Event(uuid, method, params)
@@ -50,14 +49,14 @@ func DispatchV2Event(uuid, method string, params any) bool {
 }
 
 func DispatchPing(uuid string, legacy any, params v2.PingParams) bool {
-	if conn := ws.GetConnectedClients()[uuid]; conn != nil {
+	if conn := GetConnectedClients()[uuid]; conn != nil {
 		payload := legacy
-		if ws.IsV2Client(uuid) {
+		if IsV2Client(uuid) {
 			payload = v2.Request{JSONRPC: v2.Version, Method: v2.MethodAgentPing, Params: params}
 		}
 		return conn.WriteJSON(payload) == nil
 	}
-	if !ws.IsV2Client(uuid) {
+	if !IsV2Client(uuid) {
 		return false
 	}
 	EnqueueV2Event(uuid, v2.MethodAgentPing, params)
@@ -65,10 +64,10 @@ func DispatchPing(uuid string, legacy any, params v2.PingParams) bool {
 }
 
 func IsAgentOnline(uuid string) bool {
-	if ws.GetConnectedClients()[uuid] != nil {
+	if GetConnectedClients()[uuid] != nil {
 		return true
 	}
-	return ws.IsV2Client(uuid)
+	return IsV2Client(uuid)
 }
 
 func EnqueueV2Event(uuid, method string, params any) v2.Event {

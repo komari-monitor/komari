@@ -6,6 +6,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/web/api"
+	report_cache "github.com/komari-monitor/komari/web/report"
 )
 
 func GetClientRecentRecords(c *gin.Context) {
@@ -40,6 +41,6 @@ func GetClientRecentRecords(c *gin.Context) {
 		}
 	}
 
-	records, _ := api.Records.Get(uuid)
+	records, _ := report_cache.Records.Get(uuid)
 	api.RespondSuccess(c, records)
 }

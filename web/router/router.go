@@ -2,7 +2,6 @@ package router
 
 import (
 	"github.com/gin-gonic/gin"
-	jsonRpc "github.com/komari-monitor/komari/pkg/rpc/jsonrpc"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/api/admin"
 	"github.com/komari-monitor/komari/web/api/admin/clipboard"
@@ -14,6 +13,7 @@ import (
 	public_api "github.com/komari-monitor/komari/web/api/public"
 	"github.com/komari-monitor/komari/web/api/terminal"
 	"github.com/komari-monitor/komari/web/public"
+	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
 )
 
 // Register binds all HTTP, WebSocket, JSON-RPC and static frontend routes.
@@ -76,7 +76,7 @@ func Register(r *gin.Engine) {
 		taskGroup := adminAuthrized.Group("/task")
 		{
 			taskGroup.GET("/all", admin.GetTasks)
-			taskGroup.POST("/exec", admin.Exec)
+			taskGroup.POST("/exec", api.RequireSensitive2FA(), admin.Exec)
 			taskGroup.GET("/:task_id", admin.GetTaskById)
 			taskGroup.GET("/:task_id/result", admin.GetTaskResultsByTaskId)
 			taskGroup.GET("/:task_id/result/:uuid", admin.GetSpecificTaskResult)
@@ -120,7 +120,7 @@ func Register(r *gin.Engine) {
 			clientGroup.GET("/:uuid/token", admin.GetClientToken)
 			clientGroup.POST("/order", admin.OrderWeight)
 			// client terminal
-			clientGroup.GET("/:uuid/terminal", terminal.RequestTerminal)
+			clientGroup.GET("/:uuid/terminal", api.RequireSensitive2FA(), terminal.RequestTerminal)
 		}
 
 		// records
@@ -145,7 +145,7 @@ func Register(r *gin.Engine) {
 		{
 			two_factorGroup.GET("/generate", admin.Generate2FA)
 			two_factorGroup.POST("/enable", admin.Enable2FA)
-			two_factorGroup.POST("/disable", admin.Disable2FA)
+			two_factorGroup.POST("/disable", api.RequireSensitive2FA(), admin.Disable2FA)
 		}
 		adminAuthrized.GET("/logs", log_api.GetLogs)
 

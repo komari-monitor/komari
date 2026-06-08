@@ -17,8 +17,9 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils/notifier"
-	agent_api "github.com/komari-monitor/komari/web/api/agent"
-	"github.com/komari-monitor/komari/web/ws"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
+	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/connection"
 )
 
 func readMaybeCompressedBody(r *http.Request) ([]byte, error) {
@@ -58,12 +59,12 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		if err := SaveClientReport(uuid, report); err != nil {
 			return v2.Error(req.ID, -32000, "failed to save report", err.Error())
 		}
-		ws.SetLatestReport(uuid, &report)
+		agent_runtime.SetLatestReport(uuid, &report)
 		refreshPostPresence(uuid)
-		ws.SetClientProtocolVersion(uuid, 2)
+		agent_runtime.SetClientProtocolVersion(uuid, 2)
 		return v2.Success(req.ID, gin.H{
 			"status": "success",
-			"events": agent_api.TakeV2Events(uuid, params.AckEventIDs, 8),
+			"events": agent_runtime.TakeV2Events(uuid, params.AckEventIDs, 8),
 		})
 	case v2.MethodAgentBasicInfo:
 		var params v2.BasicInfoParams
@@ -102,13 +103,13 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 			return v2.Error(req.ID, -32602, "invalid pull params", err.Error())
 		}
 		refreshPostPresence(uuid)
-		ws.SetClientProtocolVersion(uuid, 2)
+		agent_runtime.SetClientProtocolVersion(uuid, 2)
 		timeout := 0 * time.Second
 		if allowWait {
 			timeout = 25 * time.Second
 		}
 		return v2.Success(req.ID, gin.H{
-			"events": agent_api.WaitV2Events(uuid, params.AckEventIDs, timeout),
+			"events": agent_runtime.WaitV2Events(uuid, params.AckEventIDs, timeout),
 		})
 	default:
 		return v2.Error(req.ID, -32601, "method not found", req.Method)
@@ -140,20 +141,16 @@ func UploadV2RPC(c *gin.Context) {
 }
 
 func WebSocketV2RPC(c *gin.Context) {
-	if !websocket.IsWebSocketUpgrade(c.Request) {
+	if !api.IsWebSocketUpgrade(c) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
 		return
 	}
-	upgrader := websocket.Upgrader{
-		EnableCompression: true,
-		CheckOrigin:       func(r *http.Request) bool { return true },
-	}
-	unsafeConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	unsafeConn, err := api.UpgradeWebSocket(c, api.EnableWebSocketCompression)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
-	conn := ws.NewSafeConn(unsafeConn)
+	conn := connection.NewSafeConn(unsafeConn)
 	defer conn.Close()
 
 	uuid, ok := clientUUIDFromContext(c)
@@ -161,14 +158,14 @@ func WebSocketV2RPC(c *gin.Context) {
 		conn.WriteJSON(v2.Error(nil, -32001, "invalid token", nil))
 		return
 	}
-	if oldConn, exists := ws.GetConnectedClients()[uuid]; exists {
+	if oldConn, exists := agent_runtime.GetConnectedClients()[uuid]; exists {
 		go oldConn.Close()
 	}
-	ws.SetConnectedClients(uuid, conn)
-	ws.SetClientProtocolVersion(uuid, 2)
+	agent_runtime.SetConnectedClients(uuid, conn)
+	agent_runtime.SetClientProtocolVersion(uuid, 2)
 	go notifierOnline(uuid, conn.ID)
 	defer func() {
-		ws.DeleteClientConditionally(uuid, conn)
+		agent_runtime.DeleteClientConditionally(uuid, conn)
 		notifierOffline(uuid, conn.ID)
 	}()
 
