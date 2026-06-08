@@ -88,6 +88,8 @@ type Record struct {
 	NetOut         int64     `json:"net_out" gorm:"type:bigint"`
 	NetTotalUp     int64     `json:"net_total_up" gorm:"type:bigint"`
 	NetTotalDown   int64     `json:"net_total_down" gorm:"type:bigint"`
+	TrafficUp      int64     `json:"traffic_up" gorm:"type:bigint"`
+	TrafficDown    int64     `json:"traffic_down" gorm:"type:bigint"`
 	Process        int       `json:"process"`
 	Connections    int       `json:"connections"`
 	ConnectionsUdp int       `json:"connections_udp"`
