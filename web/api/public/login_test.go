@@ -31,11 +31,6 @@ func TestLogin(t *testing.T) {
 				Password: "correctpassword",
 			},
 			expectedStatus: http.StatusOK,
-			expectedBody: map[string]interface{}{
-				"set-cookie": map[string]interface{}{
-					"session_token": "",
-				},
-			},
 		},
 		{
 			name: "无效的请求体",
@@ -45,8 +40,8 @@ func TestLogin(t *testing.T) {
 			},
 			expectedStatus: http.StatusBadRequest,
 			expectedBody: map[string]interface{}{
-				"status": "error",
-				"error":  "Invalid request body",
+				"status":  "error",
+				"message": "Invalid request body: Username and password are required",
 			},
 		},
 		{
@@ -57,8 +52,8 @@ func TestLogin(t *testing.T) {
 			},
 			expectedStatus: http.StatusUnauthorized,
 			expectedBody: map[string]interface{}{
-				"status": "error",
-				"error":  "Invalid credentials",
+				"status":  "error",
+				"message": "Invalid credentials",
 			},
 		},
 	}
@@ -91,7 +86,14 @@ func TestLogin(t *testing.T) {
 			// 断言响应体
 			if tt.expectedStatus == http.StatusOK {
 				// 对于成功的情况，我们只检查响应结构，不检查具体的 session token
-				assert.Contains(t, response, "set-cookie")
+				assert.Equal(t, "success", response["status"])
+				assert.Equal(t, "", response["message"])
+				data, ok := response["data"].(map[string]interface{})
+				assert.True(t, ok)
+				setCookie, ok := data["set-cookie"].(map[string]interface{})
+				assert.True(t, ok)
+				assert.NotEmpty(t, setCookie["session_token"])
+				assert.Contains(t, strings.Join(w.Header().Values("Set-Cookie"), "\n"), "session_token=")
 			} else {
 				assert.Equal(t, tt.expectedBody, response)
 			}
