@@ -1,0 +1,62 @@
+name: Generate Release Notes
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to regenerate notes for."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  update-release-notes:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate and apply release notes
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const tag = context.payload.release?.tag_name || core.getInput("tag");
+            if (!tag) {
+              core.setFailed("No release tag was provided.");
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const release = context.payload.release?.tag_name === tag
+              ? context.payload.release
+              : (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
+
+            const generated = await github.request(
+              "POST /repos/{owner}/{repo}/releases/generate-notes",
+              {
+                owner,
+                repo,
+                tag_name: tag,
+                target_commitish: release.target_commitish || undefined,
+              },
+            );
+
+            const body = generated.data.body?.trim();
+            if (!body) {
+              core.setFailed(`GitHub returned empty release notes for ${tag}.`);
+              return;
+            }
+
+            await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: release.id,
+              body,
+            });
+
+            await core.summary
+              .addHeading("Release Notes")
+              .addRaw(`Updated release notes for ${tag}.`)
+              .write();
