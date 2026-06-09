@@ -74,8 +74,7 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		if params.Info == nil {
 			params.Info = map[string]interface{}{}
 		}
-		params.Info["uuid"] = uuid
-		if err := clients.SaveClientInfo(params.Info); err != nil {
+		if err := saveClientBasicInfo(params.Info, uuid, ""); err != nil {
 			return v2.Error(req.ID, -32000, "failed to save basic info", err.Error())
 		}
 		return v2.Success(req.ID, gin.H{"status": "success"})

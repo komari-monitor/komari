@@ -22,6 +22,65 @@ func getClientIPType(ip net.IP) int {
 	}
 }
 
+func saveClientBasicInfo(info map[string]interface{}, uuid string, fallbackIP string) error {
+	info["uuid"] = uuid
+	applyFallbackClientIP(info, fallbackIP)
+	appendClientRegionFromGeoIP(info)
+	return clients.SaveClientInfo(info)
+}
+
+func applyFallbackClientIP(info map[string]interface{}, fallbackIP string) {
+	if hasClientIP(info) {
+		return
+	}
+	ip := net.ParseIP(fallbackIP)
+
+	switch getClientIPType(ip) {
+	case 0:
+		info["ipv4"] = fallbackIP
+	case 1:
+		info["ipv6"] = fallbackIP
+	}
+}
+
+func hasClientIP(info map[string]interface{}) bool {
+	if ipv4, ok := info["ipv4"].(string); ok && ipv4 != "" {
+		return true
+	}
+	if ipv6, ok := info["ipv6"].(string); ok && ipv6 != "" {
+		return true
+	}
+	return false
+}
+
+func appendClientRegionFromGeoIP(info map[string]interface{}) {
+	cfg, err := config.GetAs[bool](config.GeoIpEnabledKey)
+	if err != nil || !cfg {
+		return
+	}
+
+	for _, key := range []string{"ipv4", "ipv6"} {
+		ipStr, ok := info[key].(string)
+		if !ok || ipStr == "" {
+			continue
+		}
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			continue
+		}
+		record, _ := geoip.GetGeoInfo(ip)
+		if record == nil {
+			continue
+		}
+		region := geoip.GetRegionUnicodeEmoji(record.ISOCode)
+		if region == "" {
+			continue
+		}
+		info["region"] = region
+		return
+	}
+}
+
 func UploadBasicInfo(c *gin.Context) {
 	var cbi = map[string]interface{}{}
 	if err := c.ShouldBindJSON(&cbi); err != nil {
@@ -36,47 +95,7 @@ func UploadBasicInfo(c *gin.Context) {
 		return
 	}
 
-	cbi["uuid"] = uuid
-	// 如果没有传入 IP 信息，尝试从请求中获取
-	if (func() bool {
-		if v4, ok := cbi["ipv4"].(string); !ok || v4 == "" {
-			if v6, ok := cbi["ipv6"].(string); !ok || v6 == "" {
-				return true
-			}
-		}
-		return false
-	})() {
-		ipStr := c.ClientIP()
-		ip := net.ParseIP(ipStr)
-		ipType := getClientIPType(ip)
-
-		switch ipType {
-		case 0:
-			cbi["ipv4"] = ipStr
-		case 1:
-			cbi["ipv6"] = ipStr
-		default:
-			break
-		}
-	}
-
-	if cfg, err := config.GetAs[bool](config.GeoIpEnabledKey); err == nil && cfg {
-		if ipv4, ok := cbi["ipv4"].(string); ok && ipv4 != "" {
-			ip4 := net.ParseIP(ipv4)
-			ip4_record, _ := geoip.GetGeoInfo(ip4)
-			if ip4_record != nil {
-				cbi["region"] = geoip.GetRegionUnicodeEmoji(ip4_record.ISOCode)
-			}
-		} else if ipv6, ok := cbi["ipv6"].(string); ok && ipv6 != "" {
-			ip6 := net.ParseIP(ipv6)
-			ip6_record, _ := geoip.GetGeoInfo(ip6)
-			if ip6_record != nil {
-				cbi["region"] = geoip.GetRegionUnicodeEmoji(ip6_record.ISOCode)
-			}
-		}
-	}
-
-	if err := clients.SaveClientInfo(cbi); err != nil {
+	if err := saveClientBasicInfo(cbi, uuid, c.ClientIP()); err != nil {
 		c.JSON(500, gin.H{"status": "error", "error": err})
 		return
 	}
