@@ -2,6 +2,7 @@ package security
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -16,7 +17,7 @@ func CorsMiddleware(initialEnabled bool, initialAllowedOrigins string) gin.Handl
 	config.Subscribe(func(event config.ConfigEvent) {
 		mu.Lock()
 		defer mu.Unlock()
-		if ok, t := config.IsChangedT[bool](event, config.AllowCorsKey); ok {
+		if ok, t := config.IsChangedT[bool](event, config.CorsOriginCheckEnabledKey); ok {
 			enabled = t
 		}
 		if ok, t := config.IsChangedT[string](event, config.CorsAllowedOriginsKey); ok {
@@ -25,6 +26,11 @@ func CorsMiddleware(initialEnabled bool, initialAllowedOrigins string) gin.Handl
 	})
 
 	return func(c *gin.Context) {
+		if !isAPIRequestPath(c.Request.URL.Path) {
+			c.Next()
+			return
+		}
+
 		mu.RLock()
 		corsEnabled := enabled
 		corsAllowedOrigins := allowedOrigins
@@ -69,6 +75,15 @@ func CorsMiddleware(initialEnabled bool, initialAllowedOrigins string) gin.Handl
 			return
 		}
 
+		if origin != "" && allowOrigin == "" {
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
+
 		c.Next()
 	}
+}
+
+func isAPIRequestPath(path string) bool {
+	return path == "/api" || strings.HasPrefix(path, "/api/")
 }

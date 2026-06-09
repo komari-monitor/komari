@@ -28,7 +28,8 @@ import (
 const (
 	// 如果超过这个时间没有收到任何消息，则认为连接已死
 	// 因为目前server没有存agent的信息上报间隔。只有写一个默认的
-	readWait = 11 * time.Second
+	readWait        = 11 * time.Second
+	postPresenceTTL = 35 * time.Second
 )
 
 // postPresenceEntry 保存单个客户端的 POST 上报会话状态
@@ -55,16 +56,16 @@ func refreshPostPresence(uuid string) {
 		entry.timer.Stop()
 		// 重新创建 AfterFunc 以在闭包中捕获新的 generation
 		gen := entry.generation
-		entry.timer = time.AfterFunc(readWait, func() {
+		entry.timer = time.AfterFunc(postPresenceTTL, func() {
 			postPresenceExpired(uuid, entry.connID, gen)
 		})
-		agent_runtime.KeepAlivePresence(uuid, entry.connID, readWait)
+		agent_runtime.KeepAlivePresence(uuid, entry.connID, postPresenceTTL)
 		return
 	}
 
 	// 新 POST 会话：生成 connID，标记在线，启动超时定时器
 	connID := time.Now().UnixNano()
-	agent_runtime.KeepAlivePresence(uuid, connID, readWait)
+	agent_runtime.KeepAlivePresence(uuid, connID, postPresenceTTL)
 	agent_runtime.SetClientProtocolVersion(uuid, 1)
 	go notifier.OnlineNotification(uuid, connID)
 
@@ -75,7 +76,7 @@ func refreshPostPresence(uuid string) {
 		generation: defaultGeneration,
 	}
 
-	entry.timer = time.AfterFunc(readWait, func() {
+	entry.timer = time.AfterFunc(postPresenceTTL, func() {
 		postPresenceExpired(uuid, connID, defaultGeneration)
 	})
 

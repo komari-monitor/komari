@@ -168,6 +168,9 @@ func WebSocketV2RPC(c *gin.Context) {
 		agent_runtime.DeleteClientConditionally(uuid, conn)
 		notifierOffline(uuid, conn.ID)
 	}()
+	if !pushQueuedV2Events(conn, uuid) {
+		return
+	}
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(readWait))
@@ -192,6 +195,25 @@ func WebSocketV2RPC(c *gin.Context) {
 			}
 		}
 	}
+}
+
+func pushQueuedV2Events(conn *connection.SafeConn, uuid string) bool {
+	events := agent_runtime.TakeV2Events(uuid, nil, 0)
+	if len(events) == 0 {
+		return true
+	}
+	ackIDs := make([]string, 0, len(events))
+	for _, event := range events {
+		payload := v2.Request{JSONRPC: v2.Version, Method: event.Method, Params: event.Params}
+		if err := conn.WriteJSON(payload); err != nil {
+			agent_runtime.AckV2Events(uuid, ackIDs)
+			log.Printf("failed to push queued v2 event %s to client %s: %v", event.ID, uuid, err)
+			return false
+		}
+		ackIDs = append(ackIDs, event.ID)
+	}
+	agent_runtime.AckV2Events(uuid, ackIDs)
+	return true
 }
 
 func clientUUIDFromContext(c *gin.Context) (string, bool) {

@@ -163,7 +163,6 @@ func TestRunMigratesLegacyConfigTableToConfigItems(t *testing.T) {
 	legacy := legacyModelConfig{
 		Sitename:                   "Old Komari",
 		Description:                "legacy description",
-		AllowCors:                  true,
 		Theme:                      "classic",
 		GeoIpEnabled:               true,
 		GeoIpProvider:              "ip-api",
@@ -195,12 +194,9 @@ func TestRunMigratesLegacyConfigTableToConfigItems(t *testing.T) {
 		t.Fatalf("unexpected sitename value: %s", sitename.Value)
 	}
 
-	var allowCors appconfig.ConfigItem
-	if err := db.First(&allowCors, "key = ?", appconfig.AllowCorsKey).Error; err != nil {
-		t.Fatalf("find migrated allow_cors: %v", err)
-	}
-	if allowCors.Value != `true` {
-		t.Fatalf("unexpected allow_cors value: %s", allowCors.Value)
+	var corsOriginCheck appconfig.ConfigItem
+	if err := db.First(&corsOriginCheck, "key = ?", appconfig.CorsOriginCheckEnabledKey).Error; err == nil {
+		t.Fatalf("unexpected migrated cors_origin_check_enabled value: %s", corsOriginCheck.Value)
 	}
 }
 

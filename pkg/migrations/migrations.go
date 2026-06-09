@@ -18,7 +18,6 @@ type legacyModelConfig struct {
 	ID                         uint    `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
 	Sitename                   string  `json:"sitename" gorm:"type:varchar(100);not null"`
 	Description                string  `json:"description" gorm:"type:text"`
-	AllowCors                  bool    `json:"allow_cors" gorm:"column:allow_cors;default:false"`
 	Theme                      string  `json:"theme" gorm:"type:varchar(100);default:'default'"`
 	PrivateSite                bool    `json:"private_site" gorm:"default:false"`
 	ApiKey                     string  `json:"api_key" gorm:"type:varchar(255);default:''"`
@@ -57,7 +56,6 @@ type legacyConfig struct {
 	ID                         uint      `json:"id,omitempty"`
 	Sitename                   string    `json:"sitename"`
 	Description                string    `json:"description"`
-	AllowCors                  bool      `json:"allow_cors"`
 	Theme                      string    `json:"theme"`
 	PrivateSite                bool      `json:"private_site"`
 	ApiKey                     string    `json:"api_key"`
@@ -112,9 +110,6 @@ func Run(ctx Context) error {
 	legacyConfigTable := hasLegacyConfigTable(db)
 
 	if legacyConfigTable {
-		if err := migrateLegacyConfigColumns(db); err != nil {
-			return err
-		}
 		if err := migrateLegacyOidcConfig(db); err != nil {
 			return err
 		}
@@ -160,14 +155,6 @@ func hasTableColumn(db *gorm.DB, tableName, columnName string) bool {
 		}
 	}
 	return false
-}
-
-func migrateLegacyConfigColumns(db *gorm.DB) error {
-	if hasTableColumn(db, "configs", "allow_cros") {
-		log.Println("[>0.0.5a] Renaming column 'allow_cros' to 'allow_cors' in config table...")
-		return db.Migrator().RenameColumn(&legacyModelConfig{}, "allow_cros", "allow_cors")
-	}
-	return nil
 }
 
 func migrateLegacyLoadNotification(db *gorm.DB) error {

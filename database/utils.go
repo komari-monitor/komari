@@ -134,7 +134,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		"oauth_enable":              cst.OAuthEnabled,
 		"oauth_provider":            cst.OAuthProvider,
 		"disable_password_login":    cst.DisablePasswordLogin,
-		"allow_cors":                cst.AllowCors,
+		"cors_origin_check_enabled": cst.CorsOriginCheckEnabled,
 		"record_enabled":            cst.RecordEnabled,
 		"record_preserve_time":      cst.RecordPreserveTime,
 		"ping_record_preserve_time": cst.PingRecordPreserveTime,

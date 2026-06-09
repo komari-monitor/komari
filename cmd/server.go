@@ -134,7 +134,7 @@ func RunServer() {
 		}
 
 	})
-	r.Use(security.CorsMiddleware(conf.AllowCors, conf.CorsAllowedOrigins))
+	r.Use(security.CorsMiddleware(conf.CorsOriginCheckEnabled, conf.CorsAllowedOrigins))
 
 	r.Use(api.IdentityMiddleware())
 	r.Use(api.PrivateSiteMiddleware())

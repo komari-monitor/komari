@@ -39,7 +39,9 @@ func getV2EventQueueLocked(uuid string) *v2EventQueue {
 func DispatchV2Event(uuid, method string, params any) bool {
 	if conn := GetConnectedClients()[uuid]; conn != nil {
 		payload := v2.Request{JSONRPC: v2.Version, Method: method, Params: params}
-		return conn.WriteJSON(payload) == nil
+		if conn.WriteJSON(payload) == nil {
+			return true
+		}
 	}
 	if !IsV2Client(uuid) {
 		return false
@@ -54,7 +56,9 @@ func DispatchPing(uuid string, legacy any, params v2.PingParams) bool {
 		if IsV2Client(uuid) {
 			payload = v2.Request{JSONRPC: v2.Version, Method: v2.MethodAgentPing, Params: params}
 		}
-		return conn.WriteJSON(payload) == nil
+		if conn.WriteJSON(payload) == nil {
+			return true
+		}
 	}
 	if !IsV2Client(uuid) {
 		return false
@@ -183,6 +187,24 @@ func TakeV2Events(uuid string, ackIDs []string, limit int) []v2.Event {
 	q := getV2EventQueueLocked(uuid)
 	ackV2EventsLocked(q, ackIDs)
 	pruneExpiredV2EventsLocked(q)
+	return takeV2EventsLocked(q, limit)
+}
+
+func AckV2Events(uuid string, ackIDs []string) {
+	if len(ackIDs) == 0 {
+		return
+	}
+	v2EventMu.Lock()
+	defer v2EventMu.Unlock()
+
+	q := v2EventQueues[uuid]
+	if q == nil {
+		return
+	}
+	ackV2EventsLocked(q, ackIDs)
+}
+
+func takeV2EventsLocked(q *v2EventQueue, limit int) []v2.Event {
 	if limit <= 0 || limit > len(q.events) {
 		limit = len(q.events)
 	}
@@ -192,13 +214,15 @@ func TakeV2Events(uuid string, ackIDs []string, limit int) []v2.Event {
 }
 
 func WaitV2Events(uuid string, ackIDs []string, timeout time.Duration) []v2.Event {
-	events := TakeV2Events(uuid, ackIDs, v2EventQueueLimit)
-	if len(events) > 0 || timeout <= 0 {
-		return events
-	}
-
 	v2EventMu.Lock()
 	q := getV2EventQueueLocked(uuid)
+	ackV2EventsLocked(q, ackIDs)
+	pruneExpiredV2EventsLocked(q)
+	events := takeV2EventsLocked(q, v2EventQueueLimit)
+	if len(events) > 0 || timeout <= 0 {
+		v2EventMu.Unlock()
+		return events
+	}
 	signal := q.signal
 	v2EventMu.Unlock()
 
