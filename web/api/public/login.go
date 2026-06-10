@@ -28,7 +28,7 @@ func setSessionCookie(c *gin.Context, value string, maxAge int) {
 		Value:    value,
 		Path:     "/",
 		MaxAge:   maxAge,
-		Secure:   utils.GetScheme(c) == "https" || utils.CurrentVersion != "dev",
+		Secure:   utils.GetScheme(c) == "https",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
