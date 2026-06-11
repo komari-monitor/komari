@@ -10,7 +10,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -104,36 +103,38 @@ func TestLogin(t *testing.T) {
 	accounts.DeleteAllSessions()
 }
 
-func TestSessionCookieIsSecureOnHTTPByDefault(t *testing.T) {
+func TestSessionCookieSecureFollowsRequestScheme(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	original := utils.CurrentVersion
-	utils.CurrentVersion = "0.0.1"
-	defer func() {
-		utils.CurrentVersion = original
-	}()
+	tests := []struct {
+		name       string
+		requestURL string
+		wantSecure bool
+	}{
+		{
+			name:       "http",
+			requestURL: "http://example.test/login",
+		},
+		{
+			name:       "https",
+			requestURL: "https://example.test/login",
+			wantSecure: true,
+		},
+	}
 
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "http://example.test/login", nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, tt.requestURL, nil)
 
-	setSessionCookie(c, "test-session", sessionCookieMaxAge)
+			setSessionCookie(c, "test-session", sessionCookieMaxAge)
 
-	assert.Contains(t, strings.Join(w.Header().Values("Set-Cookie"), "\n"), "Secure")
-}
-
-func TestSessionCookieIsNotSecureOnHTTPWhenOverrideEnabled(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	original := utils.CurrentVersion
-	utils.CurrentVersion = "dev"
-	defer func() {
-		utils.CurrentVersion = original
-	}()
-
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "http://example.test/login", nil)
-
-	setSessionCookie(c, "test-session", sessionCookieMaxAge)
-
-	assert.NotContains(t, strings.Join(w.Header().Values("Set-Cookie"), "\n"), "Secure")
+			setCookie := strings.Join(w.Header().Values("Set-Cookie"), "\n")
+			if tt.wantSecure {
+				assert.Contains(t, setCookie, "Secure")
+			} else {
+				assert.NotContains(t, setCookie, "Secure")
+			}
+		})
+	}
 }
