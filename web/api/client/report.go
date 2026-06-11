@@ -14,8 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/database/tasks"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/utils/notifier"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
@@ -134,19 +132,12 @@ func UploadReport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "UUID is required"})
 		return
 	}
-	report.UUID = uuid
 
-	err = SaveClientReport(uuid, report)
-	if err != nil {
+	// POST 上报：落库、更新运行时状态并刷新在线状态
+	if err := ingestReport(uuid, report, 1, true); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("%v", err)})
 		return
 	}
-	// Update report with method and token
-
-	agent_runtime.SetLatestReport(uuid, &report)
-
-	// POST 上报后标记节点在线，超时未收到新 POST 则触发离线
-	refreshPostPresence(uuid)
 
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Restore the body for further use
 	c.JSON(200, gin.H{"status": "success"})
@@ -251,13 +242,11 @@ func processMessage(conn *connection.SafeConn, message []byte, uuid string) {
 			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid report format"})
 			return
 		}
-		report.UpdatedAt = time.Now()
-		err = SaveClientReport(uuid, report)
-		if err != nil {
+		// WS 连接自行管理在线状态，无需刷新 POST presence
+		if err := ingestReport(uuid, report, 1, false); err != nil {
 			conn.WriteJSON(gin.H{"status": "error", "error": fmt.Sprintf("%v", err)})
 			return
 		}
-		agent_runtime.SetLatestReport(uuid, &report)
 	case "ping_result":
 		var reqBody struct {
 			PingTaskID uint      `json:"task_id"`
@@ -270,13 +259,7 @@ func processMessage(conn *connection.SafeConn, message []byte, uuid string) {
 			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid ping result format"})
 			return
 		}
-		pingResult := models.PingRecord{
-			Client: uuid,
-			TaskId: reqBody.PingTaskID,
-			Value:  reqBody.PingResult,
-			Time:   models.FromTime(reqBody.FinishedAt),
-		}
-		tasks.SavePingRecord(pingResult)
+		ingestPingResult(uuid, reqBody.PingTaskID, reqBody.PingResult, reqBody.FinishedAt)
 	default:
 		log.Printf("Unknown message type: %s", msgType.Type)
 		conn.WriteJSON(gin.H{"status": "error", "error": "Unknown message type"})

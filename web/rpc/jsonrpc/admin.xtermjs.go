@@ -1,14 +1,17 @@
-package admin
+package jsonrpc
 
 import (
+	"context"
 	"errors"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/pkg/config"
-	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/pkg/rpc"
 )
+
+// admin.xtermjs.go
+// xterm.js 终端设置 RPC2 方法（admin 命名空间），含类型定义与归一化逻辑。
 
 const (
 	defaultXtermJSFontFamily = "'Cascadia Mono', 'Noto Sans SC', monospace"
@@ -62,6 +65,45 @@ type ThemeConfig struct {
 	BrightCyan                  string   `json:"brightCyan,omitempty"`
 	BrightWhite                 string   `json:"brightWhite,omitempty"`
 	ExtendedAnsi                []string `json:"extendedAnsi,omitempty"`
+}
+
+func init() {
+	reg("getXtermjsSettings", adminGetXtermjs, "Get xterm.js terminal settings")
+	RegisterWithGroupAndMeta("setXtermjsSettings", rpc.RoleAdmin, adminSetXtermjs, &rpc.MethodMeta{
+		Name:    "admin:setXtermjsSettings",
+		Summary: "Set xterm.js terminal settings",
+	})
+}
+
+func adminGetXtermjs(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	defaultSettings := defaultXtermJSSettings()
+	settings, err := config.GetAs[XtermJSSettings](config.XtermjsSettingsKey, defaultSettings)
+	if err != nil {
+		_ = config.Set(config.XtermjsSettingsKey, defaultSettings)
+		settings = defaultSettings
+	}
+	normalized, err := normalizeXtermJSSettings(settings)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to get xtermjs settings: "+err.Error(), nil)
+	}
+	return normalized, nil
+}
+
+func adminSetXtermjs(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var settings XtermJSSettings
+	if err := req.BindParams(&settings); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing request body: "+err.Error(), nil)
+	}
+	normalized, err := normalizeXtermJSSettings(settings)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid xtermjs settings: "+err.Error(), nil)
+	}
+	if err := config.Set(config.XtermjsSettingsKey, normalized); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to save settings: "+err.Error(), nil)
+	}
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, "update xtermjs settings", "info")
+	return normalized, nil
 }
 
 func defaultXtermJSSettings() XtermJSSettings {
@@ -175,13 +217,9 @@ func normalizeThemeConfig(input *ThemeConfig) (*ThemeConfig, error) {
 	return normalized, nil
 }
 
-func boolPtr(value bool) *bool {
-	return &value
-}
+func boolPtr(value bool) *bool { return &value }
 
-func intPtr(value int) *int {
-	return &value
-}
+func intPtr(value int) *int { return &value }
 
 func boolOrDefault(value *bool, defaultValue bool) *bool {
 	if value == nil {
@@ -191,18 +229,13 @@ func boolOrDefault(value *bool, defaultValue bool) *bool {
 }
 
 func cleanThemeColor(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return ""
-	}
-	return trimmed
+	return strings.TrimSpace(value)
 }
 
 func themeIsEmpty(theme *ThemeConfig) bool {
 	if theme == nil {
 		return true
 	}
-
 	return theme.Foreground == "" &&
 		theme.Background == "" &&
 		theme.Cursor == "" &&
@@ -227,44 +260,4 @@ func themeIsEmpty(theme *ThemeConfig) bool {
 		theme.BrightCyan == "" &&
 		theme.BrightWhite == "" &&
 		len(theme.ExtendedAnsi) == 0
-}
-
-func GetXtermJSSettings(c *gin.Context) {
-	defaultSettings := defaultXtermJSSettings()
-	settings, err := config.GetAs[XtermJSSettings](config.XtermjsSettingsKey, defaultSettings)
-	if err != nil {
-		_ = config.Set(config.XtermjsSettingsKey, defaultSettings)
-		settings = defaultSettings
-	}
-
-	normalized, err := normalizeXtermJSSettings(settings)
-	if err != nil {
-		api.RespondError(c, 500, "Failed to get xtermjs settings: "+err.Error())
-		return
-	}
-
-	api.RespondSuccess(c, normalized)
-}
-
-func SetXtermJSSettings(c *gin.Context) {
-	var settings XtermJSSettings
-	if err := c.ShouldBindJSON(&settings); err != nil {
-		api.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
-		return
-	}
-
-	normalized, err := normalizeXtermJSSettings(settings)
-	if err != nil {
-		api.RespondError(c, 400, "Invalid xtermjs settings: "+err.Error())
-		return
-	}
-
-	if err := config.Set(config.XtermjsSettingsKey, normalized); err != nil {
-		api.RespondError(c, 500, "Failed to save settings: "+err.Error())
-		return
-	}
-
-	uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), uuid.(string), "update xtermjs settings", "info")
-	api.RespondSuccessMessage(c, "settings saved", nil)
 }
