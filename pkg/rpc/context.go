@@ -24,10 +24,14 @@ type ContextMeta struct {
 	ClientToken string
 	// ClientUUID 解析出的客户端 UUID（若 token 合法）
 	ClientUUID string
+	// SessionToken 当前管理员会话的 session token（仅 admin 会话存在，用于区分当前会话等场景）
+	SessionToken string
 	// RemoteIP 请求来源 IP（可选）
 	RemoteIP string
 	// UserAgent 请求 UA（可选）
 	UserAgent string
+	// TempShareValid 临时分享访问许可是否有效（基于 temp_key cookie 校验，由传输层填充）
+	TempShareValid bool
 }
 
 // 私有类型做 key，避免外部冲突

@@ -13,8 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/database/tasks"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils/notifier"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
@@ -53,15 +51,9 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		if err := bindV2Params(req.Params, &params); err != nil {
 			return v2.Error(req.ID, -32602, "invalid report params", err.Error())
 		}
-		report := params.Report
-		report.UUID = uuid
-		report.UpdatedAt = time.Now()
-		if err := SaveClientReport(uuid, report); err != nil {
+		if err := ingestReport(uuid, params.Report, 2, true); err != nil {
 			return v2.Error(req.ID, -32000, "failed to save report", err.Error())
 		}
-		agent_runtime.SetLatestReport(uuid, &report)
-		refreshPostPresence(uuid)
-		agent_runtime.SetClientProtocolVersion(uuid, 2)
 		return v2.Success(req.ID, gin.H{
 			"status": "success",
 			"events": agent_runtime.TakeV2Events(uuid, params.AckEventIDs, 8),
@@ -71,10 +63,7 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		if err := bindV2Params(req.Params, &params); err != nil {
 			return v2.Error(req.ID, -32602, "invalid basic info params", err.Error())
 		}
-		if params.Info == nil {
-			params.Info = map[string]interface{}{}
-		}
-		if err := saveClientBasicInfo(params.Info, uuid, ""); err != nil {
+		if err := ingestBasicInfo(uuid, params.Info, ""); err != nil {
 			return v2.Error(req.ID, -32000, "failed to save basic info", err.Error())
 		}
 		return v2.Success(req.ID, gin.H{"status": "success"})
@@ -89,12 +78,7 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 				finishedAt = t
 			}
 		}
-		tasks.SavePingRecord(models.PingRecord{
-			Client: uuid,
-			TaskId: params.TaskID,
-			Value:  params.Value,
-			Time:   models.FromTime(finishedAt),
-		})
+		ingestPingResult(uuid, params.TaskID, params.Value, finishedAt)
 		return v2.Success(req.ID, gin.H{"status": "success"})
 	case v2.MethodAgentPull:
 		var params v2.PullParams

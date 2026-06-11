@@ -95,7 +95,7 @@ func UploadBasicInfo(c *gin.Context) {
 		return
 	}
 
-	if err := saveClientBasicInfo(cbi, uuid, c.ClientIP()); err != nil {
+	if err := ingestBasicInfo(uuid, cbi, c.ClientIP()); err != nil {
 		c.JSON(500, gin.H{"status": "error", "error": err})
 		return
 	}
