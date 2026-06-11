@@ -37,10 +37,12 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/api/oauth", public_api.OAuth)
 	r.GET("/api/oauth_callback", public_api.OAuthCallback)
 	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
+	// /api/clients 是 WebSocket 端点（客户端发 "get"/"get <uuid>" 拉取在线列表与最新上报），
+	// 非 JSON-RPC，保留为 WS handler。
+	r.GET("/api/clients", api.GetClients)
 
 	// JSON 接口 -> RPC2。
 	r.GET("/api/me", jsonRpc.Bind("public:getMe", jsonRpc.WithRaw()))
-	r.GET("/api/clients", jsonRpc.Bind("public:getNodesInformation"))
 	r.GET("/api/nodes", jsonRpc.Bind("public:getNodesInformation"))
 	r.GET("/api/public", jsonRpc.Bind("public:getPublicSettings"))
 	r.GET("/api/version", jsonRpc.Bind("public:getVersion"))
@@ -137,9 +139,9 @@ func registerAdminRoutes(r *gin.Engine) {
 		settings.POST("/", jsonRpc.Bind("admin:editSettings"))
 		settings.GET("/xtermjs", jsonRpc.Bind("admin:getXtermjsSettings"))
 		settings.POST("/xtermjs", jsonRpc.Bind("admin:setXtermjsSettings", jsonRpc.WithMessage("settings saved")))
-		settings.POST("/oidc", jsonRpc.Bind("admin:setOidcProvider", jsonRpc.WithFlat()))
+		settings.POST("/oidc", jsonRpc.Bind("admin:setOidcProvider"))
 		settings.GET("/oidc", jsonRpc.Bind("admin:getOidcProvider", jsonRpc.WithQuery("provider")))
-		settings.POST("/message-sender", jsonRpc.Bind("admin:setMessageSenderProvider", jsonRpc.WithFlat()))
+		settings.POST("/message-sender", jsonRpc.Bind("admin:setMessageSenderProvider"))
 		settings.GET("/message-sender", jsonRpc.Bind("admin:getMessageSenderProvider", jsonRpc.WithQuery("provider")))
 		settings.GET("/cloudflared", jsonRpc.Bind("admin:getCloudflaredStatus"))
 		settings.POST("/cloudflared/start", jsonRpc.Bind("admin:startCloudflared"))
