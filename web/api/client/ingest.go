@@ -18,11 +18,11 @@ import (
 // markPresence 为 true 时按 POST 上报会话刷新在线状态（WS 连接自行管理在线状态，应传 false）。
 func ingestReport(uuid string, report v1.Report, protocolVersion int, markPresence bool) error {
 	report.UUID = uuid
-	report.UpdatedAt = time.Now()
-	if err := SaveClientReport(uuid, report); err != nil {
+	savedReport, err := SaveClientReport(uuid, report)
+	if err != nil {
 		return err
 	}
-	agent_runtime.SetLatestReport(uuid, &report)
+	agent_runtime.SetLatestReport(uuid, &savedReport)
 	agent_runtime.SetClientProtocolVersion(uuid, protocolVersion)
 	if markPresence {
 		refreshPostPresence(uuid)

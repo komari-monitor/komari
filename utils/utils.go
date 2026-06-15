@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/protocol/v1"
 )
 
 // AverageReport 根据 topPercentage 参数计算报告的平均值。
@@ -25,6 +25,8 @@ func AverageReport(uuid string, time time.Time, records []v1.Report, topPercenta
 			recordsToAverageCount = 1 // 确保至少选择一个记录，除非总数为0
 		}
 	}
+
+	latestTotalUp, latestTotalDown := latestNetworkTotals(records)
 
 	// 定义一个辅助函数，用于排序和求和
 	sumAndSort := func(getFloat32Value func(v1.Report) float32, getInt64Value func(v1.Report) int64, isFloat bool) (float32, int64) {
@@ -120,13 +122,37 @@ func AverageReport(uuid string, time time.Time, records []v1.Report, topPercenta
 		DiskTotal:      records[0].Disk.Total,
 		NetIn:          sumNETIn / int64(recordsToAverageCount),
 		NetOut:         sumNETOut / int64(recordsToAverageCount),
-		NetTotalUp:     sumNETTotalUp / int64(recordsToAverageCount),
-		NetTotalDown:   sumNETTotalDown / int64(recordsToAverageCount),
+		NetTotalUp:     latestTotalUp,
+		NetTotalDown:   latestTotalDown,
 		Process:        sumPROCESS / recordsToAverageCount,
 		Connections:    sumConnections / recordsToAverageCount,
 		ConnectionsUdp: sumConnectionsUDP / recordsToAverageCount,
 	}
 	return newRecord
+}
+
+func latestNetworkTotals(records []v1.Report) (int64, int64) {
+	if len(records) == 0 {
+		return 0, 0
+	}
+	latestIndex := 0
+	for i := 1; i < len(records); i++ {
+		if records[i].UpdatedAt.After(records[latestIndex].UpdatedAt) ||
+			records[i].UpdatedAt.Equal(records[latestIndex].UpdatedAt) {
+			latestIndex = i
+		}
+	}
+	return records[latestIndex].Network.TotalUp, records[latestIndex].Network.TotalDown
+}
+
+func ComputeTrafficDelta(current, previous int64) int64 {
+	if current < 0 || previous < 0 {
+		return 0
+	}
+	if current >= previous {
+		return current - previous
+	}
+	return current
 }
 
 // AverageGPUReports 使用与 AverageReport 相同的聚合逻辑处理GPU数据

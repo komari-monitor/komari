@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/komari-monitor/komari/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -23,7 +24,7 @@ func TestComputeTrafficDeltaHandlesZeroAndReset(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			assert.Equal(t, test.want, computeTrafficDelta(test.current, test.previous))
+			assert.Equal(t, test.want, utils.ComputeTrafficDelta(test.current, test.previous))
 		})
 	}
 }

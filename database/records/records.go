@@ -1,6 +1,7 @@
 package records
 
 import (
+	"errors"
 	"log"
 	"sort"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/utils"
 )
 
 func RecordOne(rec models.Record) error {
@@ -199,6 +201,11 @@ func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 	if len(records) == 0 {
 		return nil
 	}
+	previousByClient, err := getPreviousTrafficRecordsBefore(db, records)
+	if err != nil {
+		return err
+	}
+	repairZeroTrafficDeltas(records, previousByClient)
 
 	// 按 Client 和 15 分钟时间段分组，并存储所有记录以计算分位数
 	type groupData struct {
@@ -377,6 +384,84 @@ func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 
 		return nil
 	})
+}
+
+func getPreviousTrafficRecordsBefore(db *gorm.DB, records []models.Record) (map[string]*models.Record, error) {
+	firstTimeByClient := make(map[string]time.Time)
+	for _, record := range records {
+		recordTime := record.Time.ToTime()
+		firstTime, ok := firstTimeByClient[record.Client]
+		if !ok || recordTime.Before(firstTime) {
+			firstTimeByClient[record.Client] = recordTime
+		}
+	}
+
+	previousByClient := make(map[string]*models.Record, len(firstTimeByClient))
+	for clientUUID, firstTime := range firstTimeByClient {
+		previous, err := getPreviousTrafficRecordBefore(db, clientUUID, firstTime)
+		if err != nil {
+			return nil, err
+		}
+		if previous != nil {
+			previousByClient[clientUUID] = previous
+		}
+	}
+	return previousByClient, nil
+}
+
+func getPreviousTrafficRecordBefore(db *gorm.DB, clientUUID string, before time.Time) (*models.Record, error) {
+	var latest *models.Record
+	for _, table := range []string{"records", "records_long_term"} {
+		var record models.Record
+		queryBefore := before
+		if table == "records_long_term" {
+			queryBefore = before.Truncate(15 * time.Minute)
+		}
+		err := db.Table(table).
+			Where("client = ? AND time < ?", clientUUID, models.FromTime(queryBefore)).
+			Order("time DESC").
+			First(&record).Error
+		if err == nil {
+			if latest == nil || record.Time.ToTime().After(latest.Time.ToTime()) {
+				latest = &record
+			}
+			continue
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+	return latest, nil
+}
+
+func repairZeroTrafficDeltas(records []models.Record, previousByClient map[string]*models.Record) {
+	recordsByClient := make(map[string][]*models.Record)
+	for i := range records {
+		recordsByClient[records[i].Client] = append(recordsByClient[records[i].Client], &records[i])
+	}
+
+	for _, clientRecords := range recordsByClient {
+		sort.Slice(clientRecords, func(i, j int) bool {
+			return clientRecords[i].Time.ToTime().Before(clientRecords[j].Time.ToTime())
+		})
+		var previous *models.Record
+		if previousByClient != nil {
+			previous = previousByClient[clientRecords[0].Client]
+		}
+		for _, current := range clientRecords {
+			if previous == nil {
+				previous = current
+				continue
+			}
+			if current.TrafficUp == 0 {
+				current.TrafficUp = utils.ComputeTrafficDelta(current.NetTotalUp, previous.NetTotalUp)
+			}
+			if current.TrafficDown == 0 {
+				current.TrafficDown = utils.ComputeTrafficDelta(current.NetTotalDown, previous.NetTotalDown)
+			}
+			previous = current
+		}
+	}
 }
 
 // migrateGPURecords 压缩GPU记录数据

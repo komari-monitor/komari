@@ -20,7 +20,6 @@ import (
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/connection"
 	report_cache "github.com/komari-monitor/komari/web/report"
-	"github.com/patrickmn/go-cache"
 )
 
 const (
@@ -119,8 +118,6 @@ func UploadReport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
-	report.UpdatedAt = time.Now()
-
 	// 优先使用 body 中的 UUID，若为空则从中间件注入的上下文中获取
 	uuid := report.UUID
 	if uuid == "" {
@@ -266,16 +263,9 @@ func processMessage(conn *connection.SafeConn, message []byte, uuid string) {
 	}
 }
 
-func SaveClientReport(uuid string, report v1.Report) error {
-	reports, _ := report_cache.Records.Get(uuid)
-	if reports == nil {
-		reports = []v1.Report{}
-	}
+func SaveClientReport(uuid string, report v1.Report) (v1.Report, error) {
 	if report.CPU.Usage < 0.01 {
 		report.CPU.Usage = 0.01
 	}
-	reports = append(reports.([]v1.Report), report)
-	report_cache.Records.Set(uuid, reports, cache.DefaultExpiration)
-
-	return nil
+	return report_cache.AppendClientReport(uuid, report)
 }
