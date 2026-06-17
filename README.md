@@ -9,6 +9,11 @@
 
 Komari is a lightweight, self-hosted server monitoring tool designed to provide a simple and efficient solution for monitoring server performance. It supports viewing server status through a web interface and collects data through a lightweight agent.
 
+> [!WARNING]
+> Komari is a self-hosted monitoring and control program intended only for systems you own or are authorized to administer. Do not weaponize Komari, deploy it without consent, or use it for unauthorized access, persistence, command execution, or other abusive activity. For context on real-world abuse risks, see Huntress' analysis: [Komari C2 agent abuse](https://www.huntress.com/blog/komari-c2-agent-abuse).
+> Users are solely responsible for how they deploy and operate Komari. The developers do not accept responsibility for unauthorized or abusive use, or for any resulting consequences.
+> On Windows, when remote control is enabled, the client displays a Windows notification at each user login to remind the user that Komari is remote control software.
+
 [Documentation](https://komari-document.pages.dev/) | [文档(镜像站 By Geekertao)](https://www.komari.wiki) | [Telegram Group](https://t.me/komari_monitor)
 
 ## Features

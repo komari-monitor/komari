@@ -6,6 +6,11 @@
 
 Komari 是一款輕量級的自託管伺服器監控工具，旨在提供簡單、高效的伺服器性能監控解決方案。它支援透過 Web 介面查看伺服器狀態，並透過輕量級 Agent 收集數據。
 
+> [!WARNING]
+> Komari 是一款自託管的監控/控制程式，僅應部署在你擁有或已獲授權管理的系統上。請勿將 Komari 武器化，或在未獲授權的情況下部署、存取、持久化、執行命令及從事其他濫用行為。關於現實中的濫用風險，可參考 Huntress 的分析：[Komari C2 agent abuse](https://www.huntress.com/blog/komari-c2-agent-abuse)。
+> 使用者需要自行承擔部署和使用 Komari 的責任。開發者不對未經授權或濫用行為及其後果承擔責任。
+> 在 Windows 端啟用遠端控制後，客戶端會在每次使用者登入時透過 Windows 通知提醒使用者 Komari 是一款遠端控制軟體。
+
 [文檔](https://komari-document.pages.dev/) | [Telegram 群組](https://t.me/komari_monitor)
 
 ## 特性
