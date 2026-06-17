@@ -349,14 +349,17 @@ func ingestState(uuid string, st *proto.State) error {
 			TotalUp:   int64(st.NetOutTransfer),
 			TotalDown: int64(st.NetInTransfer),
 		},
-		Uptime:    int64(st.Uptime),
-		Process:   int(st.ProcessCount),
-		UpdatedAt: time.Now(),
+		Uptime:  int64(st.Uptime),
+		Process: int(st.ProcessCount),
+	}
+	// 写入内存缓存，入库交由定时聚合任务处理
+	savedReport, err := apiClient.SaveClientReport(uuid, rep)
+	if err != nil {
+		return err
 	}
 	// 更新实时缓存供前端使用
-	agent_runtime.SetLatestReport(uuid, &rep)
-	// 写入内存缓存，入库交由定时聚合任务处理
-	return apiClient.SaveClientReport(uuid, rep)
+	agent_runtime.SetLatestReport(uuid, &savedReport)
+	return nil
 }
 
 // ReportGeoIP: 保存 Agent 上报的 IP，并回填国家码/面板启动时间

@@ -1,8 +1,10 @@
 package notifier
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
+	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"gorm.io/gorm"
 )
@@ -173,49 +176,135 @@ func getClientTrafficInRange(clientUUID string, trafficType string, start, end t
 	return getClientTrafficInRangeWithDB(dbcore.GetDBInstance(), clientUUID, trafficType, start, end)
 }
 
-func getClientTrafficInRangeWithDB(db *gorm.DB, clientUUID string, trafficType string, start, end time.Time) (int64, error) {
-	type trafficDeltaRecord struct {
-		Time        models.LocalTime `gorm:"column:time"`
-		TrafficUp   int64            `gorm:"column:traffic_up"`
-		TrafficDown int64            `gorm:"column:traffic_down"`
-	}
+type trafficDeltaRecord struct {
+	Time         models.LocalTime `gorm:"column:time"`
+	NetTotalUp   int64            `gorm:"column:net_total_up"`
+	NetTotalDown int64            `gorm:"column:net_total_down"`
+	TrafficUp    int64            `gorm:"column:traffic_up"`
+	TrafficDown  int64            `gorm:"column:traffic_down"`
+}
 
+func getClientTrafficInRangeWithDB(db *gorm.DB, clientUUID string, trafficType string, start, end time.Time) (int64, error) {
 	var recentRecords []trafficDeltaRecord
 	if err := db.Table("records").
-		Select("time, traffic_up, traffic_down").
-		Where("client = ? AND time >= ? AND time <= ?", clientUUID, start, end).
+		Select("time, net_total_up, net_total_down, traffic_up, traffic_down").
+		Where("client = ? AND time >= ? AND time <= ?", clientUUID, models.FromTime(start), models.FromTime(end)).
 		Find(&recentRecords).Error; err != nil {
 		return 0, err
 	}
 
 	var longTermRecords []trafficDeltaRecord
 	if err := db.Table("records_long_term").
-		Select("time, traffic_up, traffic_down").
-		Where("client = ? AND time >= ? AND time <= ?", clientUUID, start, end).
+		Select("time, net_total_up, net_total_down, traffic_up, traffic_down").
+		Where("client = ? AND time >= ? AND time <= ?", clientUUID, models.FromTime(start), models.FromTime(end)).
 		Find(&longTermRecords).Error; err != nil {
 		return 0, err
 	}
 
-	var totalUp int64
-	var totalDown int64
-	longTermSlots := make(map[time.Time]struct{}, len(longTermRecords))
+	records := mergeTrafficRecords(recentRecords, longTermRecords)
 
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Time.ToTime().Before(records[j].Time.ToTime())
+	})
+
+	previous, err := getPreviousTrafficDeltaRecord(db, clientUUID, start)
+	if err != nil {
+		return 0, err
+	}
+
+	totalUp, totalDown := sumTrafficDeltas(records, previous)
+	return computeUsedByType(strings.ToLower(trafficType), totalUp, totalDown), nil
+}
+
+func mergeTrafficRecords(recentRecords, longTermRecords []trafficDeltaRecord) []trafficDeltaRecord {
+	rawSlots := make(map[time.Time]struct{}, len(recentRecords))
+	for _, record := range recentRecords {
+		rawSlots[record.Time.ToTime().Truncate(15*time.Minute)] = struct{}{}
+	}
+
+	longTermSlots := make(map[time.Time]struct{}, len(longTermRecords))
+	records := make([]trafficDeltaRecord, 0, len(longTermRecords)+len(recentRecords))
 	for _, record := range longTermRecords {
-		totalUp += record.TrafficUp
-		totalDown += record.TrafficDown
-		longTermSlots[record.Time.ToTime()] = struct{}{}
+		slot := record.Time.ToTime().Truncate(15 * time.Minute)
+		if _, hasRawSlot := rawSlots[slot]; hasRawSlot && record.TrafficUp == 0 && record.TrafficDown == 0 {
+			continue
+		}
+		longTermSlots[slot] = struct{}{}
+		records = append(records, record)
 	}
 
 	for _, record := range recentRecords {
-		// records_long_term stores one aggregated row per 15-minute slot.
-		// Skip raw rows only when that exact slot is already present there.
 		slot := record.Time.ToTime().Truncate(15 * time.Minute)
 		if _, exists := longTermSlots[slot]; exists {
 			continue
 		}
-		totalUp += record.TrafficUp
-		totalDown += record.TrafficDown
+		records = append(records, record)
 	}
 
-	return computeUsedByType(strings.ToLower(trafficType), totalUp, totalDown), nil
+	return records
+}
+
+func getPreviousTrafficDeltaRecord(db *gorm.DB, clientUUID string, before time.Time) (*trafficDeltaRecord, error) {
+	record, err := latestTrafficDeltaRecordBefore(db.Table("records"), clientUUID, before)
+	if err != nil {
+		return nil, err
+	}
+
+	longTermRecord, err := latestTrafficDeltaRecordBefore(db.Table("records_long_term"), clientUUID, before)
+	if err != nil {
+		return nil, err
+	}
+
+	if record == nil {
+		return longTermRecord, nil
+	}
+	if longTermRecord == nil {
+		return record, nil
+	}
+	if longTermRecord.Time.ToTime().After(record.Time.ToTime()) {
+		return longTermRecord, nil
+	}
+	return record, nil
+}
+
+func latestTrafficDeltaRecordBefore(query *gorm.DB, clientUUID string, before time.Time) (*trafficDeltaRecord, error) {
+	var record trafficDeltaRecord
+	err := query.
+		Select("time, net_total_up, net_total_down, traffic_up, traffic_down").
+		Where("client = ? AND time < ?", clientUUID, models.FromTime(before)).
+		Order("time DESC").
+		First(&record).Error
+	if err == nil {
+		return &record, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return nil, err
+}
+
+func sumTrafficDeltas(records []trafficDeltaRecord, previous *trafficDeltaRecord) (int64, int64) {
+	var totalUp int64
+	var totalDown int64
+
+	for i := range records {
+		up := records[i].TrafficUp
+		down := records[i].TrafficDown
+		if previous != nil {
+			up = trafficDeltaOrFallback(up, records[i].NetTotalUp, previous.NetTotalUp)
+			down = trafficDeltaOrFallback(down, records[i].NetTotalDown, previous.NetTotalDown)
+		}
+		totalUp += up
+		totalDown += down
+		previous = &records[i]
+	}
+
+	return totalUp, totalDown
+}
+
+func trafficDeltaOrFallback(storedDelta, currentTotal, previousTotal int64) int64 {
+	if storedDelta > 0 {
+		return storedDelta
+	}
+	return utils.ComputeTrafficDelta(currentTotal, previousTotal)
 }

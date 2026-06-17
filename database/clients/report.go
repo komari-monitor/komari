@@ -11,6 +11,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
+	"github.com/komari-monitor/komari/utils"
 
 	"gorm.io/gorm"
 )
@@ -20,17 +21,6 @@ var reportSaveLocks sync.Map
 func getReportSaveLock(clientUUID string) *sync.Mutex {
 	lock, _ := reportSaveLocks.LoadOrStore(clientUUID, &sync.Mutex{})
 	return lock.(*sync.Mutex)
-}
-
-func computeTrafficDelta(current, previous int64) int64 {
-	if previous < 0 {
-		return 0
-	}
-	if current >= previous {
-		return current - previous
-	}
-	// Counter reset or reboot: treat the new counter value as traffic since reset.
-	return current
 }
 
 func getLatestTrafficRecord(tx *gorm.DB, clientUUID string) (*models.Record, error) {
@@ -246,8 +236,8 @@ func SaveClientReport(clientUUID string, report v1.Report) (err error) {
 			return fmt.Errorf("failed to load previous Record: %w", err)
 		}
 		if previous != nil {
-			Record.TrafficUp = computeTrafficDelta(report.Network.TotalUp, previous.NetTotalUp)
-			Record.TrafficDown = computeTrafficDelta(report.Network.TotalDown, previous.NetTotalDown)
+			Record.TrafficUp = utils.ComputeTrafficDelta(report.Network.TotalUp, previous.NetTotalUp)
+			Record.TrafficDown = utils.ComputeTrafficDelta(report.Network.TotalDown, previous.NetTotalDown)
 		}
 
 		// 保存 Record
