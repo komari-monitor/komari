@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// TestPostgreSQLIntegration runs the PostgreSQL integration test when configured.
+//
+// TestPostgreSQLIntegration 在配置 DSN 后运行 PostgreSQL 集成测试。
 func TestPostgreSQLIntegration(t *testing.T) {
 	dsn := os.Getenv("METRIC_POSTGRES_DSN")
 	if dsn == "" {
@@ -18,6 +21,9 @@ func TestPostgreSQLIntegration(t *testing.T) {
 	runSQLIntegration(t, "postgres", PostgreSQL(dsn), true)
 }
 
+// TestMySQLIntegration runs the MySQL integration test when configured.
+//
+// TestMySQLIntegration 在配置 DSN 后运行 MySQL 集成测试。
 func TestMySQLIntegration(t *testing.T) {
 	dsn := os.Getenv("METRIC_MYSQL_DSN")
 	if dsn == "" {
@@ -27,6 +33,9 @@ func TestMySQLIntegration(t *testing.T) {
 	runSQLIntegration(t, "mysql", MySQL(dsn), false)
 }
 
+// runSQLIntegration exercises the SQL store against an external database.
+//
+// runSQLIntegration 在外部数据库上执行通用 SQL 集成测试流程。
 func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentile bool) {
 	t.Helper()
 
@@ -159,6 +168,9 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 	}
 }
 
+// dropIntegrationTables drops integration-test tables.
+//
+// dropIntegrationTables 删除集成测试创建的表。
 func dropIntegrationTables(t *testing.T, store *Store, prefix string) {
 	t.Helper()
 	if strings.TrimSpace(prefix) == "" {

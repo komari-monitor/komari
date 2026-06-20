@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// newMemStore opens an isolated in-memory store for tests.
+//
+// newMemStore 打开一个用于测试的隔离内存 Store。
 func newMemStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(context.Background(), SQLite("file:imp-test?mode=memory&cache=shared"))
@@ -19,6 +22,9 @@ func newMemStore(t *testing.T) *Store {
 	return store
 }
 
+// TestCreateMetricRejectsDuplicate verifies create-only metric semantics.
+//
+// TestCreateMetricRejectsDuplicate 验证 CreateMetric 遇到重复指标时会拒绝。
 func TestCreateMetricRejectsDuplicate(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -32,6 +38,9 @@ func TestCreateMetricRejectsDuplicate(t *testing.T) {
 	}
 }
 
+// TestUpsertMetricOverwrites verifies upsert updates mutable definition fields.
+//
+// TestUpsertMetricOverwrites 验证 UpsertMetric 会更新指标定义的可变字段。
 func TestUpsertMetricOverwrites(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -50,6 +59,9 @@ func TestUpsertMetricOverwrites(t *testing.T) {
 	}
 }
 
+// TestTagFilterPushdownWithPaging verifies tag filtering happens before paging.
+//
+// TestTagFilterPushdownWithPaging 验证标签过滤会先于分页在 SQL 中执行。
 func TestTagFilterPushdownWithPaging(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -92,6 +104,9 @@ func TestTagFilterPushdownWithPaging(t *testing.T) {
 	}
 }
 
+// TestSQLAggregateMatchesInMemory compares SQL and in-memory aggregation.
+//
+// TestSQLAggregateMatchesInMemory 对比 SQL 下推聚合和内存聚合结果。
 func TestSQLAggregateMatchesInMemory(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -140,6 +155,9 @@ func TestSQLAggregateMatchesInMemory(t *testing.T) {
 	}
 }
 
+// TestCounterRateHandlesReset verifies reset-aware counter rate calculation.
+//
+// TestCounterRateHandlesReset 验证计数器重置时速率计算仍然稳定。
 func TestCounterRateHandlesReset(t *testing.T) {
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
 	// Counter goes 0 -> 10 -> reset -> 5; naive (last-first)/sec would give a
@@ -157,6 +175,9 @@ func TestCounterRateHandlesReset(t *testing.T) {
 	}
 }
 
+// TestAlignTimeNegativeTimestamp verifies pre-epoch bucket alignment.
+//
+// TestAlignTimeNegativeTimestamp 验证 Unix epoch 之前的时间也能正确对齐桶。
 func TestAlignTimeNegativeTimestamp(t *testing.T) {
 	interval := time.Minute
 	// 30s before the epoch should align down to -60s, not up to 0.
@@ -168,6 +189,9 @@ func TestAlignTimeNegativeTimestamp(t *testing.T) {
 	}
 }
 
+// TestLatestReturnsMostRecent verifies latest-point ordering.
+//
+// TestLatestReturnsMostRecent 验证 Latest 返回最新采样点。
 func TestLatestReturnsMostRecent(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -189,6 +213,9 @@ func TestLatestReturnsMostRecent(t *testing.T) {
 	}
 }
 
+// TestStatsDistinguishesNoDataFromUnknownMetric verifies stats error semantics.
+//
+// TestStatsDistinguishesNoDataFromUnknownMetric 验证 Stats 能区分无数据和未知指标。
 func TestStatsDistinguishesNoDataFromUnknownMetric(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -210,6 +237,9 @@ func TestStatsDistinguishesNoDataFromUnknownMetric(t *testing.T) {
 	}
 }
 
+// TestStdDevPopMatchesCalculateStats verifies population standard deviation.
+//
+// TestStdDevPopMatchesCalculateStats 验证总体标准差与统计摘要一致。
 func TestStdDevPopMatchesCalculateStats(t *testing.T) {
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
 	var pts []Point
@@ -230,6 +260,9 @@ func TestStdDevPopMatchesCalculateStats(t *testing.T) {
 	}
 }
 
+// TestAggregateStdDevSQLiteUsesMemoryPath verifies SQLite stddev fallback.
+//
+// TestAggregateStdDevSQLiteUsesMemoryPath 验证 SQLite 标准差聚合会回退到内存路径。
 func TestAggregateStdDevSQLiteUsesMemoryPath(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -261,6 +294,9 @@ func TestAggregateStdDevSQLiteUsesMemoryPath(t *testing.T) {
 	}
 }
 
+// TestSQLAggValueExprPushdownMatrix verifies aggregation pushdown support.
+//
+// TestSQLAggValueExprPushdownMatrix 验证各后端支持的聚合下推矩阵。
 func TestSQLAggValueExprPushdownMatrix(t *testing.T) {
 	cases := []struct {
 		driver Driver
@@ -288,6 +324,9 @@ func TestSQLAggValueExprPushdownMatrix(t *testing.T) {
 	}
 }
 
+// TestSQLiteReadPoolOpens verifies SQLite read-pool creation.
+//
+// TestSQLiteReadPoolOpens 验证 SQLite 只读连接池会按配置打开。
 func TestSQLiteReadPoolOpens(t *testing.T) {
 	ctx := context.Background()
 	dir := filepath.Join(t.TempDir(), "rp")
@@ -319,6 +358,9 @@ func TestSQLiteReadPoolOpens(t *testing.T) {
 	}
 }
 
+// TestMemoryDSNSkipsReadPool verifies memory SQLite skips read pools.
+//
+// TestMemoryDSNSkipsReadPool 验证内存 SQLite 不会打开独立读池。
 func TestMemoryDSNSkipsReadPool(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, SQLite("file:rp-mem?mode=memory&cache=shared", WithSQLiteReadPool(4)))
@@ -331,6 +373,9 @@ func TestMemoryDSNSkipsReadPool(t *testing.T) {
 	}
 }
 
+// TestWriteBatchAtomicAcrossChunks verifies chunked writes are atomic.
+//
+// TestWriteBatchAtomicAcrossChunks 验证分块批量写入仍保持整体原子性。
 func TestWriteBatchAtomicAcrossChunks(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -358,6 +403,9 @@ func TestWriteBatchAtomicAcrossChunks(t *testing.T) {
 	}
 }
 
+// TestAggregateBucketPagingSQLPath verifies bucket paging in SQL aggregation.
+//
+// TestAggregateBucketPagingSQLPath 验证 SQL 聚合路径按桶分页。
 func TestAggregateBucketPagingSQLPath(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -393,6 +441,9 @@ func TestAggregateBucketPagingSQLPath(t *testing.T) {
 	}
 }
 
+// TestAggregateBucketPagingMemoryPathMatchesSQL compares bucket paging paths.
+//
+// TestAggregateBucketPagingMemoryPathMatchesSQL 对比内存聚合和 SQL 聚合的桶分页语义。
 func TestAggregateBucketPagingMemoryPathMatchesSQL(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -434,6 +485,9 @@ func TestAggregateBucketPagingMemoryPathMatchesSQL(t *testing.T) {
 	}
 }
 
+// TestAggregateIgnoresRawPointLimit verifies raw limits do not affect aggregation.
+//
+// TestAggregateIgnoresRawPointLimit 验证原始点分页参数不会影响聚合输入。
 func TestAggregateIgnoresRawPointLimit(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
@@ -463,6 +517,9 @@ func TestAggregateIgnoresRawPointLimit(t *testing.T) {
 	}
 }
 
+// TestJSONTagKeyWithSpecialChars verifies JSON tag keys with special characters.
+//
+// TestJSONTagKeyWithSpecialChars 验证包含特殊字符的标签键可正确查询。
 func TestJSONTagKeyWithSpecialChars(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)

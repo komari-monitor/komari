@@ -5,6 +5,9 @@ import (
 	"testing"
 )
 
+// TestDialectsGenerateBackendSpecificSQL verifies backend-specific SQL rendering.
+//
+// TestDialectsGenerateBackendSpecificSQL 验证不同数据库后端生成各自的 SQL。
 func TestDialectsGenerateBackendSpecificSQL(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -17,7 +20,7 @@ func TestDialectsGenerateBackendSpecificSQL(t *testing.T) {
 			name:        "sqlite",
 			driver:      DriverSQLite,
 			placeholder: "?",
-			upsert:      "ON CONFLICT(metric_name, entity_id, ts_nano)",
+			upsert:      "ON CONFLICT(metric_name, entity_id, tags_hash, ts_nano)",
 			jsonType:    "TEXT",
 		},
 		{
@@ -31,7 +34,7 @@ func TestDialectsGenerateBackendSpecificSQL(t *testing.T) {
 			name:        "postgresql",
 			driver:      DriverPostgreSQL,
 			placeholder: "$1",
-			upsert:      "ON CONFLICT(metric_name, entity_id, ts_nano)",
+			upsert:      "ON CONFLICT(metric_name, entity_id, tags_hash, ts_nano)",
 			jsonType:    "JSONB",
 		},
 	}

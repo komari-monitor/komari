@@ -5,6 +5,9 @@ import (
 	"time"
 )
 
+// TestBackendBuildersApplyOptions verifies backend builders apply options.
+//
+// TestBackendBuildersApplyOptions 验证各后端构造器会正确应用选项。
 func TestBackendBuildersApplyOptions(t *testing.T) {
 	cfg := SQLite(
 		"file:metrics.db?cache=shared",
@@ -37,6 +40,9 @@ func TestBackendBuildersApplyOptions(t *testing.T) {
 	}
 }
 
+// TestSQLiteInDirBuildsFileConfig verifies SQLiteInDir file configuration.
+//
+// TestSQLiteInDirBuildsFileConfig 验证 SQLiteInDir 会生成预期的文件数据库配置。
 func TestSQLiteInDirBuildsFileConfig(t *testing.T) {
 	cfg := SQLiteInDir(
 		"data/metrics",
