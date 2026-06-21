@@ -3,11 +3,16 @@ name: Generate Release Notes
 on:
   release:
     types: [published]
+  repository_dispatch:
+    types:
+      - komari-web-release-published
+  schedule:
+    - cron: "41 * * * *"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to regenerate notes for."
-        required: true
+        description: "Release tag to regenerate notes for. Leave empty to use the latest release."
+        required: false
         type: string
 
 permissions:
@@ -22,39 +27,180 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            const tag = context.payload.release?.tag_name || core.getInput("tag");
-            if (!tag) {
-              core.setFailed("No release tag was provided.");
-              return;
+            const { owner, repo } = context.repo;
+            const webRepo = { owner: "komari-monitor", repo: "komari-web" };
+
+            const clean = (value) => (typeof value === "string" ? value.trim() : "");
+            const releaseTimestamp = (release) => Date.parse(release.published_at || release.created_at || "");
+
+            async function resolveRelease() {
+              const requestedTag = clean(context.payload.release?.tag_name)
+                || clean(context.payload.client_payload?.tag)
+                || clean(core.getInput("tag"));
+
+              if (requestedTag) {
+                const release = context.payload.release?.tag_name === requestedTag
+                  ? context.payload.release
+                  : (await github.rest.repos.getReleaseByTag({ owner, repo, tag: requestedTag })).data;
+                return { tag: requestedTag, release };
+              }
+
+              const release = (await github.rest.repos.getLatestRelease({ owner, repo })).data;
+              return { tag: release.tag_name, release };
             }
 
-            const { owner, repo } = context.repo;
-            const release = context.payload.release?.tag_name === tag
-              ? context.payload.release
-              : (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
+            async function getPreviousReleaseTag(tag, release) {
+              const releases = await github.paginate(github.rest.repos.listReleases, {
+                owner,
+                repo,
+                per_page: 100,
+              });
 
-            const generated = await github.request(
-              "POST /repos/{owner}/{repo}/releases/generate-notes",
-              {
+              const currentTime = releaseTimestamp(release);
+              const candidates = releases
+                .filter((item) => !item.draft && item.tag_name !== tag)
+                .filter((item) => {
+                  if (!Number.isFinite(currentTime)) {
+                    return true;
+                  }
+
+                  const itemTime = releaseTimestamp(item);
+                  return Number.isFinite(itemTime) && itemTime < currentTime;
+                })
+                .sort((left, right) => releaseTimestamp(right) - releaseTimestamp(left));
+
+              return candidates[0]?.tag_name || "";
+            }
+
+            async function getGeneratedNotes(tag, release, previousTag) {
+              const params = {
                 owner,
                 repo,
                 tag_name: tag,
                 target_commitish: release.target_commitish || undefined,
-              },
-            );
+              };
 
-            const body = generated.data.body?.trim();
-            if (!body) {
+              if (previousTag) {
+                params.previous_tag_name = previousTag;
+              }
+
+              const generated = await github.request(
+                "POST /repos/{owner}/{repo}/releases/generate-notes",
+                params,
+              );
+
+              return clean(generated.data.body);
+            }
+
+            async function getComparedCommits(previousTag, tag) {
+              if (!previousTag) {
+                return [];
+              }
+
+              const commits = [];
+              for (let page = 1; page <= 20; page += 1) {
+                const response = await github.rest.repos.compareCommitsWithBasehead({
+                  owner,
+                  repo,
+                  basehead: `${previousTag}...${tag}`,
+                  per_page: 100,
+                  page,
+                });
+
+                commits.push(...response.data.commits);
+
+                if (!response.headers.link?.includes('rel="next"')) {
+                  break;
+                }
+              }
+
+              return commits;
+            }
+
+            function renderCommitLine(commit) {
+              const subject = clean(commit.commit.message.split("\n")[0]) || "(no subject)";
+              const shortSha = commit.sha.slice(0, 7);
+              const author = commit.author?.login
+                ? ` @${commit.author.login}`
+                : (commit.commit.author?.name ? ` ${commit.commit.author.name}` : "");
+
+              return `- ${subject} ([${shortSha}](${commit.html_url}))${author}`;
+            }
+
+            async function buildCommitSection(previousTag, tag) {
+              if (!previousTag) {
+                return "## Commits\n\nNo previous release tag was found; commit comparison is unavailable.";
+              }
+
+              const commits = await getComparedCommits(previousTag, tag);
+              if (commits.length === 0) {
+                return `## Commits\n\nNo commits found between \`${previousTag}\` and \`${tag}\`.`;
+              }
+
+              return ["## Commits", "", ...commits.map(renderCommitLine)].join("\n");
+            }
+
+            async function buildWebReleaseSection(tag) {
+              const demoteMarkdownHeadings = (markdown) => markdown.replace(/^(#{1,5})(\s+)/gm, "#$1$2");
+
+              try {
+                const webRelease = (await github.rest.repos.getReleaseByTag({
+                  owner: webRepo.owner,
+                  repo: webRepo.repo,
+                  tag,
+                })).data;
+
+                const webBody = clean(webRelease.body);
+                if (!webBody) {
+                  return `## Komari Web Release Notes\n\nKomari Web release [${tag}](${webRelease.html_url}) exists, but its release notes are empty.`;
+                }
+
+                return [
+                  "## Komari Web Release Notes",
+                  "",
+                  `Source: [komari-web ${tag}](${webRelease.html_url})`,
+                  "",
+                  demoteMarkdownHeadings(webBody),
+                ].join("\n");
+              } catch (error) {
+                if (error.status === 404) {
+                  core.info(`Komari Web release ${tag} does not exist yet. Skipping web release notes for now.`);
+                  return "";
+                }
+
+                throw error;
+              }
+            }
+
+            const { tag, release } = await resolveRelease();
+            if (!tag) {
+              core.setFailed("No release tag was provided or found.");
+              return;
+            }
+
+            const previousTag = await getPreviousReleaseTag(tag, release);
+            const generatedBody = await getGeneratedNotes(tag, release, previousTag);
+            if (!generatedBody) {
               core.setFailed(`GitHub returned empty release notes for ${tag}.`);
               return;
             }
 
-            await github.rest.repos.updateRelease({
-              owner,
-              repo,
-              release_id: release.id,
-              body,
-            });
+            const body = [
+              generatedBody,
+              await buildCommitSection(previousTag, tag),
+              await buildWebReleaseSection(tag),
+            ].filter(Boolean).join("\n\n");
+
+            if (clean(release.body) === clean(body)) {
+              core.info(`Release notes for ${tag} are already up to date.`);
+            } else {
+              await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: release.id,
+                body,
+              });
+            }
 
             await core.summary
               .addHeading("Release Notes")
