@@ -180,7 +180,7 @@ func init() {
 					Type:        "string",
 				},
 			},
-			Returns: "Client | { [uuid]: Client }",
+			Returns: "Client | Client[]",
 		},
 	)
 	RegisterWithGroupAndMeta("getNodesLatestStatus", "common",
@@ -262,11 +262,7 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 		return nil, rpc.MakeError(rpc.InvalidParams, "Node not found", params.UUID)
 	}
 
-	nodesMap := make(map[string]models.Client, len(cinfo))
-	for _, node := range cinfo {
-		nodesMap[node.UUID] = node
-	}
-	return nodesMap, nil
+	return cinfo, nil
 }
 
 func getPublicInfo(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
