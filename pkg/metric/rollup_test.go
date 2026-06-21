@@ -234,6 +234,121 @@ func TestCompactCascadeFineToCoarse(t *testing.T) {
 	}
 }
 
+func TestCompactDoesNotOverwriteCoarseRollupWithPartialFineRows(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 10 * time.Minute,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 11 * time.Minute},
+			{Interval: 5 * time.Minute, Retention: time.Hour},
+		},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "partial", Type: TypeGauge}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	var batch []Point
+	for i := 0; i < 300; i++ {
+		batch = append(batch, Point{MetricName: "partial", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Second), Value: 1})
+	}
+	if err := s.WriteBatch(ctx, batch); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, base.Add(15*time.Minute)); err != nil {
+		t.Fatalf("compact initial: %v", err)
+	}
+	query := AggregateQuery{
+		Query:       Query{MetricName: "partial", EntityID: "n1", Start: base, End: base.Add(5*time.Minute - time.Nanosecond)},
+		Aggregation: AggCount,
+		Interval:    5 * time.Minute,
+	}
+	before, err := s.AggregateRollup(ctx, query, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("rollup before: %v", err)
+	}
+	if len(before) != 1 || before[0].Count != 300 {
+		t.Fatalf("expected initial complete coarse bucket, got %#v", before)
+	}
+	if _, err := s.Compact(ctx, base.Add(18*time.Minute)); err != nil {
+		t.Fatalf("compact after fine retention moves: %v", err)
+	}
+	after, err := s.AggregateRollup(ctx, query, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("rollup after: %v", err)
+	}
+	if len(after) != 1 || after[0].Count != 300 {
+		t.Fatalf("coarse bucket was overwritten from partial fine rows: %#v", after)
+	}
+	if err := s.Write(ctx, Point{MetricName: "partial", EntityID: "n1", Timestamp: base.Add(4*time.Minute + 30*time.Second), Value: 1}); err != nil {
+		t.Fatalf("write late: %v", err)
+	}
+	if _, err := s.Compact(ctx, base.Add(19*time.Minute)); err != nil {
+		t.Fatalf("compact late: %v", err)
+	}
+	late, err := s.AggregateRollup(ctx, query, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("rollup after late: %v", err)
+	}
+	if len(late) != 1 || late[0].Count != 301 {
+		t.Fatalf("late fine delta should merge into retained coarse bucket: %#v", late)
+	}
+	if _, err := s.Compact(ctx, base.Add(20*time.Minute)); err != nil {
+		t.Fatalf("compact late again: %v", err)
+	}
+	again, err := s.AggregateRollup(ctx, query, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("rollup after repeated compact: %v", err)
+	}
+	if len(again) != 1 || again[0].Count != 301 {
+		t.Fatalf("repeated compact should not merge the same late delta twice: %#v", again)
+	}
+}
+
+func TestCompactMergesLateFineDeltaLargerThanCoarseBucket(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 10 * time.Minute,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 11 * time.Minute},
+			{Interval: 5 * time.Minute, Retention: time.Hour},
+		},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "latebig", Type: TypeGauge}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	if err := s.Write(ctx, Point{MetricName: "latebig", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 1}); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+	if _, err := s.Compact(ctx, base.Add(15*time.Minute)); err != nil {
+		t.Fatalf("compact initial: %v", err)
+	}
+	if _, err := s.Compact(ctx, base.Add(18*time.Minute)); err != nil {
+		t.Fatalf("compact expire fine: %v", err)
+	}
+	for _, ts := range []time.Time{base.Add(20 * time.Second), base.Add(30 * time.Second)} {
+		if err := s.Write(ctx, Point{MetricName: "latebig", EntityID: "n1", Timestamp: ts, Value: 1}); err != nil {
+			t.Fatalf("write late: %v", err)
+		}
+	}
+	if _, err := s.Compact(ctx, base.Add(19*time.Minute)); err != nil {
+		t.Fatalf("compact late: %v", err)
+	}
+	got, err := s.AggregateRollup(ctx, AggregateQuery{
+		Query:       Query{MetricName: "latebig", EntityID: "n1", Start: base, End: base.Add(5*time.Minute - time.Nanosecond)},
+		Aggregation: AggCount,
+		Interval:    5 * time.Minute,
+	}, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	if len(got) != 1 || got[0].Count != 3 {
+		t.Fatalf("late delta should merge even when larger than existing bucket, got %#v", got)
+	}
+}
+
 // TestRetentionDropsRawButPercentileSurvives verifies the TSDB property that
 // raw data can age out while percentiles remain answerable from rollups.
 //
@@ -285,6 +400,60 @@ func TestRetentionDropsRawButPercentileSurvives(t *testing.T) {
 	exact := percentileSortedRange(0, 59, 0.90)
 	if math.Abs(res[0].Value-exact)/exact > 0.05 {
 		t.Fatalf("surviving p90 %v too far from exact %v", res[0].Value, exact)
+	}
+}
+
+// TestCompactMergesLateRawIntoExpiredRollup verifies a late-arriving raw point
+// for an already-retained rollup bucket is folded into the stored rollup instead
+// of replacing the bucket with only the late sample.
+//
+// TestCompactMergesLateRawIntoExpiredRollup 验证已过原始保留期的 rollup 桶收到
+// 迟到 raw 点时，会把迟到样本合入已有 rollup，而不是用迟到样本覆盖整桶。
+func TestCompactMergesLateRawIntoExpiredRollup(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 2 * time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "late", Type: TypeGauge}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	var batch []Point
+	for i := 0; i < 60; i++ {
+		batch = append(batch, Point{MetricName: "late", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Second), Value: float64(i)})
+	}
+	if err := s.WriteBatch(ctx, batch); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, base.Add(time.Hour)); err != nil {
+		t.Fatalf("compact initial: %v", err)
+	}
+	if err := s.Write(ctx, Point{
+		MetricName: "late",
+		EntityID:   "n1",
+		Timestamp:  base.Add(30*time.Second + 500*time.Millisecond),
+		Value:      1000,
+	}); err != nil {
+		t.Fatalf("write late: %v", err)
+	}
+	if _, err := s.Compact(ctx, base.Add(2*time.Hour)); err != nil {
+		t.Fatalf("compact late: %v", err)
+	}
+	res, err := s.AggregateRollup(ctx, AggregateQuery{
+		Query:       Query{MetricName: "late", EntityID: "n1", Start: base, End: base.Add(time.Minute)},
+		Aggregation: AggSum,
+		Interval:    time.Minute,
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("rollup sum: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("expected 1 rollup bucket, got %d", len(res))
+	}
+	if res[0].Count != 61 || res[0].Value != 2770 {
+		t.Fatalf("late point should merge into existing bucket count=61 sum=2770, got %#v", res[0])
 	}
 }
 
@@ -365,6 +534,67 @@ func TestSeriesRoutesByAge(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("old window not served from rollup correctly: %#v", oldGot)
+	}
+}
+
+// TestSeriesAcrossRetentionIncludesUncompactedRecentRaw verifies a query that
+// spans the raw-retention boundary uses rollups for old buckets and raw data for
+// recent buckets that may not have been compacted yet.
+//
+// TestSeriesAcrossRetentionIncludesUncompactedRecentRaw 验证跨原始保留期边界的查询
+// 会用 rollup 回答旧桶，并包含可能尚未 compact 的近期 raw 桶。
+func TestSeriesAcrossRetentionIncludesUncompactedRecentRaw(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: time.Hour,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "hybrid", Type: TypeGauge}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-2 * time.Hour)
+	var batch []Point
+	for i := 0; i < 60; i++ {
+		batch = append(batch, Point{MetricName: "hybrid", EntityID: "n1", Timestamp: old.Add(time.Duration(i) * time.Second), Value: float64(i)})
+	}
+	if err := s.WriteBatch(ctx, batch); err != nil {
+		t.Fatalf("write old: %v", err)
+	}
+	if _, err := s.Compact(ctx, now); err != nil {
+		t.Fatalf("compact old: %v", err)
+	}
+
+	recent := now.Add(-10 * time.Minute)
+	if err := s.Write(ctx, Point{MetricName: "hybrid", EntityID: "n1", Timestamp: recent, Value: 500}); err != nil {
+		t.Fatalf("write recent: %v", err)
+	}
+
+	got, err := s.Series(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "hybrid",
+			EntityID:   "n1",
+			Start:      old.Add(-time.Minute),
+			End:        recent.Add(time.Minute),
+		},
+		Aggregation: AggCount,
+		Interval:    time.Minute,
+	}, now)
+	if err != nil {
+		t.Fatalf("series: %v", err)
+	}
+	var oldFound, recentFound bool
+	for _, p := range got {
+		if p.Bucket.Equal(alignTime(old, time.Minute)) && p.Count == 60 {
+			oldFound = true
+		}
+		if p.Bucket.Equal(alignTime(recent, time.Minute)) && p.Count == 1 {
+			recentFound = true
+		}
+	}
+	if !oldFound || !recentFound {
+		t.Fatalf("series should include old rollup and recent raw buckets (old=%v recent=%v): %#v", oldFound, recentFound, got)
 	}
 }
 

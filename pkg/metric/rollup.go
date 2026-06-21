@@ -80,6 +80,15 @@ func (p RollupPolicy) compression() float64 {
 	return p.Compression
 }
 
+func (p RollupPolicy) rawCutoff(now time.Time) time.Time {
+	if p.RawRetention <= 0 || len(p.Tiers) == 0 {
+		return time.Time{}
+	}
+	cutoff := now.UTC().Add(-p.RawRetention)
+	interval := p.Tiers[0].Interval.Nanoseconds()
+	return time.Unix(0, floorDivNano(cutoff.UnixNano(), interval)).UTC()
+}
+
 // Validate enforces the structural rules that make cascading composition and
 // retention well-defined.
 //

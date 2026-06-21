@@ -495,9 +495,9 @@ func (s *Store) ListMetrics(ctx context.Context) ([]Definition, error) {
 	return out, rows.Err()
 }
 
-// DeleteMetric deletes a metric definition and its points.
+// DeleteMetric deletes a metric definition and all of its raw and rollup data.
 //
-// DeleteMetric 删除指标定义及其所有原始点。
+// DeleteMetric 删除指标定义及其所有原始点和 rollup 数据。
 func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
@@ -511,6 +511,9 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.rollups, s.dialect.placeholder(1)), name); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.points, s.dialect.placeholder(1)), name); err != nil {
 		return err
 	}
@@ -518,6 +521,88 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// DeleteEntity deletes all raw and rollup data for one entity across every metric.
+//
+// DeleteEntity 删除某个实体在所有指标下的原始点和 rollup 数据。
+func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error) {
+	if err := s.ensureOpen(); err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(entityID) == "" {
+		return 0, fmt.Errorf("%w: entity id is required", ErrInvalidArgument)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var total int64
+	for _, table := range []string{s.tables.points, s.tables.rollups} {
+		res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE entity_id = %s`, table, s.dialect.placeholder(1)), entityID)
+		if err != nil {
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	if err := tx.Commit(); err != nil {
+		return total, err
+	}
+	return total, nil
+}
+
+// DeleteSeries deletes raw and rollup data matching a query-shaped series filter.
+// MetricName is required; EntityID and Tags are optional, so callers can delete
+// one task tag across all agents or one tagged series for a single agent.
+//
+// DeleteSeries 删除匹配查询式序列过滤条件的原始点和 rollup 数据。MetricName 必填；
+// EntityID 和 Tags 可选，因此调用方可以删除所有 agent 的某个 task 标签，或删除
+// 单个 agent 的某条带标签序列。
+func (s *Store) DeleteSeries(ctx context.Context, filter Query) (int64, error) {
+	if err := s.ensureOpen(); err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(filter.MetricName) == "" {
+		return 0, fmt.Errorf("%w: metric name is required", ErrInvalidArgument)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var total int64
+	for _, table := range []string{s.tables.points, s.tables.rollups} {
+		args := []any{filter.MetricName}
+		parts := []string{"metric_name = " + s.dialect.placeholder(1)}
+		if strings.TrimSpace(filter.EntityID) != "" {
+			args = append(args, filter.EntityID)
+			parts = append(parts, "entity_id = "+s.dialect.placeholder(len(args)))
+		}
+		for _, k := range sortedKeys(filter.Tags) {
+			args = append(args, filter.Tags[k])
+			parts = append(parts, s.dialect.jsonExtractEquals("tags", k, s.dialect.placeholder(len(args))))
+		}
+		res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE %s`, table, strings.Join(parts, " AND ")), args...)
+		if err != nil {
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	if err := tx.Commit(); err != nil {
+		return total, err
+	}
+	return total, nil
 }
 
 // Write stores one metric point.
@@ -568,6 +653,21 @@ func (s *Store) WriteBatch(ctx context.Context, points []Point) error {
 // 也可在批量事务中执行。
 type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// querier is satisfied by both *sql.DB and *sql.Tx, letting read helpers run
+// either standalone (on the read pool / primary) or inside an existing
+// transaction. Running a read on the owning *sql.Tx is required when the store
+// holds a single connection (e.g. SQLite with MaxOpenConns=1): issuing the read
+// against the pool instead would block forever waiting for the connection the
+// transaction already holds.
+//
+// querier 同时由 *sql.DB 和 *sql.Tx 满足，使读取辅助函数既能独立执行（走读池
+// 或主连接），也能在已有事务中执行。当 Store 只持有单个连接时（例如
+// MaxOpenConns=1 的 SQLite），事务内的读取必须走其所属的 *sql.Tx；否则向连接池
+// 发起读取会永远等待事务已占用的那个连接，造成死锁。
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // writeBatch writes one chunk of metric points through an executor.

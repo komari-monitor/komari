@@ -215,6 +215,108 @@ func TestSeriesTagFilterRoutesPerTag(t *testing.T) {
 	}
 }
 
+// TestDeleteSeriesRemovesTaggedTaskAcrossAgents verifies a task_id tag can be
+// deleted across every agent, including stored rollups.
+//
+// TestDeleteSeriesRemovesTaggedTaskAcrossAgents 验证可以跨所有 agent 删除某个
+// task_id 标签，包括已存储的 rollup。
+func TestDeleteSeriesRemovesTaggedTaskAcrossAgents(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 2 * time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "ping.latency_ms", Type: TypeGauge}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	var batch []Point
+	for _, agent := range []string{"agent-001", "agent-002"} {
+		for i := 0; i < 60; i++ {
+			ts := base.Add(time.Duration(i) * time.Second)
+			batch = append(batch,
+				Point{MetricName: "ping.latency_ms", EntityID: agent, Timestamp: ts, Value: float64(20 + i), Tags: map[string]string{"task_id": "pingtask1"}},
+				Point{MetricName: "ping.latency_ms", EntityID: agent, Timestamp: ts, Value: float64(60 + i), Tags: map[string]string{"task_id": "pingtask2"}},
+			)
+		}
+	}
+	if err := s.WriteBatch(ctx, batch); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, base.Add(time.Hour)); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if _, err := s.DeleteSeries(ctx, Query{
+		MetricName: "ping.latency_ms",
+		Tags:       map[string]string{"task_id": "pingtask2"},
+	}); err != nil {
+		t.Fatalf("delete series: %v", err)
+	}
+
+	task2, err := s.AggregateRollup(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "ping.latency_ms",
+			Start:      base, End: base.Add(time.Minute),
+			Tags: map[string]string{"task_id": "pingtask2"},
+		},
+		Aggregation: AggAvg,
+		Interval:    time.Minute,
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("rollup task2: %v", err)
+	}
+	if len(task2) != 0 {
+		t.Fatalf("deleted task still has rollup buckets: %#v", task2)
+	}
+	task1, err := s.AggregateRollup(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "ping.latency_ms",
+			Start:      base, End: base.Add(time.Minute),
+			Tags: map[string]string{"task_id": "pingtask1"},
+		},
+		Aggregation: AggAvg,
+		Interval:    time.Minute,
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("rollup task1: %v", err)
+	}
+	if len(task1) != 1 || task1[0].Count != 120 {
+		t.Fatalf("remaining task should keep both agents, got %#v", task1)
+	}
+}
+
+// TestDeleteMetricRemovesRollups verifies metric deletion clears rollup rows.
+//
+// TestDeleteMetricRemovesRollups 验证删除指标会清理 rollup 行。
+func TestDeleteMetricRemovesRollups(t *testing.T) {
+	ctx := context.Background()
+	s := newRollupStore(t, RollupPolicy{
+		Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	})
+	if err := s.CreateMetric(ctx, Definition{Name: "gone", Type: TypeGauge}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	if err := s.Write(ctx, Point{MetricName: "gone", EntityID: "agent-001", Timestamp: base, Value: 1}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, base.Add(time.Hour)); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if err := s.DeleteMetric(ctx, "gone"); err != nil {
+		t.Fatalf("delete metric: %v", err)
+	}
+	rows, err := s.scanRollupRows(ctx, s.reader(), "gone", time.Minute)
+
+	if err != nil {
+		t.Fatalf("scan rollups: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("deleted metric still has rollups: %#v", rows)
+	}
+}
+
 // TestTagsFingerprintStable verifies equal tag maps fingerprint identically
 // regardless of construction order, and different maps differ.
 //

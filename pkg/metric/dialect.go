@@ -1,6 +1,7 @@
 package metric
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -41,6 +42,17 @@ type dialect interface {
 	//
 	// upsertRollupSQL 为单个 rollup 桶单元构造单行 upsert。
 	upsertRollupSQL(t tables) string
+	// compactTxOptions returns the transaction options used for the compaction
+	// transaction. PostgreSQL/MySQL escalate to SERIALIZABLE so the raw scan and
+	// the raw deletion share one snapshot and a point inserted between them
+	// cannot be deleted without first being rolled up. SQLite returns nil
+	// (its default) because a single connection already serializes writes.
+	//
+	// compactTxOptions 返回 compaction 事务使用的事务选项。PostgreSQL/MySQL 会
+	// 提升到 SERIALIZABLE，使 raw 扫描和 raw 删除共享同一个快照，让两者之间写入
+	// 的点不会在尚未进入 rollup 前被删除。SQLite 返回 nil（默认），因为单连接
+	// 已经串行化写入。
+	compactTxOptions() *sql.TxOptions
 }
 
 // tables stores the physical table names used by a Store.

@@ -2,6 +2,7 @@ package metric
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -233,6 +234,9 @@ func (p Point) Validate() error {
 	}
 	if p.Timestamp.IsZero() {
 		return fmt.Errorf("%w: timestamp is required", ErrInvalidArgument)
+	}
+	if math.IsNaN(p.Value) || math.IsInf(p.Value, 0) {
+		return fmt.Errorf("%w: value must be finite", ErrInvalidArgument)
 	}
 	return nil
 }

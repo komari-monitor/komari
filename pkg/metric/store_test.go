@@ -2,6 +2,8 @@ package metric
 
 import (
 	"context"
+	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -82,6 +84,27 @@ func TestSQLiteStoreWriteQueryAggregate(t *testing.T) {
 	}
 	if stats.Count != 3 || stats.Avg != 20 || stats.P95 != 29 {
 		t.Fatalf("unexpected stats: %#v", stats)
+	}
+}
+
+func TestWriteRejectsNonFiniteValues(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, SQLite("file:test-non-finite?mode=memory&cache=shared"))
+	if err != nil {
+		t.Fatalf("open sqlite store: %v", err)
+	}
+	defer store.Close()
+
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		err := store.Write(ctx, Point{
+			MetricName: "bad",
+			EntityID:   "server-1",
+			Timestamp:  time.Now(),
+			Value:      value,
+		})
+		if !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("expected ErrInvalidArgument for %v, got %v", value, err)
+		}
 	}
 }
 

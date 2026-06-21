@@ -1,6 +1,7 @@
 package metric
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -46,6 +47,40 @@ func (mysqlDialect) blobType() string { return "LONGBLOB" }
 //
 // blobType 返回 PostgreSQL 用于保存 t-digest 摘要的二进制列类型。
 func (postgresDialect) blobType() string { return "BYTEA" }
+
+// compactTxOptions returns nil so SQLite uses its default isolation. A single
+// write connection already serializes the compaction transaction against
+// concurrent writers, so the raw scan and the raw deletion observe a stable
+// view without escalating the isolation level.
+//
+// compactTxOptions 返回 nil，让 SQLite 使用默认隔离级别。单个写连接已经把
+// compaction 事务与并发写入串行化，因此 raw 扫描和 raw 删除无需提升隔离级别
+// 即可观察到稳定视图。
+func (sqliteDialect) compactTxOptions() *sql.TxOptions { return nil }
+
+// compactTxOptions escalates to SERIALIZABLE so a point inserted between the raw
+// scan and the raw deletion cannot be deleted without first being rolled up.
+// InnoDB's SERIALIZABLE turns the scan into a locking read that blocks such a
+// concurrent insert in the scanned range until the compaction commits.
+//
+// compactTxOptions 提升到 SERIALIZABLE，使在 raw 扫描和 raw 删除之间写入的点
+// 不会在尚未进入 rollup 前被删除。InnoDB 的 SERIALIZABLE 会把扫描变为加锁读，
+// 在 compaction 提交前阻塞扫描范围内的此类并发插入。
+func (mysqlDialect) compactTxOptions() *sql.TxOptions {
+	return &sql.TxOptions{Isolation: sql.LevelSerializable}
+}
+
+// compactTxOptions escalates to SERIALIZABLE so the raw scan and the raw
+// deletion share one snapshot. A concurrent insert into the scanned range that
+// would otherwise be deleted without a rollup instead triggers a serialization
+// failure that CompactMetric retries on a fresh snapshot.
+//
+// compactTxOptions 提升到 SERIALIZABLE，使 raw 扫描和 raw 删除共享同一个快照。
+// 对扫描范围内的并发插入（否则会被删除却没有进入 rollup）会触发序列化失败，
+// 由 CompactMetric 在新快照上重试。
+func (postgresDialect) compactTxOptions() *sql.TxOptions {
+	return &sql.TxOptions{Isolation: sql.LevelSerializable}
+}
 
 // upsertRollupSQL builds a single-row upsert for a rollup cell, keyed by
 // (metric_name, entity_id, tags_hash, resolution_nano, bucket_nano). Compact

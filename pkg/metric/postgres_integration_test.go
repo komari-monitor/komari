@@ -176,7 +176,7 @@ func dropIntegrationTables(t *testing.T, store *Store, prefix string) {
 	if strings.TrimSpace(prefix) == "" {
 		t.Fatal("refusing to drop tables with empty prefix")
 	}
-	for _, name := range []string{prefix + "points", prefix + "definitions"} {
+	for _, name := range []string{prefix + "rollups", prefix + "points", prefix + "definitions"} {
 		if _, err := store.db.Exec("DROP TABLE IF EXISTS " + name); err != nil {
 			t.Fatalf("drop integration table %s: %v", name, err)
 		}
