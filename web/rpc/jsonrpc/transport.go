@@ -61,7 +61,25 @@ func CallFromGin(c *gin.Context, method string, params any) *rpc.JsonRpcResponse
 		}
 	}
 	req := &rpc.JsonRpcRequest{Version: rpc.RPC_VERSION, Method: method, Params: params}
-	return Dispatch(c.Request.Context(), meta, req)
+	return dispatchWithSensitive(c.Request.Context(), c, meta, req)
+}
+
+// dispatchWithSensitive 在统一分发前对敏感方法补充二次验证，使各调用入口行为一致。
+// 对已通过命名空间权限校验的敏感方法，要求调用方满足敏感操作 2FA（沿用
+// api.VerifySensitive2FA 语义：API Key 放行、未配置 2FA 的账号沿用既有行为），
+// 再交由 Dispatch 执行；Dispatch 仍为权威鉴权点。
+//
+// 若请求已被 RequireSensitive2FA 中间件校验过（sensitive_2fa_verified），则跳过，
+// 避免在 body 被解析消费后重复读取校验。经 /api/rpc2 调用时无该中间件，2FA 码由
+// X-2FA-Code 请求头（或 query）传入。
+func dispatchWithSensitive(ctx context.Context, c *gin.Context, meta *rpc.ContextMeta, req *rpc.JsonRpcRequest) *rpc.JsonRpcResponse {
+	if c != nil && meta != nil && !c.GetBool("sensitive_2fa_verified") &&
+		rpc.IsSensitive(req.Method) && rpc.CheckPermission(meta.Permission, req.Method) {
+		if err := api.VerifySensitive2FA(c); err != nil {
+			return rpc.ErrorResponse(req.ID, rpc.PermissionDenied, err.Error(), nil)
+		}
+	}
+	return Dispatch(ctx, meta, req)
 }
 
 func serveWebSocket(c *gin.Context) {
@@ -92,7 +110,7 @@ func serveWebSocket(c *gin.Context) {
 			continue
 		}
 		// 同步写：SafeConn 内部有锁，串行写避免响应乱序与并发竞态。
-		conn.WriteJSON(Dispatch(context.Background(), meta, &req))
+		conn.WriteJSON(dispatchWithSensitive(context.Background(), c, meta, &req))
 	}
 }
 
@@ -112,7 +130,7 @@ func servePost(c *gin.Context) {
 
 	responses := make([]*rpc.JsonRpcResponse, 0, len(requests))
 	for _, rreq := range requests {
-		responses = append(responses, Dispatch(c.Request.Context(), meta, rreq))
+		responses = append(responses, dispatchWithSensitive(c.Request.Context(), c, meta, rreq))
 	}
 	// 单条直接对象，批量数组（符合 JSON-RPC 2.0）。
 	if len(responses) == 1 {
