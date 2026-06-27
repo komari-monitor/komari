@@ -179,5 +179,22 @@ func RequiredRole(method string) string {
 
 // CheckPermission 判定 group 角色是否有权调用 method。
 func CheckPermission(group, method string) bool {
-	return levelOf(group) >= levelOf(resolveMinRole(method))
+	return CheckPrincipal(PrincipalFromRole(group), method)
 }
+
+// CheckPrincipal 基于主体的能力集判定是否有权调用 method。
+// 采用集合成员语义(而非线性等级):方法要求某最低角色,主体须在其角色集中持有该角色;
+// guest 为公共基线,任何主体均隐式可访问。
+// 该模型使 agent 与 admin 成为正交主体:admin 不再自动获得 client 能力(反之亦然),
+// 从而堵住"admin 会话冒充 agent 调用 client:* 上报方法"等越权路径。
+func CheckPrincipal(p *Principal, method string) bool {
+	if p == nil {
+		p = NewAnonymousPrincipal()
+	}
+	min := resolveMinRole(method)
+	if min == RoleGuest {
+		return true // 公共基线,所有主体可访问
+	}
+	return p.HasRole(min)
+}
+

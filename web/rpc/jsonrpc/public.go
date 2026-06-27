@@ -39,7 +39,7 @@ func regPublic(name string, h rpc.Handler, summary string) {
 // isLoginFromCtx 依据 meta 判断是否为已登录管理员。
 func isLoginFromCtx(ctx context.Context) bool {
 	if meta := rpc.MetaFromContext(ctx); meta != nil {
-		return meta.Permission == rpc.RoleAdmin
+		return meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
 	}
 	return false
 }

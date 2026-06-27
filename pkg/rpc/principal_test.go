@@ -69,3 +69,39 @@ func TestHasRole(t *testing.T) {
 		t.Error("nil principal should not have any role")
 	}
 }
+
+func TestCheckPrincipal(t *testing.T) {
+	cases := []struct {
+		name   string
+		p      *Principal
+		method string
+		want   bool
+	}{
+		// agent 主体:可调 client 与 common,不可调 admin
+		{"agent->client", NewAgentPrincipal("c1"), "client:report", true},
+		{"agent->common", NewAgentPrincipal("c1"), "common:getNodes", true},
+		{"agent->admin", NewAgentPrincipal("c1"), "admin:addClient", false},
+		// user 主体:可调 admin 与 common,不可调 client(正交,堵住冒充)
+		{"user->admin", NewUserPrincipal("u1"), "admin:addClient", true},
+		{"user->common", NewUserPrincipal("u1"), "common:getNodes", true},
+		{"user->client", NewUserPrincipal("u1"), "client:report", false},
+		// api key 主体:等同 admin 能力
+		{"apikey->admin", NewAPIKeyPrincipal(), "admin:addClient", true},
+		{"apikey->client", NewAPIKeyPrincipal(), "client:report", false},
+		// 匿名主体:仅公共方法
+		{"anon->common", NewAnonymousPrincipal(), "common:getNodes", true},
+		{"anon->admin", NewAnonymousPrincipal(), "admin:addClient", false},
+		{"anon->client", NewAnonymousPrincipal(), "client:report", false},
+		// nil 主体按匿名处理
+		{"nil->common", nil, "common:getNodes", true},
+		{"nil->admin", nil, "admin:addClient", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := CheckPrincipal(c.p, c.method); got != c.want {
+				t.Errorf("CheckPrincipal(%s, %q) = %v, want %v", c.name, c.method, got, c.want)
+			}
+		})
+	}
+}
+

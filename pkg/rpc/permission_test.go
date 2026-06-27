@@ -33,7 +33,7 @@ func TestCheckPermission(t *testing.T) {
 		{RoleClient, "client:report", true},
 		{RoleClient, "admin:addClient", false},
 		{RoleAdmin, "admin:addClient", true},
-		{RoleAdmin, "client:report", true},
+		{RoleAdmin, "client:report", false},
 		{RoleAdmin, "common:getNodes", true},
 		// 未知命名空间默认要求 admin
 		{RoleGuest, "plugin:foo", false},

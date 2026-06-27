@@ -227,7 +227,7 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 	meta := rpc.MetaFromContext(ctx)
 
 	SendIpAddrToGuest, _ := config.GetAs[bool](config.SendIpAddrToGuestKey)
-	if meta.Permission != "admin" {
+	if meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
 		// 过滤 Hidden 节点并隐藏敏感字段
 		filtered := make([]models.Client, 0, len(cinfo))
 		for _, node := range cinfo {
@@ -289,7 +289,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	}
 
 	// Hidden 过滤
-	if meta.Permission != "admin" {
+	if meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
 		cinfo, err := clients.GetAllClientBasicInfo()
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
@@ -415,8 +415,13 @@ func getMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) 
 
 	meta := rpc.MetaFromContext(ctx)
 
-	switch meta.Permission {
-	case "admin":
+	switch meta.Principal.Type {
+	case rpc.PrincipalUser, rpc.PrincipalAPIKey:
+		if meta.User == nil {
+			resp.LoggedIn = true
+			resp.Username = "api_key"
+			return resp, nil
+		}
 		resp.TwoFAEnabled = meta.User.TwoFactor != ""
 		resp.LoggedIn = true
 		resp.SSOId = meta.User.SSOID
@@ -424,10 +429,10 @@ func getMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) 
 		resp.Username = meta.User.Username
 		resp.UUID = meta.User.UUID
 		return resp, nil
-	case "guest":
+	case rpc.PrincipalAnonymous:
 		resp.LoggedIn = false
 		return resp, nil
-	case "client":
+	case rpc.PrincipalAgent:
 		resp.LoggedIn = true
 		resp.SSOId = "client"
 		resp.SSOType = "client"
@@ -439,7 +444,8 @@ func getMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) 
 		}
 		return resp, nil
 	default:
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid user role", meta.Permission)
+		resp.LoggedIn = false
+		return resp, nil
 	}
 }
 
@@ -464,7 +470,7 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	meta := rpc.MetaFromContext(ctx)
 	// 登录状态检查
 	isLogin := false
-	if meta.Permission == "admin" {
+	if meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin) {
 		isLogin = true
 	}
 

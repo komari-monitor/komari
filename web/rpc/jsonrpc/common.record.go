@@ -70,7 +70,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	}
 
 	// Hidden filtering for non-admin
-	isAdmin := meta.Permission == "admin"
+	isAdmin := meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
 	hidden := map[string]bool{}
 	if !isAdmin {
 		cinfo, err := clients.GetAllClientBasicInfo()
