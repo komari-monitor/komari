@@ -13,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/rpc"
 	"gorm.io/gorm"
 )
 
@@ -24,46 +25,31 @@ const (
 
 // IdentityMiddleware 统一身份识别中间件，在路由栈最外层运行。
 // 负责识别当前请求者身份（Admin / Client / Guest），并写入 Context。
+// 身份识别统一委托给 IdentifyPrincipal;同时保留旧的 c.Set 键(role/uuid/
+// api_key/session/client_uuid)以兼容现有 handler 与中间件。
 func IdentityMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 1. API Key 认证
-		apiKey := c.GetHeader("Authorization")
-		if isApiKeyValid(apiKey) {
-			c.Set("role", RoleAdmin)
-			c.Set("api_key", apiKey[7:])
-			c.Set("uuid", "00000000-0000-0000-0000-000000000000") // API Key
-			c.Next()
-			return
-		}
+		p := IdentifyPrincipal(c)
+		SetPrincipal(c, p)
 
-		// 2. Session 认证
-		session, err := c.Cookie("session_token")
-		if err == nil && session != "" {
-			uuid, err := accounts.GetSession(session)
-			if err == nil {
-				c.Set("role", RoleAdmin)
+		// 写入兼容字段。
+		c.Set("role", p.PrimaryRole())
+		switch p.Type {
+		case rpc.PrincipalAPIKey:
+			// 旧逻辑:API Key 时记录裸 key 与固定占位 uuid。
+			apiKey := c.GetHeader("Authorization")
+			c.Set("api_key", apiKey[len("Bearer "):])
+			c.Set("uuid", "00000000-0000-0000-0000-000000000000")
+		case rpc.PrincipalUser:
+			if session, err := c.Cookie("session_token"); err == nil && session != "" {
 				c.Set("session", session)
-				c.Set("uuid", uuid)
 				accounts.UpdateLatest(session, c.Request.UserAgent(), c.ClientIP())
-				c.Next()
-				return
 			}
+			c.Set("uuid", p.UserUUID)
+		case rpc.PrincipalAgent:
+			c.Set("client_uuid", p.ClientUUID)
 		}
 
-		// 3. Client Token 认证
-		token := extractClientToken(c)
-		if token != "" {
-			uuid, err := checkTokenAndGetUUID(token)
-			if err == nil && uuid != "" {
-				c.Set("role", RoleClient)
-				c.Set("client_uuid", uuid)
-				c.Next()
-				return
-			}
-		}
-
-		// 4. 未识别身份，标记为访客
-		c.Set("role", RoleGuest)
 		c.Next()
 	}
 }
@@ -181,6 +167,10 @@ func hasTempAccess(c *gin.Context) bool {
 func extractClientToken(c *gin.Context) string {
 	token := c.Query("token")
 	if token != "" {
+		return token
+	}
+	// rpc2 约定:agent 经 ?Authorization=<token> 传入 client token。
+	if token := c.Query("Authorization"); token != "" {
 		return token
 	}
 

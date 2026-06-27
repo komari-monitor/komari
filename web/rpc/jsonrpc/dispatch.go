@@ -21,6 +21,11 @@ func Dispatch(ctx context.Context, meta *rpc.ContextMeta, req *rpc.JsonRpcReques
 	if group == "" {
 		group = rpc.RoleGuest
 	}
+	// 保证下游 handler 读 meta.Principal 永不为 nil:缺失时按权限分组兜底构造。
+	if meta.Principal == nil {
+		meta.Principal = rpc.PrincipalFromRole(group)
+	}
+
 
 	// 私有站点：未登录访客一律拒绝。
 	if group == rpc.RoleGuest {
