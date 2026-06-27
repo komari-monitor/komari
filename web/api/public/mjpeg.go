@@ -970,7 +970,17 @@ func fetchNodeData(ctx context.Context) ([]NodeInfo, map[string]NodeStatus, erro
 		return nodes, statuses, fmt.Errorf("%v", nodesResp.Error.Message)
 	}
 	if nodesResp != nil && nodesResp.Result != nil {
-		if nodesMap, ok := nodesResp.Result.(map[string]interface{}); ok {
+		if nodesList, ok := nodesResp.Result.([]models.Client); ok {
+			for _, client := range nodesList {
+				nodes = append(nodes, nodeInfoFromClient(client))
+			}
+		} else if nodesList, ok := nodesResp.Result.([]interface{}); ok {
+			for _, v := range nodesList {
+				if nodeData, ok := v.(map[string]interface{}); ok {
+					nodes = append(nodes, parseNodeInfo(nodeData))
+				}
+			}
+		} else if nodesMap, ok := nodesResp.Result.(map[string]interface{}); ok {
 			for _, v := range nodesMap {
 				if nodeData, ok := v.(map[string]interface{}); ok {
 					node := parseNodeInfo(nodeData)
@@ -979,23 +989,7 @@ func fetchNodeData(ctx context.Context) ([]NodeInfo, map[string]NodeStatus, erro
 			}
 		} else if nodesMap, ok := nodesResp.Result.(map[string]models.Client); ok {
 			for _, client := range nodesMap {
-				nodes = append(nodes, NodeInfo{
-					UUID:           client.UUID,
-					Name:           client.Name,
-					IPv4:           client.IPv4,
-					IPv6:           client.IPv6,
-					Region:         client.Region,
-					Virtualization: client.Virtualization,
-					Price:          client.Price,
-					BillingCycle:   client.BillingCycle,
-					Currency:       client.Currency,
-					ExpiredAt:      client.ExpiredAt.ToTime(),
-					AutoRenewal:    client.AutoRenewal,
-					Hidden:         client.Hidden,
-					Weight:         client.Weight,
-					MemTotal:       client.MemTotal,
-					DiskTotal:      client.DiskTotal,
-				})
+				nodes = append(nodes, nodeInfoFromClient(client))
 			}
 		}
 	}
@@ -1063,6 +1057,26 @@ func fetchNodeData(ctx context.Context) ([]NodeInfo, map[string]NodeStatus, erro
 		}
 	}
 	return nodes, statuses, nil
+}
+
+func nodeInfoFromClient(client models.Client) NodeInfo {
+	return NodeInfo{
+		UUID:           client.UUID,
+		Name:           client.Name,
+		IPv4:           client.IPv4,
+		IPv6:           client.IPv6,
+		Region:         client.Region,
+		Virtualization: client.Virtualization,
+		Price:          client.Price,
+		BillingCycle:   client.BillingCycle,
+		Currency:       client.Currency,
+		ExpiredAt:      client.ExpiredAt.ToTime(),
+		AutoRenewal:    client.AutoRenewal,
+		Hidden:         client.Hidden,
+		Weight:         client.Weight,
+		MemTotal:       client.MemTotal,
+		DiskTotal:      client.DiskTotal,
+	}
 }
 
 func parseNodeInfo(data map[string]interface{}) NodeInfo {
