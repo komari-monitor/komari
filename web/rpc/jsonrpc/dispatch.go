@@ -7,6 +7,15 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
+// privateSiteLoginWhitelist 私有站点模式下仍允许匿名访问的方法白名单。
+// 这些方法返回登录页渲染所需的元信息(站点配置、版本、当前登录态占位)。
+// 不在此白名单的 public:* 方法(如 getNodesInformation)会被私有站点拦截。
+var privateSiteLoginWhitelist = map[string]bool{
+	"public:getMe":             true,
+	"public:getPublicSettings": true,
+	"public:getVersion":        true,
+}
+
 // Dispatch 是所有传输入口的统一分发点：私有站点检查 → 权限校验 → 执行方法。
 // ctx 携带可选的取消/超时；meta 为调用者身份元数据（Principal 为权威来源）。
 // 始终返回完整的 JsonRpcResponse（包含错误）。
@@ -29,8 +38,8 @@ func Dispatch(ctx context.Context, meta *rpc.ContextMeta, req *rpc.JsonRpcReques
 		meta.Permission = meta.Principal.PrimaryRole()
 	}
 
-	// 私有站点：未认证访客一律拒绝。
-	if meta.Principal.Type == rpc.PrincipalAnonymous {
+	// 私有站点：未认证访客一律拒绝，但放行登录页所需的元信息接口(见 issue #567)。
+	if meta.Principal.Type == rpc.PrincipalAnonymous && !privateSiteLoginWhitelist[req.Method] {
 		if privateSite, _ := config.GetAs[bool](config.PrivateSiteKey); privateSite {
 			return rpc.ErrorResponse(req.ID, rpc.PermissionDenied, "Private site enabled, please login first", nil)
 		}
