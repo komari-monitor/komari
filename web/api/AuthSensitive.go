@@ -17,6 +17,8 @@ func RequireSensitive2FA() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		// 标记本请求已通过敏感操作校验，避免下游（RPC 边界）在 body 被消费后重复校验。
+		c.Set("sensitive_2fa_verified", true)
 		c.Next()
 	}
 }
