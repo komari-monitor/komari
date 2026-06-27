@@ -133,6 +133,145 @@ func Run(ctx Context) error {
 		}
 	}
 
+	if err := dedupeLongTermRecords(db); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// dedupeLongTermRecords 清理长期表中的存量重复行。
+//
+// 历史上压缩去重的 WHERE 子句使用了裸 time.Time，与 LocalTime.Value()
+// 写入的本地时区/自定义格式字符串无法匹配，导致每轮压缩对同一 (client,time)
+// 反复 Create，产生 ×N 重复（已在 database/records 修复）。此迁移按
+// (client,time) / (client,device_index,time) 唯一性清理历史重复，保留一条。
+//
+// 设计为幂等：先用 GROUP BY ... HAVING COUNT(*)>1 探测，无重复则直接跳过；
+// 表不存在（全新安装，AutoMigrate 尚未建表）时同样跳过。
+func dedupeLongTermRecords(db *gorm.DB) error {
+	if db.Migrator().HasTable("records_long_term") {
+		var dupGroups int64
+		if err := db.Raw("SELECT COUNT(*) FROM (SELECT client, time FROM records_long_term GROUP BY client, time HAVING COUNT(*) > 1) AS d").Scan(&dupGroups).Error; err != nil {
+			return fmt.Errorf("count duplicate long-term records: %w", err)
+		}
+		if dupGroups > 0 {
+			log.Printf("[dedup] records_long_term has %d duplicated (client,time) groups, cleaning up...", dupGroups)
+			if err := rebuildDedupedRecords(db); err != nil {
+				return err
+			}
+			log.Printf("[dedup] records_long_term cleanup done")
+		}
+	}
+
+	if db.Migrator().HasTable("gpu_records_long_term") {
+		var dupGroups int64
+		if err := db.Raw("SELECT COUNT(*) FROM (SELECT client, device_index, time FROM gpu_records_long_term GROUP BY client, device_index, time HAVING COUNT(*) > 1) AS d").Scan(&dupGroups).Error; err != nil {
+			return fmt.Errorf("count duplicate long-term GPU records: %w", err)
+		}
+		if dupGroups > 0 {
+			log.Printf("[dedup] gpu_records_long_term has %d duplicated (client,device_index,time) groups, cleaning up...", dupGroups)
+			if err := rebuildDedupedGPURecords(db); err != nil {
+				return err
+			}
+			log.Printf("[dedup] gpu_records_long_term cleanup done")
+		}
+	}
+
+	return nil
+}
+
+// rebuildDedupedRecords 逐客户端去重 records_long_term。
+// 两个长期表均无主键，故不能用 rowid/id 做方言相关删除；改为读出该客户端
+// 全部行 -> 内存按 time 去重 -> 事务内删除该客户端旧行并批量重插，跨 SQLite/MySQL 通用。
+func rebuildDedupedRecords(db *gorm.DB) error {
+	var clientList []string
+	if err := db.Table("records_long_term").Distinct("client").Pluck("client", &clientList).Error; err != nil {
+		return fmt.Errorf("list clients for record dedup: %w", err)
+	}
+
+	for _, clientUUID := range clientList {
+		var rows []models.Record
+		if err := db.Table("records_long_term").Where("client = ?", clientUUID).Order("time ASC").Find(&rows).Error; err != nil {
+			return fmt.Errorf("load long-term records for %s: %w", clientUUID, err)
+		}
+
+		seen := make(map[string]struct{}, len(rows))
+		deduped := make([]models.Record, 0, len(rows))
+		for _, r := range rows {
+			key := r.Time.ToTime().UTC().Format(time.RFC3339Nano)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			deduped = append(deduped, r)
+		}
+
+		if len(deduped) == len(rows) {
+			continue // 该客户端无重复
+		}
+
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Table("records_long_term").Where("client = ?", clientUUID).Delete(&models.Record{}).Error; err != nil {
+				return err
+			}
+			if len(deduped) > 0 {
+				if err := tx.Table("records_long_term").CreateInBatches(&deduped, 500).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("rewrite deduped long-term records for %s: %w", clientUUID, err)
+		}
+	}
+
+	return nil
+}
+
+// rebuildDedupedGPURecords 逐客户端去重 gpu_records_long_term，键为 (device_index,time)。
+func rebuildDedupedGPURecords(db *gorm.DB) error {
+	var clientList []string
+	if err := db.Table("gpu_records_long_term").Distinct("client").Pluck("client", &clientList).Error; err != nil {
+		return fmt.Errorf("list clients for GPU record dedup: %w", err)
+	}
+
+	for _, clientUUID := range clientList {
+		var rows []models.GPURecord
+		if err := db.Table("gpu_records_long_term").Where("client = ?", clientUUID).Order("time ASC").Find(&rows).Error; err != nil {
+			return fmt.Errorf("load long-term GPU records for %s: %w", clientUUID, err)
+		}
+
+		seen := make(map[string]struct{}, len(rows))
+		deduped := make([]models.GPURecord, 0, len(rows))
+		for _, r := range rows {
+			key := fmt.Sprintf("%d|%s", r.DeviceIndex, r.Time.ToTime().UTC().Format(time.RFC3339Nano))
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			deduped = append(deduped, r)
+		}
+
+		if len(deduped) == len(rows) {
+			continue
+		}
+
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Table("gpu_records_long_term").Where("client = ?", clientUUID).Delete(&models.GPURecord{}).Error; err != nil {
+				return err
+			}
+			if len(deduped) > 0 {
+				if err := tx.Table("gpu_records_long_term").CreateInBatches(&deduped, 500).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("rewrite deduped long-term GPU records for %s: %w", clientUUID, err)
+		}
+	}
+
 	return nil
 }
 

@@ -319,3 +319,36 @@ func TestCompactRecordOnlyMigratesCompleteFifteenMinuteBuckets(t *testing.T) {
 	assert.NoError(t, db.Table("records").Where("time = ?", partialSlot.Time).Count(&rawCount).Error)
 	assert.Equal(t, int64(1), rawCount)
 }
+
+// TestCompactRecordNoDuplicateOnRepeatedRuns 回归测试：重叠带内的记录会被多轮压缩
+// 重复处理，去重检查必须命中已存在的 long-term 行并 Update，而非 Create 出重复。
+// 修复前 WHERE 用裸 time.Time 与 LocalTime.Value() 的存储格式不匹配，第二轮会插出重复行。
+func TestCompactRecordNoDuplicateOnRepeatedRuns(t *testing.T) {
+	loc := models.GetAppLocation()
+	now := time.Date(2026, 6, 7, 12, 7, 0, 0, loc)
+	cutoff := compactRecordCutoff(now)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	assert.NoError(t, err)
+	assert.NoError(t, db.AutoMigrate(&models.Record{}))
+	assert.NoError(t, db.Table("records_long_term").AutoMigrate(&models.Record{}))
+
+	// 位于重叠带 [cutoff-1h, cutoff)：每轮都 <cutoff 会被压缩，但 >cutoff-1h 不会被删除。
+	slotRec := models.Record{Client: uuid, Time: models.FromTime(cutoff.Add(-30 * time.Minute)), Cpu: 42}
+	assert.NoError(t, db.Create(&slotRec).Error)
+
+	// 连续压缩三轮，模拟约 1 小时内多次定时压缩同一槽位。
+	for i := 0; i < 3; i++ {
+		assert.NoError(t, migrateOldRecordsAt(db, now))
+	}
+
+	slot := slotRec.Time.ToTime().Truncate(15 * time.Minute)
+	var slotCount int64
+	assert.NoError(t, db.Table("records_long_term").
+		Where("client = ? AND time = ?", uuid, models.FromTime(slot)).
+		Count(&slotCount).Error)
+	assert.Equal(t, int64(1), slotCount, "重复压缩不应在 long-term 表产生重复行")
+
+	var totalLong int64
+	assert.NoError(t, db.Table("records_long_term").Count(&totalLong).Error)
+	assert.Equal(t, int64(1), totalLong)
+}

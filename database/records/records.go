@@ -335,8 +335,11 @@ func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 			// 取高位
 			high_percentile := 0.7
 			// 检查 records_long_term 表中是否已存在相同的记录
+			// 注意：time 列经 models.LocalTime.Value() 以本地时区/自定义格式写入，
+			// WHERE 比较必须同样包成 models.FromTime，否则裸 time.Time 序列化不一致，永远匹配不到 -> 重复插入。
+			slotTime := models.FromTime(timeSlot)
 			var existingCount int64
-			if err := tx.Table("records_long_term").Where("client = ? AND time = ?", clientUUID, timeSlot).Count(&existingCount).Error; err != nil {
+			if err := tx.Table("records_long_term").Where("client = ? AND time = ?", clientUUID, slotTime).Count(&existingCount).Error; err != nil {
 				return err
 			}
 
@@ -367,7 +370,7 @@ func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 
 			// 如果记录已存在则更新，否则创建新记录
 			if existingCount > 0 {
-				if err := tx.Table("records_long_term").Where("client = ? AND time = ?", clientUUID, timeSlot).Updates(&newRec).Error; err != nil {
+				if err := tx.Table("records_long_term").Where("client = ? AND time = ?", clientUUID, slotTime).Updates(&newRec).Error; err != nil {
 					return err
 				}
 			} else {
@@ -567,10 +570,11 @@ func migrateGPURecords(db *gorm.DB) error {
 
 	return db.Transaction(func(tx *gorm.DB) error {
 		for key, data := range groupedGPUs {
-			// 检查是否已存在记录
+			// 检查是否已存在记录（time 须包成 models.FromTime，理由同 migrateOldRecordsAt）
+			slotTime := models.FromTime(key.TimeSlot)
 			var existingCount int64
 			if err := tx.Table("gpu_records_long_term").Where("client = ? AND device_index = ? AND time = ?",
-				key.Client, key.DeviceIndex, key.TimeSlot).Count(&existingCount).Error; err != nil {
+				key.Client, key.DeviceIndex, slotTime).Count(&existingCount).Error; err != nil {
 				return err
 			}
 
@@ -588,7 +592,7 @@ func migrateGPURecords(db *gorm.DB) error {
 			if existingCount > 0 {
 				// 更新已存在记录
 				if err := tx.Table("gpu_records_long_term").Where("client = ? AND device_index = ? AND time = ?",
-					key.Client, key.DeviceIndex, key.TimeSlot).Updates(&compressedGPU).Error; err != nil {
+					key.Client, key.DeviceIndex, slotTime).Updates(&compressedGPU).Error; err != nil {
 					return err
 				}
 			} else {
