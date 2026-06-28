@@ -50,6 +50,8 @@ func saveClientReportToDB(db *gorm.DB, now time.Time) error {
 	trafficByRecord := make(map[string]cachedTrafficSummary)
 
 	reportCacheMu.Lock()
+	// 先收集所有需要保存的数据，但不修改缓存
+	filteredByUUID := make(map[string][]v1.Report)
 	for uuid, x := range Records.Items() {
 		func() {
 			if uuid == "" {
@@ -73,7 +75,7 @@ func saveClientReportToDB(db *gorm.DB, now time.Time) error {
 				}
 			}
 
-			Records.Set(uuid, filtered, cache.DefaultExpiration)
+			filteredByUUID[uuid] = filtered
 
 			if len(filtered) > 0 {
 				r := utils.AverageReport(uuid, now, filtered, 0.3)
@@ -128,6 +130,29 @@ func saveClientReportToDB(db *gorm.DB, now time.Time) error {
 			return err
 		}
 	}
+
+	// 数据成功写入数据库后，才清理缓存中已处理的旧数据。
+	// 这里重新从当前缓存读取并按时间过滤，保留最近一分钟内的报告
+	// （包括写库期间新到达的报告），避免写库失败时丢失尚未持久化的历史数据。
+	reportCacheMu.Lock()
+	for uuid := range filteredByUUID {
+		cached, ok := Records.Get(uuid)
+		if !ok || cached == nil {
+			continue
+		}
+		reports, ok := cached.([]v1.Report)
+		if !ok {
+			continue
+		}
+		var remaining []v1.Report
+		for _, r := range reports {
+			if r.UpdatedAt.Unix() >= lastMinute {
+				remaining = append(remaining, r)
+			}
+		}
+		Records.Set(uuid, remaining, cache.DefaultExpiration)
+	}
+	reportCacheMu.Unlock()
 
 	return nil
 }
