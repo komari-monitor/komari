@@ -149,6 +149,14 @@ func registerAdminRoutes(r *gin.Engine) {
 		settings.POST("/cloudflared/remove-token", jsonRpc.Bind("admin:removeCloudflaredToken"))
 	}
 
+	// database 运维（压缩/大小）
+	databaseGroup := g.Group("/database")
+	{
+		databaseGroup.GET("/size", jsonRpc.Bind("admin:getDatabaseSize"))
+		databaseGroup.POST("/vacuum", jsonRpc.Bind("admin:vacuumDatabase", jsonRpc.WithMessage("database vacuumed")))
+	}
+
+
 	// clients
 	clientGroup := g.Group("/client")
 	{
