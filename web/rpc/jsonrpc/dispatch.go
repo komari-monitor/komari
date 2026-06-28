@@ -39,7 +39,9 @@ func Dispatch(ctx context.Context, meta *rpc.ContextMeta, req *rpc.JsonRpcReques
 	}
 
 	// 私有站点：未认证访客一律拒绝，但放行登录页所需的元信息接口(见 issue #567)。
-	if meta.Principal.Type == rpc.PrincipalAnonymous && !privateSiteLoginWhitelist[req.Method] {
+	// 持有有效临时分享许可(temp_key)的匿名访客同样放行，使「临时分析」分享链接在私有站点下可用；
+	// 后续 CheckPrincipal 仍会将匿名主体限制在 public:*(guest 角色)范围内，admin 方法不受影响。
+	if meta.Principal.Type == rpc.PrincipalAnonymous && !privateSiteLoginWhitelist[req.Method] && !meta.TempShareValid {
 		if privateSite, _ := config.GetAs[bool](config.PrivateSiteKey); privateSite {
 			return rpc.ErrorResponse(req.ID, rpc.PermissionDenied, "Private site enabled, please login first", nil)
 		}
@@ -47,6 +49,7 @@ func Dispatch(ctx context.Context, meta *rpc.ContextMeta, req *rpc.JsonRpcReques
 
 	// 命名空间权限校验:基于 Principal 的能力集(集合成员语义)。
 	if !rpc.CheckPrincipal(meta.Principal, req.Method) {
+
 		return rpc.ErrorResponse(req.ID, rpc.PermissionDenied, "Permission denied", nil)
 	}
 
