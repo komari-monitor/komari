@@ -1,9 +1,11 @@
 package tasks
 
 import (
+	"context"
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
@@ -126,6 +128,9 @@ func UpdatePingTaskOrder(order map[uint]int) error {
 }
 
 func SavePingRecord(record models.PingRecord) error {
+	if metricstore.IsEnabled() {
+		return metricstore.WritePingRecord(context.Background(), record)
+	}
 	db := dbcore.GetDBInstance()
 	return db.Create(&record).Error
 }
@@ -201,6 +206,9 @@ func AddDefaultOnClientUUID(uuid string) error {
 }
 
 func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
+	if metricstore.IsEnabled() {
+		return metricstore.GetPingRecords(context.Background(), uuid, taskId, start, end)
+	}
 	db := dbcore.GetDBInstance()
 	var records []models.PingRecord
 	dbQuery := db.Model(&models.PingRecord{})

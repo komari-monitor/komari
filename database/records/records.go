@@ -1,6 +1,7 @@
 package records
 
 import (
+	"context"
 	"errors"
 	"log"
 	"sort"
@@ -11,21 +12,32 @@ import (
 
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
 )
 
 func RecordOne(rec models.Record) error {
+	// 启用 metric store 时优先写入新存储
+	if metricstore.IsEnabled() {
+		return metricstore.WriteRecord(context.Background(), rec)
+	}
 	db := dbcore.GetDBInstance()
 	return db.Create(&rec).Error
 }
 
 func RecordGPU(rec models.GPURecord) error {
+	if metricstore.IsEnabled() {
+		return metricstore.WriteGPURecord(context.Background(), rec)
+	}
 	db := dbcore.GetDBInstance()
 	return db.Create(&rec).Error
 }
 
 func DeleteAll() error {
+	if metricstore.IsEnabled() {
+		return metricstore.DeleteAllRecords(context.Background())
+	}
 	db := dbcore.GetDBInstance()
 	if err := db.Exec("DELETE FROM records_long_term").Error; err != nil {
 		return err
@@ -41,6 +53,9 @@ func DeleteAll() error {
 
 // GetGPURecordsByClientAndTime 获取GPU记录数据
 func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.GPURecord, error) {
+	if metricstore.IsEnabled() {
+		return metricstore.GetGPURecordsByClientAndTime(context.Background(), uuid, start, end)
+	}
 	db := dbcore.GetDBInstance()
 	var records []models.GPURecord
 
@@ -90,6 +105,9 @@ func DeleteRecordBefore(before time.Time) error {
 }
 
 func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Record, error) {
+	if metricstore.IsEnabled() {
+		return metricstore.GetRecordsByClientAndTime(context.Background(), uuid, start, end)
+	}
 	db := dbcore.GetDBInstance()
 	var records []models.Record
 

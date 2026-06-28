@@ -19,6 +19,7 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
@@ -66,6 +67,11 @@ func RunServer() {
 	conf, err := config.GetManyAs[config.Settings]()
 	if err != nil {
 		log.Fatal(err)
+	}
+	// 初始化独立 metrics 数据库（如已启用）
+	if err := metricstore.InitializeStore(); err != nil {
+		log.Printf("Failed to initialize metric store: %v", err)
+		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize metric store: %v", err))
 	}
 	go geoip.InitGeoIp()
 	go DoScheduledWork()
@@ -229,6 +235,9 @@ func OnShutdown() {
 	auditlog.Log("", "", "server is shutting down", "info")
 	corn.StopAll()
 	cloudflared.Shutdown()
+	if err := metricstore.CloseStore(); err != nil {
+		log.Printf("Failed to close metric store: %v", err)
+	}
 }
 
 func OnFatal(err error) {
