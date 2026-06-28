@@ -31,6 +31,9 @@ SERVICE_NAME="komari"
 BINARY_PATH="$INSTALL_DIR/komari"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
+REPO="komari-monitor/komari"
+# 发布通道: stable（稳定版）或 snapshot（快照版）
+CHANNEL="stable"
 
 # Show banner
 show_banner() {
@@ -113,6 +116,29 @@ install_dependencies() {
     fi
 }
 
+# Get download URL based on channel
+get_download_url() {
+    local arch=$1
+    local file_name="komari-linux-${arch}"
+    
+    if [ "$CHANNEL" = "snapshot" ]; then
+        # 获取最新的 snapshot 预发布版本
+        log_info "获取最新 snapshot 版本..."
+        local latest_snapshot=$(curl -s "https://api.github.com/repos/${REPO}/releases" | grep '"tag_name"' | grep 'Snapshot-' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
+        
+        if [ -z "$latest_snapshot" ]; then
+            log_error "未找到 snapshot 版本"
+            return 1
+        fi
+        
+        log_info "最新 snapshot 版本: $latest_snapshot"
+        echo "https://github.com/${REPO}/releases/download/${latest_snapshot}/${file_name}"
+    else
+        # 稳定版：使用 latest
+        echo "https://github.com/${REPO}/releases/latest/download/${file_name}"
+    fi
+}
+
 # Binary installation
 install_binary() {
     log_step "开始二进制安装..."
@@ -122,6 +148,26 @@ install_binary() {
         return
     fi
 
+    # 选择发布通道
+    echo "请选择发布通道："
+    echo "  1) stable (稳定版，推荐)"
+    echo "  2) snapshot (快照版，最新功能)"
+    read -p "请选择 [默认: 1]: " channel_choice
+    
+    case $channel_choice in
+        2)
+            CHANNEL="snapshot"
+            log_info "已选择: snapshot (快照版)"
+            ;;
+        1|"")
+            CHANNEL="stable"
+            log_info "已选择: stable (稳定版)"
+            ;;
+        *)
+            log_error "无效选项，使用默认 stable"
+            CHANNEL="stable"
+            ;;
+    esac
 
     # 监听端口输入，校验范围 1-65535
     while true; do
@@ -148,8 +194,11 @@ install_binary() {
     log_step "创建数据目录: $DATA_DIR"
     mkdir -p "$DATA_DIR"
 
-    local file_name="komari-linux-${arch}"
-    local download_url="https://github.com/komari-monitor/komari/releases/latest/download/${file_name}"
+    local download_url=$(get_download_url "$arch")
+    if [ $? -ne 0 ]; then
+        log_error "获取下载链接失败"
+        return 1
+    fi
 
     log_step "下载 Komari 二进制文件..."
     log_info "URL: $download_url"
@@ -254,6 +303,27 @@ upgrade_komari() {
         return 1
     fi
 
+    # 选择发布通道
+    echo "请选择发布通道："
+    echo "  1) stable (稳定版，推荐)"
+    echo "  2) snapshot (快照版，最新功能)"
+    read -p "请选择 [默认: 1]: " channel_choice
+    
+    case $channel_choice in
+        2)
+            CHANNEL="snapshot"
+            log_info "已选择: snapshot (快照版)"
+            ;;
+        1|"")
+            CHANNEL="stable"
+            log_info "已选择: stable (稳定版)"
+            ;;
+        *)
+            log_error "无效选项，使用默认 stable"
+            CHANNEL="stable"
+            ;;
+    esac
+
     log_step "停止 Komari 服务..."
     systemctl stop ${SERVICE_NAME}.service
 
@@ -261,8 +331,13 @@ upgrade_komari() {
     cp "$BINARY_PATH" "${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
 
     local arch=$(detect_arch)
-    local file_name="komari-linux-${arch}"
-    local download_url="https://github.com/komari-monitor/komari/releases/latest/download/${file_name}"
+    local download_url=$(get_download_url "$arch")
+    if [ $? -ne 0 ]; then
+        log_error "获取下载链接失败，正在从备份恢复"
+        mv "${BINARY_PATH}.backup."* "$BINARY_PATH"
+        systemctl start ${SERVICE_NAME}.service
+        return 1
+    fi
 
     log_step "下载最新版本..."
     if ! curl -L -o "$BINARY_PATH" "$download_url"; then
