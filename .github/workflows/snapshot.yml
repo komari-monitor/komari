@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         goos: [windows, linux]
         goarch: [amd64, arm64, 386, riscv64]
@@ -137,7 +138,12 @@ jobs:
   publish-snapshot-release:
     needs: [prepare, build-and-attach-binaries]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download all binaries
         uses: actions/download-artifact@v4
         with:
@@ -146,19 +152,27 @@ jobs:
 
       - name: Create snapshot prerelease and upload binaries
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          cd artifacts
-          ls -al
-          # 创建（或复用）预发布并上传所有二进制文件
+          set -euxo pipefail
+          echo "Snapshot version: ${VERSION}"
+          ls -alR artifacts
+
+          # 如果同名 release/tag 已存在（例如重跑），先删除避免创建冲突
+          if gh release view "${VERSION}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${VERSION} 已存在，正在删除以重新创建..."
+            gh release delete "${VERSION}" --repo "${{ github.repository }}" --cleanup-tag --yes
+          fi
+
+          # 创建预发布并上传所有二进制文件
           gh release create "${VERSION}" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "${VERSION}" \
             --notes "Automated snapshot build (${VERSION}) from commit ${{ github.sha }}." \
             --prerelease \
-            komari-* || gh release upload "${VERSION}" --repo "${{ github.repository }}" --clobber komari-*
+            artifacts/komari-*
         shell: bash
 
   build-and-push-docker:

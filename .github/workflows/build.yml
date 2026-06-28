@@ -1,9 +1,6 @@
-name: Build Binaries on Main Push and PR
+name: Build Binaries on PR
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
