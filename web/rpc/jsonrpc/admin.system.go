@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -38,10 +40,62 @@ func init() {
 	reg("exec", adminExec, "Execute a command on clients")
 	reg("testSendMessage", adminTestSendMessage, "Send a test notification")
 	reg("testGeoip", adminTestGeoip, "Test GeoIP lookup")
+	reg("getDatabaseSize", adminGetDatabaseSize, "Get the database file size on disk")
+	reg("vacuumDatabase", adminVacuumDatabase, "Vacuum (compact) the SQLite database to reclaim disk space")
 
 	// 远程命令执行属敏感操作：除 admin 角色外，还需通过敏感操作二次验证。
 	rpc.MarkSensitive("admin:exec")
 }
+
+// databaseFileSize 统计 SQLite 数据库文件及其 WAL/SHM 附属文件占用的磁盘大小。
+func databaseFileSize() int64 {
+	if !flags.IsSQLite() {
+		return 0
+	}
+	var total int64
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if info, err := os.Stat(flags.DatabaseFile + suffix); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
+}
+
+func adminGetDatabaseSize(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	return map[string]any{
+		"type": flags.NormalizeDatabaseType(flags.DatabaseType),
+		"size": databaseFileSize(),
+	}, nil
+}
+
+func adminVacuumDatabase(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if !flags.IsSQLite() {
+		return nil, rpc.MakeError(rpc.InvalidParams, "VACUUM is only supported for SQLite databases", nil)
+	}
+
+	before := databaseFileSize()
+
+	db := dbcore.GetDBInstance()
+	// 先做一次 WAL checkpoint，把 WAL 中的内容合并回主库，确保 VACUUM 能回收最多空间。
+	db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	if err := db.Exec("VACUUM;").Error; err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to vacuum database: "+err.Error(), nil)
+	}
+	// VACUUM 后再次 checkpoint，回收 WAL 占用。
+	db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+
+	after := databaseFileSize()
+
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, "vacuumed database", "warn")
+
+	return map[string]any{
+		"before": before,
+		"after":  after,
+		"size":   after,
+	}, nil
+}
+
 
 func adminGetLogs(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
