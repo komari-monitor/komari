@@ -108,6 +108,12 @@ func DeleteTheme(c *gin.Context) {
 		return
 	}
 
+	// 校验主题短名称，防止路径穿越（如 ../）导致删除工作目录外的任意文件
+	if !isValidThemeShort(req.Short) {
+		api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
+		return
+	}
+
 	themeDir := filepath.Join("./data/theme", req.Short)
 
 	// 检查主题是否存在
@@ -135,6 +141,11 @@ func SetTheme(c *gin.Context) {
 
 	// 如果不是default主题，检查主题是否存在
 	if themeName != "default" {
+		// 校验主题名称，防止路径穿越（如 ../）访问工作目录外的文件
+		if !isValidThemeShort(themeName) {
+			api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
+			return
+		}
 		themeDir := filepath.Join("./data/theme", themeName)
 		themeConfigPath := filepath.Join(themeDir, "komari-theme.json")
 
@@ -472,6 +483,12 @@ func UpdateTheme(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	// 校验主题短名称，防止路径穿越（如 ../）访问工作目录外的文件
+	if !isValidThemeShort(req.Short) {
+		api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
 		return
 	}
 
