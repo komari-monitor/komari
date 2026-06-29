@@ -72,27 +72,7 @@ func MigrateFromLegacyTables(batchSize int) (*MigrationProgress, error) {
 		return progress, err
 	}
 
-	// 3. 迁移 gpu_records 表
-	log.Println("Starting migration of gpu_records table...")
-	if err := migrateGPURecordsTable(ctx, s, db, batchSize, progress); err != nil {
-		progress.Status = "failed"
-		progress.Error = fmt.Sprintf("failed to migrate gpu_records: %v", err)
-		progress.EndTime = time.Now()
-		config.Set(MetricMigrationStatusKey, "failed")
-		return progress, err
-	}
-
-	// 4. 迁移 gpu_records_long_term 表
-	log.Println("Starting migration of gpu_records_long_term table...")
-	if err := migrateGPURecordsLongTermTable(ctx, s, db, batchSize, progress); err != nil {
-		progress.Status = "failed"
-		progress.Error = fmt.Sprintf("failed to migrate gpu_records_long_term: %v", err)
-		progress.EndTime = time.Now()
-		config.Set(MetricMigrationStatusKey, "failed")
-		return progress, err
-	}
-
-	// 5. 迁移 ping_records 表
+	// 3. 迁移 ping_records 表
 	log.Println("Starting migration of ping_records table...")
 	if err := migratePingRecordsTable(ctx, s, db, batchSize, progress); err != nil {
 		progress.Status = "failed"
@@ -215,110 +195,6 @@ func migrateRecordsLongTermTable(ctx context.Context, s *metric.Store, db *gorm.
 		log.Printf("Migrated %d/%d total records", progress.MigratedRecords, progress.TotalRecords)
 
 		if len(records) < batchSize {
-			break
-		}
-	}
-
-	return nil
-}
-
-// migrateGPURecordsTable 迁移 gpu_records 表
-func migrateGPURecordsTable(ctx context.Context, s *metric.Store, db *gorm.DB, batchSize int, progress *MigrationProgress) error {
-	var totalCount int64
-	if err := db.Table("gpu_records").Count(&totalCount).Error; err != nil {
-		return err
-	}
-	progress.TotalGPURecords += totalCount
-
-	if totalCount == 0 {
-		log.Println("No records to migrate from gpu_records table")
-		return nil
-	}
-
-	log.Printf("Migrating %d GPU records from gpu_records table...", totalCount)
-
-	offset := 0
-	for {
-		var gpuRecords []models.GPURecord
-		err := db.Table("gpu_records").
-			Order("time ASC").
-			Limit(batchSize).
-			Offset(offset).
-			Find(&gpuRecords).Error
-
-		if err != nil {
-			return err
-		}
-
-		if len(gpuRecords) == 0 {
-			break
-		}
-
-		for _, rec := range gpuRecords {
-			if err := WriteGPURecord(ctx, rec); err != nil {
-				log.Printf("Failed to migrate GPU record for client %s device %d at %v: %v",
-					rec.Client, rec.DeviceIndex, rec.Time.ToTime(), err)
-				continue
-			}
-			progress.MigratedGPU++
-		}
-
-		offset += len(gpuRecords)
-		log.Printf("Migrated %d/%d GPU records from gpu_records table", progress.MigratedGPU, progress.TotalGPURecords)
-
-		if len(gpuRecords) < batchSize {
-			break
-		}
-	}
-
-	return nil
-}
-
-// migrateGPURecordsLongTermTable 迁移 gpu_records_long_term 表
-func migrateGPURecordsLongTermTable(ctx context.Context, s *metric.Store, db *gorm.DB, batchSize int, progress *MigrationProgress) error {
-	var totalCount int64
-	if err := db.Table("gpu_records_long_term").Count(&totalCount).Error; err != nil {
-		return err
-	}
-	progress.TotalGPURecords += totalCount
-
-	if totalCount == 0 {
-		log.Println("No records to migrate from gpu_records_long_term table")
-		return nil
-	}
-
-	log.Printf("Migrating %d GPU records from gpu_records_long_term table...", totalCount)
-
-	offset := 0
-	for {
-		var gpuRecords []models.GPURecord
-		err := db.Table("gpu_records_long_term").
-			Order("time ASC").
-			Limit(batchSize).
-			Offset(offset).
-			Find(&gpuRecords).Error
-
-		if err != nil {
-			return err
-		}
-
-		if len(gpuRecords) == 0 {
-			break
-		}
-
-		for _, rec := range gpuRecords {
-			if err := WriteGPURecord(ctx, rec); err != nil {
-				log.Printf("Failed to migrate long-term GPU record for client %s device %d at %v: %v",
-					rec.Client, rec.DeviceIndex, rec.Time.ToTime(), err)
-				continue
-			}
-			progress.MigratedGPU++
-		}
-
-		offset += len(gpuRecords)
-		log.Printf("Migrated %d/%d total GPU records", progress.MigratedGPU, progress.TotalGPURecords)
-
-		if len(gpuRecords) < batchSize {
 			break
 		}
 	}

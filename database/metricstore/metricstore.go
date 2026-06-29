@@ -15,7 +15,8 @@ import (
 // 指标名称常量
 const (
 	MetricCPU            = "cpu.usage"
-	MetricGPU            = "gpu.usage"
+	MetricGPU            = "gpu.usage"           // 实体级平均 GPU 使用率（对应 Record.Gpu）
+	MetricGPUDeviceUsage = "gpu.device.usage"    // 每设备 GPU 利用率（带 device_index 标签）
 	MetricGPUMem         = "gpu.memory.used"
 	MetricGPUMemTotal    = "gpu.memory.total"
 	MetricGPUTemp        = "gpu.temperature"
@@ -180,6 +181,7 @@ func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
 	definitions := []metric.Definition{
 		{Name: MetricCPU, Type: metric.TypeGauge, Unit: "%", Description: "CPU usage percentage"},
 		{Name: MetricGPU, Type: metric.TypeGauge, Unit: "%", Description: "GPU usage percentage"},
+		{Name: MetricGPUDeviceUsage, Type: metric.TypeGauge, Unit: "%", Description: "Per-device GPU utilization"},
 		{Name: MetricGPUMem, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory used"},
 		{Name: MetricGPUMemTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory total"},
 		{Name: MetricGPUTemp, Type: metric.TypeGauge, Unit: "°C", Description: "GPU temperature"},
@@ -264,7 +266,7 @@ func WriteGPURecord(ctx context.Context, rec models.GPURecord) error {
 	points := []metric.Point{
 		{MetricName: MetricGPUMem, EntityID: entityID, Timestamp: ts, Value: float64(rec.MemUsed), Tags: tags},
 		{MetricName: MetricGPUMemTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.MemTotal), Tags: tags},
-		{MetricName: MetricGPU, EntityID: entityID, Timestamp: ts, Value: float64(rec.Utilization), Tags: tags},
+		{MetricName: MetricGPUDeviceUsage, EntityID: entityID, Timestamp: ts, Value: float64(rec.Utilization), Tags: tags},
 		{MetricName: MetricGPUTemp, EntityID: entityID, Timestamp: ts, Value: float64(rec.Temperature), Tags: tags},
 	}
 
@@ -396,6 +398,148 @@ func GetRecordsByClientAndTime(ctx context.Context, clientUUID string, start, en
 	return records, nil
 }
 
+// GetRecordsByTime 从 metric store 查询所有客户端在时间范围内的记录
+func GetRecordsByTime(ctx context.Context, start, end time.Time) ([]models.Record, error) {
+	s := GetStore()
+	if s == nil {
+		return nil, fmt.Errorf("metric store not enabled")
+	}
+
+	metricNames := []string{
+		MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
+		MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
+		MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
+		MetricProcess, MetricConnections, MetricConnectionsUDP,
+	}
+
+	type recKey struct {
+		client string
+		ts     int64
+	}
+	recordMap := make(map[recKey]*models.Record)
+
+	for _, metricName := range metricNames {
+		points, err := s.Query(ctx, metric.Query{
+			MetricName: metricName,
+			Start:      start,
+			End:        end,
+			Order:      metric.OrderAsc,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to query metric %s: %w", metricName, err)
+		}
+
+		for _, p := range points {
+			key := recKey{client: p.EntityID, ts: p.Timestamp.Unix()}
+			if recordMap[key] == nil {
+				recordMap[key] = &models.Record{
+					Client: p.EntityID,
+					Time:   models.FromTime(p.Timestamp),
+				}
+			}
+			rec := recordMap[key]
+
+			switch metricName {
+			case MetricCPU:
+				rec.Cpu = float32(p.Value)
+			case MetricGPU:
+				rec.Gpu = float32(p.Value)
+			case MetricRAM:
+				rec.Ram = int64(p.Value)
+			case MetricRAMTotal:
+				rec.RamTotal = int64(p.Value)
+			case MetricSwap:
+				rec.Swap = int64(p.Value)
+			case MetricSwapTotal:
+				rec.SwapTotal = int64(p.Value)
+			case MetricLoad:
+				rec.Load = float32(p.Value)
+			case MetricTemp:
+				rec.Temp = float32(p.Value)
+			case MetricDisk:
+				rec.Disk = int64(p.Value)
+			case MetricDiskTotal:
+				rec.DiskTotal = int64(p.Value)
+			case MetricNetIn:
+				rec.NetIn = int64(p.Value)
+			case MetricNetOut:
+				rec.NetOut = int64(p.Value)
+			case MetricNetTotalUp:
+				rec.NetTotalUp = int64(p.Value)
+			case MetricNetTotalDown:
+				rec.NetTotalDown = int64(p.Value)
+			case MetricTrafficUp:
+				rec.TrafficUp = int64(p.Value)
+			case MetricTrafficDown:
+				rec.TrafficDown = int64(p.Value)
+			case MetricProcess:
+				rec.Process = int(p.Value)
+			case MetricConnections:
+				rec.Connections = int(p.Value)
+			case MetricConnectionsUDP:
+				rec.ConnectionsUdp = int(p.Value)
+			}
+		}
+	}
+
+	records := make([]models.Record, 0, len(recordMap))
+	for _, rec := range recordMap {
+		records = append(records, *rec)
+	}
+	return records, nil
+}
+
+// GetLatestTrafficBefore 查询每个客户端在指定时间之前最新的累计流量（用于计算增量基线）
+func GetLatestTrafficBefore(ctx context.Context, clientUUIDs []string, before time.Time) (map[string]models.Record, error) {
+	s := GetStore()
+	if s == nil {
+		return nil, fmt.Errorf("metric store not enabled")
+	}
+
+	result := make(map[string]models.Record, len(clientUUIDs))
+	end := before.Add(-time.Nanosecond)
+	for _, uuid := range clientUUIDs {
+		if uuid == "" {
+			continue
+		}
+		upPts, err := s.Query(ctx, metric.Query{
+			MetricName: MetricNetTotalUp,
+			EntityID:   uuid,
+			Start:      time.Unix(0, 0),
+			End:        end,
+			Order:      metric.OrderDesc,
+			Limit:      1,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(upPts) == 0 {
+			continue
+		}
+		rec := models.Record{
+			Client:     uuid,
+			Time:       models.FromTime(upPts[0].Timestamp),
+			NetTotalUp: int64(upPts[0].Value),
+		}
+		downPts, err := s.Query(ctx, metric.Query{
+			MetricName: MetricNetTotalDown,
+			EntityID:   uuid,
+			Start:      time.Unix(0, 0),
+			End:        end,
+			Order:      metric.OrderDesc,
+			Limit:      1,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(downPts) > 0 {
+			rec.NetTotalDown = int64(downPts[0].Value)
+		}
+		result[uuid] = rec
+	}
+	return result, nil
+}
+
 // GetGPURecordsByClientAndTime 从 metric store 查询 GPU 记录
 func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start, end time.Time) ([]models.GPURecord, error) {
 	s := GetStore()
@@ -403,8 +547,8 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 		return nil, fmt.Errorf("metric store not enabled")
 	}
 
-	// 查询 GPU 相关指标
-	gpuMetrics := []string{MetricGPU, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp}
+	// 查询 GPU 相关指标（每设备利用率使用独立指标 gpu.device.usage）
+	gpuMetrics := []string{MetricGPUDeviceUsage, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp}
 
 	// 按设备索引和时间组织数据
 	type gpuKey struct {
@@ -447,7 +591,7 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 			rec := recordMap[key]
 
 			switch metricName {
-			case MetricGPU:
+			case MetricGPUDeviceUsage:
 				rec.Utilization = float32(p.Value)
 			case MetricGPUMem:
 				rec.MemUsed = int64(p.Value)
@@ -528,7 +672,7 @@ func DeleteAllRecords(ctx context.Context) error {
 		MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
 		MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
 		MetricProcess, MetricConnections, MetricConnectionsUDP,
-		MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp, MetricPingLatency,
+		MetricGPUDeviceUsage, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp, MetricPingLatency,
 	}
 
 	for _, metricName := range metricNames {
@@ -552,7 +696,7 @@ func DeleteRecordsBefore(ctx context.Context, before time.Time) error {
 		MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
 		MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
 		MetricProcess, MetricConnections, MetricConnectionsUDP,
-		MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp, MetricPingLatency,
+		MetricGPUDeviceUsage, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp, MetricPingLatency,
 	}
 
 	for _, metricName := range metricNames {

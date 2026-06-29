@@ -1,65 +1,13 @@
 package clients
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
-	"sync"
-	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
-	"github.com/komari-monitor/komari/utils"
-
-	"gorm.io/gorm"
 )
-
-var reportSaveLocks sync.Map
-
-func getReportSaveLock(clientUUID string) *sync.Mutex {
-	lock, _ := reportSaveLocks.LoadOrStore(clientUUID, &sync.Mutex{})
-	return lock.(*sync.Mutex)
-}
-
-func getLatestTrafficRecord(tx *gorm.DB, clientUUID string) (*models.Record, error) {
-	var record models.Record
-	err := tx.Where("client = ?", clientUUID).Order("time DESC").First(&record).Error
-	if err == nil {
-		return &record, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
-
-	err = tx.Table("records_long_term").Where("client = ?", clientUUID).Order("time DESC").First(&record).Error
-	if err == nil {
-		return &record, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
-
-	return nil, nil
-}
-
-// Report 表示客户端报告数据
-// SaveReport 保存报告数据
-func SaveReport(uuid string, data map[string]interface{}) (err error) {
-
-	report, err := ParseReport(data)
-	if err != nil {
-		return err
-	}
-	err = SaveClientReport(uuid, report)
-	if err != nil {
-
-		return err
-	}
-	return nil
-
-}
 
 func GetClientUUIDByToken(token string) (clientUUID string, err error) {
 	db := dbcore.GetDBInstance()
@@ -69,18 +17,6 @@ func GetClientUUIDByToken(token string) (clientUUID string, err error) {
 		return "", err
 	}
 	return client.UUID, nil
-}
-
-func ParseReport(data map[string]interface{}) (report v1.Report, err error) {
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return v1.Report{}, err
-	}
-	err = json.Unmarshal(jsonData, &report)
-	if err != nil {
-		return v1.Report{}, err
-	}
-	return report, nil
 }
 
 // 检查数据防止异常数据导致数据库损坏
@@ -166,132 +102,3 @@ func ReportVerify(report v1.Report) error {
 	}
 	return nil
 }
-
-// SaveClientReport 保存客户端报告到 Record 表
-func SaveClientReport(clientUUID string, report v1.Report) (err error) {
-	db := dbcore.GetDBInstance()
-	lock := getReportSaveLock(clientUUID)
-	lock.Lock()
-	defer lock.Unlock()
-
-	if err := ReportVerify(report); err != nil {
-		return fmt.Errorf("failed to save Record: %w", err)
-	}
-
-	// 保存GPU详细记录到独立表
-	currentTime := time.Now()
-	if report.GPU != nil && len(report.GPU.DetailedInfo) > 0 {
-		for idx, gpu := range report.GPU.DetailedInfo {
-			gpuRecord := models.GPURecord{
-				Client:      clientUUID,
-				Time:        models.FromTime(currentTime),
-				DeviceIndex: idx,
-				DeviceName:  gpu.Name,
-				MemTotal:    gpu.MemoryTotal,
-				MemUsed:     gpu.MemoryUsed,
-				Utilization: float32(gpu.Utilization),
-				Temperature: gpu.Temperature,
-			}
-			if err := db.Create(&gpuRecord).Error; err != nil {
-				return fmt.Errorf("failed to save GPU record: %w", err)
-			}
-		}
-	}
-
-	// 计算平均GPU使用率，用于向后兼容
-	averageGPUUsage := float32(0)
-	if report.GPU != nil && len(report.GPU.DetailedInfo) > 0 {
-		averageGPUUsage = float32(report.GPU.AverageUsage)
-	}
-
-	Record := models.Record{
-		Client:         clientUUID,
-		Time:           models.FromTime(currentTime),
-		Cpu:            float32(report.CPU.Usage),
-		Gpu:            averageGPUUsage, // 使用平均GPU使用率
-		Ram:            report.Ram.Used,
-		RamTotal:       report.Ram.Total,
-		Swap:           report.Swap.Used,
-		SwapTotal:      report.Swap.Total,
-		Load:           float32(report.Load.Load1), // 使用 Load1 作为主要负载指标
-		Temp:           0,                          // Report 未提供 TEMP，设为 0（与原 nil 行为类似）
-		Disk:           report.Disk.Used,
-		DiskTotal:      report.Disk.Total,
-		NetIn:          report.Network.Down,
-		NetOut:         report.Network.Up,
-		NetTotalUp:     report.Network.TotalUp,
-		NetTotalDown:   report.Network.TotalDown,
-		TrafficUp:      0,
-		TrafficDown:    0,
-		Process:        report.Process,
-		Connections:    report.Connections.TCP,
-		ConnectionsUdp: report.Connections.UDP,
-		//Uptime:         report.Uptime,
-	}
-
-	// 使用事务确保 Record 和 ClientsInfo 一致性
-	err = db.Transaction(func(tx *gorm.DB) error {
-		previous, err := getLatestTrafficRecord(tx, clientUUID)
-		if err != nil {
-			return fmt.Errorf("failed to load previous Record: %w", err)
-		}
-		if previous != nil {
-			Record.TrafficUp = utils.ComputeTrafficDelta(report.Network.TotalUp, previous.NetTotalUp)
-			Record.TrafficDown = utils.ComputeTrafficDelta(report.Network.TotalDown, previous.NetTotalDown)
-		}
-
-		// 保存 Record
-		if err := tx.Create(&Record).Error; err != nil {
-			return fmt.Errorf("failed to save Record: %w", err)
-		}
-		return nil
-	})
-
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-/*
-// getString 从 map 中获取字符串
-func getString(data map[string]interface{}, key string) string {
-	if val, ok := data[key]; ok {
-		if str, ok := val.(string); ok {
-			return str
-		}
-	}
-	return ""
-}
-
-// getInt 从 map 中获取整数
-func getInt(data map[string]interface{}, key string) int {
-	if val, ok := data[key]; ok {
-		if num, ok := val.(float64); ok {
-			return int(num)
-		}
-	}
-	return 0
-}
-
-// getInt64 从 map 中获取 int64
-func getInt64(data map[string]interface{}, key string) int64 {
-	if val, ok := data[key]; ok {
-		if num, ok := val.(float64); ok {
-			return int64(num)
-		}
-	}
-	return 0
-}
-
-// getFloat 从 map 中获取 float64
-func getFloat(data map[string]interface{}, key string) float64 {
-	if val, ok := data[key]; ok {
-		if num, ok := val.(float64); ok {
-			return num
-		}
-	}
-	return 0.0
-}
-*/

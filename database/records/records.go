@@ -17,23 +17,6 @@ import (
 	"github.com/komari-monitor/komari/utils"
 )
 
-func RecordOne(rec models.Record) error {
-	// 启用 metric store 时优先写入新存储
-	if metricstore.IsEnabled() {
-		return metricstore.WriteRecord(context.Background(), rec)
-	}
-	db := dbcore.GetDBInstance()
-	return db.Create(&rec).Error
-}
-
-func RecordGPU(rec models.GPURecord) error {
-	if metricstore.IsEnabled() {
-		return metricstore.WriteGPURecord(context.Background(), rec)
-	}
-	db := dbcore.GetDBInstance()
-	return db.Create(&rec).Error
-}
-
 func DeleteAll() error {
 	if metricstore.IsEnabled() {
 		return metricstore.DeleteAllRecords(context.Background())
@@ -42,65 +25,24 @@ func DeleteAll() error {
 	if err := db.Exec("DELETE FROM records_long_term").Error; err != nil {
 		return err
 	}
-	if err := db.Exec("DELETE FROM gpu_records_long_term").Error; err != nil {
-		return err
-	}
-	if err := db.Exec("DELETE FROM gpu_records").Error; err != nil {
-		return err
-	}
 	return db.Exec("DELETE FROM records").Error
 }
 
-// GetGPURecordsByClientAndTime 获取GPU记录数据
+// GetGPURecordsByClientAndTime 获取GPU记录数据（仅 metric store 启用时有数据）
 func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.GPURecord, error) {
 	if metricstore.IsEnabled() {
 		return metricstore.GetGPURecordsByClientAndTime(context.Background(), uuid, start, end)
 	}
-	db := dbcore.GetDBInstance()
-	var records []models.GPURecord
-
-	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-
-	var recentRecords []models.GPURecord
-	recentStart := start
-	if end.After(fourHoursAgo) {
-		if recentStart.Before(fourHoursAgo) {
-			recentStart = fourHoursAgo
-		}
-		err := db.Where("client = ? AND time >= ? AND time <= ?", uuid, recentStart, end).
-			Order("time ASC, device_index ASC").Find(&recentRecords).Error
-		if err != nil {
-			log.Printf("Error fetching recent GPU records for client %s between %s and %s: %v", uuid, recentStart, end, err)
-			return nil, err
-		}
-	}
-
-	var longTermRecords []models.GPURecord
-	err := db.Table("gpu_records_long_term").Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).
-		Order("time ASC, device_index ASC").Find(&longTermRecords).Error
-	if err != nil {
-		log.Printf("Error fetching long-term GPU records for client %s between %s and %s: %v", uuid, start, end, err)
-		return recentRecords, nil
-	}
-
-	// 合并结果 - 不再需要类型转换
-	records = append(records, recentRecords...)
-	records = append(records, longTermRecords...)
-
-	return records, nil
-}
-
-func GetLatestRecord(uuid string) (Record []models.Record, err error) {
-	db := dbcore.GetDBInstance()
-	err = db.Where("client = ?", uuid).Order("time DESC").Limit(1).Find(&Record).Error
-	return
+	// 传统 GPU 表已移除，未启用 metric store 时不再提供 GPU 历史数据
+	return []models.GPURecord{}, nil
 }
 
 func DeleteRecordBefore(before time.Time) error {
+	if metricstore.IsEnabled() {
+		return metricstore.DeleteRecordsBefore(context.Background(), before)
+	}
 	db := dbcore.GetDBInstance()
 	db.Table("records_long_term").Where("time < ?", before).Delete(&models.Record{})
-	db.Table("gpu_records_long_term").Where("time < ?", before).Delete(&models.GPURecord{})
-	db.Where("time < ?", before).Delete(&models.GPURecord{})
 	return db.Where("time < ?", before).Delete(&models.Record{}).Error
 }
 
@@ -159,36 +101,60 @@ func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Reco
 	return records, nil
 }
 
-func GetAllRecords() ([]models.Record, error) {
+// GetRecordsByTime 获取所有客户端在时间范围内的记录
+func GetRecordsByTime(start, end time.Time) ([]models.Record, error) {
+	if metricstore.IsEnabled() {
+		return metricstore.GetRecordsByTime(context.Background(), start, end)
+	}
 	db := dbcore.GetDBInstance()
-	var records []models.Record
-	var long_term []models.Record
-	err := db.Table("records").Order("time ASC").Find(&records).Error
-	if err != nil {
-		log.Printf("Error fetching all records: %v", err)
-		return nil, err
+	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
+
+	var recent []models.Record
+	recentStart := start
+	if end.After(fourHoursAgo) {
+		if recentStart.Before(fourHoursAgo) {
+			recentStart = fourHoursAgo
+		}
+		_ = db.Table("records").Where("time >= ? AND time <= ?", recentStart, end).Order("time ASC").Find(&recent).Error
 	}
-	err = db.Table("records_long_term").Order("time ASC").Find(&long_term).Error
-	if err != nil {
-		log.Printf("Error fetching long-term records: %v", err)
-		return records, nil
+
+	var longTerm []models.Record
+	_ = db.Table("records_long_term").Where("time >= ? AND time <= ?", start, end).Order("time ASC").Find(&longTerm).Error
+
+	if len(longTerm) == 0 {
+		return recent, nil
 	}
-	records = append(records, long_term...)
-	return records, nil
+
+	// group recent by client+15min, keep latest in bucket
+	type key struct {
+		c    string
+		slot string
+	}
+	grouped := make(map[key]models.Record)
+	for _, rec := range recent {
+		k := key{c: rec.Client, slot: rec.Time.ToTime().Truncate(15 * time.Minute).Format(time.RFC3339)}
+		if old, ok := grouped[k]; !ok || rec.Time.ToTime().After(old.Time.ToTime()) {
+			grouped[k] = rec
+		}
+	}
+	flat := make([]models.Record, 0, len(grouped))
+	for _, rec := range grouped {
+		flat = append(flat, rec)
+	}
+	sort.Slice(flat, func(i, j int) bool { return flat[i].Time.ToTime().Before(flat[j].Time.ToTime()) })
+	flat = append(flat, longTerm...)
+	return flat, nil
 }
 
-// 压缩数据库
+// 压缩数据库（metric store 启用时由 metric 包自行管理 rollup，无需压缩传统表）
 func CompactRecord() error {
+	if metricstore.IsEnabled() {
+		return nil
+	}
 	db := dbcore.GetDBInstance()
 	err := migrateOldRecords(db)
 	if err != nil {
 		log.Printf("Error migrating old records: %v", err)
-		return err
-	}
-
-	err = migrateGPURecords(db)
-	if err != nil {
-		log.Printf("Error migrating GPU records: %v", err)
 		return err
 	}
 
@@ -481,150 +447,4 @@ func repairZeroTrafficDeltas(records []models.Record, previousByClient map[strin
 			previous = current
 		}
 	}
-}
-
-// migrateGPURecords 压缩GPU记录数据
-func migrateGPURecords(db *gorm.DB) error {
-	cutoff := compactRecordCutoff(time.Now())
-
-	// 查询超过4小时的GPU记录
-	var gpuRecords []models.GPURecord
-	if err := db.Where("time < ?", cutoff).Find(&gpuRecords).Error; err != nil {
-		return err
-	}
-
-	if len(gpuRecords) == 0 {
-		return nil
-	}
-
-	// 按Client + DeviceIndex + 15分钟时间窗口分组
-	type gpuGroupKey struct {
-		Client      string
-		DeviceIndex int
-		TimeSlot    time.Time
-		DeviceName  string
-	}
-
-	type gpuGroupData struct {
-		MemTotal    []int64
-		MemUsed     []int64
-		Utilization []float32
-		Temperature []int
-	}
-
-	groupedGPUs := make(map[gpuGroupKey]*gpuGroupData)
-
-	for _, record := range gpuRecords {
-		key := gpuGroupKey{
-			Client:      record.Client,
-			DeviceIndex: record.DeviceIndex,
-			TimeSlot:    record.Time.ToTime().Truncate(15 * time.Minute),
-			DeviceName:  record.DeviceName,
-		}
-
-		if _, ok := groupedGPUs[key]; !ok {
-			groupedGPUs[key] = &gpuGroupData{}
-		}
-
-		data := groupedGPUs[key]
-		data.MemTotal = append(data.MemTotal, record.MemTotal)
-		data.MemUsed = append(data.MemUsed, record.MemUsed)
-		data.Utilization = append(data.Utilization, record.Utilization)
-		data.Temperature = append(data.Temperature, record.Temperature)
-	}
-
-	// 百分位数计算函数 (复用传统Record压缩逻辑)
-	getPercentile := func(values []float64, percentile float64) float64 {
-		if len(values) == 0 {
-			return 0
-		}
-		sortedValues := make([]float64, len(values))
-		copy(sortedValues, values)
-		sort.Float64s(sortedValues)
-		index := float64(len(sortedValues)-1) * percentile
-		lowerIndex := int(index)
-		if lowerIndex >= len(sortedValues)-1 {
-			return sortedValues[len(sortedValues)-1]
-		}
-		frac := index - float64(lowerIndex)
-		return sortedValues[lowerIndex] + frac*(sortedValues[lowerIndex+1]-sortedValues[lowerIndex])
-	}
-
-	getIntPercentile := func(values []int64, percentile float64) int64 {
-		if len(values) == 0 {
-			return 0
-		}
-		floats := make([]float64, len(values))
-		for i, v := range values {
-			floats[i] = float64(v)
-		}
-		return int64(getPercentile(floats, percentile))
-	}
-
-	// 温度数据转换辅助函数
-	convertIntToInt64 := func(values []int) []int64 {
-		result := make([]int64, len(values))
-		for i, v := range values {
-			result[i] = int64(v)
-		}
-		return result
-	}
-
-	getFloat32Percentile := func(values []float32, percentile float64) float32 {
-		if len(values) == 0 {
-			return 0
-		}
-		floats := make([]float64, len(values))
-		for i, v := range values {
-			floats[i] = float64(v)
-		}
-		return float32(getPercentile(floats, percentile))
-	}
-
-	// 保持与传统Record压缩的一致性
-	high_percentile := 0.7
-
-	return db.Transaction(func(tx *gorm.DB) error {
-		for key, data := range groupedGPUs {
-			// 检查是否已存在记录
-			// 必须使用 models.FromTime() 转换，因为数据库存储的是格式化后的字符串
-			timeSlot := models.FromTime(key.TimeSlot)
-			var existingCount int64
-			if err := tx.Table("gpu_records_long_term").Where("client = ? AND device_index = ? AND time = ?",
-				key.Client, key.DeviceIndex, timeSlot).Count(&existingCount).Error; err != nil {
-				return err
-			}
-
-			compressedGPU := models.GPURecord{
-				Client:      key.Client,
-				DeviceIndex: key.DeviceIndex,
-				Time:        models.FromTime(key.TimeSlot),
-				DeviceName:  key.DeviceName,
-				MemTotal:    getIntPercentile(data.MemTotal, high_percentile),
-				MemUsed:     getIntPercentile(data.MemUsed, high_percentile),
-				Utilization: getFloat32Percentile(data.Utilization, high_percentile),
-				Temperature: int(getIntPercentile(convertIntToInt64(data.Temperature), high_percentile)),
-			}
-
-			if existingCount > 0 {
-				// 更新已存在记录
-				if err := tx.Table("gpu_records_long_term").Where("client = ? AND device_index = ? AND time = ?",
-					key.Client, key.DeviceIndex, timeSlot).Updates(&compressedGPU).Error; err != nil {
-					return err
-				}
-			} else {
-				// 创建新记录
-				if err := tx.Table("gpu_records_long_term").Create(&compressedGPU).Error; err != nil {
-					return err
-				}
-			}
-		}
-
-		// 删除已压缩的原始GPU数据
-		if err := tx.Where("time < ?", cutoff.Add(-1*time.Hour)).Delete(&models.GPURecord{}).Error; err != nil {
-			return err
-		}
-
-		return nil
-	})
 }

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	recordsdb "github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
@@ -510,46 +509,10 @@ func getLoadRecordsCombined(uuid string, start, end time.Time) ([]models.Record,
 	if uuid != "" {
 		return recordsdb.GetRecordsByClientAndTime(uuid, start, end)
 	}
-	db := dbcore.GetDBInstance()
-	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-
-	var recent []models.Record
-	recentStart := start
-	if end.After(fourHoursAgo) {
-		if recentStart.Before(fourHoursAgo) {
-			recentStart = fourHoursAgo
-		}
-		_ = db.Table("records").Where("time >= ? AND time <= ?", recentStart, end).Order("time ASC").Find(&recent).Error
-	}
-
-	var longTerm []models.Record
-	_ = db.Table("records_long_term").Where("time >= ? AND time <= ?", start, end).Order("time ASC").Find(&longTerm).Error
-
-	// if no long term, return all recent
-	if len(longTerm) == 0 {
-		return recent, nil
-	}
-
-	// group recent by client+15min, keep latest in bucket
-	type key struct {
-		c    string
-		slot string
-	}
-	grouped := make(map[key]models.Record)
-	for _, rec := range recent {
-		k := key{c: rec.Client, slot: rec.Time.ToTime().Truncate(15 * time.Minute).Format(time.RFC3339)}
-		if old, ok := grouped[k]; !ok || rec.Time.ToTime().After(old.Time.ToTime()) {
-			grouped[k] = rec
-		}
-	}
-	flat := make([]models.Record, 0, len(grouped))
-	for _, rec := range grouped {
-		flat = append(flat, rec)
-	}
-	sort.Slice(flat, func(i, j int) bool { return flat[i].Time.ToTime().Before(flat[j].Time.ToTime()) })
-	flat = append(flat, longTerm...)
-	return flat, nil
+	// 所有客户端：统一通过 records 包查询，启用 metric store 时自动走 metric store
+	return recordsdb.GetRecordsByTime(start, end)
 }
+
 
 // ---------- downsampling helpers ----------
 

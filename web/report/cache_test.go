@@ -19,7 +19,6 @@ func openReportCacheTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&models.Record{}))
 	require.NoError(t, db.Table("records_long_term").AutoMigrate(&models.Record{}))
-	require.NoError(t, db.AutoMigrate(&models.GPURecord{}))
 	return db
 }
 
