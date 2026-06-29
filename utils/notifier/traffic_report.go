@@ -8,7 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"context"
+
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/pkg/config"
@@ -173,7 +176,50 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 // getClientTrafficInRange 查询某客户端在指定时间段内的流量增量
 // 通过累加持久化的精确流量增量字段计算用量
 func getClientTrafficInRange(clientUUID string, trafficType string, start, end time.Time) (int64, error) {
+	if metricstore.IsEnabled() {
+		return getClientTrafficInRangeFromMetricStore(clientUUID, trafficType, start, end)
+	}
 	return getClientTrafficInRangeWithDB(dbcore.GetDBInstance(), clientUUID, trafficType, start, end)
+}
+
+// getClientTrafficInRangeFromMetricStore 在 metric store 启用时从 metric store 计算流量用量
+func getClientTrafficInRangeFromMetricStore(clientUUID string, trafficType string, start, end time.Time) (int64, error) {
+	ctx := context.Background()
+	recs, err := metricstore.GetRecordsByClientAndTime(ctx, clientUUID, start, end)
+	if err != nil {
+		return 0, err
+	}
+
+	records := make([]trafficDeltaRecord, 0, len(recs))
+	for _, r := range recs {
+		records = append(records, trafficDeltaRecord{
+			Time:         r.Time,
+			NetTotalUp:   r.NetTotalUp,
+			NetTotalDown: r.NetTotalDown,
+			TrafficUp:    r.TrafficUp,
+			TrafficDown:  r.TrafficDown,
+		})
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Time.ToTime().Before(records[j].Time.ToTime())
+	})
+
+	// 计算增量基线（区间开始前最后一条累计流量）
+	var previous *trafficDeltaRecord
+	baseline, err := metricstore.GetLatestTrafficBefore(ctx, []string{clientUUID}, start)
+	if err != nil {
+		return 0, err
+	}
+	if base, ok := baseline[clientUUID]; ok {
+		previous = &trafficDeltaRecord{
+			Time:         base.Time,
+			NetTotalUp:   base.NetTotalUp,
+			NetTotalDown: base.NetTotalDown,
+		}
+	}
+
+	totalUp, totalDown := sumTrafficDeltas(records, previous)
+	return computeUsedByType(strings.ToLower(trafficType), totalUp, totalDown), nil
 }
 
 type trafficDeltaRecord struct {

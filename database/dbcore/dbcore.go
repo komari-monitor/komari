@@ -252,7 +252,6 @@ func GetDBInstance() *gorm.DB {
 			&models.User{},
 			&models.Client{},
 			&models.Record{},
-			&models.GPURecord{},
 			&models.Log{},
 			&models.Clipboard{},
 			&models.LoadNotification{},
@@ -273,12 +272,6 @@ func GetDBInstance() *gorm.DB {
 		if err != nil {
 			log.Printf("Failed to create records_long_term table, it may already exist: %v", err)
 		}
-		err = instance.Table("gpu_records_long_term").AutoMigrate(
-			&models.GPURecord{},
-		)
-		if err != nil {
-			log.Printf("Failed to create gpu_records_long_term table, it may already exist: %v", err)
-		}
 		err = instance.AutoMigrate(
 			&models.Session{},
 		)
@@ -297,8 +290,6 @@ func GetDBInstance() *gorm.DB {
 		if flags.IsSQLite() {
 			instance.Exec("CREATE INDEX IF NOT EXISTS idx_record_client_time ON records(client, time)")
 			instance.Exec("CREATE INDEX IF NOT EXISTS idx_record_lt_client_time ON records_long_term(client, time)")
-			instance.Exec("CREATE INDEX IF NOT EXISTS idx_gpu_record_client_time ON gpu_records(client, time)")
-			instance.Exec("CREATE INDEX IF NOT EXISTS idx_gpu_record_lt_client_time ON gpu_records_long_term(client, time)")
 			instance.Exec("CREATE INDEX IF NOT EXISTS idx_ping_record_client_time ON ping_records(client, time)")
 		}
 
