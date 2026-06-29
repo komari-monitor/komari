@@ -60,16 +60,19 @@ func (t *TelegramSender) SendTextMessage(message, title string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("telegram API returned non-OK status: %d", resp.StatusCode)
-	}
-
 	var result struct {
 		Ok          bool   `json:"ok"`
 		Description string `json:"description"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return err
+		return fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if result.Description != "" {
+			return fmt.Errorf("telegram API error: %s", result.Description)
+		}
+		return fmt.Errorf("telegram API returned non-OK status: %d", resp.StatusCode)
 	}
 
 	if !result.Ok {
