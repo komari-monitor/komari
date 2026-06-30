@@ -15,8 +15,8 @@ import (
 // 指标名称常量
 const (
 	MetricCPU            = "cpu.usage"
-	MetricGPU            = "gpu.usage"           // 实体级平均 GPU 使用率（对应 Record.Gpu）
-	MetricGPUDeviceUsage = "gpu.device.usage"    // 每设备 GPU 利用率（带 device_index 标签）
+	MetricGPU            = "gpu.usage"        // 实体级平均 GPU 使用率（对应 Record.Gpu）
+	MetricGPUDeviceUsage = "gpu.device.usage" // 每设备 GPU 利用率（带 device_index 标签）
 	MetricGPUMem         = "gpu.memory.used"
 	MetricGPUMemTotal    = "gpu.memory.total"
 	MetricGPUTemp        = "gpu.temperature"
@@ -44,13 +44,14 @@ var (
 	store     *metric.Store
 	storeMu   sync.RWMutex
 	storeOnce sync.Once
+	reloadMu  sync.Mutex
 )
 
 // MetricStoreConfig 保存 metric store 配置
 type MetricStoreConfig struct {
 	Enabled         bool   `json:"metric_store_enabled" default:"false"`          // 是否启用独立 metrics 数据库
 	Driver          string `json:"metric_db_driver" default:"sqlite"`             // 数据库类型: sqlite, mysql, postgresql
-	DSN             string `json:"metric_db_dsn" default:"./data/metrics.db"`    // 数据库连接串
+	DSN             string `json:"metric_db_dsn" default:"./data/metrics.db"`     // 数据库连接串
 	RetentionDays   int    `json:"metric_retention_days" default:"30"`            // 数据保留天数
 	TablePrefix     string `json:"metric_table_prefix" default:"metric_"`         // 表名前缀
 	MaxOpenConns    int    `json:"metric_max_open_conns" default:"25"`            // 最大连接数
@@ -60,17 +61,96 @@ type MetricStoreConfig struct {
 
 // MetricStoreConfigKeys 配置键
 const (
-	MetricStoreEnabledKey         = "metric_store_enabled"
-	MetricDBDriverKey             = "metric_db_driver"
-	MetricDBDSNKey                = "metric_db_dsn"
-	MetricRetentionDaysKey        = "metric_retention_days"
-	MetricTablePrefixKey          = "metric_table_prefix"
-	MetricMaxOpenConnsKey         = "metric_max_open_conns"
-	MetricMaxIdleConnsKey         = "metric_max_idle_conns"
-	MetricMigrationStatusKey      = "metric_migration_status"
+	MetricStoreEnabledKey    = "metric_store_enabled"
+	MetricDBDriverKey        = "metric_db_driver"
+	MetricDBDSNKey           = "metric_db_dsn"
+	MetricRetentionDaysKey   = "metric_retention_days"
+	MetricTablePrefixKey     = "metric_table_prefix"
+	MetricMaxOpenConnsKey    = "metric_max_open_conns"
+	MetricMaxIdleConnsKey    = "metric_max_idle_conns"
+	MetricMigrationStatusKey = "metric_migration_status"
 )
 
-// InitializeStore 初始化 metric store（启动时调用）
+// buildMetricConfig 根据 MetricStoreConfig 构造底层 metric.Config。
+// autoMigrate 控制是否在 Open 时自动建表：正式初始化/热加载时为 true，
+// 仅做连接测试时为 false（不写入 schema，避免对目标库产生副作用）。
+func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config, error) {
+	driver := metric.Driver(cfg.Driver)
+	if driver == "" {
+		driver = metric.DriverSQLite
+	}
+
+	tablePrefix := cfg.TablePrefix
+	if tablePrefix == "" {
+		tablePrefix = "metric_"
+	}
+	retention := cfg.RetentionDays
+	if retention <= 0 {
+		retention = 30
+	}
+
+	opts := []metric.Option{
+		metric.WithTablePrefix(tablePrefix),
+		metric.WithDefaultRetention(retention),
+		metric.WithAutoMigrate(autoMigrate),
+		metric.WithMaxOpenConns(cfg.MaxOpenConns),
+		metric.WithMaxIdleConns(cfg.MaxIdleConns),
+	}
+
+	switch driver {
+	case metric.DriverSQLite:
+		dsn := cfg.DSN
+		if dsn == "" || dsn == "./data/metrics.db" {
+			dsn = "file:./data/metrics.db?cache=shared&mode=rwc"
+		}
+		return metric.SQLite(dsn, opts...), nil
+	case metric.DriverMySQL:
+		return metric.MySQL(cfg.DSN, opts...), nil
+	case metric.DriverPostgreSQL:
+		return metric.PostgreSQL(cfg.DSN, opts...), nil
+	default:
+		return metric.Config{}, fmt.Errorf("unsupported metric database driver: %s", cfg.Driver)
+	}
+}
+
+// openStore 按配置打开 metric store 并创建指标定义。
+func openStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, error) {
+	metricCfg, err := buildMetricConfig(cfg, true)
+	if err != nil {
+		return nil, err
+	}
+
+	s, err := metric.Open(ctx, metricCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open metric store: %w", err)
+	}
+
+	if err := createMetricDefinitions(ctx, s); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("failed to create metric definitions: %w", err)
+	}
+
+	return s, nil
+}
+
+// TestConnection 使用给定配置尝试连接 metrics 数据库（不影响当前运行的 store）。
+// 仅打开连接并 Ping，不执行自动建表，连接成功后立即关闭。失败时返回可读错误。
+func TestConnection(ctx context.Context, cfg *MetricStoreConfig) error {
+	metricCfg, err := buildMetricConfig(cfg, false)
+	if err != nil {
+		return err
+	}
+
+	s, err := metric.Open(ctx, metricCfg)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+
+	return s.Ping(ctx)
+}
+
+// InitializeStore 初始化 metric store（启动时调用，仅执行一次）。
 func InitializeStore() error {
 	var initErr error
 	storeOnce.Do(func() {
@@ -88,56 +168,9 @@ func InitializeStore() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		driver := metric.Driver(cfg.Driver)
-		if driver == "" {
-			driver = metric.DriverSQLite
-		}
-
-		var metricCfg metric.Config
-		switch driver {
-		case metric.DriverSQLite:
-			dsn := cfg.DSN
-			if dsn == "" || dsn == "./data/metrics.db" {
-				dsn = "file:./data/metrics.db?cache=shared&mode=rwc"
-			}
-			metricCfg = metric.SQLite(dsn,
-				metric.WithTablePrefix(cfg.TablePrefix),
-				metric.WithDefaultRetention(cfg.RetentionDays),
-				metric.WithAutoMigrate(true),
-				metric.WithMaxOpenConns(cfg.MaxOpenConns),
-				metric.WithMaxIdleConns(cfg.MaxIdleConns),
-			)
-		case metric.DriverMySQL:
-			metricCfg = metric.MySQL(cfg.DSN,
-				metric.WithTablePrefix(cfg.TablePrefix),
-				metric.WithDefaultRetention(cfg.RetentionDays),
-				metric.WithAutoMigrate(true),
-				metric.WithMaxOpenConns(cfg.MaxOpenConns),
-				metric.WithMaxIdleConns(cfg.MaxIdleConns),
-			)
-		case metric.DriverPostgreSQL:
-			metricCfg = metric.PostgreSQL(cfg.DSN,
-				metric.WithTablePrefix(cfg.TablePrefix),
-				metric.WithDefaultRetention(cfg.RetentionDays),
-				metric.WithAutoMigrate(true),
-				metric.WithMaxOpenConns(cfg.MaxOpenConns),
-				metric.WithMaxIdleConns(cfg.MaxIdleConns),
-			)
-		default:
-			initErr = fmt.Errorf("unsupported metric database driver: %s", cfg.Driver)
-			return
-		}
-
-		s, err := metric.Open(ctx, metricCfg)
+		s, err := openStore(ctx, cfg)
 		if err != nil {
-			initErr = fmt.Errorf("failed to open metric store: %w", err)
-			return
-		}
-
-		// 创建所有指标定义
-		if err := createMetricDefinitions(ctx, s); err != nil {
-			s.Close()
-			initErr = fmt.Errorf("failed to create metric definitions: %w", err)
+			initErr = err
 			return
 		}
 
@@ -149,6 +182,54 @@ func InitializeStore() error {
 	})
 
 	return initErr
+}
+
+// Reload 根据最新配置热重载 metric store，无需重启进程。
+// 当配置中 enabled=false 时仅关闭当前 store；否则先用新配置测试连接，
+// 成功后再替换运行中的 store，最后关闭旧实例。任何失败都会保留旧 store 不变。
+func Reload(ctx context.Context) error {
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
+
+	cfg, err := config.GetManyAs[MetricStoreConfig]()
+	if err != nil {
+		return fmt.Errorf("failed to load metric store config: %w", err)
+	}
+
+	// 关闭：未启用时释放当前 store。
+	if !cfg.Enabled {
+		storeMu.Lock()
+		old := store
+		store = nil
+		storeMu.Unlock()
+		if old != nil {
+			if cerr := old.Close(); cerr != nil {
+				log.Printf("Failed to close previous metric store on reload: %v", cerr)
+			}
+			log.Println("Metric store disabled and closed via hot reload")
+		}
+		return nil
+	}
+
+	// 启用：用新配置打开并建表（内部已 Ping 校验连接）。
+	s, err := openStore(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
+	storeMu.Lock()
+	old := store
+	store = s
+	storeMu.Unlock()
+
+	if old != nil {
+		if cerr := old.Close(); cerr != nil {
+			log.Printf("Failed to close previous metric store on reload: %v", cerr)
+		}
+	}
+
+	log.Printf("Metric store reloaded successfully (driver=%s, retention=%d days)", cfg.Driver, cfg.RetentionDays)
+	return nil
 }
 
 // GetStore 获取 metric store 实例（如果未启用返回 nil）

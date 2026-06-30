@@ -3,10 +3,12 @@ package jsonrpc
 import (
 	"context"
 	"strconv"
+	"time"
 
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
@@ -105,14 +107,70 @@ func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonR
 	return cst, nil
 }
 
+// metricStoreConfigKeys 是与 metrics 独立数据库相关、需要触发连接测试 + 热重载的配置键。
+var metricStoreConfigKeys = map[string]struct{}{
+	metricstore.MetricStoreEnabledKey:  {},
+	metricstore.MetricDBDriverKey:      {},
+	metricstore.MetricDBDSNKey:         {},
+	metricstore.MetricRetentionDaysKey: {},
+	metricstore.MetricTablePrefixKey:   {},
+	metricstore.MetricMaxOpenConnsKey:  {},
+	metricstore.MetricMaxIdleConnsKey:  {},
+}
+
+// metricKeysTouched 判断本次设置变更是否涉及 metrics 数据库相关键。
+func metricKeysTouched(cfg map[string]interface{}) bool {
+	for key := range cfg {
+		if _, ok := metricStoreConfigKeys[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	cfg := make(map[string]interface{})
 	if err := req.BindParams(&cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing request body: "+err.Error(), nil)
 	}
+
+	// 若本次修改涉及 metrics 数据库配置，则在落库前先用「当前配置 + 本次改动」
+	// 合并出的目标配置做一次连接测试。目标状态为启用时必须测试；即使未启用，
+	// 只要本次保存了 DSN，也要测试，避免把明显无效的连接串保存给用户。
+	touchedMetric := metricKeysTouched(cfg)
+	if touchedMetric {
+		merged, err := mergedMetricConfig(cfg)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InternalError, "Failed to resolve metric store config: "+err.Error(), nil)
+		}
+		_, dsnTouched := cfg[metricstore.MetricDBDSNKey]
+		if merged.Enabled || dsnTouched {
+			testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			if err := metricstore.TestConnection(testCtx, merged); err != nil {
+				cancel()
+				return nil, rpc.MakeError(rpc.InvalidParams,
+					"Metrics database connection test failed: "+err.Error(), nil)
+			}
+			cancel()
+		}
+	}
+
 	if err := config.SetMany(cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to update settings: "+err.Error(), nil)
 	}
+
+	// 配置已落库，热重载 metric store（无需重启）。连接已在上面验证过，
+	// 这里再次失败属异常情况，回报给用户。
+	if touchedMetric {
+		reloadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := metricstore.Reload(reloadCtx); err != nil {
+			cancel()
+			return nil, rpc.MakeError(rpc.InternalError,
+				"Settings saved but metrics database hot reload failed: "+err.Error(), nil)
+		}
+		cancel()
+	}
+
 	message := "update settings: "
 	for key := range cfg {
 		message += key + ", "
@@ -125,7 +183,80 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	return nil, nil
 }
 
+// mergedMetricConfig 读取当前持久化的 metric store 配置，并把本次请求中涉及的
+// metrics 相关键覆盖上去，得到「即将生效」的目标配置，用于落库前的连接测试。
+func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreConfig, error) {
+	merged, err := config.GetManyAs[metricstore.MetricStoreConfig]()
+	if err != nil {
+		return nil, err
+	}
+
+	if v, ok := cfg[metricstore.MetricStoreEnabledKey]; ok {
+		merged.Enabled = toBool(v, merged.Enabled)
+	}
+	if v, ok := cfg[metricstore.MetricDBDriverKey]; ok {
+		if s, ok := v.(string); ok {
+			merged.Driver = s
+		}
+	}
+	if v, ok := cfg[metricstore.MetricDBDSNKey]; ok {
+		if s, ok := v.(string); ok {
+			merged.DSN = s
+		}
+	}
+	if v, ok := cfg[metricstore.MetricRetentionDaysKey]; ok {
+		merged.RetentionDays = toInt(v, merged.RetentionDays)
+	}
+	if v, ok := cfg[metricstore.MetricTablePrefixKey]; ok {
+		if s, ok := v.(string); ok {
+			merged.TablePrefix = s
+		}
+	}
+	if v, ok := cfg[metricstore.MetricMaxOpenConnsKey]; ok {
+		merged.MaxOpenConns = toInt(v, merged.MaxOpenConns)
+	}
+	if v, ok := cfg[metricstore.MetricMaxIdleConnsKey]; ok {
+		merged.MaxIdleConns = toInt(v, merged.MaxIdleConns)
+	}
+
+	return merged, nil
+}
+
+// toBool 将 JSON 解码得到的任意值转换为 bool，失败时返回 fallback。
+func toBool(v any, fallback bool) bool {
+	switch val := v.(type) {
+	case bool:
+		return val
+	case string:
+		switch val {
+		case "true", "1":
+			return true
+		case "false", "0":
+			return false
+		}
+	}
+	return fallback
+}
+
+// toInt 将 JSON 解码得到的任意值（通常是 float64 或 string）转换为 int，失败时返回 fallback。
+func toInt(v any, fallback int) int {
+	switch val := v.(type) {
+	case float64:
+		return int(val)
+	case int:
+		return val
+	case int64:
+		return int(val)
+	case string:
+		if n, err := strconv.Atoi(val); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
 func adminClearAllRecords(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+
 	records.DeleteAll()
 	tasks.DeleteAllPingRecords()
 	actor, ip := auditActor(ctx)
