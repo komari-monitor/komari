@@ -76,10 +76,7 @@ const (
 // autoMigrate 控制是否在 Open 时自动建表：正式初始化/热加载时为 true，
 // 仅做连接测试时为 false（不写入 schema，避免对目标库产生副作用）。
 func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config, error) {
-	driver := metric.Driver(cfg.Driver)
-	if driver == "" {
-		driver = metric.DriverSQLite
-	}
+	driver := ResolveDriverFromConfig(cfg.Driver, cfg.DSN)
 
 	tablePrefix := cfg.TablePrefix
 	if tablePrefix == "" {
@@ -135,6 +132,98 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 	default:
 		return metric.Config{}, fmt.Errorf("unsupported metric database driver: %s", cfg.Driver)
 	}
+}
+
+// ResolveDriverFromConfig 根据 DSN 自动推断 metrics 数据库类型；当 DSN 不能可靠
+// 识别时回退到旧配置中的 driver，以兼容已有配置和非常规 DSN。
+func ResolveDriverFromConfig(configuredDriver, dsn string) metric.Driver {
+	if driver, ok := InferDriverFromDSN(dsn); ok {
+		return driver
+	}
+
+	switch driver := metric.Driver(strings.ToLower(strings.TrimSpace(configuredDriver))); driver {
+	case metric.DriverSQLite, metric.DriverMySQL, metric.DriverPostgreSQL:
+		return driver
+	default:
+		return metric.DriverSQLite
+	}
+}
+
+// InferDriverFromDSN 尽量根据常见 DSN 格式推断数据库类型。
+// 返回 ok=false 表示格式不够明确，调用方应使用已有配置作为兜底。
+func InferDriverFromDSN(dsn string) (metric.Driver, bool) {
+	raw := strings.TrimSpace(dsn)
+	if raw == "" {
+		return metric.DriverSQLite, true
+	}
+	lower := strings.ToLower(raw)
+
+	// PostgreSQL URL DSN: postgres://... 或 postgresql://...
+	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
+		return metric.DriverPostgreSQL, true
+	}
+
+	// SQLite 常见文件/内存 DSN。
+	if raw == ":memory:" || strings.HasPrefix(lower, "file:") || strings.HasPrefix(lower, "sqlite://") || strings.HasPrefix(lower, "sqlite3://") {
+		return metric.DriverSQLite, true
+	}
+
+	// MySQL URL（虽然 go-sql-driver/mysql 原生 DSN 通常不是 URL，但这里用于给出
+	// 类型推断；连接测试仍会校验 DSN 是否可被驱动接受）。
+	if strings.HasPrefix(lower, "mysql://") {
+		return metric.DriverMySQL, true
+	}
+
+	// PostgreSQL 关键字/值 DSN: host=... user=... dbname=...
+	if looksLikePostgreSQLKeyValueDSN(lower) {
+		return metric.DriverPostgreSQL, true
+	}
+
+	// go-sql-driver/mysql DSN: user:pass@tcp(host:3306)/db、user@unix(...)/db、user:pass@/db 等。
+	if looksLikeMySQLDSN(lower) {
+		return metric.DriverMySQL, true
+	}
+
+	// SQLite 路径：./data/metrics.db、/var/lib/metrics.sqlite3、metrics.sqlite 等。
+	if looksLikeSQLitePath(lower) {
+		return metric.DriverSQLite, true
+	}
+
+	return "", false
+}
+
+func looksLikePostgreSQLKeyValueDSN(lower string) bool {
+	if !strings.Contains(lower, "=") || strings.Contains(lower, "://") {
+		return false
+	}
+	keys := []string{"host=", "user=", "password=", "dbname=", "port=", "sslmode="}
+	matched := 0
+	for _, key := range keys {
+		if strings.Contains(lower, key) {
+			matched++
+		}
+	}
+	// dbname= 基本是 PostgreSQL libpq DSN 的强特征；否则至少匹配两个常见键。
+	return strings.Contains(lower, "dbname=") || matched >= 2
+}
+
+func looksLikeMySQLDSN(lower string) bool {
+	if strings.Contains(lower, "://") || strings.Contains(lower, " ") {
+		return false
+	}
+	if strings.Contains(lower, "@tcp(") || strings.Contains(lower, "@unix(") || strings.Contains(lower, "@/") {
+		return true
+	}
+	// user:pass@host/db、user@host/db 这类虽然不是推荐格式，但也明显偏 MySQL。
+	return strings.Contains(lower, "@") && strings.Contains(lower, "/")
+}
+
+func looksLikeSQLitePath(lower string) bool {
+	path := lower
+	if idx := strings.IndexAny(path, "?"); idx >= 0 {
+		path = path[:idx]
+	}
+	return strings.HasSuffix(path, ".db") || strings.HasSuffix(path, ".sqlite") || strings.HasSuffix(path, ".sqlite3")
 }
 
 // stripSharedCache 从 SQLite DSN 中移除 cache=shared 参数，避免共享缓存模式下的
@@ -228,7 +317,7 @@ func InitializeStore() error {
 		store = s
 		storeMu.Unlock()
 
-		log.Printf("Metric store initialized successfully (driver=%s, retention=%d days)", cfg.Driver, cfg.RetentionDays)
+		log.Printf("Metric store initialized successfully (driver=%s, retention=%d days)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN), cfg.RetentionDays)
 	})
 
 	return initErr
@@ -278,7 +367,7 @@ func Reload(ctx context.Context) error {
 		}
 	}
 
-	log.Printf("Metric store reloaded successfully (driver=%s, retention=%d days)", cfg.Driver, cfg.RetentionDays)
+	log.Printf("Metric store reloaded successfully (driver=%s, retention=%d days)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN), cfg.RetentionDays)
 	return nil
 }
 

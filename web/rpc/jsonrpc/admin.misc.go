@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/database/accounts"
@@ -139,6 +140,18 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	// 只要本次保存了 DSN，也要测试，避免把明显无效的连接串保存给用户。
 	touchedMetric := metricKeysTouched(cfg)
 	if touchedMetric {
+		// 数据库类型不再由前端显式选择，而是根据 DSN 自动推断后写回配置，
+		// 使后续连接测试、热重载和初始化都使用一致的 driver。
+		if v, ok := cfg[metricstore.MetricDBDSNKey]; ok {
+			if dsn, ok := v.(string); ok {
+				dsn = strings.TrimSpace(dsn)
+				cfg[metricstore.MetricDBDSNKey] = dsn
+				if driver, inferred := metricstore.InferDriverFromDSN(dsn); inferred {
+					cfg[metricstore.MetricDBDriverKey] = string(driver)
+				}
+			}
+		}
+
 		merged, err := mergedMetricConfig(cfg)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to resolve metric store config: "+err.Error(), nil)
