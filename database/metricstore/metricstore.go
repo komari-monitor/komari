@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,24 +94,73 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 		metric.WithTablePrefix(tablePrefix),
 		metric.WithDefaultRetention(retention),
 		metric.WithAutoMigrate(autoMigrate),
-		metric.WithMaxOpenConns(cfg.MaxOpenConns),
-		metric.WithMaxIdleConns(cfg.MaxIdleConns),
 	}
 
 	switch driver {
 	case metric.DriverSQLite:
 		dsn := cfg.DSN
 		if dsn == "" || dsn == "./data/metrics.db" {
-			dsn = "file:./data/metrics.db?cache=shared&mode=rwc"
+			// 注意：刻意不使用 cache=shared。SQLite 共享缓存模式使用表级锁，
+			// 当一个连接持有读锁、另一个连接尝试写入时会立即返回
+			// SQLITE_LOCKED（"database table is locked"），且 busy_timeout
+			// 对共享缓存的表级锁无效，迁移期间与前台查询/实时写入并发时必然报错。
+			// _txlock=immediate 让写事务开始即获取写锁，避免锁升级死锁。
+			dsn = "file:./data/metrics.db?mode=rwc&_txlock=immediate"
+		} else {
+			// 用户自定义 DSN 时，剥离 cache=shared，避免上述表级锁问题。
+			dsn = stripSharedCache(dsn)
 		}
+		// SQLite 串行化写入：固定单写连接以避免 "database is locked" 竞争，
+		// 同时启用独立的 WAL 只读连接池提升前台查询并发（写仍走单主连接）。
+		// 这里刻意忽略 cfg.MaxOpenConns/MaxIdleConns —— 对 SQLite 而言多写连接
+		// 只会引入锁竞争而非提升吞吐。
+		opts = append(opts,
+			metric.WithMaxOpenConns(1),
+			metric.WithMaxIdleConns(1),
+			metric.WithSQLiteReadPool(4),
+		)
 		return metric.SQLite(dsn, opts...), nil
 	case metric.DriverMySQL:
+		opts = append(opts,
+			metric.WithMaxOpenConns(cfg.MaxOpenConns),
+			metric.WithMaxIdleConns(cfg.MaxIdleConns),
+		)
 		return metric.MySQL(cfg.DSN, opts...), nil
 	case metric.DriverPostgreSQL:
+		opts = append(opts,
+			metric.WithMaxOpenConns(cfg.MaxOpenConns),
+			metric.WithMaxIdleConns(cfg.MaxIdleConns),
+		)
 		return metric.PostgreSQL(cfg.DSN, opts...), nil
 	default:
 		return metric.Config{}, fmt.Errorf("unsupported metric database driver: %s", cfg.Driver)
 	}
+}
+
+// stripSharedCache 从 SQLite DSN 中移除 cache=shared 参数，避免共享缓存模式下的
+// 表级锁（SQLITE_LOCKED "database table is locked"）。其它参数保持不变。
+func stripSharedCache(dsn string) string {
+	if !strings.Contains(dsn, "cache=shared") {
+		return dsn
+	}
+	idx := strings.Index(dsn, "?")
+	if idx < 0 {
+		return dsn
+	}
+	base := dsn[:idx]
+	query := dsn[idx+1:]
+	parts := strings.Split(query, "&")
+	kept := parts[:0]
+	for _, p := range parts {
+		if p == "cache=shared" {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if len(kept) == 0 {
+		return base
+	}
+	return base + "?" + strings.Join(kept, "&")
 }
 
 // openStore 按配置打开 metric store 并创建指标定义。
