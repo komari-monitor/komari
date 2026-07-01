@@ -146,6 +146,13 @@ func MigrateFromLegacyTables(batchSize int, resume bool) (*MigrationProgress, er
 		StartTime: time.Now(),
 	}
 
+	// 恢复场景：从持久化存储载入已迁移计数，避免进度从 0 重新累计并覆盖旧值。
+	// 数据本身通过游标（cursor）续传是正确的，这里仅修复进度数字被重置的问题。
+	if resume {
+		progress.MigratedRecords = loadProgress(MigrationProgressRecordsKey)
+		progress.MigratedPing = loadProgress(MigrationProgressPingKey)
+	}
+
 	if err := config.Set(MetricMigrationStatusKey, "in_progress"); err != nil {
 		log.Printf("Failed to update migration status: %v", err)
 	}
@@ -523,8 +530,8 @@ func GetMigrationStatus() (string, error) {
 // 关键逻辑：处理服务器重启后的孤儿 in_progress 状态。
 //   - 如果配置中 status 是 in_progress 但内存中迁移未运行，说明服务器中途重启。
 //     此时检查游标是否存在：
-//     * 有游标 → 迁移被意外中断，自动转为 paused，用户可恢复。
-//     * 无游标 → 数据不可靠，重置为 not_started（极少数情况）。
+//   - 有游标 → 迁移被意外中断，自动转为 paused，用户可恢复。
+//   - 无游标 → 数据不可靠，重置为 not_started（极少数情况）。
 func GetFullMigrationStatus() *MigrationProgress {
 	progress := &MigrationProgress{}
 
