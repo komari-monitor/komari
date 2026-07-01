@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	logutil "github.com/komari-monitor/komari/utils/log"
+	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -283,6 +284,17 @@ func GetDBInstance() *gorm.DB {
 			instance.Exec("PRAGMA cache_size = -65536;")
 			instance.Exec("PRAGMA temp_store = MEMORY;")
 			instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+		case flags.DatabaseTypePostgres:
+			// PostgreSQL 连接（通过 KOMARI_DB_DSN 传入完整连接串）
+			dsn := flags.DatabaseDSN
+			if dsn == "" {
+				log.Fatalf("KOMARI_DB_DSN is not configured for database type %s (expected a PostgreSQL DSN, e.g. \"host=... port=... user=... password=... dbname=... sslmode=disable\")", flags.DatabaseType)
+			}
+			instance, err = gorm.Open(postgres.Open(dsn), logConfig)
+			if err != nil {
+				log.Fatalf("Failed to connect to PostgreSQL database: %v", err)
+			}
+			log.Printf("Using PostgreSQL database (configured via DSN)")
 		default:
 			log.Fatalf("Unsupported database type: %s (supported: %s)", flags.DatabaseType, flags.SupportedDatabaseTypes())
 		}
