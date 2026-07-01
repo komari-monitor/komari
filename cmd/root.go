@@ -21,11 +21,7 @@ func GetEnv(key, defaultValue string) string {
 var (
 	dbTypeEnv = GetEnv("KOMARI_DB_TYPE", "sqlite")
 	dbFileEnv = GetEnv("KOMARI_DB_FILE", "./data/komari.db")
-	dbHostEnv = GetEnv("KOMARI_DB_HOST", "localhost")
-	dbPortEnv = GetEnv("KOMARI_DB_PORT", "3306")
-	dbUserEnv = GetEnv("KOMARI_DB_USER", "root")
-	dbPassEnv = GetEnv("KOMARI_DB_PASS", "")
-	dbNameEnv = GetEnv("KOMARI_DB_NAME", "komari")
+	dbDSNEnv  = GetEnv("KOMARI_DB_DSN", "")
 )
 
 var RootCmd = &cobra.Command{
@@ -48,14 +44,7 @@ func Execute() {
 
 func init() {
 	// 设置命令行参数，提供环境变量作为默认值
-	RootCmd.PersistentFlags().StringVarP(&flags.DatabaseType, "db-type", "t", dbTypeEnv, "Database type (sqlite) [env: KOMARI_DB_TYPE]")
+	RootCmd.PersistentFlags().StringVarP(&flags.DatabaseType, "db-type", "t", dbTypeEnv, "Database type: sqlite, postgres [env: KOMARI_DB_TYPE]")
 	RootCmd.PersistentFlags().StringVarP(&flags.DatabaseFile, "database", "d", dbFileEnv, "SQLite database file path [env: KOMARI_DB_FILE]")
-	RootCmd.PersistentFlags().StringVar(&flags.DatabaseHost, "db-host", dbHostEnv, "Reserved database host parameter [env: KOMARI_DB_HOST]")
-	RootCmd.PersistentFlags().StringVar(&flags.DatabasePort, "db-port", dbPortEnv, "Reserved database port parameter [env: KOMARI_DB_PORT]")
-	RootCmd.PersistentFlags().StringVar(&flags.DatabaseUser, "db-user", dbUserEnv, "Reserved database username parameter [env: KOMARI_DB_USER]")
-	RootCmd.PersistentFlags().StringVar(&flags.DatabasePass, "db-pass", dbPassEnv, "Reserved database password parameter [env: KOMARI_DB_PASS]")
-	RootCmd.PersistentFlags().StringVar(&flags.DatabaseName, "db-name", dbNameEnv, "Reserved database name parameter [env: KOMARI_DB_NAME]")
-	for _, name := range []string{"db-host", "db-port", "db-user", "db-pass", "db-name"} {
-		_ = RootCmd.PersistentFlags().MarkHidden(name)
-	}
+	RootCmd.PersistentFlags().StringVar(&flags.DatabaseDSN, "db-dsn", dbDSNEnv, `PostgreSQL DSN, e.g. "host=... port=... user=... password=... dbname=... sslmode=disable" [env: KOMARI_DB_DSN]`)
 }
