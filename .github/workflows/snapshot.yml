@@ -14,8 +14,38 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+concurrency:
+  group: snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  validate-ref:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Ensure snapshot target is main
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "Snapshot builds must run from refs/heads/main. Current ref: ${GITHUB_REF}"
+            exit 1
+          fi
+
+          git fetch --no-tags --depth=1 origin main
+          MAIN_SHA="$(git rev-parse FETCH_HEAD)"
+
+          if [ "${GITHUB_SHA}" != "${MAIN_SHA}" ]; then
+            echo "Snapshot builds must use the current main commit."
+            echo "Workflow SHA: ${GITHUB_SHA}"
+            echo "Current main: ${MAIN_SHA}"
+            exit 1
+          fi
+
   prepare:
+    needs: validate-ref
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -144,6 +174,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Ensure commit is still current main
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          MAIN_SHA="$(git rev-parse FETCH_HEAD)"
+
+          if [ "${GITHUB_SHA}" != "${MAIN_SHA}" ]; then
+            echo "Snapshot publish skipped because a newer main commit exists."
+            echo "Workflow SHA: ${GITHUB_SHA}"
+            echo "Current main: ${MAIN_SHA}"
+            exit 1
+          fi
+
       - name: Download all binaries
         uses: actions/download-artifact@v4
         with:
@@ -173,10 +215,24 @@ jobs:
             --notes "Automated snapshot build (${VERSION}) from commit ${{ github.sha }}." \
             --prerelease \
             artifacts/komari-*
+
+          gh release list \
+            --repo "${{ github.repository }}" \
+            --limit 1000 \
+            --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease and (.tagName | startswith("Snapshot-"))) | .tagName' |
+          while IFS= read -r tag; do
+            if [ -z "${tag}" ] || [ "${tag}" = "${VERSION}" ]; then
+              continue
+            fi
+
+            echo "Deleting old snapshot release ${tag}..."
+            gh release delete "${tag}" --repo "${{ github.repository }}" --cleanup-tag --yes
+          done
         shell: bash
 
   build-and-push-docker:
-    needs: prepare
+    needs: [prepare, publish-snapshot-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -185,6 +241,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Ensure commit is still current main
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          MAIN_SHA="$(git rev-parse FETCH_HEAD)"
+
+          if [ "${GITHUB_SHA}" != "${MAIN_SHA}" ]; then
+            echo "Snapshot Docker publish skipped because a newer main commit exists."
+            echo "Workflow SHA: ${GITHUB_SHA}"
+            echo "Current main: ${MAIN_SHA}"
+            exit 1
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -255,7 +323,6 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=snapshot
-            type=raw,value=${{ needs.prepare.outputs.version }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
