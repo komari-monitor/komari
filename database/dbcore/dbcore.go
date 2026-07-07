@@ -168,6 +168,7 @@ func unzipToDir(zipPath, dstDir string) error {
 var (
 	instance *gorm.DB
 	once     sync.Once
+	initErr  error
 )
 
 func buildSQLiteDSN(databaseFile string) string {
@@ -192,151 +193,176 @@ func buildSQLiteDSN(databaseFile string) string {
 	return "file:" + filepath.ToSlash(databaseFile) + separator + params
 }
 
-func GetDBInstance() *gorm.DB {
+// Initialize 显式初始化数据库连接与表结构，仅执行一次。
+// 与 GetDBInstance 不同，Initialize 返回错误而非直接退出进程，
+// 便于启动生命周期统一处理错误、以及在测试/CLI 命令中做隔离。
+func Initialize() error {
 	once.Do(func() {
-
-		var err error
-
-		// 在数据库初始化前执行：如果存在 ./data/backup.zip，则进行恢复逻辑
-		func() {
-			backupZipPath := filepath.Join(".", "data", "backup.zip")
-			if _, statErr := os.Stat(backupZipPath); statErr == nil {
-				// 4. 把除了 ./data/backup.zip 之外的所有文件压缩到 ./backup/{time}.zip
-				if err := os.MkdirAll("./backup", 0755); err != nil {
-					log.Printf("[restore] failed to create backup dir: %v", err)
-				} else {
-					tsName := time.Now().Format("20060102-150405")
-					bakPath := filepath.Join("./backup", fmt.Sprintf("%s.zip", tsName))
-					if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
-						log.Printf("[restore] failed to zip current data: %v", zipErr)
-					} else {
-						log.Printf("[restore] current data zipped to %s", bakPath)
-					}
-				}
-
-				// 5. 删除除了 ./data/backup.zip 之外的所有文件
-				if delErr := removeAllInDirExcept("./data", map[string]struct{}{backupZipPath: {}}); delErr != nil {
-					log.Printf("[restore] failed to cleanup data dir: %v", delErr)
-				}
-
-				// 6. 解压 ./data/backup.zip 到 ./data
-				if unzipErr := unzipToDir(backupZipPath, "./data"); unzipErr != nil {
-					log.Printf("[restore] failed to unzip backup into data: %v", unzipErr)
-				} else {
-					log.Printf("[restore] backup.zip extracted to ./data")
-				}
-
-				// 7. 删除 ./data/backup.zip
-				if rmErr := os.Remove(backupZipPath); rmErr != nil {
-					log.Printf("[restore] failed to remove backup.zip: %v", rmErr)
-				} else {
-					log.Printf("[restore] backup.zip removed")
-				}
-				// 8. 删除标记
-				if rmErr := os.Remove("./data/komari-backup-markup"); rmErr != nil {
-					log.Printf("[restore] failed to remove komari-backup-markup: %v", rmErr)
-				} else {
-					log.Printf("[restore] komari-backup-markup removed")
-				}
-			}
-		}()
-
-		logConfig := &gorm.Config{
-			Logger: logutil.NewGormLogger(),
-		}
-
-		// 根据数据库类型选择不同的连接方式
-		switch flags.ApplyDatabaseTypeNormalization() {
-		case flags.DatabaseTypeSQLite:
-			// SQLite 连接
-			// 通过 DSN 传入 _busy_timeout / _txlock 等参数，确保连接池中的每一条连接
-			// 都生效：
-			//   - _busy_timeout=5000：遇到写锁时最多等待 5s 再返回，避免瞬时
-			//     "database is locked" 直接失败（仅靠后续 PRAGMA Exec 只作用于
-			//     当时执行该语句的单条连接，池内其它连接不生效）。
-			//   - _txlock=immediate：事务一开始即获取写锁，避免「先 SELECT 后写」
-			//     的锁升级在并发写入下产生死锁式的立即 SQLITE_BUSY。
-			//   - _journal_mode=WAL / _synchronous=NORMAL：与下方 PRAGMA 保持一致，
-			//     在 DSN 层为所有连接预设。
-			dsn := buildSQLiteDSN(flags.DatabaseFile)
-			instance, err = gorm.Open(sqlite.Open(dsn), logConfig)
-			if err != nil {
-				log.Fatalf("Failed to connect to SQLite3 database: %v", err)
-			}
-			log.Printf("Using SQLite database file: %s", flags.DatabaseFile)
-			if sqlDB, dbErr := instance.DB(); dbErr == nil {
-				// SQLite 同一时刻只允许一个写者；限制连接数可避免连接池层面的写写竞争。
-				// 负载历史每分钟会执行包含读和写的事务，若连接池允许多个连接，容易与
-				// ping 结果等短写入撞锁并导致整批负载记录回滚。
-				sqlDB.SetMaxOpenConns(1)
-				sqlDB.SetMaxIdleConns(1)
-				sqlDB.SetConnMaxLifetime(0)
-			} else {
-				log.Printf("Failed to access underlying sql.DB for SQLite tuning: %v", dbErr)
-			}
-			instance.Exec("PRAGMA wal = ON;")
-			if err := instance.Exec("PRAGMA journal_mode = WAL;").Error; err != nil {
-				log.Printf("Failed to enable WAL mode for SQLite: %v", err)
-			}
-			instance.Exec("PRAGMA synchronous = NORMAL;")
-			instance.Exec("PRAGMA busy_timeout = 5000;")
-			instance.Exec("PRAGMA cache_size = -65536;")
-			instance.Exec("PRAGMA temp_store = MEMORY;")
-			instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
-		default:
-			log.Fatalf("Unsupported database type: %s (supported: %s)", flags.DatabaseType, flags.SupportedDatabaseTypes())
-		}
-		if err := migrations.Run(migrations.Context{DB: instance}); err != nil {
-			log.Fatalf("Failed to run startup migrations: %v", err)
-		}
-		config.SetDb(instance)
-		// 自动迁移模型
-		err = instance.AutoMigrate(
-			&models.User{},
-			&models.Client{},
-			&models.Record{},
-			&models.Log{},
-			&models.Clipboard{},
-			&models.LoadNotification{},
-			&models.OfflineNotification{},
-			&models.TrafficReportNotification{},
-			&models.PingRecord{},
-			&models.PingTask{},
-			&models.OidcProvider{},
-			&models.MessageSenderProvider{},
-			&models.ThemeConfiguration{},
-		)
-		if err != nil {
-			log.Fatalf("Failed to create tables: %v", err)
-		}
-		err = instance.Table("records_long_term").AutoMigrate(
-			&models.Record{},
-		)
-		if err != nil {
-			log.Printf("Failed to create records_long_term table, it may already exist: %v", err)
-		}
-		err = instance.AutoMigrate(
-			&models.Session{},
-		)
-		if err != nil {
-			log.Printf("Failed to create Session table, it may already exist: %v", err)
-		}
-		err = instance.AutoMigrate(
-			&models.Task{},
-			&models.TaskResult{},
-		)
-		if err != nil {
-			log.Printf("Failed to create Task and TaskResult table, it may already exist: %v", err)
-		}
-
-		// Manually create composite indexes
-		if flags.IsSQLite() {
-			instance.Exec("CREATE INDEX IF NOT EXISTS idx_record_client_time ON records(client, time)")
-			instance.Exec("CREATE INDEX IF NOT EXISTS idx_record_lt_client_time ON records_long_term(client, time)")
-			instance.Exec("CREATE INDEX IF NOT EXISTS idx_ping_record_client_time ON ping_records(client, time)")
-		}
-
+		initErr = doInitialize()
 	})
+	return initErr
+}
 
+// GetDBInstance 返回全局数据库实例。
+// 为兼容既有大量调用点，这里保留“出错即退出”的语义；
+// 需要错误处理的启动流程应优先调用 Initialize()。
+func GetDBInstance() *gorm.DB {
+	if err := Initialize(); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
 	return instance
+}
+
+// Close 关闭底层数据库连接，供关闭流程调用。
+func Close() error {
+	if instance == nil {
+		return nil
+	}
+	sqlDB, err := instance.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
+}
+
+func doInitialize() error {
+	var err error
+
+	// 在数据库初始化前执行：如果存在 ./data/backup.zip，则进行恢复逻辑
+	func() {
+		backupZipPath := filepath.Join(".", "data", "backup.zip")
+		if _, statErr := os.Stat(backupZipPath); statErr == nil {
+			// 4. 把除了 ./data/backup.zip 之外的所有文件压缩到 ./backup/{time}.zip
+			if err := os.MkdirAll("./backup", 0755); err != nil {
+				log.Printf("[restore] failed to create backup dir: %v", err)
+			} else {
+				tsName := time.Now().Format("20060102-150405")
+				bakPath := filepath.Join("./backup", fmt.Sprintf("%s.zip", tsName))
+				if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
+					log.Printf("[restore] failed to zip current data: %v", zipErr)
+				} else {
+					log.Printf("[restore] current data zipped to %s", bakPath)
+				}
+			}
+
+			// 5. 删除除了 ./data/backup.zip 之外的所有文件
+			if delErr := removeAllInDirExcept("./data", map[string]struct{}{backupZipPath: {}}); delErr != nil {
+				log.Printf("[restore] failed to cleanup data dir: %v", delErr)
+			}
+
+			// 6. 解压 ./data/backup.zip 到 ./data
+			if unzipErr := unzipToDir(backupZipPath, "./data"); unzipErr != nil {
+				log.Printf("[restore] failed to unzip backup into data: %v", unzipErr)
+			} else {
+				log.Printf("[restore] backup.zip extracted to ./data")
+			}
+
+			// 7. 删除 ./data/backup.zip
+			if rmErr := os.Remove(backupZipPath); rmErr != nil {
+				log.Printf("[restore] failed to remove backup.zip: %v", rmErr)
+			} else {
+				log.Printf("[restore] backup.zip removed")
+			}
+			// 8. 删除标记
+			if rmErr := os.Remove("./data/komari-backup-markup"); rmErr != nil {
+				log.Printf("[restore] failed to remove komari-backup-markup: %v", rmErr)
+			} else {
+				log.Printf("[restore] komari-backup-markup removed")
+			}
+		}
+	}()
+
+	logConfig := &gorm.Config{
+		Logger: logutil.NewGormLogger(),
+	}
+
+	// 根据数据库类型选择不同的连接方式
+	switch flags.ApplyDatabaseTypeNormalization() {
+	case flags.DatabaseTypeSQLite:
+		// SQLite 连接
+		// 通过 DSN 传入 _busy_timeout / _txlock 等参数，确保连接池中的每一条连接
+		// 都生效：
+		//   - _busy_timeout=5000：遇到写锁时最多等待 5s 再返回，避免瞬时
+		//     "database is locked" 直接失败（仅靠后续 PRAGMA Exec 只作用于
+		//     当时执行该语句的单条连接，池内其它连接不生效）。
+		//   - _txlock=immediate：事务一开始即获取写锁，避免「先 SELECT 后写」
+		//     的锁升级在并发写入下产生死锁式的立即 SQLITE_BUSY。
+		//   - _journal_mode=WAL / _synchronous=NORMAL：与下方 PRAGMA 保持一致，
+		//     在 DSN 层为所有连接预设。
+		dsn := buildSQLiteDSN(flags.DatabaseFile)
+		instance, err = gorm.Open(sqlite.Open(dsn), logConfig)
+		if err != nil {
+			return fmt.Errorf("failed to connect to SQLite3 database: %w", err)
+		}
+		log.Printf("Using SQLite database file: %s", flags.DatabaseFile)
+		if sqlDB, dbErr := instance.DB(); dbErr == nil {
+			// SQLite 同一时刻只允许一个写者；限制连接数可避免连接池层面的写写竞争。
+			// 负载历史每分钟会执行包含读和写的事务，若连接池允许多个连接，容易与
+			// ping 结果等短写入撞锁并导致整批负载记录回滚。
+			sqlDB.SetMaxOpenConns(1)
+			sqlDB.SetMaxIdleConns(1)
+			sqlDB.SetConnMaxLifetime(0)
+		} else {
+			log.Printf("Failed to access underlying sql.DB for SQLite tuning: %v", dbErr)
+		}
+		instance.Exec("PRAGMA wal = ON;")
+		if err := instance.Exec("PRAGMA journal_mode = WAL;").Error; err != nil {
+			log.Printf("Failed to enable WAL mode for SQLite: %v", err)
+		}
+		instance.Exec("PRAGMA synchronous = NORMAL;")
+		instance.Exec("PRAGMA busy_timeout = 5000;")
+		instance.Exec("PRAGMA cache_size = -65536;")
+		instance.Exec("PRAGMA temp_store = MEMORY;")
+		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	default:
+		return fmt.Errorf("unsupported database type: %s (supported: %s)", flags.DatabaseType, flags.SupportedDatabaseTypes())
+	}
+	if err := migrations.Run(migrations.Context{DB: instance}); err != nil {
+		return fmt.Errorf("failed to run startup migrations: %w", err)
+	}
+	config.SetDb(instance)
+	// 自动迁移模型
+	err = instance.AutoMigrate(
+		&models.User{},
+		&models.Client{},
+		&models.Record{},
+		&models.Log{},
+		&models.Clipboard{},
+		&models.LoadNotification{},
+		&models.OfflineNotification{},
+		&models.TrafficReportNotification{},
+		&models.PingRecord{},
+		&models.PingTask{},
+		&models.OidcProvider{},
+		&models.MessageSenderProvider{},
+		&models.ThemeConfiguration{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create tables: %w", err)
+	}
+	if err := instance.Table("records_long_term").AutoMigrate(
+		&models.Record{},
+	); err != nil {
+		log.Printf("Failed to create records_long_term table, it may already exist: %v", err)
+	}
+	if err := instance.AutoMigrate(
+		&models.Session{},
+	); err != nil {
+		log.Printf("Failed to create Session table, it may already exist: %v", err)
+	}
+	if err := instance.AutoMigrate(
+		&models.Task{},
+		&models.TaskResult{},
+	); err != nil {
+		log.Printf("Failed to create Task and TaskResult table, it may already exist: %v", err)
+	}
+
+	// Manually create composite indexes
+	if flags.IsSQLite() {
+		instance.Exec("CREATE INDEX IF NOT EXISTS idx_record_client_time ON records(client, time)")
+		instance.Exec("CREATE INDEX IF NOT EXISTS idx_record_lt_client_time ON records_long_term(client, time)")
+		instance.Exec("CREATE INDEX IF NOT EXISTS idx_ping_record_client_time ON ping_records(client, time)")
+	}
+
+	return nil
 }

@@ -27,6 +27,18 @@ func CurrentProvider() factory.IMessageSender {
 	return currentProvider
 }
 
+// Shutdown 销毁当前消息发送 provider，释放其持有的资源。供关闭流程调用。
+func Shutdown() error {
+	mu.Lock()
+	defer mu.Unlock()
+	if currentProvider == nil {
+		return nil
+	}
+	err := currentProvider.Destroy()
+	currentProvider = nil
+	return err
+}
+
 func Initialize() {
 	go func() {
 		once.Do(func() {

@@ -115,6 +115,14 @@ func InitGeoIp() {
 	}
 }
 
+// Shutdown 关闭当前 GeoIP provider 持有的资源（如 mmdb 文件句柄）。供关闭流程调用。
+func Shutdown() error {
+	if CurrentProvider == nil {
+		return nil
+	}
+	return CurrentProvider.Close()
+}
+
 func GetGeoInfo(ip net.IP) (*GeoInfo, error) {
 	providerName := CurrentProvider.Name()
 	cacheKey := providerName + ":" + ip.String()
