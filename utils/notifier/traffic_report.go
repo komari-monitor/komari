@@ -1,7 +1,6 @@
 package notifier
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -18,7 +17,6 @@ import (
 	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/messageSender"
-	"gorm.io/gorm"
 )
 
 // InitTrafficReportSchedule 注册三个定时任务：日报、周报、月报
@@ -173,17 +171,11 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 	}
 }
 
-// getClientTrafficInRange 查询某客户端在指定时间段内的流量增量
-// 通过累加持久化的精确流量增量字段计算用量
+// getClientTrafficInRange 查询某客户端在指定时间段内的流量增量。
+//
+// 历史监控数据已完全迁移到 metric store，这里从 metric store 读取区间内记录并
+// 累加精确的流量增量字段计算用量；缺失增量时回退到累计流量差值。
 func getClientTrafficInRange(clientUUID string, trafficType string, start, end time.Time) (int64, error) {
-	if metricstore.IsEnabled() {
-		return getClientTrafficInRangeFromMetricStore(clientUUID, trafficType, start, end)
-	}
-	return getClientTrafficInRangeWithDB(dbcore.GetDBInstance(), clientUUID, trafficType, start, end)
-}
-
-// getClientTrafficInRangeFromMetricStore 在 metric store 启用时从 metric store 计算流量用量
-func getClientTrafficInRangeFromMetricStore(clientUUID string, trafficType string, start, end time.Time) (int64, error) {
 	ctx := context.Background()
 	recs, err := metricstore.GetRecordsByClientAndTime(ctx, clientUUID, start, end)
 	if err != nil {
@@ -223,110 +215,11 @@ func getClientTrafficInRangeFromMetricStore(clientUUID string, trafficType strin
 }
 
 type trafficDeltaRecord struct {
-	Time         models.LocalTime `gorm:"column:time"`
-	NetTotalUp   int64            `gorm:"column:net_total_up"`
-	NetTotalDown int64            `gorm:"column:net_total_down"`
-	TrafficUp    int64            `gorm:"column:traffic_up"`
-	TrafficDown  int64            `gorm:"column:traffic_down"`
-}
-
-func getClientTrafficInRangeWithDB(db *gorm.DB, clientUUID string, trafficType string, start, end time.Time) (int64, error) {
-	var recentRecords []trafficDeltaRecord
-	if err := db.Table("records").
-		Select("time, net_total_up, net_total_down, traffic_up, traffic_down").
-		Where("client = ? AND time >= ? AND time <= ?", clientUUID, models.FromTime(start), models.FromTime(end)).
-		Find(&recentRecords).Error; err != nil {
-		return 0, err
-	}
-
-	var longTermRecords []trafficDeltaRecord
-	if err := db.Table("records_long_term").
-		Select("time, net_total_up, net_total_down, traffic_up, traffic_down").
-		Where("client = ? AND time >= ? AND time <= ?", clientUUID, models.FromTime(start), models.FromTime(end)).
-		Find(&longTermRecords).Error; err != nil {
-		return 0, err
-	}
-
-	records := mergeTrafficRecords(recentRecords, longTermRecords)
-
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].Time.ToTime().Before(records[j].Time.ToTime())
-	})
-
-	previous, err := getPreviousTrafficDeltaRecord(db, clientUUID, start)
-	if err != nil {
-		return 0, err
-	}
-
-	totalUp, totalDown := sumTrafficDeltas(records, previous)
-	return computeUsedByType(strings.ToLower(trafficType), totalUp, totalDown), nil
-}
-
-func mergeTrafficRecords(recentRecords, longTermRecords []trafficDeltaRecord) []trafficDeltaRecord {
-	rawSlots := make(map[time.Time]struct{}, len(recentRecords))
-	for _, record := range recentRecords {
-		rawSlots[record.Time.ToTime().Truncate(15*time.Minute)] = struct{}{}
-	}
-
-	longTermSlots := make(map[time.Time]struct{}, len(longTermRecords))
-	records := make([]trafficDeltaRecord, 0, len(longTermRecords)+len(recentRecords))
-	for _, record := range longTermRecords {
-		slot := record.Time.ToTime().Truncate(15 * time.Minute)
-		if _, hasRawSlot := rawSlots[slot]; hasRawSlot && record.TrafficUp == 0 && record.TrafficDown == 0 {
-			continue
-		}
-		longTermSlots[slot] = struct{}{}
-		records = append(records, record)
-	}
-
-	for _, record := range recentRecords {
-		slot := record.Time.ToTime().Truncate(15 * time.Minute)
-		if _, exists := longTermSlots[slot]; exists {
-			continue
-		}
-		records = append(records, record)
-	}
-
-	return records
-}
-
-func getPreviousTrafficDeltaRecord(db *gorm.DB, clientUUID string, before time.Time) (*trafficDeltaRecord, error) {
-	record, err := latestTrafficDeltaRecordBefore(db.Table("records"), clientUUID, before)
-	if err != nil {
-		return nil, err
-	}
-
-	longTermRecord, err := latestTrafficDeltaRecordBefore(db.Table("records_long_term"), clientUUID, before)
-	if err != nil {
-		return nil, err
-	}
-
-	if record == nil {
-		return longTermRecord, nil
-	}
-	if longTermRecord == nil {
-		return record, nil
-	}
-	if longTermRecord.Time.ToTime().After(record.Time.ToTime()) {
-		return longTermRecord, nil
-	}
-	return record, nil
-}
-
-func latestTrafficDeltaRecordBefore(query *gorm.DB, clientUUID string, before time.Time) (*trafficDeltaRecord, error) {
-	var record trafficDeltaRecord
-	err := query.
-		Select("time, net_total_up, net_total_down, traffic_up, traffic_down").
-		Where("client = ? AND time < ?", clientUUID, models.FromTime(before)).
-		Order("time DESC").
-		First(&record).Error
-	if err == nil {
-		return &record, nil
-	}
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
-	}
-	return nil, err
+	Time         models.LocalTime
+	NetTotalUp   int64
+	NetTotalDown int64
+	TrafficUp    int64
+	TrafficDown  int64
 }
 
 func sumTrafficDeltas(records []trafficDeltaRecord, previous *trafficDeltaRecord) (int64, int64) {
@@ -336,6 +229,7 @@ func sumTrafficDeltas(records []trafficDeltaRecord, previous *trafficDeltaRecord
 	for i := range records {
 		up := records[i].TrafficUp
 		down := records[i].TrafficDown
+
 		if previous != nil {
 			up = trafficDeltaOrFallback(up, records[i].NetTotalUp, previous.NetTotalUp)
 			down = trafficDeltaOrFallback(down, records[i].NetTotalDown, previous.NetTotalDown)

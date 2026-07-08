@@ -48,28 +48,34 @@ var (
 	reloadMu  sync.Mutex
 )
 
-// MetricStoreConfig 保存 metric store 配置
+// MetricStoreConfig 保存 metric store 配置。
+//
+// 注意：metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）。
+// 未显式配置时默认使用 SQLite（./data/metrics.db）。
 type MetricStoreConfig struct {
-	Enabled         bool   `json:"metric_store_enabled" default:"false"`          // 是否启用独立 metrics 数据库
-	Driver          string `json:"metric_db_driver" default:"sqlite"`             // 数据库类型: sqlite, mysql, postgresql
-	DSN             string `json:"metric_db_dsn" default:"./data/metrics.db"`     // 数据库连接串
-	RetentionDays   int    `json:"metric_retention_days" default:"30"`            // 数据保留天数
-	TablePrefix     string `json:"metric_table_prefix" default:"metric_"`         // 表名前缀
-	MaxOpenConns    int    `json:"metric_max_open_conns" default:"25"`            // 最大连接数
-	MaxIdleConns    int    `json:"metric_max_idle_conns" default:"5"`             // 最大空闲连接数
-	MigrationStatus string `json:"metric_migration_status" default:"not_started"` // 迁移状态: not_started, in_progress, completed, failed
+	Driver        string `json:"metric_db_driver" default:"sqlite"`         // 数据库类型: sqlite, mysql, postgresql
+	DSN           string `json:"metric_db_dsn" default:"./data/metrics.db"` // 数据库连接串
+	RetentionDays int    `json:"metric_retention_days" default:"30"`        // 数据保留天数
+	TablePrefix   string `json:"metric_table_prefix" default:"metric_"`     // 表名前缀
+	MaxOpenConns  int    `json:"metric_max_open_conns" default:"25"`        // 最大连接数
+	MaxIdleConns  int    `json:"metric_max_idle_conns" default:"5"`         // 最大空闲连接数
 }
 
 // MetricStoreConfigKeys 配置键
+//
+// MetricStoreEnabledKey 已废弃：metric store 始终启用，保留常量仅用于清理旧配置。
 const (
-	MetricStoreEnabledKey    = "metric_store_enabled"
-	MetricDBDriverKey        = "metric_db_driver"
-	MetricDBDSNKey           = "metric_db_dsn"
-	MetricRetentionDaysKey   = "metric_retention_days"
-	MetricTablePrefixKey     = "metric_table_prefix"
-	MetricMaxOpenConnsKey    = "metric_max_open_conns"
-	MetricMaxIdleConnsKey    = "metric_max_idle_conns"
-	MetricMigrationStatusKey = "metric_migration_status"
+	MetricStoreEnabledKey  = "metric_store_enabled" // Deprecated: metric store 始终启用
+	MetricDBDriverKey      = "metric_db_driver"
+	MetricDBDSNKey         = "metric_db_dsn"
+	MetricRetentionDaysKey = "metric_retention_days"
+	MetricTablePrefixKey   = "metric_table_prefix"
+	MetricMaxOpenConnsKey  = "metric_max_open_conns"
+	MetricMaxIdleConnsKey  = "metric_max_idle_conns"
+	// MigrationTargetKey 记录上一次成功完成启动迁移的目标指纹（driver+dsn）。
+	// 当目标发生变化（例如从 SQLite 切换到 MySQL/PostgreSQL）时，启动迁移会
+	// 重新执行，把上一个目标库的数据搬运到新的目标 metrics 库。
+	MigrationTargetKey = "metric_migration_target"
 )
 
 // buildMetricConfig 根据 MetricStoreConfig 构造底层 metric.Config。
@@ -299,11 +305,7 @@ func InitializeStore() error {
 			return
 		}
 
-		if !cfg.Enabled {
-			log.Println("Metric store is disabled, using legacy records storage")
-			return
-		}
-
+		// metric store 始终启用；未配置时默认 SQLite（./data/metrics.db）。
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -324,8 +326,12 @@ func InitializeStore() error {
 }
 
 // Reload 根据最新配置热重载 metric store，无需重启进程。
-// 当配置中 enabled=false 时仅关闭当前 store；否则先用新配置测试连接，
+// metric store 始终启用：用新配置打开并建表（内部已 Ping 校验连接），
 // 成功后再替换运行中的 store，最后关闭旧实例。任何失败都会保留旧 store 不变。
+//
+// 注意：Reload 只切换运行中的连接，不会把旧目标（如 SQLite）中的历史数据
+// 搬运到新目标（如 MySQL/PostgreSQL）。跨库数据迁移由启动迁移
+// （RunStartupMigration）在下次启动时按目标指纹自动完成。
 func Reload(ctx context.Context) error {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
@@ -335,22 +341,7 @@ func Reload(ctx context.Context) error {
 		return fmt.Errorf("failed to load metric store config: %w", err)
 	}
 
-	// 关闭：未启用时释放当前 store。
-	if !cfg.Enabled {
-		storeMu.Lock()
-		old := store
-		store = nil
-		storeMu.Unlock()
-		if old != nil {
-			if cerr := old.Close(); cerr != nil {
-				log.Printf("Failed to close previous metric store on reload: %v", cerr)
-			}
-			log.Println("Metric store disabled and closed via hot reload")
-		}
-		return nil
-	}
-
-	// 启用：用新配置打开并建表（内部已 Ping 校验连接）。
+	// 用新配置打开并建表（内部已 Ping 校验连接）。
 	s, err := openStore(ctx, cfg)
 	if err != nil {
 		return err
@@ -879,24 +870,30 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 	return records, nil
 }
 
-// DeleteAllRecords 删除所有记录（保留指标定义）
+// recordMetricNames 是负载/系统类指标（不含 ping）。ping 使用独立的保留策略，
+// 因此负载记录的批量删除与保留清理都不应波及 ping.latency_ms。
+var recordMetricNames = []string{
+	MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
+	MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
+	MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
+	MetricProcess, MetricConnections, MetricConnectionsUDP,
+	MetricGPUDeviceUsage, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp,
+}
+
+// farFuture 返回一个足够远的未来时间，用于以 DeleteBefore 语义清空某指标的全部数据。
+func farFuture() time.Time {
+	return time.Now().Add(24 * 365 * time.Hour)
+}
+
+// DeleteAllRecords 删除所有负载/系统类记录（保留指标定义，不含 ping）。
 func DeleteAllRecords(ctx context.Context) error {
 	s := GetStore()
 	if s == nil {
 		return fmt.Errorf("metric store not enabled")
 	}
 
-	// 删除所有数据指标（但保留定义）
-	metricNames := []string{
-		MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
-		MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
-		MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
-		MetricProcess, MetricConnections, MetricConnectionsUDP,
-		MetricGPUDeviceUsage, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp, MetricPingLatency,
-	}
-
-	for _, metricName := range metricNames {
-		if _, err := s.DeleteBefore(ctx, metricName, time.Now().Add(24*365*time.Hour)); err != nil {
+	for _, metricName := range recordMetricNames {
+		if _, err := s.DeleteBefore(ctx, metricName, farFuture()); err != nil {
 			log.Printf("Failed to delete metric %s: %v", metricName, err)
 		}
 	}
@@ -904,26 +901,59 @@ func DeleteAllRecords(ctx context.Context) error {
 	return nil
 }
 
-// DeleteRecordsBefore 删除指定时间之前的记录
+// DeleteRecordsBefore 删除指定时间之前的负载/系统类记录（不含 ping）。
 func DeleteRecordsBefore(ctx context.Context, before time.Time) error {
 	s := GetStore()
 	if s == nil {
 		return fmt.Errorf("metric store not enabled")
 	}
 
-	metricNames := []string{
-		MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
-		MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
-		MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
-		MetricProcess, MetricConnections, MetricConnectionsUDP,
-		MetricGPUDeviceUsage, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp, MetricPingLatency,
-	}
-
-	for _, metricName := range metricNames {
+	for _, metricName := range recordMetricNames {
 		if _, err := s.DeleteBefore(ctx, metricName, before); err != nil {
 			log.Printf("Failed to delete old metric %s: %v", metricName, err)
 		}
 	}
 
+	return nil
+}
+
+// DeleteAllPingRecords 删除全部 ping 记录（保留指标定义）。
+func DeleteAllPingRecords(ctx context.Context) error {
+	s := GetStore()
+	if s == nil {
+		return fmt.Errorf("metric store not enabled")
+	}
+	if _, err := s.DeleteBefore(ctx, MetricPingLatency, farFuture()); err != nil {
+		return fmt.Errorf("failed to delete ping records: %w", err)
+	}
+	return nil
+}
+
+// DeletePingRecordsBefore 删除指定时间之前的 ping 记录。
+func DeletePingRecordsBefore(ctx context.Context, before time.Time) error {
+	s := GetStore()
+	if s == nil {
+		return fmt.Errorf("metric store not enabled")
+	}
+	if _, err := s.DeleteBefore(ctx, MetricPingLatency, before); err != nil {
+		return fmt.Errorf("failed to delete ping records before %s: %w", before, err)
+	}
+	return nil
+}
+
+// DeletePingRecordsByTask 删除指定任务（task_id）的全部 ping 记录。
+func DeletePingRecordsByTask(ctx context.Context, taskIDs []uint) error {
+	s := GetStore()
+	if s == nil {
+		return fmt.Errorf("metric store not enabled")
+	}
+	for _, id := range taskIDs {
+		if _, err := s.DeleteSeries(ctx, metric.Query{
+			MetricName: MetricPingLatency,
+			Tags:       map[string]string{"task_id": fmt.Sprintf("%d", id)},
+		}); err != nil {
+			return fmt.Errorf("failed to delete ping records for task %d: %w", id, err)
+		}
+	}
 	return nil
 }

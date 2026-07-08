@@ -90,10 +90,15 @@ func (a *App) Bootstrap() error {
 		return fmt.Errorf("failed to create theme directory: %w", err)
 	}
 
+	// 注入版本标识，供 dbcore 在检测到版本升级时自动备份 ./data。
+	// 必须在 Initialize() 之前设置。
+	dbcore.SetVersionID(utils.CurrentVersion + "-" + utils.VersionHash)
+
 	// 显式初始化数据库（返回错误而非在 getter 里 log.Fatal）。
 	if err := dbcore.Initialize(); err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
+
 	a.dbReady = true
 	a.addCleanup("database", func(context.Context) error {
 		return dbcore.Close()
@@ -116,17 +121,31 @@ func (a *App) Bootstrap() error {
 	return nil
 }
 
-// InitStores 初始化独立存储组件（当前为 metric store）。
+// InitStores 初始化独立存储组件（metric store）并执行一次性历史数据迁移。
+//
+// metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）：
+// 未显式配置时使用 SQLite（./data/metrics.db），否则使用配置的 MySQL/PostgreSQL。
+// 初始化失败即启动失败，不再静默 fallback 到旧 records 表。
+//
+// 初始化成功后执行启动迁移：当 metrics 存储后端发生变化（例如从默认 SQLite
+// 切换到 MySQL/PostgreSQL）时，把上一个 metrics 目标库的数据搬运到当前目标。
+// 旧 komari.db 的监控表已彻底废弃，不再参与。迁移失败同样让启动失败，
+// 并打印明确错误。
 func (a *App) InitStores() error {
 	if err := metricstore.InitializeStore(); err != nil {
-		// metric store 失败不阻断启动，退回主库存储。
-		log.Printf("Failed to initialize metric store: %v", err)
 		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize metric store: %v", err))
-		return nil
+		return fmt.Errorf("failed to initialize metric store: %w", err)
 	}
 	a.addCleanup("metric-store", func(context.Context) error {
 		return metricstore.CloseStore()
 	})
+
+	// 存储后端切换时把上一个 metrics 目标库的数据搬运到当前目标（失败即启动失败）。
+	if err := metricstore.RunStartupMigration(); err != nil {
+		auditlog.EventLog("error", fmt.Sprintf("Metrics startup migration failed: %v", err))
+
+		return fmt.Errorf("metrics startup migration failed: %w", err)
+	}
 	return nil
 }
 
@@ -373,7 +392,6 @@ func registerScheduledWork() {
 	if err := d_notification.ReloadLoadNotificationSchedule(); err != nil {
 		log.Println("Failed to reload load notification schedule:", err)
 	}
-	records.CompactRecord()
 
 	if err := corn.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
 		log.Println("Failed to add cleanup scheduled task:", err)
@@ -384,15 +402,16 @@ func registerScheduledWork() {
 	if err := corn.AddFunc("notifier:expire", "0 0 9 * * *", notifier.CheckExpireScheduledWork); err != nil {
 		log.Println("Failed to add expire notification scheduled task:", err)
 	}
+
 	notifier.InitTrafficReportSchedule()
 }
 
 func cleanupScheduledData() {
 	cfg, _ := config.GetManyAs[config.Settings]()
 	records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-	records.CompactRecord()
 	tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
 	tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
+
 	auditlog.RemoveOldLogs()
 	accounts.RemoveExpiredSessions()
 }

@@ -171,6 +171,98 @@ var (
 	initErr  error
 )
 
+// SystemVersionKey 是记录“上次启动所用版本标识”的配置键（存于 configs 表）。
+// 取代旧的 ./data/.komari-version 文件：版本标识随配置库一起备份/恢复，
+// 也避免额外的裸文件依赖。
+const SystemVersionKey = "system_version"
+
+// versionID 是当前构建的版本标识，由 SetVersionID 在 Initialize 前注入。
+var versionID string
+
+// dbFileExistedAtStartup 记录本次进程启动、打开数据库之前 komari.db 是否已存在，
+// 用于区分“全新安装”与“从旧版升级（无版本标记）”。在 doInitialize 打开数据库
+// 之前采集。
+var dbFileExistedAtStartup bool
+
+// SetVersionID 设置当前构建的版本标识（通常为 CurrentVersion+"-"+VersionHash），
+// 用于版本升级检测与自动备份。应在 Initialize() 之前调用；为空则跳过升级备份。
+func SetVersionID(id string) {
+	versionID = id
+}
+
+// resolveDatabaseFile 返回当前使用的 SQLite 数据库文件路径。
+func resolveDatabaseFile() string {
+	dbFile := flags.DatabaseFile
+	if dbFile == "" {
+		dbFile = "./data/komari.db"
+	}
+	return dbFile
+}
+
+// backupOnVersionUpgrade 在检测到版本升级时，把当前 ./data 打包到
+// ./backup/upgrade-{time}.zip，便于升级（含 metrics 迁移）异常时回滚。
+//
+// 版本标识存放于配置库（configs 表，键 system_version），因此本函数必须在
+// config.SetDb 之后、一次性 metrics 迁移（InitStores）之前调用。
+//
+// 触发规则：
+//   - versionID 为空：跳过（未注入版本，如部分测试场景）。
+//   - 配置中无版本且启动前无数据库文件：全新安装，仅写版本，不备份。
+//   - 配置中无版本但启动前已有数据库文件：从无版本标记的旧稳定版升级，备份。
+//   - 配置中版本与当前不同：版本升级，备份。
+//   - 配置中版本与当前一致：无需备份。
+//
+// 备份失败不阻止启动，但打印明确错误；备份成功（或无需备份）后写入/更新版本。
+func backupOnVersionUpgrade() {
+	if versionID == "" {
+		return
+	}
+
+	prevVersion, readErr := config.GetAs[string](SystemVersionKey)
+	prevVersion = strings.TrimSpace(prevVersion)
+	versionRecorded := readErr == nil && prevVersion != ""
+
+	// 版本未变化，无需备份。
+	if versionRecorded && prevVersion == versionID {
+		return
+	}
+
+	// 全新安装：配置中无版本且启动前无数据库文件，直接写版本不备份。
+	if !versionRecorded && !dbFileExistedAtStartup {
+		writeVersionMarker()
+		return
+	}
+
+	// 需要备份（升级或从旧稳定版首次带版本标记启动）。
+	// 先做一次 WAL checkpoint，确保 komari.db 主文件包含最新数据，
+	// 避免备份出的库缺少仍留在 -wal 中的写入。
+	if instance != nil {
+		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	}
+
+	if err := os.MkdirAll("./backup", 0755); err != nil {
+		log.Printf("[upgrade-backup] failed to create backup dir: %v", err)
+		return
+	}
+	tsName := time.Now().Format("20060102-150405")
+	bakPath := filepath.Join("./backup", fmt.Sprintf("upgrade-%s.zip", tsName))
+	backupZipPath := filepath.Join(".", "data", "backup.zip")
+	if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
+		log.Printf("[upgrade-backup] failed to backup ./data before upgrade (from %q to %q): %v", prevVersion, versionID, zipErr)
+		return
+	}
+	log.Printf("[upgrade-backup] ./data backed up to %s before upgrade (from %q to %q)", bakPath, prevVersion, versionID)
+
+	writeVersionMarker()
+}
+
+// writeVersionMarker 将当前 versionID 写入配置库。
+func writeVersionMarker() {
+	if err := config.Set(SystemVersionKey, versionID); err != nil {
+		log.Printf("[upgrade-backup] failed to persist version marker: %v", err)
+	}
+}
+
 func buildSQLiteDSN(databaseFile string) string {
 	if databaseFile == "" {
 		databaseFile = "./data/komari.db"
@@ -272,6 +364,13 @@ func doInitialize() error {
 		}
 	}()
 
+	// 记录“打开数据库之前”komari.db 是否已存在，用于区分全新安装与旧版升级。
+	// 必须在（可能的）恢复逻辑之后、gorm.Open 之前采集：恢复会解压出旧库，
+	// gorm.Open 会创建空库。
+	if _, statErr := os.Stat(resolveDatabaseFile()); statErr == nil {
+		dbFileExistedAtStartup = true
+	}
+
 	logConfig := &gorm.Config{
 		Logger: logutil.NewGormLogger(),
 	}
@@ -321,17 +420,28 @@ func doInitialize() error {
 		return fmt.Errorf("failed to run startup migrations: %w", err)
 	}
 	config.SetDb(instance)
+
+	// 配置库就绪后、执行后续 AutoMigrate 与一次性 metrics 迁移之前：
+	// 基于配置中的版本标记检测升级并自动备份 ./data，便于回滚。
+	backupOnVersionUpgrade()
+
 	// 自动迁移模型
+	//
+	// 注意：负载/GPU/ping 历史监控数据已完全迁移到 metric store（默认 SQLite
+	// ./data/metrics.db，或配置的 MySQL/PostgreSQL）。旧的 records /
+	// records_long_term / gpu_records / ping_records 表不再建表、不再写入，
+	// 因此从 AutoMigrate 中移除，并在启动时清理这些遗留表（见下方 dropLegacyMonitoringTables）。
+	// models.Record / models.PingRecord / models.GPURecord 结构体仍作为
+	// metric store 的读写 DTO 保留在 models 包中。
+
 	err = instance.AutoMigrate(
 		&models.User{},
 		&models.Client{},
-		&models.Record{},
 		&models.Log{},
 		&models.Clipboard{},
 		&models.LoadNotification{},
 		&models.OfflineNotification{},
 		&models.TrafficReportNotification{},
-		&models.PingRecord{},
 		&models.PingTask{},
 		&models.OidcProvider{},
 		&models.MessageSenderProvider{},
@@ -339,11 +449,6 @@ func doInitialize() error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create tables: %w", err)
-	}
-	if err := instance.Table("records_long_term").AutoMigrate(
-		&models.Record{},
-	); err != nil {
-		log.Printf("Failed to create records_long_term table, it may already exist: %v", err)
 	}
 	if err := instance.AutoMigrate(
 		&models.Session{},
@@ -357,12 +462,23 @@ func doInitialize() error {
 		log.Printf("Failed to create Task and TaskResult table, it may already exist: %v", err)
 	}
 
-	// Manually create composite indexes
-	if flags.IsSQLite() {
-		instance.Exec("CREATE INDEX IF NOT EXISTS idx_record_client_time ON records(client, time)")
-		instance.Exec("CREATE INDEX IF NOT EXISTS idx_record_lt_client_time ON records_long_term(client, time)")
-		instance.Exec("CREATE INDEX IF NOT EXISTS idx_ping_record_client_time ON ping_records(client, time)")
-	}
+	// 清理已迁移到 metric store 的遗留监控表（幂等：IF EXISTS）。
+	dropLegacyMonitoringTables()
 
 	return nil
+}
+
+// dropLegacyMonitoringTables 删除已完全迁移到 metric store 的遗留监控表：
+// records / records_long_term / gpu_records / ping_records。
+//
+// 历史数据已在更早版本一次性导入 metric store，主库不再保留这些表。删除使用
+// DROP TABLE IF EXISTS，幂等且对不存在的表安全；失败仅记录日志、不阻断启动。
+// 升级前 backupOnVersionUpgrade 已对 ./data 做过备份，删除具备回滚兜底。
+func dropLegacyMonitoringTables() {
+	legacyTables := []string{"records", "records_long_term", "gpu_records", "ping_records"}
+	for _, table := range legacyTables {
+		if err := instance.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", table)).Error; err != nil {
+			log.Printf("[legacy-cleanup] failed to drop legacy table %s: %v", table, err)
+		}
+	}
 }

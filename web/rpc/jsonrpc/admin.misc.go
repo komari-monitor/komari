@@ -109,8 +109,9 @@ func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonR
 }
 
 // metricStoreConfigKeys 是与 metrics 独立数据库相关、需要触发连接测试 + 热重载的配置键。
+//
+// 注意：metric_store_enabled 已废弃（metric store 始终启用），不再纳入此集合。
 var metricStoreConfigKeys = map[string]struct{}{
-	metricstore.MetricStoreEnabledKey:  {},
 	metricstore.MetricDBDriverKey:      {},
 	metricstore.MetricDBDSNKey:         {},
 	metricstore.MetricRetentionDaysKey: {},
@@ -136,8 +137,8 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	}
 
 	// 若本次修改涉及 metrics 数据库配置，则在落库前先用「当前配置 + 本次改动」
-	// 合并出的目标配置做一次连接测试。目标状态为启用时必须测试；即使未启用，
-	// 只要本次保存了 DSN，也要测试，避免把明显无效的连接串保存给用户。
+	// 合并出的目标配置做一次连接测试。metric store 始终启用，只要触及 metrics
+	// 相关键就做连接测试，避免把明显无效的连接串保存给用户。
 	touchedMetric := metricKeysTouched(cfg)
 	if touchedMetric {
 		// 数据库类型不再由前端显式选择，而是根据 DSN 自动推断后写回配置，
@@ -156,16 +157,13 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to resolve metric store config: "+err.Error(), nil)
 		}
-		_, dsnTouched := cfg[metricstore.MetricDBDSNKey]
-		if merged.Enabled || dsnTouched {
-			testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			if err := metricstore.TestConnection(testCtx, merged); err != nil {
-				cancel()
-				return nil, rpc.MakeError(rpc.InvalidParams,
-					"Metrics database connection test failed: "+err.Error(), nil)
-			}
+		testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		if err := metricstore.TestConnection(testCtx, merged); err != nil {
 			cancel()
+			return nil, rpc.MakeError(rpc.InvalidParams,
+				"Metrics database connection test failed: "+err.Error(), nil)
 		}
+		cancel()
 	}
 
 	if err := config.SetMany(cfg); err != nil {
@@ -204,14 +202,12 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 		return nil, err
 	}
 
-	if v, ok := cfg[metricstore.MetricStoreEnabledKey]; ok {
-		merged.Enabled = toBool(v, merged.Enabled)
-	}
 	if v, ok := cfg[metricstore.MetricDBDriverKey]; ok {
 		if s, ok := v.(string); ok {
 			merged.Driver = s
 		}
 	}
+
 	if v, ok := cfg[metricstore.MetricDBDSNKey]; ok {
 		if s, ok := v.(string); ok {
 			merged.DSN = s
@@ -235,24 +231,9 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 	return merged, nil
 }
 
-// toBool 将 JSON 解码得到的任意值转换为 bool，失败时返回 fallback。
-func toBool(v any, fallback bool) bool {
-	switch val := v.(type) {
-	case bool:
-		return val
-	case string:
-		switch val {
-		case "true", "1":
-			return true
-		case "false", "0":
-			return false
-		}
-	}
-	return fallback
-}
-
 // toInt 将 JSON 解码得到的任意值（通常是 float64 或 string）转换为 int，失败时返回 fallback。
 func toInt(v any, fallback int) int {
+
 	switch val := v.(type) {
 	case float64:
 		return int(val)

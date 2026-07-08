@@ -9,18 +9,7 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
-
-func openReportCacheTestDB(t *testing.T) *gorm.DB {
-	t.Helper()
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&models.Record{}))
-	require.NoError(t, db.Table("records_long_term").AutoMigrate(&models.Record{}))
-	return db
-}
 
 func resetReportCache(t *testing.T) {
 	t.Helper()
@@ -70,276 +59,85 @@ func TestAppendClientReportRejectsCorruptedCacheValue(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid report type")
 }
 
-func TestSaveClientReportToDBStoresCachedTrafficDelta(t *testing.T) {
-	resetReportCache(t)
-	db := openReportCacheTestDB(t)
-
-	clientUUID := "client-cached-delta"
-	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
-	require.NoError(t, db.Create(&models.Record{
-		Client:       clientUUID,
-		Time:         models.FromTime(now.Add(-2 * time.Minute)),
-		NetTotalUp:   100,
-		NetTotalDown: 200,
-	}).Error)
-
-	Records.Set(clientUUID, []v1.Report{
-		{
-			UpdatedAt: now.Add(-30 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 130, TotalDown: 260},
-		},
-		{
-			UpdatedAt: now.Add(-10 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 175, TotalDown: 320},
-		},
-	}, cache.DefaultExpiration)
-
-	require.NoError(t, saveClientReportToDB(db, now))
-
-	var saved models.Record
-	require.NoError(t, db.Where("client = ? AND time = ?", clientUUID, models.FromTime(now)).First(&saved).Error)
-	assert.Equal(t, int64(175), saved.NetTotalUp)
-	assert.Equal(t, int64(320), saved.NetTotalDown)
-	assert.Equal(t, int64(75), saved.TrafficUp)
-	assert.Equal(t, int64(120), saved.TrafficDown)
+// newCachedTrafficSummary 构造按时间递增的缓存流量汇总，便于测试增量累加逻辑。
+func newCachedTrafficSummary(base time.Time, points ...[2]int64) cachedTrafficSummary {
+	pts := make([]trafficTotalPoint, 0, len(points))
+	for i, p := range points {
+		pts = append(pts, trafficTotalPoint{
+			Time:      base.Add(time.Duration(i) * time.Second),
+			TotalUp:   p[0],
+			TotalDown: p[1],
+		})
+	}
+	return cachedTrafficSummary{Points: pts}
 }
 
-func TestSaveClientReportToDBStoresCachedTrafficDeltaAfterCounterReset(t *testing.T) {
-	resetReportCache(t)
-	db := openReportCacheTestDB(t)
+func TestSumCachedTrafficDeltasWithBaseline(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	previous := &previousTrafficRecord{
+		Time:         models.FromTime(base.Add(-time.Minute)),
+		NetTotalUp:   100,
+		NetTotalDown: 200,
+	}
+	summary := newCachedTrafficSummary(base, [2]int64{130, 260}, [2]int64{175, 320})
 
-	clientUUID := "client-cached-reset"
-	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
-	require.NoError(t, db.Create(&models.Record{
-		Client:       clientUUID,
-		Time:         models.FromTime(now.Add(-2 * time.Minute)),
+	up, down := sumCachedTrafficDeltas(summary, previous)
+	assert.Equal(t, int64(75), up)
+	assert.Equal(t, int64(120), down)
+}
+
+func TestSumCachedTrafficDeltasWithBaselineAfterCounterReset(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	previous := &previousTrafficRecord{
+		Time:         models.FromTime(base.Add(-time.Minute)),
 		NetTotalUp:   500,
 		NetTotalDown: 700,
-	}).Error)
+	}
+	summary := newCachedTrafficSummary(base, [2]int64{30, 45}, [2]int64{40, 55})
 
-	Records.Set(clientUUID, []v1.Report{
-		{
-			UpdatedAt: now.Add(-20 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 30, TotalDown: 45},
-		},
-		{
-			UpdatedAt: now.Add(-5 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 40, TotalDown: 55},
-		},
-	}, cache.DefaultExpiration)
-
-	require.NoError(t, saveClientReportToDB(db, now))
-
-	var saved models.Record
-	require.NoError(t, db.Where("client = ? AND time = ?", clientUUID, models.FromTime(now)).First(&saved).Error)
-	assert.Equal(t, int64(40), saved.NetTotalUp)
-	assert.Equal(t, int64(55), saved.NetTotalDown)
-	assert.Equal(t, int64(40), saved.TrafficUp)
-	assert.Equal(t, int64(55), saved.TrafficDown)
+	up, down := sumCachedTrafficDeltas(summary, previous)
+	assert.Equal(t, int64(40), up)
+	assert.Equal(t, int64(55), down)
 }
 
-func TestSaveClientReportToDBSumsCachedTrafficWithoutPersistedBaseline(t *testing.T) {
-	resetReportCache(t)
-	db := openReportCacheTestDB(t)
+func TestSumCachedTrafficDeltasWithoutBaseline(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	summary := newCachedTrafficSummary(base,
+		[2]int64{100, 200}, [2]int64{130, 250}, [2]int64{155, 280})
 
-	clientUUID := "client-cached-no-baseline"
-	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
-	Records.Set(clientUUID, []v1.Report{
-		{
-			UpdatedAt: now.Add(-40 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 100, TotalDown: 200},
-		},
-		{
-			UpdatedAt: now.Add(-20 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 130, TotalDown: 250},
-		},
-		{
-			UpdatedAt: now.Add(-5 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 155, TotalDown: 280},
-		},
-	}, cache.DefaultExpiration)
-
-	require.NoError(t, saveClientReportToDB(db, now))
-
-	var saved models.Record
-	require.NoError(t, db.Where("client = ? AND time = ?", clientUUID, models.FromTime(now)).First(&saved).Error)
-	assert.Equal(t, int64(155), saved.NetTotalUp)
-	assert.Equal(t, int64(280), saved.NetTotalDown)
-	assert.Equal(t, int64(55), saved.TrafficUp)
-	assert.Equal(t, int64(80), saved.TrafficDown)
+	up, down := sumCachedTrafficDeltas(summary, nil)
+	assert.Equal(t, int64(55), up)
+	assert.Equal(t, int64(80), down)
 }
 
-func TestSaveClientReportToDBSumsCachedTrafficAcrossIntraMinuteReset(t *testing.T) {
-	resetReportCache(t)
-	db := openReportCacheTestDB(t)
-
-	clientUUID := "client-cached-intra-minute-reset"
-	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
-	require.NoError(t, db.Create(&models.Record{
-		Client:       clientUUID,
-		Time:         models.FromTime(now.Add(-2 * time.Minute)),
+func TestSumCachedTrafficDeltasAcrossIntraMinuteReset(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	previous := &previousTrafficRecord{
+		Time:         models.FromTime(base.Add(-time.Minute)),
 		NetTotalUp:   500,
 		NetTotalDown: 700,
-	}).Error)
+	}
+	summary := newCachedTrafficSummary(base,
+		[2]int64{540, 760}, [2]int64{10, 20}, [2]int64{25, 35})
 
-	Records.Set(clientUUID, []v1.Report{
-		{
-			UpdatedAt: now.Add(-45 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 540, TotalDown: 760},
-		},
-		{
-			UpdatedAt: now.Add(-25 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 10, TotalDown: 20},
-		},
-		{
-			UpdatedAt: now.Add(-5 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 25, TotalDown: 35},
-		},
-	}, cache.DefaultExpiration)
-
-	require.NoError(t, saveClientReportToDB(db, now))
-
-	var saved models.Record
-	require.NoError(t, db.Where("client = ? AND time = ?", clientUUID, models.FromTime(now)).First(&saved).Error)
-	assert.Equal(t, int64(25), saved.NetTotalUp)
-	assert.Equal(t, int64(35), saved.NetTotalDown)
-	assert.Equal(t, int64(65), saved.TrafficUp)
-	assert.Equal(t, int64(95), saved.TrafficDown)
+	up, down := sumCachedTrafficDeltas(summary, previous)
+	assert.Equal(t, int64(65), up)
+	assert.Equal(t, int64(95), down)
 }
 
-func TestSaveClientReportToDBDoesNotRecountRetainedCachePoints(t *testing.T) {
-	resetReportCache(t)
-	db := openReportCacheTestDB(t)
-
-	clientUUID := "client-retained-cache-point"
-	firstFlush := time.Date(2026, 6, 13, 12, 0, 30, 0, time.UTC)
-	secondFlush := firstFlush.Add(30 * time.Second)
-	require.NoError(t, db.Create(&models.Record{
-		Client:       clientUUID,
-		Time:         models.FromTime(firstFlush.Add(-2 * time.Minute)),
+func TestSumCachedTrafficDeltasSkipsPointsAtOrBeforeBaseline(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	previous := &previousTrafficRecord{
+		Time:         models.FromTime(base.Add(1 * time.Second)),
 		NetTotalUp:   100,
 		NetTotalDown: 200,
-	}).Error)
+	}
+	// 前两个点时间早于/等于基线时间，应被忽略；仅最后一个点（晚于基线）计入。
+	summary := newCachedTrafficSummary(base,
+		[2]int64{50, 90}, [2]int64{130, 260}, [2]int64{160, 300})
 
-	Records.Set(clientUUID, []v1.Report{{
-		UpdatedAt: firstFlush.Add(-10 * time.Second),
-		Network:   v1.NetworkReport{TotalUp: 175, TotalDown: 320},
-	}}, cache.DefaultExpiration)
-
-	require.NoError(t, saveClientReportToDB(db, firstFlush))
-
-	reports, ok := Records.Get(clientUUID)
-	require.True(t, ok)
-	retained := reports.([]v1.Report)
-	retained = append(retained, v1.Report{
-		UpdatedAt: secondFlush.Add(-5 * time.Second),
-		Network:   v1.NetworkReport{TotalUp: 190, TotalDown: 360},
-	})
-	Records.Set(clientUUID, retained, cache.DefaultExpiration)
-
-	require.NoError(t, saveClientReportToDB(db, secondFlush))
-
-	var saved []models.Record
-	require.NoError(t, db.Where("client = ?", clientUUID).Order("time ASC").Find(&saved).Error)
-	require.Len(t, saved, 3)
-	assert.Equal(t, int64(75), saved[1].TrafficUp)
-	assert.Equal(t, int64(120), saved[1].TrafficDown)
-	assert.Equal(t, int64(15), saved[2].TrafficUp)
-	assert.Equal(t, int64(40), saved[2].TrafficDown)
+	up, down := sumCachedTrafficDeltas(summary, previous)
+	assert.Equal(t, int64(60), up)
+	assert.Equal(t, int64(100), down)
 }
 
-func TestSaveClientReportToDBSkipsInvalidCachedReports(t *testing.T) {
-	resetReportCache(t)
-	db := openReportCacheTestDB(t)
-
-	clientUUID := "client-invalid-report"
-	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
-	require.NoError(t, db.Create(&models.Record{
-		Client:       clientUUID,
-		Time:         models.FromTime(now.Add(-2 * time.Minute)),
-		NetTotalUp:   100,
-		NetTotalDown: 200,
-	}).Error)
-
-	Records.Set(clientUUID, []v1.Report{
-		{
-			UpdatedAt: now.Add(-30 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: -1, TotalDown: 260},
-		},
-		{
-			UpdatedAt: now.Add(-10 * time.Second),
-			Network:   v1.NetworkReport{TotalUp: 175, TotalDown: 320},
-		},
-	}, cache.DefaultExpiration)
-
-	require.NoError(t, saveClientReportToDB(db, now))
-
-	var saved models.Record
-	require.NoError(t, db.Where("client = ? AND time = ?", clientUUID, models.FromTime(now)).First(&saved).Error)
-	assert.Equal(t, int64(175), saved.NetTotalUp)
-	assert.Equal(t, int64(320), saved.NetTotalDown)
-	assert.Equal(t, int64(75), saved.TrafficUp)
-	assert.Equal(t, int64(120), saved.TrafficDown)
-}
-
-func TestSaveClientReportToDBIgnoresSameTimeRowsWhenComputingDelta(t *testing.T) {
-	resetReportCache(t)
-	db := openReportCacheTestDB(t)
-
-	clientUUID := "client-same-time"
-	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
-	require.NoError(t, db.Create(&models.Record{
-		Client:       clientUUID,
-		Time:         models.FromTime(now.Add(-time.Minute)),
-		NetTotalUp:   100,
-		NetTotalDown: 200,
-	}).Error)
-	require.NoError(t, db.Create(&models.Record{
-		Client:       clientUUID,
-		Time:         models.FromTime(now),
-		NetTotalUp:   999,
-		NetTotalDown: 999,
-	}).Error)
-
-	records := []models.Record{{
-		Client:       clientUUID,
-		Time:         models.FromTime(now),
-		NetTotalUp:   175,
-		NetTotalDown: 320,
-	}}
-	require.NoError(t, fillTrafficDeltas(db, records, nil))
-
-	assert.Equal(t, int64(75), records[0].TrafficUp)
-	assert.Equal(t, int64(120), records[0].TrafficDown)
-}
-
-func TestSaveClientReportToDBUsesLatestLongTermRecordWhenNewer(t *testing.T) {
-	resetReportCache(t)
-	db := openReportCacheTestDB(t)
-
-	clientUUID := "client-long-term-previous"
-	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
-	require.NoError(t, db.Create(&models.Record{
-		Client:       clientUUID,
-		Time:         models.FromTime(now.Add(-10 * time.Minute)),
-		NetTotalUp:   100,
-		NetTotalDown: 200,
-	}).Error)
-	require.NoError(t, db.Table("records_long_term").Create(&models.Record{
-		Client:       clientUUID,
-		Time:         models.FromTime(now.Add(-2 * time.Minute)),
-		NetTotalUp:   150,
-		NetTotalDown: 260,
-	}).Error)
-
-	records := []models.Record{{
-		Client:       clientUUID,
-		Time:         models.FromTime(now),
-		NetTotalUp:   175,
-		NetTotalDown: 320,
-	}}
-	require.NoError(t, fillTrafficDeltas(db, records, nil))
-
-	assert.Equal(t, int64(25), records[0].TrafficUp)
-	assert.Equal(t, int64(60), records[0].TrafficDown)
-}
