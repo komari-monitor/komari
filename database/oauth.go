@@ -23,6 +23,11 @@ func GetOidcConfigByName(name string) (*models.OidcProvider, error) {
 	return &config, nil
 }
 
+func DeleteOidcConfigByName(name string) error {
+	db := dbcore.GetDBInstance()
+	return db.Delete(&models.OidcProvider{}, "name = ?", name).Error
+}
+
 func SaveOidcConfig(config *models.OidcProvider) error {
 	db := dbcore.GetDBInstance()
 	if err := db.Save(config).Error; err != nil {

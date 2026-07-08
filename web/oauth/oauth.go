@@ -18,6 +18,8 @@ var (
 	once            = sync.Once{}
 )
 
+const removedCloudflareAccessProvider = "CloudflareAccess"
+
 func CurrentProvider() factory.IOidcProvider {
 	mu.Lock()
 	defer mu.Unlock()
@@ -60,6 +62,7 @@ func LoadProvider(name string, configJson string) error {
 }
 
 func Initialize() error {
+	cleanupRemovedProviders()
 	once.Do(func() {
 		all := factory.GetAllOidcProviders()
 		for _, provider := range all {
@@ -99,4 +102,17 @@ func Initialize() error {
 		return err
 	}
 	return nil
+}
+
+func cleanupRemovedProviders() {
+	if err := database.DeleteOidcConfigByName(removedCloudflareAccessProvider); err != nil {
+		log.Printf("Failed to delete removed OIDC provider %s: %v", removedCloudflareAccessProvider, err)
+	}
+
+	cfg, _ := config.GetAs[string](config.OAuthProviderKey, "github")
+	if cfg == removedCloudflareAccessProvider {
+		if err := config.Set(config.OAuthProviderKey, "github"); err != nil {
+			log.Printf("Failed to reset removed OIDC provider %s: %v", removedCloudflareAccessProvider, err)
+		}
+	}
 }
