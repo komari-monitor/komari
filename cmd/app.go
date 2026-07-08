@@ -25,7 +25,6 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/utils"
-	"github.com/komari-monitor/komari/utils/cloudflared"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logutil "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -47,7 +46,7 @@ type cleanupFunc struct {
 // App 显式建模服务端的启动生命周期。
 //
 // 过去 RunServer 把目录创建、数据库、metric store、GeoIP、定时任务、通知、OAuth、
-// Nezha、cloudflared、Gin 中间件、路由、HTTP 启动与 shutdown 全部混在一个函数里，
+// Nezha、Gin 中间件、路由、HTTP 启动与 shutdown 全部混在一个函数里，
 // 启动顺序只能靠通读整段代码推断，异步初始化过早且吞掉错误，关闭也不完整。
 //
 // App 把这些拆成有序阶段：
@@ -55,7 +54,7 @@ type cleanupFunc struct {
 //	Bootstrap    基础设施：目录、数据库、默认管理员、配置快照
 //	InitStores   存储：metric store
 //	InitProviders 外部 provider：OAuth（同步，路由依赖）、GeoIP、消息发送、Nezha 兼容
-//	StartBackground 后台：定时任务、cloudflared
+//	StartBackground 后台：定时任务
 //	BuildRouter  构建 Gin 引擎与路由
 //	Run          启动 HTTP 服务并阻塞直到收到信号
 //	Shutdown     反序执行已登记的清理函数
@@ -196,19 +195,11 @@ func (a *App) InitProviders() error {
 	return nil
 }
 
-// StartBackground 启动后台工作：定时任务与 cloudflared。
+// StartBackground 启动后台工作：定时任务。
 func (a *App) StartBackground() error {
 	registerScheduledWork()
 	a.addCleanup("scheduler", func(context.Context) error {
 		corn.StopAll()
-		return nil
-	})
-
-	if err := cloudflared.AutoStart(GetEnv("KOMARI_CLOUDFLARED_TOKEN", "")); err != nil {
-		log.Printf("failed to auto start cloudflared: %v", err)
-	}
-	a.addCleanup("cloudflared", func(context.Context) error {
-		cloudflared.Shutdown()
 		return nil
 	})
 	return nil

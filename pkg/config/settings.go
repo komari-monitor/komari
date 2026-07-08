@@ -26,12 +26,12 @@ type Settings struct {
 	NezhaCompatListen  string `json:"nezha_compat_listen" default:""` // 例如 0.0.0.0:5555
 	// OAuth 配置
 	OAuthEnabled          bool   `json:"o_auth_enabled" default:"false"`
-	OAuthProvider         string `json:"o_auth_provider" default:"github"`
-	DisablePasswordLogin  bool   `json:"disable_password_login" default:"false"`
-	CloudflareTunnelToken string `json:"cloudflare_tunnel_token" default:""`
+	OAuthProvider        string `json:"o_auth_provider" default:"github"`
+	DisablePasswordLogin bool   `json:"disable_password_login" default:"false"`
 	// 自定义美化
 	CustomHead string `json:"custom_head" default:""`
 	CustomBody string `json:"custom_body" default:""`
+
 	// 通知
 	NotificationEnabled        bool    `json:"notification_enabled" default:"true"` // 通知总开关
 	NotificationMethod         string  `json:"notification_method" default:"none"`
@@ -69,9 +69,9 @@ const (
 	OAuthEnabledKey               = "o_auth_enabled"
 	OAuthProviderKey              = "o_auth_provider"
 	DisablePasswordLoginKey       = "disable_password_login"
-	CloudflareTunnelTokenKey      = "cloudflare_tunnel_token"
 	CustomHeadKey                 = "custom_head"
 	CustomBodyKey                 = "custom_body"
+
 	NotificationEnabledKey        = "notification_enabled"
 	NotificationMethodKey         = "notification_method"
 	NotificationTemplateKey       = "notification_template"

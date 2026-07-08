@@ -71,7 +71,6 @@ type legacyConfig struct {
 	OAuthEnabled               bool      `json:"o_auth_enabled"`
 	OAuthProvider              string    `json:"o_auth_provider"`
 	DisablePasswordLogin       bool      `json:"disable_password_login"`
-	CloudflareTunnelToken      string    `json:"cloudflare_tunnel_token"`
 	CustomHead                 string    `json:"custom_head"`
 	CustomBody                 string    `json:"custom_body"`
 	NotificationEnabled        bool      `json:"notification_enabled"`
