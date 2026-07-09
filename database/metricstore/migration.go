@@ -10,12 +10,9 @@ import (
 
 // migration.go
 //
-// 启动阶段的 metrics 数据迁移。历史监控数据（旧 komari.db 的 records /
-// records_long_term / ping_records 等表）已在更早版本一次性迁移到 metric store，
-// 运行期的读写全部走 metric store，旧表不再参与，也不再保留任何 legacy 导入逻辑。
-//
-// 因此这里只保留一种迁移：metrics 存储后端切换时的数据搬运
-// （例如默认 SQLite ./data/metrics.db 切换到 MySQL/PostgreSQL）。
+// 启动阶段的 metrics 数据迁移。这里只处理 metrics 存储后端切换时的数据搬运
+// （例如默认 SQLite ./data/metrics.db 切换到 MySQL/PostgreSQL）。旧 komari.db
+// 监控表导入属于一次性迁移，见 pkg/migrations.RunMetricStoreMigrations。
 
 // targetFingerprint 返回当前 metrics 目标库的指纹（driver + 归一化 DSN），
 // 用于判断 metrics 存储后端是否发生变化（例如从 SQLite 切换到 MySQL/PostgreSQL）。

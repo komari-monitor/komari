@@ -24,6 +24,7 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
+	"github.com/komari-monitor/komari/pkg/migrations"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logutil "github.com/komari-monitor/komari/utils/log"
@@ -120,16 +121,15 @@ func (a *App) Bootstrap() error {
 	return nil
 }
 
-// InitStores 初始化独立存储组件（metric store）并执行一次性历史数据迁移。
+// InitStores 初始化独立存储组件（metric store）并执行 metrics 迁移。
 //
 // metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）：
 // 未显式配置时使用 SQLite（./data/metrics.db），否则使用配置的 MySQL/PostgreSQL。
 // 初始化失败即启动失败，不再静默 fallback 到旧 records 表。
 //
-// 初始化成功后执行启动迁移：当 metrics 存储后端发生变化（例如从默认 SQLite
-// 切换到 MySQL/PostgreSQL）时，把上一个 metrics 目标库的数据搬运到当前目标。
-// 旧 komari.db 的监控表已彻底废弃，不再参与。迁移失败同样让启动失败，
-// 并打印明确错误。
+// 初始化成功后先执行需要 metric store 的一次性迁移，再执行启动迁移：当 metrics
+// 存储后端发生变化（例如从默认 SQLite 切换到 MySQL/PostgreSQL）时，把上一个
+// metrics 目标库的数据搬运到当前目标。迁移失败同样让启动失败，并打印明确错误。
 func (a *App) InitStores() error {
 	if err := metricstore.InitializeStore(); err != nil {
 		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize metric store: %v", err))
@@ -138,6 +138,14 @@ func (a *App) InitStores() error {
 	a.addCleanup("metric-store", func(context.Context) error {
 		return metricstore.CloseStore()
 	})
+
+	if err := migrations.RunMetricStoreMigrations(migrations.MetricContext{
+		DB:    dbcore.GetDBInstance(),
+		Store: metricstore.GetStore(),
+	}); err != nil {
+		auditlog.EventLog("error", fmt.Sprintf("Metric store one-shot migrations failed: %v", err))
+		return fmt.Errorf("metric store one-shot migrations failed: %w", err)
+	}
 
 	// 存储后端切换时把上一个 metrics 目标库的数据搬运到当前目标（失败即启动失败）。
 	if err := metricstore.RunStartupMigration(); err != nil {

@@ -427,12 +427,12 @@ func doInitialize() error {
 
 	// 自动迁移模型
 	//
-	// 注意：负载/GPU/ping 历史监控数据已完全迁移到 metric store（默认 SQLite
+	// 注意：负载/GPU/ping 历史监控数据运行期全部走 metric store（默认 SQLite
 	// ./data/metrics.db，或配置的 MySQL/PostgreSQL）。旧的 records /
-	// records_long_term / gpu_records / ping_records 表不再建表、不再写入，
-	// 因此从 AutoMigrate 中移除，并在启动时清理这些遗留表（见下方 dropLegacyMonitoringTables）。
+	// records_long_term / gpu_records / ping_records 表不再建表、不再写入。
+	// 若升级时旧表仍存在，会在 pkg/migrations.RunMetricStoreMigrations 中先导入再清理。
 	// models.Record / models.PingRecord / models.GPURecord 结构体仍作为
-	// metric store 的读写 DTO 保留在 models 包中。
+	// metric store 的读写 DTO 和旧表导入 DTO 保留在 models 包中。
 
 	err = instance.AutoMigrate(
 		&models.User{},
@@ -462,23 +462,5 @@ func doInitialize() error {
 		log.Printf("Failed to create Task and TaskResult table, it may already exist: %v", err)
 	}
 
-	// 清理已迁移到 metric store 的遗留监控表（幂等：IF EXISTS）。
-	dropLegacyMonitoringTables()
-
 	return nil
-}
-
-// dropLegacyMonitoringTables 删除已完全迁移到 metric store 的遗留监控表：
-// records / records_long_term / gpu_records / ping_records。
-//
-// 历史数据已在更早版本一次性导入 metric store，主库不再保留这些表。删除使用
-// DROP TABLE IF EXISTS，幂等且对不存在的表安全；失败仅记录日志、不阻断启动。
-// 升级前 backupOnVersionUpgrade 已对 ./data 做过备份，删除具备回滚兜底。
-func dropLegacyMonitoringTables() {
-	legacyTables := []string{"records", "records_long_term", "gpu_records", "ping_records"}
-	for _, table := range legacyTables {
-		if err := instance.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", table)).Error; err != nil {
-			log.Printf("[legacy-cleanup] failed to drop legacy table %s: %v", table, err)
-		}
-	}
 }
