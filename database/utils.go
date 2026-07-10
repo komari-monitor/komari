@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
 )
@@ -42,15 +43,6 @@ func GetPublicInfo() (map[string]interface{}, error) {
 	if !hasKey("o_auth_provider") {
 		cst.OAuthProvider = "github"
 	}
-	if !hasKey("record_enabled") {
-		cst.RecordEnabled = true
-	}
-	if !hasKey("record_preserve_time") {
-		cst.RecordPreserveTime = 720
-	}
-	if !hasKey("ping_record_preserve_time") {
-		cst.PingRecordPreserveTime = 24
-	}
 
 	// Fallback defaults if we couldn't enumerate keys.
 	if allErr != nil {
@@ -61,7 +53,10 @@ func GetPublicInfo() (map[string]interface{}, error) {
 			cst.Description = "Komari Monitor, a simple server monitoring tool."
 		}
 	}
-
+	metricCfg, err := config.GetManyAs[metricstore.MetricStoreConfig]()
+	if err != nil {
+		return nil, err
+	}
 	db := dbcore.GetDBInstance()
 	tc := models.ThemeConfiguration{}
 	err = db.Model(&models.ThemeConfiguration{}).Where("short = ?", cst.Theme).First(&tc).Error
@@ -135,9 +130,10 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		"oauth_provider":            cst.OAuthProvider,
 		"disable_password_login":    cst.DisablePasswordLogin,
 		"cors_origin_check_enabled": cst.CorsOriginCheckEnabled,
-		"record_enabled":            cst.RecordEnabled,
-		"record_preserve_time":      cst.RecordPreserveTime,
-		"ping_record_preserve_time": cst.PingRecordPreserveTime,
+		"record_enabled":            metricCfg.RetentionDays > 0,  //兼容旧版本主题
+		"record_preserve_time":      metricCfg.RetentionDays * 24, //兼容旧版本主题
+		"ping_record_preserve_time": metricCfg.RetentionDays * 24, //兼容旧版本主题
+		"metric_retention_days":     metricCfg.RetentionDays,
 		"private_site":              cst.PrivateSite,
 		"theme":                     cst.Theme,
 		"theme_settings":            tc_data,

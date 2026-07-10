@@ -41,9 +41,6 @@ type legacyModelConfig struct {
 	ExpireNotificationLeadDays int     `json:"expire_notification_lead_days" gorm:"default:7"`
 	LoginNotification          bool    `json:"login_notification" gorm:"default:false"`
 	TrafficLimitPercentage     float64 `json:"traffic_limit_percentage" gorm:"default:80.00"`
-	RecordEnabled              bool    `json:"record_enabled" gorm:"default:true"`
-	RecordPreserveTime         int     `json:"record_preserve_time" gorm:"default:720"`
-	PingRecordPreserveTime     int     `json:"ping_record_preserve_time" gorm:"default:24"`
 	CreatedAt                  models.LocalTime
 	UpdatedAt                  models.LocalTime
 }
@@ -80,9 +77,6 @@ type legacyConfig struct {
 	ExpireNotificationLeadDays int       `json:"expire_notification_lead_days"`
 	LoginNotification          bool      `json:"login_notification"`
 	TrafficLimitPercentage     float64   `json:"traffic_limit_percentage"`
-	RecordEnabled              bool      `json:"record_enabled"`
-	RecordPreserveTime         int       `json:"record_preserve_time"`
-	PingRecordPreserveTime     int       `json:"ping_record_preserve_time"`
 	UpdatedAt                  time.Time `json:"updated_at"`
 }
 

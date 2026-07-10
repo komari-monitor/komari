@@ -406,23 +406,22 @@ func registerScheduledWork() {
 }
 
 func cleanupScheduledData() {
-	cfg, _ := config.GetManyAs[config.Settings]()
-	records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-	tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-	tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
+	cfg, _ := config.GetManyAs[metricstore.MetricStoreConfig]()
+	retentionDays := cfg.RetentionDays
+	if retentionDays < 0 {
+		retentionDays = 30
+	}
+	before := time.Now().Add(-24 * time.Hour * time.Duration(retentionDays))
+	records.DeleteRecordBefore(before)
+	tasks.ClearTaskResultsByTimeBefore(before)
+	tasks.DeletePingRecordsBefore(before)
 
 	auditlog.RemoveOldLogs()
 	accounts.RemoveExpiredSessions()
 }
 
 func minuteScheduledWork() {
-	cfg, _ := config.GetManyAs[config.Settings]()
 	report_cache.SaveClientReportToDB()
-
-	if !cfg.RecordEnabled {
-		records.DeleteAll()
-		tasks.DeleteAllPingRecords()
-	}
 	// 每分钟检查一次流量提醒
 	notifier.CheckTraffic()
 }

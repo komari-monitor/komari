@@ -169,9 +169,6 @@ func TestRunMigratesLegacyConfigTableToConfigItems(t *testing.T) {
 		OAuthProvider:              "github",
 		NotificationMethod:         "none",
 		TrafficLimitPercentage:     66.5,
-		RecordEnabled:              true,
-		RecordPreserveTime:         48,
-		PingRecordPreserveTime:     12,
 		ExpireNotificationLeadDays: 3,
 	}
 	if err := db.Create(&legacy).Error; err != nil {

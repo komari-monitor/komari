@@ -25,7 +25,7 @@ type Settings struct {
 	NezhaCompatEnabled bool   `json:"nezha_compat_enabled" default:"false"`
 	NezhaCompatListen  string `json:"nezha_compat_listen" default:""` // 例如 0.0.0.0:5555
 	// OAuth 配置
-	OAuthEnabled          bool   `json:"o_auth_enabled" default:"false"`
+	OAuthEnabled         bool   `json:"o_auth_enabled" default:"false"`
 	OAuthProvider        string `json:"o_auth_provider" default:"github"`
 	DisablePasswordLogin bool   `json:"disable_password_login" default:"false"`
 	// 自定义美化
@@ -40,37 +40,33 @@ type Settings struct {
 	ExpireNotificationLeadDays int     `json:"expire_notification_lead_days" default:"7"`  // 过期前多少天通知，默认7天
 	LoginNotification          bool    `json:"login_notification" default:"true"`          // 登录通知
 	TrafficLimitPercentage     float64 `json:"traffic_limit_percentage" default:"80.00"`   // 流量限制百分比，默认80.00%
-	// Record
-	RecordEnabled          bool `json:"record_enabled" default:"true"`          // 是否启用记录功能
-	RecordPreserveTime     int  `json:"record_preserve_time" default:"720"`     // 记录保留时间，单位小时，默认30天
-	PingRecordPreserveTime int  `json:"ping_record_preserve_time" default:"24"` // Ping 记录保留时间，单位小时，默认1天
-	UpdatedAt              time.Time
+	UpdatedAt                  time.Time
 }
 
 const (
-	SitenameKey                   = "sitename"
-	DescriptionKey                = "description"
-	CorsOriginCheckEnabledKey     = "cors_origin_check_enabled"
-	CorsAllowedOriginsKey         = "cors_allowed_origins"
-	WsOriginCheckEnabledKey       = "ws_origin_check_enabled"
-	WsAllowedOriginsKey           = "ws_allowed_origins"
-	ThemeKey                      = "theme"
-	PrivateSiteKey                = "private_site"
-	ApiKeyKey                     = "api_key"
-	AutoDiscoveryKeyKey           = "auto_discovery_key"
-	ScriptDomainKey               = "script_domain"
-	SendIpAddrToGuestKey          = "send_ip_addr_to_guest"
-	EulaAcceptedKey               = "eula_accepted"
-	BaseScriptsURLKey             = "base_scripts_url"
-	GeoIpEnabledKey               = "geo_ip_enabled"
-	GeoIpProviderKey              = "geo_ip_provider"
-	NezhaCompatEnabledKey         = "nezha_compat_enabled"
-	NezhaCompatListenKey          = "nezha_compat_listen"
-	OAuthEnabledKey               = "o_auth_enabled"
-	OAuthProviderKey              = "o_auth_provider"
-	DisablePasswordLoginKey       = "disable_password_login"
-	CustomHeadKey                 = "custom_head"
-	CustomBodyKey                 = "custom_body"
+	SitenameKey               = "sitename"
+	DescriptionKey            = "description"
+	CorsOriginCheckEnabledKey = "cors_origin_check_enabled"
+	CorsAllowedOriginsKey     = "cors_allowed_origins"
+	WsOriginCheckEnabledKey   = "ws_origin_check_enabled"
+	WsAllowedOriginsKey       = "ws_allowed_origins"
+	ThemeKey                  = "theme"
+	PrivateSiteKey            = "private_site"
+	ApiKeyKey                 = "api_key"
+	AutoDiscoveryKeyKey       = "auto_discovery_key"
+	ScriptDomainKey           = "script_domain"
+	SendIpAddrToGuestKey      = "send_ip_addr_to_guest"
+	EulaAcceptedKey           = "eula_accepted"
+	BaseScriptsURLKey         = "base_scripts_url"
+	GeoIpEnabledKey           = "geo_ip_enabled"
+	GeoIpProviderKey          = "geo_ip_provider"
+	NezhaCompatEnabledKey     = "nezha_compat_enabled"
+	NezhaCompatListenKey      = "nezha_compat_listen"
+	OAuthEnabledKey           = "o_auth_enabled"
+	OAuthProviderKey          = "o_auth_provider"
+	DisablePasswordLoginKey   = "disable_password_login"
+	CustomHeadKey             = "custom_head"
+	CustomBodyKey             = "custom_body"
 
 	NotificationEnabledKey        = "notification_enabled"
 	NotificationMethodKey         = "notification_method"
@@ -79,9 +75,6 @@ const (
 	ExpireNotificationLeadDaysKey = "expire_notification_lead_days"
 	LoginNotificationKey          = "login_notification"
 	TrafficLimitPercentageKey     = "traffic_limit_percentage"
-	RecordEnabledKey              = "record_enabled"
-	RecordPreserveTimeKey         = "record_preserve_time"
-	PingRecordPreserveTimeKey     = "ping_record_preserve_time"
 	UpdatedAtKey                  = "updated_at"
 	XtermjsSettingsKey            = "xtermjs_settings"
 )
