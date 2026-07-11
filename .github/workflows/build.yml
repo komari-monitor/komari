@@ -7,7 +7,20 @@ on:
   workflow_dispatch:
 
 jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build frontend artifact
+        uses: ./.github/actions/build-frontend
+        with:
+          artifact-name: komari-frontend
+
   build-binaries:
+    needs: build-frontend
     runs-on: ubuntu-latest
 
     strategy:
@@ -55,27 +68,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "23"
-
-      - name: Clone and build frontend
-        run: |
-          git clone https://github.com/komari-monitor/komari-web komari-web
-          cd komari-web
-          npm install
-          npm run build
-          cd ..
-          mkdir -p web/public/defaultTheme/dist
-          rm -rf web/public/defaultTheme/dist/*
-          cp -r komari-web/dist/* web/public/defaultTheme/dist/
-          cp -f komari-web/komari-theme.json web/public/defaultTheme/
-          if [ -f komari-web/preview.png ]; then cp -f komari-web/preview.png web/public/defaultTheme/; fi
-          if [ -f komari-web/perview.png ]; then cp -f komari-web/perview.png web/public/defaultTheme/; fi
-          # Compatibility: ensure both filenames exist if only one is present
-          if [ -f web/public/defaultTheme/preview.png ] && [ ! -f web/public/defaultTheme/perview.png ]; then cp -f web/public/defaultTheme/preview.png web/public/defaultTheme/perview.png; fi
-          if [ -f web/public/defaultTheme/perview.png ] && [ ! -f web/public/defaultTheme/preview.png ]; then cp -f web/public/defaultTheme/perview.png web/public/defaultTheme/preview.png; fi
+      - name: Restore frontend artifact
+        uses: ./.github/actions/restore-frontend
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -83,12 +77,7 @@ jobs:
           go-version: "1.23"
 
       - name: Install Zig cross-compiler toolchain
-        run: |
-          sudo apt-get update # Update apt package lists
-          sudo apt-get install -y build-essential curl
-          wget https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
-          sudo tar -C /usr/local -Jxf zig-x86_64-linux-0.14.1.tar.xz
-          echo "PATH=$PATH:/usr/local/zig-x86_64-linux-0.14.1" >> $GITHUB_ENV
+        uses: ./.github/actions/setup-zig
 
       - name: Build binary
         env:

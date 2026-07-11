@@ -1,9 +1,12 @@
-name: Publish Docker Image
+name: Publish Docker Image Manually
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Docker image tag and embedded version.
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,7 +17,61 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build frontend artifact
+        uses: ./.github/actions/build-frontend
+        with:
+          artifact-name: komari-frontend
+
+  build-docker-binaries:
+    needs: build-frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Restore frontend artifact
+        uses: ./.github/actions/restore-frontend
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Install Zig
+        uses: ./.github/actions/setup-zig
+
+      - name: Build static binaries for multi-arch
+        env:
+          GOOS: linux
+          CGO_ENABLED: 1
+          GIN_MODE: release
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          VERSION_HASH="${{ github.sha }}"
+          LDFLAGS="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}"
+
+          echo "Building for linux/amd64..."
+          GOARCH=amd64 CC="zig cc -target x86_64-linux-musl" go build -trimpath -ldflags="$LDFLAGS" -o komari-linux-amd64
+
+          echo "Building for linux/arm64..."
+          GOARCH=arm64 CC="zig cc -target aarch64-linux-musl" go build -trimpath -ldflags="$LDFLAGS" -o komari-linux-arm64
+
+      - name: Upload Docker binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: komari-docker-binaries
+          path: komari-linux-*
+
   build-and-push-multi-arch:
+    needs: build-docker-binaries
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -24,54 +81,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Download Docker binaries
+        uses: actions/download-artifact@v4
         with:
-          node-version: "23"
-
-      - name: Clone and build frontend
-        run: |
-          git clone https://github.com/komari-monitor/komari-web komari-web
-          cd komari-web
-          npm install
-          npm run build
-          cd ..
-          mkdir -p web/public/defaultTheme/dist
-          rm -rf web/public/defaultTheme/dist/*
-          cp -r komari-web/dist/* web/public/defaultTheme/dist/
-          cp -f komari-web/komari-theme.json web/public/defaultTheme/
-          if [ -f komari-web/preview.png ]; then cp -f komari-web/preview.png web/public/defaultTheme/; fi
-          if [ -f komari-web/perview.png ]; then cp -f komari-web/perview.png web/public/defaultTheme/; fi
-          # Compatibility: ensure both filenames exist if only one is present
-          if [ -f web/public/defaultTheme/preview.png ] && [ ! -f web/public/defaultTheme/perview.png ]; then cp -f web/public/defaultTheme/preview.png web/public/defaultTheme/perview.png; fi
-          if [ -f web/public/defaultTheme/perview.png ] && [ ! -f web/public/defaultTheme/preview.png ]; then cp -f web/public/defaultTheme/perview.png web/public/defaultTheme/preview.png; fi
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.23"
-
-      - name: Install Zig
-        run: |
-          wget https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
-          sudo tar -C /usr/local -Jxf zig-x86_64-linux-0.14.1.tar.xz
-          echo "PATH=$PATH:/usr/local/zig-x86_64-linux-0.14.1" >> $GITHUB_ENV
-
-      - name: Build static binaries for multi-arch
-        env:
-          GOOS: linux
-          CGO_ENABLED: 1
-          GIN_MODE: release
-        run: |
-          VERSION="${{ github.event.release.tag_name }}"
-          VERSION_HASH="${{ github.sha }}"
-          LDFLAGS="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}"
-
-          echo "Building for linux/amd64..."
-          GOARCH=amd64 CC="zig cc -target x86_64-linux-musl" go build -trimpath -ldflags="$LDFLAGS" -o komari-linux-amd64
-
-          echo "Building for linux/arm64..."
-          GOARCH=arm64 CC="zig cc -target aarch64-linux-musl" go build -trimpath -ldflags="$LDFLAGS" -o komari-linux-arm64
+          name: komari-docker-binaries
+          path: .
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -92,7 +106,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ github.event.release.tag_name }}
+            type=raw,value=${{ github.event.inputs.version }}
             type=raw,value=latest
 
       - name: Build and push Docker image

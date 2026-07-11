@@ -1,0 +1,31 @@
+name: Setup Zig
+description: Restore or install the Zig toolchain used for CGO cross-compilation.
+
+inputs:
+  zig-version:
+    description: Zig version to install.
+    default: 0.14.1
+
+runs:
+  using: composite
+  steps:
+    - name: Restore Zig cache
+      id: zig-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/komari-zig/zig-x86_64-linux-${{ inputs.zig-version }}
+        key: zig-${{ runner.os }}-x86_64-${{ inputs.zig-version }}
+
+    - name: Download Zig
+      if: ${{ steps.zig-cache.outputs.cache-hit != 'true' }}
+      shell: bash
+      run: |
+        set -euxo pipefail
+        mkdir -p "$HOME/.cache/komari-zig"
+        curl -fsSL "https://ziglang.org/download/${{ inputs.zig-version }}/zig-x86_64-linux-${{ inputs.zig-version }}.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz"
+        tar -C "$HOME/.cache/komari-zig" -Jxf "$RUNNER_TEMP/zig.tar.xz"
+
+    - name: Add Zig to PATH
+      shell: bash
+      run: |
+        echo "$HOME/.cache/komari-zig/zig-x86_64-linux-${{ inputs.zig-version }}" >> "$GITHUB_PATH"

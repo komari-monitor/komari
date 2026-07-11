@@ -13,7 +13,20 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build frontend artifact
+        uses: ./.github/actions/build-frontend
+        with:
+          artifact-name: komari-frontend
+
   build-and-attach-binaries:
+    needs: build-frontend
     runs-on: ubuntu-latest
 
     strategy:
@@ -61,27 +74,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "23"
-
-      - name: Clone and build frontend
-        run: |
-          git clone https://github.com/komari-monitor/komari-web komari-web
-          cd komari-web
-          npm install
-          npm run build
-          cd ..
-          mkdir -p web/public/defaultTheme/dist
-          rm -rf web/public/defaultTheme/dist/*
-          cp -r komari-web/dist/* web/public/defaultTheme/dist/
-          cp -f komari-web/komari-theme.json web/public/defaultTheme/
-          if [ -f komari-web/preview.png ]; then cp -f komari-web/preview.png web/public/defaultTheme/; fi
-          if [ -f komari-web/perview.png ]; then cp -f komari-web/perview.png web/public/defaultTheme/; fi
-          # Compatibility: ensure both filenames exist if only one is present
-          if [ -f web/public/defaultTheme/preview.png ] && [ ! -f web/public/defaultTheme/perview.png ]; then cp -f web/public/defaultTheme/preview.png web/public/defaultTheme/perview.png; fi
-          if [ -f web/public/defaultTheme/perview.png ] && [ ! -f web/public/defaultTheme/preview.png ]; then cp -f web/public/defaultTheme/perview.png web/public/defaultTheme/preview.png; fi
+      - name: Restore frontend artifact
+        uses: ./.github/actions/restore-frontend
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -89,12 +83,7 @@ jobs:
           go-version: "1.23"
 
       - name: Install Zig cross-compiler toolchain
-        run: |
-          sudo apt-get update # Update apt package lists
-          sudo apt-get install -y build-essential curl
-          wget https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
-          sudo tar -C /usr/local -Jxf zig-x86_64-linux-0.14.1.tar.xz
-          echo "PATH=$PATH:/usr/local/zig-x86_64-linux-0.14.1" >> $GITHUB_ENV
+        uses: ./.github/actions/setup-zig
 
       - name: Build binary
         env:
@@ -112,6 +101,12 @@ jobs:
           VERSION_HASH="${{ github.sha }}" # Use commit SHA for hash
           go build -trimpath -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}" -o $BINARY_NAME
 
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: komari-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: komari-${{ matrix.goos }}-${{ matrix.goarch }}*
+
       - name: Upload binary to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -124,3 +119,54 @@ jobs:
           # Upload the binary as a release asset using GitHub CLI
           gh release upload ${{ github.event.release.tag_name }} $BINARY_NAME --repo ${{ github.repository }}
         shell: bash
+
+  build-and-push-docker:
+    needs: build-and-attach-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Docker binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: komari-linux-*
+          path: .
+          merge-multiple: true
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ github.event.release.tag_name }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: true
+          provenance: false
