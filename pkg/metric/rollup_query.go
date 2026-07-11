@@ -479,6 +479,38 @@ func rawTagsToJSON(v any) (string, error) {
 	}
 }
 
+// CompatibleSeriesInterval raises an output interval when the requested window
+// is only covered by a coarser rollup tier. The returned interval can always be
+// composed from the finest tier whose retention reaches the window start.
+func (s *Store) CompatibleSeriesInterval(start, now time.Time, interval time.Duration) time.Duration {
+	policy := s.cfg.RollupPolicy
+	if interval <= 0 || !policy.Enabled() {
+		return interval
+	}
+
+	start = start.UTC()
+	now = now.UTC()
+	rawCutoff := policy.rawCutoff(now)
+	if rawCutoff.IsZero() || !start.Before(rawCutoff) {
+		return interval
+	}
+
+	for _, tier := range policy.Tiers {
+		if now.Add(-tier.Retention).After(start) {
+			continue
+		}
+		if interval < tier.Interval {
+			return tier.Interval
+		}
+		if remainder := interval % tier.Interval; remainder != 0 {
+			return interval + tier.Interval - remainder
+		}
+		return interval
+	}
+
+	return interval
+}
+
 // Series answers an AggregateQuery by transparently choosing the best data
 // source for the requested window, given `now`:
 //

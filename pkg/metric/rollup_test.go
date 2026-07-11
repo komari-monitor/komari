@@ -457,6 +457,40 @@ func TestCompactMergesLateRawIntoExpiredRollup(t *testing.T) {
 	}
 }
 
+func TestCompatibleSeriesIntervalUsesTierCoveringWindow(t *testing.T) {
+	now := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)
+	s := &Store{cfg: Config{RollupPolicy: RollupPolicy{
+		RawRetention: 15 * time.Minute,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 48 * time.Hour},
+			{Interval: 5 * time.Minute, Retention: 14 * 24 * time.Hour},
+			{Interval: time.Hour, Retention: 60 * 24 * time.Hour},
+		},
+	}}}
+
+	tests := []struct {
+		name     string
+		start    time.Time
+		interval time.Duration
+		want     time.Duration
+	}{
+		{name: "recent raw", start: now.Add(-5 * time.Minute), interval: 5 * time.Second, want: 5 * time.Second},
+		{name: "one minute tier", start: now.Add(-24 * time.Hour), interval: 2 * time.Minute, want: 2 * time.Minute},
+		{name: "five minute tier", start: now.Add(-7 * 24 * time.Hour), interval: 10 * time.Minute, want: 10 * time.Minute},
+		{name: "five minute retention boundary", start: now.Add(-14 * 24 * time.Hour), interval: 30 * time.Minute, want: 30 * time.Minute},
+		{name: "hour tier", start: now.Add(-15 * 24 * time.Hour), interval: 30 * time.Minute, want: time.Hour},
+		{name: "round to hour multiple", start: now.Add(-15 * 24 * time.Hour), interval: 90 * time.Minute, want: 2 * time.Hour},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := s.CompatibleSeriesInterval(test.start, now, test.interval); got != test.want {
+				t.Fatalf("CompatibleSeriesInterval() = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
 // TestSeriesRoutesByAge verifies Series auto-routes between raw and rollup data
 // based on the query window's age.
 //

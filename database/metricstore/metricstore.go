@@ -634,7 +634,7 @@ func GetRecordsByTime(ctx context.Context, start, end time.Time) ([]models.Recor
 		return nil, fmt.Errorf("metric store not enabled")
 	}
 
-	interval := recordSeriesInterval(start, end, time.Now())
+	interval := recordSeriesInterval(s, start, end, time.Now())
 	entityIDs, err := listRecordEntityIDs(ctx, s, start, end, interval)
 	if err != nil {
 		return nil, err
@@ -685,7 +685,7 @@ type recordSeriesKey struct {
 
 func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, clientUUID string, start, end time.Time) ([]models.Record, error) {
 	now := time.Now()
-	interval := recordSeriesInterval(start, end, now)
+	interval := recordSeriesInterval(s, start, end, now)
 	recordMap := make(map[recordSeriesKey]*models.Record)
 
 	for _, metricName := range loadRecordMetricNames {
@@ -727,12 +727,9 @@ func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, c
 	return records, nil
 }
 
-func recordSeriesInterval(start, end, now time.Time) time.Duration {
+func recordSeriesInterval(s *metric.Store, start, end, now time.Time) time.Duration {
 	interval := recordDownsampleInterval(end.Sub(start), 500)
-	if start.Before(now.Add(-DefaultRollupRawRetention)) && interval < DefaultRollupFinestTier {
-		return DefaultRollupFinestTier
-	}
-	return interval
+	return s.CompatibleSeriesInterval(start, now, interval)
 }
 
 func recordDownsampleInterval(rangeDuration time.Duration, maxPoints int) time.Duration {

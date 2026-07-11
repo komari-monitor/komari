@@ -268,7 +268,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				item.DownsampleAlgorithm = string(algorithm)
 				now := time.Now()
 				interval := metricDownsampleInterval(end.Sub(start), maxPoints)
-				interval = metricRollupCompatibleInterval(start, now, interval)
+				interval = store.CompatibleSeriesInterval(start, now, interval)
 				item.IntervalSeconds = interval.Seconds()
 				points, err := store.Series(ctx, metric.AggregateQuery{
 					Query:          query,
@@ -375,9 +375,9 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	if maxPoints <= 0 {
 		maxPoints = defaultMetricQueryPoints
 	}
-	interval := metricDownsampleInterval(end.Sub(start), maxPoints)
-	interval = metricRollupCompatibleInterval(start, time.Now(), interval)
 	now := time.Now()
+	interval := metricDownsampleInterval(end.Sub(start), maxPoints)
+	interval = store.CompatibleSeriesInterval(start, now, interval)
 
 	stats := make([]publicPingMetricTaskStats, 0)
 	for _, entityID := range entityIDs {
@@ -1077,13 +1077,6 @@ func floorMetricDownsampleInterval(interval time.Duration) time.Duration {
 		out = candidate
 	}
 	return out
-}
-
-func metricRollupCompatibleInterval(start, now time.Time, interval time.Duration) time.Duration {
-	if start.Before(now.Add(-metricstore.DefaultRollupRawRetention)) && interval < metricstore.DefaultRollupFinestTier {
-		return metricstore.DefaultRollupFinestTier
-	}
-	return interval
 }
 
 func maxInt(a, b int) int {

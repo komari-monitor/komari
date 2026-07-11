@@ -253,17 +253,3 @@ func TestMetricDownsampleIntervalFloorsToStandardInterval(t *testing.T) {
 		t.Fatalf("1h/500 should floor to 5s, got %s", got)
 	}
 }
-
-func TestMetricRollupCompatibleIntervalClampsOldWindowToFinestTier(t *testing.T) {
-	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
-
-	got := metricRollupCompatibleInterval(now.Add(-time.Hour), now, 5*time.Second)
-	if got != metricstore.DefaultRollupFinestTier {
-		t.Fatalf("old window should clamp to finest rollup tier, got %s", got)
-	}
-
-	got = metricRollupCompatibleInterval(now.Add(-5*time.Minute), now, 5*time.Second)
-	if got != 5*time.Second {
-		t.Fatalf("recent window should keep raw interval, got %s", got)
-	}
-}
