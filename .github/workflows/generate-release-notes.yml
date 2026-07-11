@@ -117,11 +117,7 @@ jobs:
                   return Number.isFinite(itemTime) && itemTime < currentTime;
                 })
                 .filter((item) => {
-                  if (currentIsSnapshot) {
-                    return isSnapshotTag(item.tag_name);
-                  }
-
-                  if (currentIsStable) {
+                  if (currentIsSnapshot || currentIsStable) {
                     return isStableRelease(item);
                   }
 
@@ -149,7 +145,7 @@ jobs:
                 return {
                   ref: previousTag,
                   previousTag,
-                  source: isSnapshotTag(tag) ? "previous snapshot release" : "previous release in the same channel",
+                  source: isSnapshotTag(tag) ? "previous stable release" : "previous release in the same channel",
                 };
               }
 
