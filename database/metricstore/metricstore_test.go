@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/metric"
 )
 
@@ -84,5 +85,85 @@ func TestCompactKeepsRotatingCursorAfterFullCycle(t *testing.T) {
 	}
 	if compactAt != 1 {
 		t.Fatalf("compact cursor = %d, want 1 after a complete rotated cycle", compactAt)
+	}
+}
+
+func TestGetRecordsByClientAndTimeReadsRollupsAfterRawCompaction(t *testing.T) {
+	ctx := context.Background()
+	s, err := metric.Open(ctx, metric.SQLite(":memory:",
+		metric.WithMaxOpenConns(1),
+		metric.WithRollupPolicy(defaultRollupPolicy(30)),
+	))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	if err := createMetricDefinitions(ctx, s); err != nil {
+		t.Fatalf("create metric definitions: %v", err)
+	}
+
+	storeMu.Lock()
+	oldStore := store
+	oldCompactAt := compactAt
+	store = s
+	compactAt = 0
+	storeMu.Unlock()
+	defer func() {
+		storeMu.Lock()
+		store = oldStore
+		compactAt = oldCompactAt
+		storeMu.Unlock()
+		_ = s.Close()
+	}()
+
+	now := time.Now().UTC().Truncate(time.Minute)
+	ts := now.Add(-time.Hour)
+	rec := models.Record{
+		Client:         "node-a",
+		Time:           models.FromTime(ts),
+		Cpu:            42.5,
+		Ram:            123456,
+		RamTotal:       999999,
+		Disk:           456789,
+		DiskTotal:      777777,
+		Load:           0.75,
+		Connections:    321,
+		ConnectionsUdp: 12,
+	}
+	if err := WriteRecord(ctx, rec); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+	if _, err := s.Compact(ctx, now); err != nil {
+		t.Fatalf("compact raw into rollup: %v", err)
+	}
+	raw, err := s.Query(ctx, metric.Query{
+		MetricName: MetricCPU,
+		EntityID:   rec.Client,
+		Start:      ts.Add(-time.Minute),
+		End:        now,
+	})
+	if err != nil {
+		t.Fatalf("query raw cpu: %v", err)
+	}
+	if len(raw) != 0 {
+		t.Fatalf("expected old raw cpu point to be deleted after compaction, got %d", len(raw))
+	}
+
+	got, err := GetRecordsByClientAndTime(ctx, rec.Client, ts.Add(-time.Minute), now)
+	if err != nil {
+		t.Fatalf("get records: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 reconstructed record from rollup, got %d: %#v", len(got), got)
+	}
+	if got[0].Cpu == 0 || got[0].Ram == 0 || got[0].Disk == 0 || got[0].Connections == 0 {
+		t.Fatalf("record was not reconstructed from rollup: %#v", got[0])
+	}
+
+	all, err := GetRecordsByTime(ctx, ts.Add(-time.Minute), now)
+	if err != nil {
+		t.Fatalf("get all records: %v", err)
+	}
+	if len(all) != 1 || all[0].Client != rec.Client || all[0].Cpu == 0 {
+		t.Fatalf("all-client records were not reconstructed from rollup: %#v", all)
 	}
 }

@@ -757,6 +757,63 @@ func (s *Store) Query(ctx context.Context, query Query) ([]Point, error) {
 	return out, nil
 }
 
+// EntityIDs returns distinct entity ids that have raw or rollup data matching a query.
+//
+// EntityIDs 返回在原始点或 rollup 中匹配查询条件的实体 ID。
+func (s *Store) EntityIDs(ctx context.Context, query Query) ([]string, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if err := query.Validate(); err != nil {
+		return nil, err
+	}
+	query = query.normalized()
+
+	pointsWhere, args := s.buildWhere(query)
+	rollupArgsStart := len(args)
+	rollupArgs := []any{query.MetricName, query.Start.UnixNano(), query.End.UnixNano()}
+	rollupParts := []string{
+		"metric_name = " + s.dialect.placeholder(rollupArgsStart+1),
+		"bucket_nano >= " + s.dialect.placeholder(rollupArgsStart+2),
+		"bucket_nano <= " + s.dialect.placeholder(rollupArgsStart+3),
+	}
+	if strings.TrimSpace(query.EntityID) != "" {
+		rollupArgs = append(rollupArgs, query.EntityID)
+		rollupParts = append(rollupParts, "entity_id = "+s.dialect.placeholder(rollupArgsStart+len(rollupArgs)))
+	}
+	for _, k := range sortedKeys(query.Tags) {
+		rollupArgs = append(rollupArgs, query.Tags[k])
+		rollupParts = append(rollupParts, s.dialect.jsonExtractEquals("tags", k, s.dialect.placeholder(rollupArgsStart+len(rollupArgs))))
+	}
+	args = append(args, rollupArgs...)
+
+	sqlText := fmt.Sprintf(`SELECT DISTINCT entity_id FROM (
+SELECT entity_id FROM %s WHERE %s
+UNION
+SELECT entity_id FROM %s WHERE %s
+) AS metric_entities ORDER BY entity_id ASC`,
+		s.tables.points, pointsWhere,
+		s.tables.rollups, strings.Join(rollupParts, " AND "),
+	)
+	rows, err := s.reader().QueryContext(ctx, sqlText, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var entityID string
+		if err := rows.Scan(&entityID); err != nil {
+			return nil, err
+		}
+		if entityID != "" {
+			out = append(out, entityID)
+		}
+	}
+	return out, rows.Err()
+}
+
 // Latest loads the newest points for a metric and entity.
 //
 // Latest 查询某指标和实体的最新采样点。

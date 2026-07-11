@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -599,98 +600,7 @@ func GetRecordsByClientAndTime(ctx context.Context, clientUUID string, start, en
 		return nil, fmt.Errorf("metric store not enabled")
 	}
 
-	// 查询所有相关指标
-	metricNames := []string{
-		MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
-		MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
-		MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
-		MetricProcess, MetricConnections, MetricConnectionsUDP,
-	}
-
-	// 按时间戳组织数据
-	recordMap := make(map[int64]*models.Record)
-
-	for _, metricName := range metricNames {
-		points, err := s.Query(ctx, metric.Query{
-			MetricName: metricName,
-			EntityID:   clientUUID,
-			Start:      start,
-			End:        end,
-			Order:      metric.OrderAsc,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to query metric %s: %w", metricName, err)
-		}
-
-		for _, p := range points {
-			tsKey := p.Timestamp.Unix()
-			if recordMap[tsKey] == nil {
-				recordMap[tsKey] = &models.Record{
-					Client: clientUUID,
-					Time:   models.FromTime(p.Timestamp),
-				}
-			}
-			rec := recordMap[tsKey]
-
-			switch metricName {
-			case MetricCPU:
-				rec.Cpu = float32(p.Value)
-			case MetricGPU:
-				rec.Gpu = float32(p.Value)
-			case MetricRAM:
-				rec.Ram = int64(p.Value)
-			case MetricRAMTotal:
-				rec.RamTotal = int64(p.Value)
-			case MetricSwap:
-				rec.Swap = int64(p.Value)
-			case MetricSwapTotal:
-				rec.SwapTotal = int64(p.Value)
-			case MetricLoad:
-				rec.Load = float32(p.Value)
-			case MetricTemp:
-				rec.Temp = float32(p.Value)
-			case MetricDisk:
-				rec.Disk = int64(p.Value)
-			case MetricDiskTotal:
-				rec.DiskTotal = int64(p.Value)
-			case MetricNetIn:
-				rec.NetIn = int64(p.Value)
-			case MetricNetOut:
-				rec.NetOut = int64(p.Value)
-			case MetricNetTotalUp:
-				rec.NetTotalUp = int64(p.Value)
-			case MetricNetTotalDown:
-				rec.NetTotalDown = int64(p.Value)
-			case MetricTrafficUp:
-				rec.TrafficUp = int64(p.Value)
-			case MetricTrafficDown:
-				rec.TrafficDown = int64(p.Value)
-			case MetricProcess:
-				rec.Process = int(p.Value)
-			case MetricConnections:
-				rec.Connections = int(p.Value)
-			case MetricConnectionsUDP:
-				rec.ConnectionsUdp = int(p.Value)
-			}
-		}
-	}
-
-	// 转换为切片并排序
-	records := make([]models.Record, 0, len(recordMap))
-	for _, rec := range recordMap {
-		records = append(records, *rec)
-	}
-
-	// 按时间排序
-	for i := 0; i < len(records)-1; i++ {
-		for j := i + 1; j < len(records); j++ {
-			if records[i].Time.ToTime().After(records[j].Time.ToTime()) {
-				records[i], records[j] = records[j], records[i]
-			}
-		}
-	}
-
-	return records, nil
+	return getRecordsByClientAndTimeFromSeries(ctx, s, clientUUID, start, end)
 }
 
 // GetRecordsByTime 从 metric store 查询所有客户端在时间范围内的记录
@@ -700,80 +610,88 @@ func GetRecordsByTime(ctx context.Context, start, end time.Time) ([]models.Recor
 		return nil, fmt.Errorf("metric store not enabled")
 	}
 
-	metricNames := []string{
-		MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
-		MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
-		MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
-		MetricProcess, MetricConnections, MetricConnectionsUDP,
+	interval := recordSeriesInterval(start, end, time.Now())
+	entityIDs, err := listRecordEntityIDs(ctx, s, start, end, interval)
+	if err != nil {
+		return nil, err
 	}
-
-	type recKey struct {
-		client string
-		ts     int64
+	var records []models.Record
+	for _, entityID := range entityIDs {
+		items, err := getRecordsByClientAndTimeFromSeries(ctx, s, entityID, start, end)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, items...)
 	}
-	recordMap := make(map[recKey]*models.Record)
+	sortRecords(records)
+	return records, nil
+}
 
-	for _, metricName := range metricNames {
-		points, err := s.Query(ctx, metric.Query{
-			MetricName: metricName,
-			Start:      start,
-			End:        end,
-			Order:      metric.OrderAsc,
-		})
+var loadRecordMetricNames = []string{
+	MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
+	MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
+	MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
+	MetricProcess, MetricConnections, MetricConnectionsUDP,
+}
+
+var recordDownsampleStandardIntervals = []time.Duration{
+	time.Second,
+	5 * time.Second,
+	10 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+	time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+	10 * time.Minute,
+	15 * time.Minute,
+	30 * time.Minute,
+	time.Hour,
+	2 * time.Hour,
+	3 * time.Hour,
+	6 * time.Hour,
+	12 * time.Hour,
+	24 * time.Hour,
+}
+
+type recordSeriesKey struct {
+	client string
+	ts     int64
+}
+
+func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, clientUUID string, start, end time.Time) ([]models.Record, error) {
+	now := time.Now()
+	interval := recordSeriesInterval(start, end, now)
+	recordMap := make(map[recordSeriesKey]*models.Record)
+
+	for _, metricName := range loadRecordMetricNames {
+		points, err := s.Series(ctx, metric.AggregateQuery{
+			Query: metric.Query{
+				MetricName: metricName,
+				EntityID:   clientUUID,
+				Start:      start,
+				End:        end,
+				Order:      metric.OrderAsc,
+			},
+			Aggregation: metric.AggAvg,
+			Interval:    interval,
+		}, now)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query metric %s: %w", metricName, err)
 		}
-
-		for _, p := range points {
-			key := recKey{client: p.EntityID, ts: p.Timestamp.Unix()}
+		for _, point := range points {
+			entityID := point.EntityID
+			if entityID == "" {
+				entityID = clientUUID
+			}
+			key := recordSeriesKey{client: entityID, ts: point.Bucket.Unix()}
 			if recordMap[key] == nil {
 				recordMap[key] = &models.Record{
-					Client: p.EntityID,
-					Time:   models.FromTime(p.Timestamp),
+					Client: entityID,
+					Time:   models.FromTime(point.Bucket),
 				}
 			}
-			rec := recordMap[key]
-
-			switch metricName {
-			case MetricCPU:
-				rec.Cpu = float32(p.Value)
-			case MetricGPU:
-				rec.Gpu = float32(p.Value)
-			case MetricRAM:
-				rec.Ram = int64(p.Value)
-			case MetricRAMTotal:
-				rec.RamTotal = int64(p.Value)
-			case MetricSwap:
-				rec.Swap = int64(p.Value)
-			case MetricSwapTotal:
-				rec.SwapTotal = int64(p.Value)
-			case MetricLoad:
-				rec.Load = float32(p.Value)
-			case MetricTemp:
-				rec.Temp = float32(p.Value)
-			case MetricDisk:
-				rec.Disk = int64(p.Value)
-			case MetricDiskTotal:
-				rec.DiskTotal = int64(p.Value)
-			case MetricNetIn:
-				rec.NetIn = int64(p.Value)
-			case MetricNetOut:
-				rec.NetOut = int64(p.Value)
-			case MetricNetTotalUp:
-				rec.NetTotalUp = int64(p.Value)
-			case MetricNetTotalDown:
-				rec.NetTotalDown = int64(p.Value)
-			case MetricTrafficUp:
-				rec.TrafficUp = int64(p.Value)
-			case MetricTrafficDown:
-				rec.TrafficDown = int64(p.Value)
-			case MetricProcess:
-				rec.Process = int(p.Value)
-			case MetricConnections:
-				rec.Connections = int(p.Value)
-			case MetricConnectionsUDP:
-				rec.ConnectionsUdp = int(p.Value)
-			}
+			applyRecordMetricValue(recordMap[key], metricName, point.Value)
 		}
 	}
 
@@ -781,7 +699,117 @@ func GetRecordsByTime(ctx context.Context, start, end time.Time) ([]models.Recor
 	for _, rec := range recordMap {
 		records = append(records, *rec)
 	}
+	sortRecords(records)
 	return records, nil
+}
+
+func recordSeriesInterval(start, end, now time.Time) time.Duration {
+	interval := recordDownsampleInterval(end.Sub(start), 500)
+	if start.Before(now.Add(-DefaultRollupRawRetention)) && interval < DefaultRollupFinestTier {
+		return DefaultRollupFinestTier
+	}
+	return interval
+}
+
+func recordDownsampleInterval(rangeDuration time.Duration, maxPoints int) time.Duration {
+	if maxPoints <= 0 {
+		maxPoints = 500
+	}
+	nanos := rangeDuration.Nanoseconds()
+	if nanos <= 0 {
+		return time.Second
+	}
+	interval := time.Duration((nanos + int64(maxPoints) - 1) / int64(maxPoints))
+	if interval < time.Second {
+		return time.Second
+	}
+	return floorRecordDownsampleInterval(interval)
+}
+
+func floorRecordDownsampleInterval(interval time.Duration) time.Duration {
+	out := time.Second
+	for _, candidate := range recordDownsampleStandardIntervals {
+		if candidate > interval {
+			break
+		}
+		out = candidate
+	}
+	return out
+}
+
+func listRecordEntityIDs(ctx context.Context, s *metric.Store, start, end time.Time, interval time.Duration) ([]string, error) {
+	seen := make(map[string]struct{})
+	for _, metricName := range loadRecordMetricNames {
+		ids, err := s.EntityIDs(ctx, metric.Query{
+			MetricName: metricName,
+			Start:      start.Add(-interval),
+			End:        end,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			seen[id] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func applyRecordMetricValue(rec *models.Record, metricName string, value float64) {
+	switch metricName {
+	case MetricCPU:
+		rec.Cpu = float32(value)
+	case MetricGPU:
+		rec.Gpu = float32(value)
+	case MetricRAM:
+		rec.Ram = int64(value)
+	case MetricRAMTotal:
+		rec.RamTotal = int64(value)
+	case MetricSwap:
+		rec.Swap = int64(value)
+	case MetricSwapTotal:
+		rec.SwapTotal = int64(value)
+	case MetricLoad:
+		rec.Load = float32(value)
+	case MetricTemp:
+		rec.Temp = float32(value)
+	case MetricDisk:
+		rec.Disk = int64(value)
+	case MetricDiskTotal:
+		rec.DiskTotal = int64(value)
+	case MetricNetIn:
+		rec.NetIn = int64(value)
+	case MetricNetOut:
+		rec.NetOut = int64(value)
+	case MetricNetTotalUp:
+		rec.NetTotalUp = int64(value)
+	case MetricNetTotalDown:
+		rec.NetTotalDown = int64(value)
+	case MetricTrafficUp:
+		rec.TrafficUp = int64(value)
+	case MetricTrafficDown:
+		rec.TrafficDown = int64(value)
+	case MetricProcess:
+		rec.Process = int(value)
+	case MetricConnections:
+		rec.Connections = int(value)
+	case MetricConnectionsUDP:
+		rec.ConnectionsUdp = int(value)
+	}
+}
+
+func sortRecords(records []models.Record) {
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Client != records[j].Client {
+			return records[i].Client < records[j].Client
+		}
+		return records[i].Time.ToTime().Before(records[j].Time.ToTime())
+	})
 }
 
 // GetLatestTrafficBefore 查询每个客户端在指定时间之前最新的累计流量（用于计算增量基线）
