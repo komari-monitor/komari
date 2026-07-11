@@ -45,6 +45,9 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: models.FromTime(base), Value: 36}).Error; err != nil {
 		t.Fatalf("seed ping_records: %v", err)
 	}
+	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: models.FromTime(base.Add(30 * time.Second)), Value: -1}).Error; err != nil {
+		t.Fatalf("seed loss ping_records: %v", err)
+	}
 
 	metricDB, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "metrics.db"))+"?mode=rwc")
 	if err != nil {
@@ -70,7 +73,7 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	if markDoneCalls != 1 {
 		t.Fatalf("expected migration marker to be written once, got %d", markDoneCalls)
 	}
-	if stats.Records != 2 || stats.GPU != 1 || stats.Ping != 1 {
+	if stats.Records != 2 || stats.GPU != 1 || stats.Ping != 2 {
 		t.Fatalf("unexpected stats: %#v", stats)
 	}
 
@@ -90,12 +93,20 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 		t.Fatalf("unexpected gpu points: %#v", gpuPoints)
 	}
 
-	pingPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricPingLatency, EntityID: "client-a", Start: base.Add(-time.Second), End: base.Add(time.Second), Tags: map[string]string{"task_id": "7"}})
+	pingPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricPingLatency, EntityID: "client-a", Start: base.Add(-time.Second), End: base.Add(time.Minute), Tags: map[string]string{"task_id": "7"}})
 	if err != nil {
 		t.Fatalf("query ping points: %v", err)
 	}
-	if len(pingPoints) != 1 || pingPoints[0].Value != 36 {
+	if len(pingPoints) != 2 || pingPoints[0].Value != 36 || pingPoints[1].Value != -1 {
 		t.Fatalf("unexpected ping points: %#v", pingPoints)
+	}
+
+	pingLossPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricPingLoss, EntityID: "client-a", Start: base.Add(-time.Second), End: base.Add(time.Minute), Tags: map[string]string{"task_id": "7"}})
+	if err != nil {
+		t.Fatalf("query ping loss points: %v", err)
+	}
+	if len(pingLossPoints) != 2 || pingLossPoints[0].Value != 0 || pingLossPoints[1].Value != 1 {
+		t.Fatalf("unexpected ping loss points: %#v", pingLossPoints)
 	}
 
 	for _, table := range legacyMonitoringTables {

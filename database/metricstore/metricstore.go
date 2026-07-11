@@ -41,6 +41,7 @@ const (
 	MetricConnections    = "connections.tcp"
 	MetricConnectionsUDP = "connections.udp"
 	MetricPingLatency    = "ping.latency_ms"
+	MetricPingLoss       = "ping.loss"
 )
 
 var (
@@ -492,6 +493,7 @@ func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
 		{Name: MetricConnections, Type: metric.TypeGauge, Unit: "count", Description: "TCP connections"},
 		{Name: MetricConnectionsUDP, Type: metric.TypeGauge, Unit: "count", Description: "UDP connections"},
 		{Name: MetricPingLatency, Type: metric.TypeGauge, Unit: "ms", Description: "Ping latency"},
+		{Name: MetricPingLoss, Type: metric.TypeGauge, Unit: "ratio", Description: "Ping packet loss indicator"},
 	}
 
 	for _, def := range definitions {
@@ -582,15 +584,28 @@ func WritePingRecord(ctx context.Context, rec models.PingRecord) error {
 		"task_id": fmt.Sprintf("%d", rec.TaskId),
 	}
 
-	point := metric.Point{
-		MetricName: MetricPingLatency,
-		EntityID:   entityID,
-		Timestamp:  ts,
-		Value:      float64(rec.Value),
-		Tags:       tags,
+	loss := 0.0
+	if rec.Value < 0 {
+		loss = 1
+	}
+	points := []metric.Point{
+		{
+			MetricName: MetricPingLatency,
+			EntityID:   entityID,
+			Timestamp:  ts,
+			Value:      float64(rec.Value),
+			Tags:       tags,
+		},
+		{
+			MetricName: MetricPingLoss,
+			EntityID:   entityID,
+			Timestamp:  ts,
+			Value:      loss,
+			Tags:       tags,
+		},
 	}
 
-	return s.Write(ctx, point)
+	return s.WriteBatch(ctx, points)
 }
 
 // GetRecordsByClientAndTime 从 metric store 查询记录并重构为 models.Record
@@ -1035,8 +1050,10 @@ func DeleteAllPingRecords(ctx context.Context) error {
 	if s == nil {
 		return fmt.Errorf("metric store not enabled")
 	}
-	if _, err := s.DeleteBefore(ctx, MetricPingLatency, farFuture()); err != nil {
-		return fmt.Errorf("failed to delete ping records: %w", err)
+	for _, metricName := range []string{MetricPingLatency, MetricPingLoss} {
+		if _, err := s.DeleteBefore(ctx, metricName, farFuture()); err != nil {
+			return fmt.Errorf("failed to delete ping records: %w", err)
+		}
 	}
 	return nil
 }
@@ -1047,8 +1064,10 @@ func DeletePingRecordsBefore(ctx context.Context, before time.Time) error {
 	if s == nil {
 		return fmt.Errorf("metric store not enabled")
 	}
-	if _, err := s.DeleteBefore(ctx, MetricPingLatency, before); err != nil {
-		return fmt.Errorf("failed to delete ping records before %s: %w", before, err)
+	for _, metricName := range []string{MetricPingLatency, MetricPingLoss} {
+		if _, err := s.DeleteBefore(ctx, metricName, before); err != nil {
+			return fmt.Errorf("failed to delete ping records before %s: %w", before, err)
+		}
 	}
 	return nil
 }
@@ -1060,11 +1079,13 @@ func DeletePingRecordsByTask(ctx context.Context, taskIDs []uint) error {
 		return fmt.Errorf("metric store not enabled")
 	}
 	for _, id := range taskIDs {
-		if _, err := s.DeleteSeries(ctx, metric.Query{
-			MetricName: MetricPingLatency,
-			Tags:       map[string]string{"task_id": fmt.Sprintf("%d", id)},
-		}); err != nil {
-			return fmt.Errorf("failed to delete ping records for task %d: %w", id, err)
+		for _, metricName := range []string{MetricPingLatency, MetricPingLoss} {
+			if _, err := s.DeleteSeries(ctx, metric.Query{
+				MetricName: metricName,
+				Tags:       map[string]string{"task_id": fmt.Sprintf("%d", id)},
+			}); err != nil {
+				return fmt.Errorf("failed to delete ping records for task %d: %w", id, err)
+			}
 		}
 	}
 	return nil

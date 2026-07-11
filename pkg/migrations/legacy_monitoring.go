@@ -252,9 +252,9 @@ func migrateLegacyPingRecordTable(ctx context.Context, s *metric.Store, db *gorm
 			break
 		}
 
-		points := make([]metric.Point, 0, len(rows))
+		points := make([]metric.Point, 0, len(rows)*2)
 		for i := range rows {
-			points = append(points, pingRecordToPoint(rows[i].PingRecord))
+			points = append(points, pingRecordToPoints(rows[i].PingRecord)...)
 		}
 		if err := s.WriteBatch(ctx, points); err != nil {
 			return migrated, fmt.Errorf("write legacy %s to metric store: %w", table, err)
@@ -309,13 +309,28 @@ func gpuRecordToPoints(rec models.GPURecord) []metric.Point {
 	}
 }
 
-func pingRecordToPoint(rec models.PingRecord) metric.Point {
-	return metric.Point{
-		MetricName: metricstore.MetricPingLatency,
-		EntityID:   rec.Client,
-		Timestamp:  rec.Time.ToTime(),
-		Value:      float64(rec.Value),
-		Tags:       map[string]string{"task_id": fmt.Sprintf("%d", rec.TaskId)},
+func pingRecordToPoints(rec models.PingRecord) []metric.Point {
+	ts := rec.Time.ToTime()
+	tags := map[string]string{"task_id": fmt.Sprintf("%d", rec.TaskId)}
+	loss := 0.0
+	if rec.Value < 0 {
+		loss = 1
+	}
+	return []metric.Point{
+		{
+			MetricName: metricstore.MetricPingLatency,
+			EntityID:   rec.Client,
+			Timestamp:  ts,
+			Value:      float64(rec.Value),
+			Tags:       tags,
+		},
+		{
+			MetricName: metricstore.MetricPingLoss,
+			EntityID:   rec.Client,
+			Timestamp:  ts,
+			Value:      loss,
+			Tags:       tags,
+		},
 	}
 }
 
