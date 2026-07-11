@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -20,7 +21,6 @@ import (
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
-	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
@@ -395,6 +395,9 @@ func registerScheduledWork() {
 	if err := corn.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
 		log.Println("Failed to add cleanup scheduled task:", err)
 	}
+	if err := corn.AddContextFunc("metrics:compact", "@every 5m", true, compactMetricStore); err != nil {
+		log.Println("Failed to add metric compact scheduled task:", err)
+	}
 	if err := corn.AddFunc("records:minute", "@every 1m", minuteScheduledWork); err != nil {
 		log.Println("Failed to add minute scheduled task:", err)
 	}
@@ -408,16 +411,31 @@ func registerScheduledWork() {
 func cleanupScheduledData() {
 	cfg, _ := config.GetManyAs[metricstore.MetricStoreConfig]()
 	retentionDays := cfg.RetentionDays
-	if retentionDays < 0 {
+	if retentionDays <= 0 {
 		retentionDays = 30
 	}
 	before := time.Now().Add(-24 * time.Hour * time.Duration(retentionDays))
-	records.DeleteRecordBefore(before)
 	tasks.ClearTaskResultsByTimeBefore(before)
-	tasks.DeletePingRecordsBefore(before)
 
 	auditlog.RemoveOldLogs()
 	accounts.RemoveExpiredSessions()
+}
+
+func compactMetricStore(ctx context.Context) {
+	compactCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+
+	written, err := metricstore.Compact(compactCtx, time.Now())
+	if errors.Is(err, metricstore.ErrCompactInProgress) {
+		return
+	}
+	if err != nil {
+		log.Println("Failed to compact metric store:", err)
+		return
+	}
+	if written > 0 {
+		log.Printf("Metric store compacted %d rollup buckets", written)
+	}
 }
 
 func minuteScheduledWork() {

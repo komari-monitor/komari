@@ -47,6 +47,16 @@ var (
 	storeMu   sync.RWMutex
 	storeOnce sync.Once
 	reloadMu  sync.Mutex
+	compactMu sync.Mutex
+)
+
+var ErrCompactInProgress = errors.New("metric store compact already in progress")
+
+const (
+	// DefaultRollupRawRetention keeps a short hot raw window; older samples are
+	// served from rollups after compaction.
+	DefaultRollupRawRetention = 15 * time.Minute
+	DefaultRollupFinestTier   = time.Minute
 )
 
 // MetricStoreConfig 保存 metric store 配置。
@@ -97,6 +107,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 	opts := []metric.Option{
 		metric.WithTablePrefix(tablePrefix),
 		metric.WithDefaultRetention(retention),
+		metric.WithRollupPolicy(defaultRollupPolicy(retention)),
 		metric.WithAutoMigrate(autoMigrate),
 	}
 
@@ -139,6 +150,31 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 	default:
 		return metric.Config{}, fmt.Errorf("unsupported metric database driver: %s", cfg.Driver)
 	}
+}
+
+func defaultRollupPolicy(retentionDays int) metric.RollupPolicy {
+	if retentionDays <= 0 {
+		retentionDays = 30
+	}
+	totalRetention := time.Duration(retentionDays) * 24 * time.Hour
+	twoDays := 48 * time.Hour
+	twoWeeks := 14 * 24 * time.Hour
+
+	return metric.RollupPolicy{
+		RawRetention: DefaultRollupRawRetention,
+		Tiers: []metric.RollupTier{
+			{Interval: DefaultRollupFinestTier, Retention: minDuration(twoDays, totalRetention)},
+			{Interval: 5 * time.Minute, Retention: minDuration(twoWeeks, totalRetention)},
+			{Interval: time.Hour, Retention: totalRetention},
+		},
+	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ResolveDriverFromConfig 根据 DSN 自动推断 metrics 数据库类型；当 DSN 不能可靠
@@ -373,6 +409,20 @@ func GetStore() *metric.Store {
 // IsEnabled 检查 metric store 是否已启用
 func IsEnabled() bool {
 	return GetStore() != nil
+}
+
+func Compact(ctx context.Context, now time.Time) (int, error) {
+	if !compactMu.TryLock() {
+		return 0, ErrCompactInProgress
+	}
+	defer compactMu.Unlock()
+
+	storeMu.RLock()
+	defer storeMu.RUnlock()
+	if store == nil {
+		return 0, fmt.Errorf("metric store not initialized")
+	}
+	return store.Compact(ctx, now)
 }
 
 // CloseStore 关闭 metric store

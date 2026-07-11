@@ -17,6 +17,26 @@ import (
 
 const defaultMetricQueryPoints = 500
 
+var metricDownsampleStandardIntervals = []time.Duration{
+	time.Second,
+	5 * time.Second,
+	10 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+	time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+	10 * time.Minute,
+	15 * time.Minute,
+	30 * time.Minute,
+	time.Hour,
+	2 * time.Hour,
+	3 * time.Hour,
+	6 * time.Hour,
+	12 * time.Hour,
+	24 * time.Hour,
+}
+
 func init() {
 	regPublic("listMetricDefinitions", publicListMetricDefinitions, "List public metric definitions")
 	regPublic("queryMetrics", publicQueryMetrics, "Query metric points")
@@ -189,13 +209,15 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 
 			if metricDownsample {
 				item.DownsampleAlgorithm = string(algorithm)
+				now := time.Now()
 				interval := metricDownsampleInterval(end.Sub(start), maxPoints)
+				interval = metricRollupCompatibleInterval(start, now, interval)
 				item.IntervalSeconds = interval.Seconds()
 				points, err := store.Series(ctx, metric.AggregateQuery{
 					Query:       query,
 					Aggregation: algorithm,
 					Interval:    interval,
-				}, time.Now())
+				}, now)
 				if err != nil {
 					return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metric "+metricKey+": "+err.Error(), nil)
 				}
@@ -549,6 +571,24 @@ func metricDownsampleInterval(rangeDuration time.Duration, maxPoints int) time.D
 	interval := time.Duration((nanos + int64(maxPoints) - 1) / int64(maxPoints))
 	if interval < time.Second {
 		return time.Second
+	}
+	return floorMetricDownsampleInterval(interval)
+}
+
+func floorMetricDownsampleInterval(interval time.Duration) time.Duration {
+	out := time.Second
+	for _, candidate := range metricDownsampleStandardIntervals {
+		if candidate > interval {
+			break
+		}
+		out = candidate
+	}
+	return out
+}
+
+func metricRollupCompatibleInterval(start, now time.Time, interval time.Duration) time.Duration {
+	if start.Before(now.Add(-metricstore.DefaultRollupRawRetention)) && interval < metricstore.DefaultRollupFinestTier {
+		return metricstore.DefaultRollupFinestTier
 	}
 	return interval
 }
