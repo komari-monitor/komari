@@ -28,12 +28,13 @@ func configFromFingerprint(fingerprint string, base *MetricStoreConfig) (*Metric
 		return nil, fmt.Errorf("empty driver in target fingerprint: %q", fingerprint)
 	}
 	return &MetricStoreConfig{
-		Driver:        driver,
-		DSN:           dsn,
-		RetentionDays: base.RetentionDays,
-		TablePrefix:   base.TablePrefix,
-		MaxOpenConns:  base.MaxOpenConns,
-		MaxIdleConns:  base.MaxIdleConns,
+		Driver:              driver,
+		DSN:                 dsn,
+		RetentionDays:       base.RetentionDays,
+		DownsamplingEnabled: base.DownsamplingEnabled,
+		TablePrefix:         base.TablePrefix,
+		MaxOpenConns:        base.MaxOpenConns,
+		MaxIdleConns:        base.MaxIdleConns,
 	}, nil
 }
 
@@ -82,7 +83,6 @@ func migrateFromPreviousStore(prevFingerprint string, cfg *MetricStoreConfig, ds
 	log.Printf("Store-to-store metrics migration completed (%d points)", total)
 	return nil
 }
-
 
 // storeMigrationObserver 在 store-to-store 迁移过程中接收进度回调。
 //   - currentMetric：当前正在搬运的指标名。
@@ -173,7 +173,6 @@ func migrateBetweenStores(ctx context.Context, src, dst *metric.Store, observe s
 
 	return total, nil
 }
-
 
 // metricTimeBounds 返回某指标在 src 中最早/最晚采样时间。ok=false 表示无数据。
 // 通过升/降序各取一条采样点定位边界，避免把整段序列读入内存。

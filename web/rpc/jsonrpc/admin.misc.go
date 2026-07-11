@@ -112,12 +112,13 @@ func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonR
 //
 // 注意：metric_store_enabled 已废弃（metric store 始终启用），不再纳入此集合。
 var metricStoreConfigKeys = map[string]struct{}{
-	metricstore.MetricDBDriverKey:      {},
-	metricstore.MetricDBDSNKey:         {},
-	metricstore.MetricRetentionDaysKey: {},
-	metricstore.MetricTablePrefixKey:   {},
-	metricstore.MetricMaxOpenConnsKey:  {},
-	metricstore.MetricMaxIdleConnsKey:  {},
+	metricstore.MetricDBDriverKey:            {},
+	metricstore.MetricDBDSNKey:               {},
+	metricstore.MetricRetentionDaysKey:       {},
+	metricstore.MetricDownsamplingEnabledKey: {},
+	metricstore.MetricTablePrefixKey:         {},
+	metricstore.MetricMaxOpenConnsKey:        {},
+	metricstore.MetricMaxIdleConnsKey:        {},
 }
 
 // metricKeysTouched 判断本次设置变更是否涉及 metrics 数据库相关键。
@@ -216,6 +217,9 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 	if v, ok := cfg[metricstore.MetricRetentionDaysKey]; ok {
 		merged.RetentionDays = toInt(v, merged.RetentionDays)
 	}
+	if v, ok := cfg[metricstore.MetricDownsamplingEnabledKey]; ok {
+		merged.DownsamplingEnabled = toBool(v, merged.DownsamplingEnabled)
+	}
 	if v, ok := cfg[metricstore.MetricTablePrefixKey]; ok {
 		if s, ok := v.(string); ok {
 			merged.TablePrefix = s
@@ -229,6 +233,18 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 	}
 
 	return merged, nil
+}
+
+func toBool(v any, fallback bool) bool {
+	switch val := v.(type) {
+	case bool:
+		return val
+	case string:
+		if parsed, err := strconv.ParseBool(val); err == nil {
+			return parsed
+		}
+	}
+	return fallback
 }
 
 // toInt 将 JSON 解码得到的任意值（通常是 float64 或 string）转换为 int，失败时返回 fallback。

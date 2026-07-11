@@ -142,7 +142,7 @@ type publicPingMetricTaskStats struct {
 	P50             *float64          `json:"p50,omitempty"`
 	P99             *float64          `json:"p99,omitempty"`
 	StdDev          *float64          `json:"stddev,omitempty"`
-	P99P50Ratio     float64           `json:"p99_p50_ratio,omitempty"`
+	P99P50Ratio     float64           `json:"p99_p50_ratio"`
 }
 
 type publicPingMetricStatsResponse struct {
@@ -260,12 +260,12 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				Tags:          params.Tags,
 				Tag:           params.Tags,
 				Downsampled:   metricDownsample,
+				FillEmpty:     metricFillEmpty,
 				MaxPoints:     maxPoints,
 			}
 
 			if metricDownsample {
 				item.DownsampleAlgorithm = string(algorithm)
-				item.FillEmpty = metricFillEmpty
 				now := time.Now()
 				interval := metricDownsampleInterval(end.Sub(start), maxPoints)
 				interval = metricRollupCompatibleInterval(start, now, interval)
@@ -299,7 +299,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				for _, point := range points {
 					item.Points = append(item.Points, publicMetricPoint{
 						Time:   point.Timestamp.Format(time.RFC3339Nano),
-						Value:  publicMetricValue(point.Value),
+						Value:  publicRawMetricValue(metricKey, point.Value, metricFillEmpty),
 						Tag:    point.Tags,
 						Tags:   point.Tags,
 						Labels: point.Labels,
@@ -704,11 +704,25 @@ func publicMetricValue(value float64) *float64 {
 	return &value
 }
 
+func publicRawMetricValue(metricName string, value float64, fillEmpty bool) *float64 {
+	if isNullPingMetricValue(metricName, value, fillEmpty) {
+		return nil
+	}
+	return publicMetricValue(value)
+}
+
 func publicAggregateMetricValue(point metric.AggregatePoint, fillEmpty bool) *float64 {
 	if fillEmpty && point.Count == 0 {
 		return nil
 	}
-	return publicMetricValue(point.Value)
+	return publicRawMetricValue(point.MetricName, point.Value, fillEmpty)
+}
+
+func isNullPingMetricValue(metricName string, value float64, fillEmpty bool) bool {
+	if !fillEmpty || value != -1 {
+		return false
+	}
+	return metricName == metricstore.MetricPingLatency || metricName == metricstore.MetricPingLoss
 }
 
 type publicPingMetricAggregateGroups struct {

@@ -136,6 +136,33 @@ func TestPublicMetricFillEmptyDisabledKeepsOnlyExistingBuckets(t *testing.T) {
 	}
 }
 
+func TestPublicPingMetricFillEmptyMapsMinusOneToNull(t *testing.T) {
+	for _, metricName := range []string{metricstore.MetricPingLatency, metricstore.MetricPingLoss} {
+		if value := publicRawMetricValue(metricName, -1, true); value != nil {
+			t.Fatalf("raw %s -1 should become null when fill_empty is enabled, got %v", metricName, *value)
+		}
+	}
+	if value := publicAggregateMetricValue(metric.AggregatePoint{
+		MetricName: metricstore.MetricPingLatency,
+		Value:      -1,
+		Count:      1,
+	}, true); value != nil {
+		t.Fatalf("downsampled ping -1 should become null when fill_empty is enabled, got %v", *value)
+	}
+}
+
+func TestPublicPingMetricMinusOneIsPreservedWithoutFillEmpty(t *testing.T) {
+	value := publicRawMetricValue(metricstore.MetricPingLatency, -1, false)
+	if value == nil || *value != -1 {
+		t.Fatalf("raw ping -1 should be preserved when fill_empty is disabled, got %v", value)
+	}
+
+	nonPing := publicRawMetricValue("temperature", -1, true)
+	if nonPing == nil || *nonPing != -1 {
+		t.Fatalf("negative values from non-ping metrics must be preserved, got %v", nonPing)
+	}
+}
+
 func TestPublicPingStatsFromAggregateGroupsUsesTaskNamesAndLossMetric(t *testing.T) {
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
 	taskMap := map[string]models.PingTask{
@@ -191,6 +218,27 @@ func TestPublicPingStatsFromAggregateGroupsUsesTaskNamesAndLossMetric(t *testing
 	}
 	if math.Abs(got.P99P50Ratio-1.6666666666666667) > 0.000001 {
 		t.Fatalf("unexpected volatility ratio: %#v", got)
+	}
+}
+
+func TestPublicPingMetricStatsIncludesZeroVolatility(t *testing.T) {
+	payload, err := json.Marshal(publicPingMetricTaskStats{
+		EntityID:    "node-a",
+		TaskID:      "1",
+		Total:       1,
+		Valid:       1,
+		P99P50Ratio: 0,
+	})
+	if err != nil {
+		t.Fatalf("marshal ping stats: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal ping stats: %v", err)
+	}
+	if value, ok := decoded["p99_p50_ratio"]; !ok || value != float64(0) {
+		t.Fatalf("zero volatility must be present, got %s", payload)
 	}
 }
 

@@ -67,25 +67,29 @@ const (
 // 注意：metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）。
 // 未显式配置时默认使用 SQLite（./data/metrics.db）。
 type MetricStoreConfig struct {
-	Driver        string `json:"metric_db_driver" default:"sqlite"`         // 数据库类型: sqlite, mysql, postgresql
-	DSN           string `json:"metric_db_dsn" default:"./data/metrics.db"` // 数据库连接串
-	RetentionDays int    `json:"metric_retention_days" default:"30"`        // 数据保留天数
-	TablePrefix   string `json:"metric_table_prefix" default:"metric_"`     // 表名前缀
-	MaxOpenConns  int    `json:"metric_max_open_conns" default:"25"`        // 最大连接数
-	MaxIdleConns  int    `json:"metric_max_idle_conns" default:"5"`         // 最大空闲连接数
+	Driver              string `json:"metric_db_driver" default:"sqlite"`          // 数据库类型: sqlite, mysql, postgresql
+	DSN                 string `json:"metric_db_dsn" default:"./data/metrics.db"`  // 数据库连接串
+	RetentionDays       int    `json:"metric_retention_days" default:"90"`         // 数据保留天数
+	DownsamplingEnabled bool   `json:"metric_downsampling_enabled" default:"true"` // 是否启用分层降采样
+	TablePrefix         string `json:"metric_table_prefix" default:"metric_"`      // 表名前缀
+	MaxOpenConns        int    `json:"metric_max_open_conns" default:"25"`         // 最大连接数
+	MaxIdleConns        int    `json:"metric_max_idle_conns" default:"5"`          // 最大空闲连接数
 }
 
 // MetricStoreConfigKeys 配置键
 //
 // MetricStoreEnabledKey 已废弃：metric store 始终启用，保留常量仅用于清理旧配置。
 const (
-	MetricStoreEnabledKey  = "metric_store_enabled" // Deprecated: metric store 始终启用
-	MetricDBDriverKey      = "metric_db_driver"
-	MetricDBDSNKey         = "metric_db_dsn"
-	MetricRetentionDaysKey = "metric_retention_days"
-	MetricTablePrefixKey   = "metric_table_prefix"
-	MetricMaxOpenConnsKey  = "metric_max_open_conns"
-	MetricMaxIdleConnsKey  = "metric_max_idle_conns"
+	DefaultMetricRetentionDays = 90
+
+	MetricStoreEnabledKey        = "metric_store_enabled" // Deprecated: metric store 始终启用
+	MetricDBDriverKey            = "metric_db_driver"
+	MetricDBDSNKey               = "metric_db_dsn"
+	MetricRetentionDaysKey       = "metric_retention_days"
+	MetricDownsamplingEnabledKey = "metric_downsampling_enabled"
+	MetricTablePrefixKey         = "metric_table_prefix"
+	MetricMaxOpenConnsKey        = "metric_max_open_conns"
+	MetricMaxIdleConnsKey        = "metric_max_idle_conns"
 	// MigrationTargetKey 记录上一次成功完成启动迁移的目标指纹（driver+dsn）。
 	// 当目标发生变化（例如从 SQLite 切换到 MySQL/PostgreSQL）时，启动迁移会
 	// 重新执行，把上一个目标库的数据搬运到新的目标 metrics 库。
@@ -104,14 +108,16 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 	}
 	retention := cfg.RetentionDays
 	if retention <= 0 {
-		retention = 30
+		retention = DefaultMetricRetentionDays
 	}
 
 	opts := []metric.Option{
 		metric.WithTablePrefix(tablePrefix),
 		metric.WithDefaultRetention(retention),
-		metric.WithRollupPolicy(defaultRollupPolicy(retention)),
 		metric.WithAutoMigrate(autoMigrate),
+	}
+	if cfg.DownsamplingEnabled {
+		opts = append(opts, metric.WithRollupPolicy(defaultRollupPolicy(retention)))
 	}
 
 	switch driver {
@@ -157,7 +163,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 
 func defaultRollupPolicy(retentionDays int) metric.RollupPolicy {
 	if retentionDays <= 0 {
-		retentionDays = 30
+		retentionDays = DefaultMetricRetentionDays
 	}
 	totalRetention := time.Duration(retentionDays) * 24 * time.Hour
 	twoDays := 48 * time.Hour
@@ -449,6 +455,9 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 		}
 		total += n
 		compactAt = (idx + 1) % len(defs)
+	}
+	if _, err := store.CleanupExpired(ctx, now); err != nil {
+		return total, fmt.Errorf("clean up expired raw metrics: %w", err)
 	}
 	return total, nil
 }

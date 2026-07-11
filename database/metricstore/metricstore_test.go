@@ -35,10 +35,11 @@ func TestDefaultRollupPolicy(t *testing.T) {
 
 func TestBuildMetricConfigEnablesDefaultRollupPolicy(t *testing.T) {
 	cfg, err := buildMetricConfig(&MetricStoreConfig{
-		Driver:        "sqlite",
-		DSN:           ":memory:",
-		RetentionDays: 30,
-		TablePrefix:   "metric_",
+		Driver:              "sqlite",
+		DSN:                 ":memory:",
+		RetentionDays:       30,
+		DownsamplingEnabled: true,
+		TablePrefix:         "metric_",
 	}, false)
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
@@ -48,6 +49,96 @@ func TestBuildMetricConfigEnablesDefaultRollupPolicy(t *testing.T) {
 	}
 	if cfg.RollupPolicy.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("raw retention = %s, want %s", cfg.RollupPolicy.RawRetention, DefaultRollupRawRetention)
+	}
+}
+
+func TestBuildMetricConfigDefaultsRetentionToNinetyDays(t *testing.T) {
+	cfg, err := buildMetricConfig(&MetricStoreConfig{
+		Driver:              "sqlite",
+		DSN:                 ":memory:",
+		DownsamplingEnabled: true,
+	}, false)
+	if err != nil {
+		t.Fatalf("build metric config: %v", err)
+	}
+	if cfg.DefaultRetentionDays != DefaultMetricRetentionDays {
+		t.Fatalf(
+			"default retention = %d, want %d",
+			cfg.DefaultRetentionDays,
+			DefaultMetricRetentionDays,
+		)
+	}
+	wantRollupRetention := time.Duration(DefaultMetricRetentionDays) * 24 * time.Hour
+	lastTier := cfg.RollupPolicy.Tiers[len(cfg.RollupPolicy.Tiers)-1]
+	if lastTier.Retention != wantRollupRetention {
+		t.Fatalf("rollup retention = %s, want %s", lastTier.Retention, wantRollupRetention)
+	}
+}
+
+func TestBuildMetricConfigCanDisableDownsampling(t *testing.T) {
+	cfg, err := buildMetricConfig(&MetricStoreConfig{
+		Driver:              "sqlite",
+		DSN:                 ":memory:",
+		DownsamplingEnabled: false,
+	}, false)
+	if err != nil {
+		t.Fatalf("build metric config: %v", err)
+	}
+	if cfg.RollupPolicy.Enabled() {
+		t.Fatal("expected rollup policy to be disabled")
+	}
+}
+
+func TestCompactCleansExpiredRawPointsWhenDownsamplingDisabled(t *testing.T) {
+	ctx := context.Background()
+	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1)))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	if err := s.UpsertMetric(ctx, metric.Definition{
+		Name:          "raw.metric",
+		Type:          metric.TypeGauge,
+		RetentionDays: 1,
+	}); err != nil {
+		t.Fatalf("upsert metric: %v", err)
+	}
+
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	if err := s.WriteBatch(ctx, []metric.Point{
+		{MetricName: "raw.metric", EntityID: "node", Timestamp: now.Add(-48 * time.Hour), Value: 1},
+		{MetricName: "raw.metric", EntityID: "node", Timestamp: now.Add(-time.Hour), Value: 2},
+	}); err != nil {
+		t.Fatalf("write points: %v", err)
+	}
+
+	storeMu.Lock()
+	oldStore := store
+	oldCompactAt := compactAt
+	store = s
+	compactAt = 0
+	storeMu.Unlock()
+	defer func() {
+		storeMu.Lock()
+		store = oldStore
+		compactAt = oldCompactAt
+		storeMu.Unlock()
+		_ = s.Close()
+	}()
+
+	if _, err := Compact(ctx, now); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	points, err := s.Query(ctx, metric.Query{
+		MetricName: "raw.metric",
+		EntityID:   "node",
+		Start:      now.Add(-72 * time.Hour),
+		End:        now,
+	})
+	if err != nil {
+		t.Fatalf("query points: %v", err)
+	}
+	if len(points) != 1 || points[0].Value != 2 {
+		t.Fatalf("expected only the retained raw point, got %#v", points)
 	}
 }
 
