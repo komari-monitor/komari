@@ -48,6 +48,7 @@ var (
 	storeOnce sync.Once
 	reloadMu  sync.Mutex
 	compactMu sync.Mutex
+	compactAt int
 )
 
 var ErrCompactInProgress = errors.New("metric store compact already in progress")
@@ -422,7 +423,32 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("metric store not initialized")
 	}
-	return store.Compact(ctx, now)
+
+	defs, err := store.ListMetrics(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(defs) == 0 {
+		compactAt = 0
+		return 0, nil
+	}
+	if compactAt >= len(defs) {
+		compactAt = 0
+	}
+
+	total := 0
+	start := compactAt
+	for i := 0; i < len(defs); i++ {
+		idx := (start + i) % len(defs)
+		n, err := store.CompactMetric(ctx, defs[idx].Name, now)
+		if err != nil {
+			compactAt = idx
+			return total, fmt.Errorf("compact metric %q: %w", defs[idx].Name, err)
+		}
+		total += n
+		compactAt = (idx + 1) % len(defs)
+	}
+	return total, nil
 }
 
 // CloseStore 关闭 metric store

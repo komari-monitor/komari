@@ -430,7 +430,7 @@ func compactMetricStore(ctx context.Context) {
 		return
 	}
 	if err != nil {
-		log.Println("Failed to compact metric store:", err)
+		log.Printf("Failed to compact metric store after writing %d rollup buckets: %v", written, err)
 		return
 	}
 	if written > 0 {

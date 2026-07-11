@@ -1,8 +1,11 @@
 package metricstore
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/komari-monitor/komari/pkg/metric"
 )
 
 func TestDefaultRollupPolicy(t *testing.T) {
@@ -44,5 +47,42 @@ func TestBuildMetricConfigEnablesDefaultRollupPolicy(t *testing.T) {
 	}
 	if cfg.RollupPolicy.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("raw retention = %s, want %s", cfg.RollupPolicy.RawRetention, DefaultRollupRawRetention)
+	}
+}
+
+func TestCompactKeepsRotatingCursorAfterFullCycle(t *testing.T) {
+	ctx := context.Background()
+	s, err := metric.Open(ctx, metric.SQLite(":memory:",
+		metric.WithMaxOpenConns(1),
+		metric.WithRollupPolicy(defaultRollupPolicy(30)),
+	))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	for _, name := range []string{"a.metric", "b.metric", "c.metric"} {
+		if err := s.UpsertMetric(ctx, metric.Definition{Name: name, Type: metric.TypeGauge}); err != nil {
+			t.Fatalf("upsert metric %s: %v", name, err)
+		}
+	}
+
+	storeMu.Lock()
+	oldStore := store
+	oldCompactAt := compactAt
+	store = s
+	compactAt = 1
+	storeMu.Unlock()
+	defer func() {
+		storeMu.Lock()
+		store = oldStore
+		compactAt = oldCompactAt
+		storeMu.Unlock()
+		_ = s.Close()
+	}()
+
+	if _, err := Compact(ctx, time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if compactAt != 1 {
+		t.Fatalf("compact cursor = %d, want 1 after a complete rotated cycle", compactAt)
 	}
 }
