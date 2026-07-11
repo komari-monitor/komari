@@ -163,6 +163,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Ensure commit is still current main
         run: |
@@ -206,10 +208,23 @@ jobs:
             --prerelease \
             artifacts/komari-*
 
-          gh workflow run generate-release-notes.yml \
-            --repo "${{ github.repository }}" \
-            --ref main \
-            -f tag="${VERSION}"
+          BASE_REF="${{ github.event.before }}"
+          if [ -z "${BASE_REF}" ] || [[ "${BASE_REF}" =~ ^0+$ ]]; then
+            BASE_REF="$(git rev-parse HEAD^ 2>/dev/null || true)"
+          fi
+
+          if [ -n "${BASE_REF}" ]; then
+            gh workflow run generate-release-notes.yml \
+              --repo "${{ github.repository }}" \
+              --ref main \
+              -f tag="${VERSION}" \
+              -f base_ref="${BASE_REF}"
+          else
+            gh workflow run generate-release-notes.yml \
+              --repo "${{ github.repository }}" \
+              --ref main \
+              -f tag="${VERSION}"
+          fi
 
           gh release list \
             --repo "${{ github.repository }}" \
