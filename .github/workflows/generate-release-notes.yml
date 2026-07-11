@@ -256,6 +256,33 @@ jobs:
               return lines.join("\n");
             }
 
+            function appendCommitsToGeneratedNotes(generatedNotes, baseRef, tag, comparison) {
+              const notes = clean(generatedNotes);
+              if (!notes || comparison.commits.length === 0) {
+                return notes || buildWhatsChangedSection(baseRef, tag, comparison);
+              }
+
+              const lines = notes.split("\n");
+              const fullChangelogIndex = lines.findIndex((line) => /^\*\*Full Changelog\*\*:/i.test(line.trim()));
+              const nextTopLevelSectionIndex = lines.findIndex((line, index) => (
+                index > 0
+                && /^##\s+/.test(line)
+                && !/^##\s+What's Changed\b/i.test(line)
+              ));
+              const insertionIndex = nextTopLevelSectionIndex >= 0
+                ? nextTopLevelSectionIndex
+                : (fullChangelogIndex >= 0 ? fullChangelogIndex : lines.length);
+              const commitSection = [
+                "### Commits",
+                "",
+                ...comparison.commits.map(renderCommitLine),
+                "",
+              ];
+
+              lines.splice(insertionIndex, 0, ...commitSection);
+              return clean(lines.join("\n"));
+            }
+
             async function getPullRequestContext(commits) {
               const pullRequests = new Map();
 
@@ -539,7 +566,12 @@ jobs:
 
             const comparison = await getComparison(comparisonBase.ref, tag);
             const whatsChangedSection = comparisonBase.previousTag
-              ? await getGeneratedNotes(tag, release, comparisonBase.previousTag)
+              ? appendCommitsToGeneratedNotes(
+                await getGeneratedNotes(tag, release, comparisonBase.previousTag),
+                comparisonBase.ref,
+                tag,
+                comparison,
+              )
               : (!comparisonBase.ref && !isSnapshotTag(tag)
                 ? await getGeneratedNotes(tag, release, "")
                 : buildWhatsChangedSection(comparisonBase.ref, tag, comparison));
