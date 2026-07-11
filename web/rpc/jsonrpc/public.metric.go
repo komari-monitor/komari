@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -190,11 +191,11 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				item.DownsampleAlgorithm = string(algorithm)
 				interval := metricDownsampleInterval(end.Sub(start), maxPoints)
 				item.IntervalSeconds = interval.Seconds()
-				points, err := store.Aggregate(ctx, metric.AggregateQuery{
+				points, err := store.Series(ctx, metric.AggregateQuery{
 					Query:       query,
 					Aggregation: algorithm,
 					Interval:    interval,
-				})
+				}, time.Now())
 				if err != nil {
 					return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metric "+metricKey+": "+err.Error(), nil)
 				}
@@ -204,6 +205,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 						Time:  point.Bucket.Format(time.RFC3339Nano),
 						Value: point.Value,
 						Count: point.Count,
+						Tags:  point.Tags,
 					})
 				}
 			} else {
@@ -221,8 +223,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 					})
 				}
 			}
-			item.Count = len(item.Points)
-			series = append(series, item)
+			series = append(series, splitPublicMetricSeries(item)...)
 		}
 	}
 
@@ -234,6 +235,91 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		"series":                    series,
 		"count":                     len(series),
 	}, nil
+}
+
+type publicMetricSeriesGroup struct {
+	entityID string
+	tagsKey  string
+	tags     map[string]string
+	points   []publicMetricPoint
+}
+
+func splitPublicMetricSeries(base publicMetricSeries) []publicMetricSeries {
+	if len(base.Points) == 0 {
+		base.Count = 0
+		return []publicMetricSeries{base}
+	}
+
+	groups := make(map[string]*publicMetricSeriesGroup)
+	order := make([]string, 0)
+	for _, point := range base.Points {
+		entityID := base.EntityID
+		tags := point.Tags
+		tagsKey := publicMetricTagsKey(tags)
+		key := entityID + "\x00" + tagsKey
+		group := groups[key]
+		if group == nil {
+			group = &publicMetricSeriesGroup{
+				entityID: entityID,
+				tagsKey:  tagsKey,
+				tags:     clonePublicMetricTags(tags),
+			}
+			groups[key] = group
+			order = append(order, key)
+		}
+		group.points = append(group.points, point)
+	}
+
+	sort.SliceStable(order, func(i, j int) bool {
+		a := groups[order[i]]
+		b := groups[order[j]]
+		if a.entityID != b.entityID {
+			return a.entityID < b.entityID
+		}
+		return a.tagsKey < b.tagsKey
+	})
+
+	out := make([]publicMetricSeries, 0, len(order))
+	for _, key := range order {
+		group := groups[key]
+		item := base
+		item.EntityID = group.entityID
+		item.Tags = group.tags
+		item.Points = group.points
+		item.Count = len(group.points)
+		out = append(out, item)
+	}
+	return out
+}
+
+func publicMetricTagsKey(tags map[string]string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(tags))
+	for key := range tags {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		b.WriteString(key)
+		b.WriteByte('=')
+		b.WriteString(tags[key])
+		b.WriteByte('\x00')
+	}
+	return b.String()
+}
+
+func clonePublicMetricTags(tags map[string]string) map[string]string {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(tags))
+	for key, value := range tags {
+		out[key] = value
+	}
+	return out
 }
 
 func publicMetricEntityIDs(ctx context.Context, requested []string) ([]string, *rpc.JsonRpcError) {

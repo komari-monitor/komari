@@ -416,6 +416,10 @@ type AggregatePoint struct {
 	//
 	// Count 是该桶代表的点数量。
 	Count int `json:"count"`
+	// Tags identify the logical series represented by the bucket.
+	//
+	// Tags 标识该聚合桶所属的逻辑序列。
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 // Stats stores or computes summary statistics for a point series.

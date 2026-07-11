@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+type aggregateSeriesKey struct {
+	metricName string
+	entityID   string
+	tagsHash   string
+}
+
+type aggregateGroupKey struct {
+	aggregateSeriesKey
+	bucket int64
+}
+
 // AggregatePoints groups raw points into time buckets and computes aggregate values.
 //
 // AggregatePoints 在内存中按查询配置将原始点分桶并聚合。
@@ -22,40 +33,122 @@ func AggregatePoints(points []Point, query AggregateQuery) ([]AggregatePoint, er
 	}
 
 	points = sortedPoints(points)
-	groups := make(map[int64][]Point)
+	groups := make(map[aggregateGroupKey][]Point)
+	seriesTags := make(map[aggregateSeriesKey]map[string]string)
 	for _, point := range points {
+		point = point.normalized()
+		if point.MetricName == "" {
+			point.MetricName = query.MetricName
+		}
+		if point.EntityID == "" {
+			point.EntityID = query.EntityID
+		}
+		tagsHash, _, err := tagsFingerprint(point.Tags)
+		if err != nil {
+			return nil, err
+		}
 		bucket := alignTime(point.Timestamp, query.Interval).UnixNano()
-		groups[bucket] = append(groups[bucket], point)
+		series := aggregateSeriesKey{
+			metricName: point.MetricName,
+			entityID:   point.EntityID,
+			tagsHash:   tagsHash,
+		}
+		key := aggregateGroupKey{aggregateSeriesKey: series, bucket: bucket}
+		groups[key] = append(groups[key], point)
+		if _, ok := seriesTags[series]; !ok {
+			seriesTags[series] = cloneStringMap(point.Tags)
+		}
 	}
 
-	var buckets []int64
+	var keys []aggregateGroupKey
 	if query.FillEmpty {
+		seriesKeys := sortedAggregateSeriesKeys(seriesTags)
+		if len(seriesKeys) == 0 {
+			tagsHash, _, err := tagsFingerprint(query.Tags)
+			if err != nil {
+				return nil, err
+			}
+			series := aggregateSeriesKey{
+				metricName: query.MetricName,
+				entityID:   query.EntityID,
+				tagsHash:   tagsHash,
+			}
+			seriesKeys = append(seriesKeys, series)
+			seriesTags[series] = cloneStringMap(query.Tags)
+		}
 		for t := alignTime(query.Start, query.Interval); !t.After(query.End); t = t.Add(query.Interval) {
-			buckets = append(buckets, t.UnixNano())
+			bucket := t.UnixNano()
+			for _, series := range seriesKeys {
+				keys = append(keys, aggregateGroupKey{aggregateSeriesKey: series, bucket: bucket})
+			}
 		}
 	} else {
-		for bucket := range groups {
-			buckets = append(buckets, bucket)
+		for key := range groups {
+			keys = append(keys, key)
 		}
-		sort.Slice(buckets, func(i, j int) bool { return buckets[i] < buckets[j] })
+		sortAggregateGroupKeys(keys)
 	}
 
-	out := make([]AggregatePoint, 0, len(buckets))
-	for _, bucket := range buckets {
-		group := groups[bucket]
+	out := make([]AggregatePoint, 0, len(keys))
+	for _, key := range keys {
+		group := groups[key]
 		value, err := aggregateValue(group, query.Aggregation)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, AggregatePoint{
-			MetricName: query.MetricName,
-			EntityID:   query.EntityID,
-			Bucket:     time.Unix(0, bucket).UTC(),
+			MetricName: key.metricName,
+			EntityID:   key.entityID,
+			Bucket:     time.Unix(0, key.bucket).UTC(),
 			Value:      value,
 			Count:      len(group),
+			Tags:       cloneStringMap(seriesTags[key.aggregateSeriesKey]),
 		})
 	}
 	return out, nil
+}
+
+func sortedAggregateSeriesKeys(tags map[aggregateSeriesKey]map[string]string) []aggregateSeriesKey {
+	keys := make([]aggregateSeriesKey, 0, len(tags))
+	for key := range tags {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].metricName != keys[j].metricName {
+			return keys[i].metricName < keys[j].metricName
+		}
+		if keys[i].entityID != keys[j].entityID {
+			return keys[i].entityID < keys[j].entityID
+		}
+		return keys[i].tagsHash < keys[j].tagsHash
+	})
+	return keys
+}
+
+func sortAggregateGroupKeys(keys []aggregateGroupKey) {
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].bucket != keys[j].bucket {
+			return keys[i].bucket < keys[j].bucket
+		}
+		if keys[i].metricName != keys[j].metricName {
+			return keys[i].metricName < keys[j].metricName
+		}
+		if keys[i].entityID != keys[j].entityID {
+			return keys[i].entityID < keys[j].entityID
+		}
+		return keys[i].tagsHash < keys[j].tagsHash
+	})
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // CalculateStats computes summary statistics for a point series.
@@ -264,6 +357,7 @@ func emptyBuckets(query AggregateQuery) []AggregatePoint {
 			MetricName: query.MetricName,
 			EntityID:   query.EntityID,
 			Bucket:     t,
+			Tags:       cloneStringMap(query.Tags),
 		})
 	}
 	return out

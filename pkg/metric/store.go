@@ -881,7 +881,7 @@ func (s *Store) aggregateInSQL(ctx context.Context, query AggregateQuery, valueE
 	// bucket column so writes stay cheap and the bucket size can vary per query.
 	bucketExpr := fmt.Sprintf("(ts_nano - ((ts_nano %% %d) + %d) %% %d)", interval, interval, interval)
 	sqlText := fmt.Sprintf(
-		`SELECT %s AS bucket, %s AS agg_value, COUNT(*) AS agg_count FROM %s WHERE %s GROUP BY bucket ORDER BY bucket ASC`,
+		`SELECT %s AS bucket, metric_name, entity_id, tags_hash, tags, %s AS agg_value, COUNT(*) AS agg_count FROM %s WHERE %s GROUP BY bucket, metric_name, entity_id, tags_hash, tags ORDER BY bucket ASC, metric_name ASC, entity_id ASC, tags_hash ASC`,
 		bucketExpr, valueExpr, s.tables.points, where,
 	)
 	// Page over aggregate buckets (BucketLimit/BucketOffset), not raw points.
@@ -903,17 +903,25 @@ func (s *Store) aggregateInSQL(ctx context.Context, query AggregateQuery, valueE
 	out := make([]AggregatePoint, 0)
 	for rows.Next() {
 		var bucket int64
+		var metricName, entityID, tagsHash string
+		var rawTags any
 		var value float64
 		var count int
-		if err := rows.Scan(&bucket, &value, &count); err != nil {
+		if err := rows.Scan(&bucket, &metricName, &entityID, &tagsHash, &rawTags, &value, &count); err != nil {
+			return nil, err
+		}
+		_ = tagsHash
+		tags, err := decodeMap(rawTags)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, AggregatePoint{
-			MetricName: q.MetricName,
-			EntityID:   q.EntityID,
+			MetricName: metricName,
+			EntityID:   entityID,
 			Bucket:     time.Unix(0, bucket).UTC(),
 			Value:      value,
 			Count:      count,
+			Tags:       tags,
 		})
 	}
 	return out, rows.Err()

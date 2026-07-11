@@ -485,6 +485,61 @@ func TestAggregateBucketPagingMemoryPathMatchesSQL(t *testing.T) {
 	}
 }
 
+func TestAggregateSeparatesTagSeries(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	if err := s.CreateMetric(ctx, Definition{Name: "tagged.util", Type: TypeGauge}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	points := []Point{
+		{MetricName: "tagged.util", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 10, Tags: map[string]string{"device": "0"}},
+		{MetricName: "tagged.util", EntityID: "n1", Timestamp: base.Add(20 * time.Second), Value: 30, Tags: map[string]string{"device": "0"}},
+		{MetricName: "tagged.util", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 100, Tags: map[string]string{"device": "1"}},
+		{MetricName: "tagged.util", EntityID: "n1", Timestamp: base.Add(20 * time.Second), Value: 200, Tags: map[string]string{"device": "1"}},
+	}
+	if err := s.WriteBatch(ctx, points); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	query := Query{MetricName: "tagged.util", EntityID: "n1", Start: base, End: base.Add(time.Minute)}
+
+	sqlRes, err := s.Aggregate(ctx, AggregateQuery{
+		Query:       query,
+		Aggregation: AggAvg,
+		Interval:    time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("sql aggregate: %v", err)
+	}
+	assertTaggedAggregate(t, sqlRes, "0", 20, 2)
+	assertTaggedAggregate(t, sqlRes, "1", 150, 2)
+
+	memRes, err := s.Aggregate(ctx, AggregateQuery{
+		Query:       query,
+		Aggregation: AggP50,
+		Interval:    time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("memory aggregate: %v", err)
+	}
+	assertTaggedAggregate(t, memRes, "0", 20, 2)
+	assertTaggedAggregate(t, memRes, "1", 150, 2)
+}
+
+func assertTaggedAggregate(t *testing.T, points []AggregatePoint, device string, wantValue float64, wantCount int) {
+	t.Helper()
+	for _, point := range points {
+		if point.Tags["device"] != device {
+			continue
+		}
+		if point.Value != wantValue || point.Count != wantCount {
+			t.Fatalf("device %s aggregate = value %v count %d, want value %v count %d; all=%#v", device, point.Value, point.Count, wantValue, wantCount, points)
+		}
+		return
+	}
+	t.Fatalf("missing aggregate for device %s; all=%#v", device, points)
+}
+
 // TestAggregateIgnoresRawPointLimit verifies raw limits do not affect aggregation.
 //
 // TestAggregateIgnoresRawPointLimit 验证原始点分页参数不会影响聚合输入。
