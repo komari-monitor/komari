@@ -25,13 +25,55 @@ jobs:
     steps:
       - name: Generate and apply release notes
         uses: actions/github-script@v9
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
         with:
           script: |
             const { owner, repo } = context.repo;
             const webRepo = { owner: "komari-monitor", repo: "komari-web" };
 
+            const AI_CONTEXT_CHAR_LIMIT = 120000;
+            const AI_MAX_COMMITS = 160;
+            const AI_MAX_CHANGED_FILES = 120;
+            const AI_MAX_PULL_REQUESTS = 80;
+            const AI_MAX_PATCH_CHARS_PER_FILE = 2200;
+            const OPENAI_TIMEOUT_MS = 120000;
+
             const clean = (value) => (typeof value === "string" ? value.trim() : "");
+            const isSnapshotTag = (tag) => /^Snapshot-/i.test(clean(tag));
             const releaseTimestamp = (release) => Date.parse(release.published_at || release.created_at || "");
+            const isStableRelease = (release) => !release.draft && !release.prerelease && !isSnapshotTag(release.tag_name);
+
+            function limitText(value, maxLength) {
+              const text = clean(value);
+              if (text.length <= maxLength) {
+                return text;
+              }
+
+              return `${text.slice(0, maxLength)}\n...[truncated ${text.length - maxLength} chars]`;
+            }
+
+            function appendWithinLimit(parts, value, maxLength) {
+              const text = clean(value);
+              if (!text) {
+                return false;
+              }
+
+              const currentLength = parts.reduce((total, part) => total + part.length + 2, 0);
+              if (currentLength + text.length + 2 <= maxLength) {
+                parts.push(text);
+                return true;
+              }
+
+              const remaining = maxLength - currentLength - 64;
+              if (remaining > 500) {
+                parts.push(`${text.slice(0, remaining)}\n...[context truncated]`);
+              }
+
+              return false;
+            }
 
             async function resolveRelease() {
               const requestedTag = clean(context.payload.release?.tag_name)
@@ -49,7 +91,7 @@ jobs:
               return { tag: release.tag_name, release };
             }
 
-            async function getPreviousReleaseTag(tag, release) {
+            async function getPreviousStableReleaseTag(tag, release) {
               const releases = await github.paginate(github.rest.repos.listReleases, {
                 owner,
                 repo,
@@ -58,7 +100,7 @@ jobs:
 
               const currentTime = releaseTimestamp(release);
               const candidates = releases
-                .filter((item) => !item.draft && item.tag_name !== tag)
+                .filter((item) => isStableRelease(item) && item.tag_name !== tag)
                 .filter((item) => {
                   if (!Number.isFinite(currentTime)) {
                     return true;
@@ -72,7 +114,7 @@ jobs:
               return candidates[0]?.tag_name || "";
             }
 
-            async function getGeneratedNotes(tag, release, previousTag) {
+            async function getGeneratedNotes(tag, release, previousStableTag) {
               const params = {
                 owner,
                 repo,
@@ -80,8 +122,8 @@ jobs:
                 target_commitish: release.target_commitish || undefined,
               };
 
-              if (previousTag) {
-                params.previous_tag_name = previousTag;
+              if (previousStableTag) {
+                params.previous_tag_name = previousStableTag;
               }
 
               const generated = await github.request(
@@ -92,20 +134,28 @@ jobs:
               return clean(generated.data.body);
             }
 
-            async function getComparedCommits(previousTag, tag) {
-              if (!previousTag) {
-                return [];
+            async function getComparison(previousStableTag, tag) {
+              if (!previousStableTag) {
+                return { commits: [], files: [], htmlUrl: "" };
               }
 
               const commits = [];
+              let files = [];
+              let htmlUrl = "";
+
               for (let page = 1; page <= 20; page += 1) {
                 const response = await github.rest.repos.compareCommitsWithBasehead({
                   owner,
                   repo,
-                  basehead: `${previousTag}...${tag}`,
+                  basehead: `${previousStableTag}...${tag}`,
                   per_page: 100,
                   page,
                 });
+
+                if (page === 1) {
+                  files = response.data.files || [];
+                  htmlUrl = response.data.html_url || "";
+                }
 
                 commits.push(...response.data.commits);
 
@@ -114,7 +164,7 @@ jobs:
                 }
               }
 
-              return commits;
+              return { commits, files, htmlUrl };
             }
 
             function renderCommitLine(commit) {
@@ -127,17 +177,245 @@ jobs:
               return `- ${subject} ([${shortSha}](${commit.html_url}))${author}`;
             }
 
-            async function buildCommitSection(previousTag, tag) {
-              if (!previousTag) {
-                return "## Commits\n\nNo previous release tag was found; commit comparison is unavailable.";
+            function buildCommitSection(previousStableTag, tag, commits) {
+              if (!previousStableTag) {
+                return "## Commits\n\nNo previous stable release tag was found; commit comparison is unavailable.";
               }
 
-              const commits = await getComparedCommits(previousTag, tag);
               if (commits.length === 0) {
-                return `## Commits\n\nNo commits found between \`${previousTag}\` and \`${tag}\`.`;
+                return `## Commits\n\nNo commits found between \`${previousStableTag}\` and \`${tag}\`.`;
               }
 
               return ["## Commits", "", ...commits.map(renderCommitLine)].join("\n");
+            }
+
+            async function getPullRequestContext(commits) {
+              const pullRequests = new Map();
+
+              for (const commit of commits.slice(0, AI_MAX_COMMITS)) {
+                try {
+                  const response = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                    owner,
+                    repo,
+                    commit_sha: commit.sha,
+                  });
+
+                  for (const pullRequest of response.data || []) {
+                    pullRequests.set(pullRequest.html_url, pullRequest);
+                  }
+                } catch (error) {
+                  core.warning(`Failed to load pull requests for ${commit.sha.slice(0, 7)}: ${error.message}`);
+                }
+
+                if (pullRequests.size >= AI_MAX_PULL_REQUESTS) {
+                  break;
+                }
+              }
+
+              return [...pullRequests.values()].slice(0, AI_MAX_PULL_REQUESTS);
+            }
+
+            function buildChangedFilesContext(files) {
+              if (!files.length) {
+                return "No changed file metadata was returned by GitHub.";
+              }
+
+              return files.slice(0, AI_MAX_CHANGED_FILES).map((file) => {
+                const lines = [
+                  `File: ${file.filename}`,
+                  `Status: ${file.status}; additions: ${file.additions}; deletions: ${file.deletions}; changes: ${file.changes}`,
+                ];
+
+                if (file.patch) {
+                  lines.push("Patch excerpt:");
+                  lines.push(limitText(file.patch, AI_MAX_PATCH_CHARS_PER_FILE));
+                }
+
+                return lines.join("\n");
+              }).join("\n\n");
+            }
+
+            function buildCommitContext(commits) {
+              if (!commits.length) {
+                return "No commits were returned by GitHub.";
+              }
+
+              return commits.slice(0, AI_MAX_COMMITS).map((commit) => {
+                const shortSha = commit.sha.slice(0, 7);
+                const author = commit.author?.login || commit.commit.author?.name || "unknown";
+                const message = limitText(commit.commit.message, 1800);
+                return [
+                  `Commit: ${shortSha}`,
+                  `Author: ${author}`,
+                  `URL: ${commit.html_url}`,
+                  "Message:",
+                  message,
+                ].join("\n");
+              }).join("\n\n");
+            }
+
+            function buildPullRequestContext(pullRequests) {
+              if (!pullRequests.length) {
+                return "No associated pull requests were found for the compared commits.";
+              }
+
+              return pullRequests.map((pullRequest) => {
+                const labels = (pullRequest.labels || []).map((label) => label.name).filter(Boolean).join(", ") || "none";
+                return [
+                  `PR: #${pullRequest.number} ${pullRequest.title}`,
+                  `URL: ${pullRequest.html_url}`,
+                  `Author: ${pullRequest.user?.login || "unknown"}`,
+                  `Labels: ${labels}`,
+                  "Body:",
+                  limitText(pullRequest.body, 1800) || "(empty)",
+                ].join("\n");
+              }).join("\n\n");
+            }
+
+            function buildAiContext({ tag, release, previousStableTag, generatedBody, comparison, pullRequests, webReleaseSection }) {
+              const sections = [];
+
+              appendWithinLimit(sections, [
+                `Repository: ${owner}/${repo}`,
+                `Release tag: ${tag}`,
+                `Release title: ${release.name || tag}`,
+                `Prerelease: ${release.prerelease ? "yes" : "no"}`,
+                `Snapshot tag: ${isSnapshotTag(tag) ? "yes" : "no"}`,
+                `Target commitish: ${release.target_commitish || "(unknown)"}`,
+                `Previous stable release tag: ${previousStableTag || "(none)"}`,
+                `Compare URL: ${comparison.htmlUrl || "(unavailable)"}`,
+              ].join("\n"), AI_CONTEXT_CHAR_LIMIT);
+
+              appendWithinLimit(sections, `GitHub generated release notes:\n${generatedBody}`, AI_CONTEXT_CHAR_LIMIT);
+              appendWithinLimit(sections, `Changed files and patch excerpts:\n${buildChangedFilesContext(comparison.files)}`, AI_CONTEXT_CHAR_LIMIT);
+              appendWithinLimit(sections, `Associated pull requests:\n${buildPullRequestContext(pullRequests)}`, AI_CONTEXT_CHAR_LIMIT);
+              appendWithinLimit(sections, `Commit details:\n${buildCommitContext(comparison.commits)}`, AI_CONTEXT_CHAR_LIMIT);
+
+              if (webReleaseSection) {
+                appendWithinLimit(sections, `Komari Web release notes for the same tag:\n${webReleaseSection}`, AI_CONTEXT_CHAR_LIMIT);
+              }
+
+              return sections.join("\n\n---\n\n");
+            }
+
+            function buildChatCompletionsUrl(baseUrl) {
+              const trimmed = clean(baseUrl).replace(/\/+$/, "");
+              if (!trimmed) {
+                return "";
+              }
+
+              if (trimmed.endsWith("/chat/completions")) {
+                return trimmed;
+              }
+
+              if (trimmed.endsWith("/v1")) {
+                return `${trimmed}/chat/completions`;
+              }
+
+              return `${trimmed}/v1/chat/completions`;
+            }
+
+            function normalizeAiSummary(markdown) {
+              const summary = clean(markdown);
+              if (!summary) {
+                return "";
+              }
+
+              if (/^##\s+AI Summary\b/im.test(summary)) {
+                return summary;
+              }
+
+              return `## AI Summary\n\n${summary}`;
+            }
+
+            async function callOpenAiChatCompletion(url, apiKey, model, messages) {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+
+              try {
+                const response = await fetch(url, {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({ model, messages, temperature: 0 }),
+                  signal: controller.signal,
+                });
+
+                const responseText = await response.text();
+                let responseJson = {};
+                try {
+                  responseJson = responseText ? JSON.parse(responseText) : {};
+                } catch {
+                  responseJson = {};
+                }
+
+                if (!response.ok) {
+                  const message = clean(responseJson.error?.message) || limitText(responseText, 500);
+                  throw new Error(`OpenAI request failed with ${response.status}: ${message}`);
+                }
+
+                return clean(responseJson.choices?.[0]?.message?.content);
+              } finally {
+                clearTimeout(timeout);
+              }
+            }
+
+            async function buildAiSummarySection({ tag, release, previousStableTag, generatedBody, comparison, webReleaseSection }) {
+              const apiKey = clean(process.env.OPENAI_API_KEY);
+              const baseUrl = clean(process.env.OPENAI_BASE_URL);
+              const model = clean(process.env.OPENAI_MODEL);
+
+              if (!apiKey || !baseUrl || !model) {
+                core.warning("OPENAI_API_KEY, OPENAI_BASE_URL, or OPENAI_MODEL is missing. Skipping AI release summary.");
+                return "";
+              }
+
+              const pullRequests = await getPullRequestContext(comparison.commits);
+              const aiContext = buildAiContext({
+                tag,
+                release,
+                previousStableTag,
+                generatedBody,
+                comparison,
+                pullRequests,
+                webReleaseSection,
+              });
+
+              const messages = [
+                {
+                  role: "system",
+                  content: [
+                    "You write accurate release notes for the Komari server project.",
+                    "Use only the supplied repository context.",
+                    "Prioritize user-visible behavior, compatibility or migration notes, operations/deployment changes, security fixes, and important bug fixes.",
+                    "Do not invent features or implementation details that are not supported by the context.",
+                    "Write concise Markdown. Match the primary language of the provided release-note context; if unclear, use English.",
+                  ].join(" "),
+                },
+                {
+                  role: "user",
+                  content: [
+                    `Create an AI-written summary for release ${tag}.`,
+                    previousStableTag
+                      ? `The release range starts at the previous stable release ${previousStableTag}; snapshot and prerelease tags inside the range are only intermediate builds.`
+                      : "No previous stable release was found, so summarize the available context carefully.",
+                    "Return only Markdown for this section. Use the heading '## AI Summary'. Add a short '### Upgrade Notes' subsection only when there are concrete upgrade, migration, compatibility, or deployment notes.",
+                    "",
+                    aiContext,
+                  ].join("\n"),
+                },
+              ];
+
+              try {
+                const url = buildChatCompletionsUrl(baseUrl);
+                const summary = await callOpenAiChatCompletion(url, apiKey, model, messages);
+                return normalizeAiSummary(summary);
+              } catch (error) {
+                core.warning(`AI release summary failed: ${error.message}`);
+                return "";
+              }
             }
 
             async function buildWebReleaseSection(tag) {
@@ -178,17 +456,33 @@ jobs:
               return;
             }
 
-            const previousTag = await getPreviousReleaseTag(tag, release);
-            const generatedBody = await getGeneratedNotes(tag, release, previousTag);
+            const previousStableTag = await getPreviousStableReleaseTag(tag, release);
+            core.info(previousStableTag
+              ? `Previous stable release for ${tag}: ${previousStableTag}`
+              : `No previous stable release found for ${tag}.`);
+
+            const generatedBody = await getGeneratedNotes(tag, release, previousStableTag);
             if (!generatedBody) {
               core.setFailed(`GitHub returned empty release notes for ${tag}.`);
               return;
             }
 
-            const body = [
+            const comparison = await getComparison(previousStableTag, tag);
+            const webReleaseSection = await buildWebReleaseSection(tag);
+            const aiSummarySection = await buildAiSummarySection({
+              tag,
+              release,
+              previousStableTag,
               generatedBody,
-              await buildCommitSection(previousTag, tag),
-              await buildWebReleaseSection(tag),
+              comparison,
+              webReleaseSection,
+            });
+
+            const body = [
+              aiSummarySection,
+              generatedBody,
+              buildCommitSection(previousStableTag, tag, comparison.commits),
+              webReleaseSection,
             ].filter(Boolean).join("\n\n");
 
             if (clean(release.body) === clean(body)) {

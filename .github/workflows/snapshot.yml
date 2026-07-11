@@ -158,6 +158,7 @@ jobs:
     needs: [prepare, build-and-attach-binaries]
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
     steps:
       - name: Checkout repository
@@ -204,6 +205,11 @@ jobs:
             --notes "Automated snapshot build (${VERSION}) from commit ${{ github.sha }}." \
             --prerelease \
             artifacts/komari-*
+
+          gh workflow run generate-release-notes.yml \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f tag="${VERSION}"
 
           gh release list \
             --repo "${{ github.repository }}" \
