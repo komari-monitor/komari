@@ -2,6 +2,7 @@ package metricstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -417,6 +418,13 @@ func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
 	}
 
 	for _, def := range definitions {
+		existing, err := s.GetMetric(ctx, def.Name)
+		if err != nil && !errors.Is(err, metric.ErrNotFound) {
+			return fmt.Errorf("failed to get metric %s: %w", def.Name, err)
+		}
+		if err == nil && existing.RetentionDays > 0 {
+			def.RetentionDays = existing.RetentionDays
+		}
 		if err := s.UpsertMetric(ctx, def); err != nil {
 			return fmt.Errorf("failed to create metric %s: %w", def.Name, err)
 		}
