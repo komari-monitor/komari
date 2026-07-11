@@ -1,0 +1,24 @@
+name: Restore frontend theme
+description: Download and unpack a previously built frontend theme artifact.
+
+inputs:
+  artifact-name:
+    description: Frontend theme artifact name.
+    default: komari-frontend
+
+runs:
+  using: composite
+  steps:
+    - name: Download frontend artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/frontend-artifact
+
+    - name: Extract frontend artifact
+      shell: bash
+      run: |
+        set -euxo pipefail
+        mkdir -p web/public/defaultTheme
+        rm -rf web/public/defaultTheme/*
+        tar -xzf "$RUNNER_TEMP/frontend-artifact/${{ inputs.artifact-name }}.tar.gz" -C web/public/defaultTheme
