@@ -63,6 +63,9 @@ func TestRollupKeepsTagSeriesSeparate(t *testing.T) {
 	if len(res0) != 1 || res0[0].Count != 10 || math.Abs(res0[0].Value-14.5) > 1e-9 {
 		t.Fatalf("device 0 should be its own series avg=14.5 count=10, got %#v", res0)
 	}
+	if res0[0].Tags["device_index"] != "0" {
+		t.Fatalf("device 0 rollup should keep tags, got %#v", res0[0])
+	}
 	// device 1: avg of 80..89 = 84.5
 	res1, err := s.AggregateRollup(ctx, q("1"), time.Minute)
 	if err != nil {
@@ -71,19 +74,90 @@ func TestRollupKeepsTagSeriesSeparate(t *testing.T) {
 	if len(res1) != 1 || res1[0].Count != 10 || math.Abs(res1[0].Value-84.5) > 1e-9 {
 		t.Fatalf("device 1 should be its own series avg=84.5 count=10, got %#v", res1)
 	}
+	if res1[0].Tags["device_index"] != "1" {
+		t.Fatalf("device 1 rollup should keep tags, got %#v", res1[0])
+	}
 
-	// No tag filter => both series merge (count 20, avg of all 20 values).
+	// No tag filter => both tag series are returned independently, matching
+	// raw Aggregate and preserving the tag dimension for public query callers.
 	all, err := s.AggregateRollup(ctx, AggregateQuery{
-		Query:       Query{MetricName: "util", EntityID: "host-1", Start: base, End: base.Add(10 * time.Minute)},
-		Aggregation: AggAvg,
-		Interval:    time.Minute,
+		Query:          Query{MetricName: "util", EntityID: "host-1", Start: base, End: base.Add(10 * time.Minute)},
+		Aggregation:    AggAvg,
+		Interval:       time.Minute,
+		PreserveSeries: true,
 	}, time.Minute)
 	if err != nil {
 		t.Fatalf("rollup all: %v", err)
 	}
-	wantAvg := (145.0 + 845.0) / 20.0 // sum(10..19)=145, sum(80..89)=845
-	if len(all) != 1 || all[0].Count != 20 || math.Abs(all[0].Value-wantAvg) > 1e-9 {
-		t.Fatalf("no-filter should merge both tags count=20 avg=%.2f, got %#v", wantAvg, all)
+	byDevice := map[string]AggregatePoint{}
+	for _, point := range all {
+		byDevice[point.Tags["device_index"]] = point
+	}
+	if len(byDevice) != 2 {
+		t.Fatalf("no-filter should keep both tag series, got %#v", all)
+	}
+	if got := byDevice["0"]; got.Count != 10 || math.Abs(got.Value-14.5) > 1e-9 {
+		t.Fatalf("unexpected no-filter device 0 rollup: %#v", got)
+	}
+	if got := byDevice["1"]; got.Count != 10 || math.Abs(got.Value-84.5) > 1e-9 {
+		t.Fatalf("unexpected no-filter device 1 rollup: %#v", got)
+	}
+}
+
+func TestSeriesRollupFillEmptyPreservesTags(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: time.Hour,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 30 * 24 * time.Hour}},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "ping.loss", Type: TypeGauge}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-48 * time.Hour)
+	if err := s.WriteBatch(ctx, []Point{
+		{MetricName: "ping.loss", EntityID: "n1", Timestamp: old, Value: 0, Tags: map[string]string{"task_id": "7"}},
+		{MetricName: "ping.loss", EntityID: "n1", Timestamp: old, Value: 1, Tags: map[string]string{"task_id": "8"}},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, now); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+
+	got, err := s.Series(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "ping.loss",
+			EntityID:   "n1",
+			Start:      old,
+			End:        old.Add(2 * time.Minute),
+		},
+		Aggregation:    AggAvg,
+		Interval:       time.Minute,
+		FillEmpty:      true,
+		PreserveSeries: true,
+	}, now)
+	if err != nil {
+		t.Fatalf("series: %v", err)
+	}
+	countByTask := map[string]int{}
+	emptyByTask := map[string]int{}
+	for _, point := range got {
+		taskID := point.Tags["task_id"]
+		if taskID == "" {
+			t.Fatalf("rollup fill-empty point lost task_id tag: %#v", point)
+		}
+		countByTask[taskID]++
+		if point.Count == 0 {
+			emptyByTask[taskID]++
+		}
+	}
+	if countByTask["7"] != 3 || countByTask["8"] != 3 {
+		t.Fatalf("expected 3 buckets per task, got counts=%#v points=%#v", countByTask, got)
+	}
+	if emptyByTask["7"] != 2 || emptyByTask["8"] != 2 {
+		t.Fatalf("expected empty buckets to retain tags, got empty=%#v points=%#v", emptyByTask, got)
 	}
 }
 

@@ -84,6 +84,7 @@ type publicMetricPoint struct {
 	Time   string            `json:"time"`
 	Value  *float64          `json:"value"`
 	Count  int               `json:"count,omitempty"`
+	Tag    map[string]string `json:"tag,omitempty"`
 	Tags   map[string]string `json:"tags,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -94,6 +95,7 @@ type publicMetricSeries struct {
 	Type                string              `json:"type,omitempty"`
 	Unit                string              `json:"unit,omitempty"`
 	RetentionDays       int                 `json:"retention_days,omitempty"`
+	Tag                 map[string]string   `json:"tag,omitempty"`
 	Tags                map[string]string   `json:"tags,omitempty"`
 	Downsampled         bool                `json:"downsampled"`
 	DownsampleAlgorithm string              `json:"downsample_algorithm,omitempty"`
@@ -256,6 +258,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				Unit:          def.Unit,
 				RetentionDays: def.RetentionDays,
 				Tags:          params.Tags,
+				Tag:           params.Tags,
 				Downsampled:   metricDownsample,
 				MaxPoints:     maxPoints,
 			}
@@ -268,10 +271,11 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				interval = metricRollupCompatibleInterval(start, now, interval)
 				item.IntervalSeconds = interval.Seconds()
 				points, err := store.Series(ctx, metric.AggregateQuery{
-					Query:       query,
-					Aggregation: algorithm,
-					Interval:    interval,
-					FillEmpty:   metricFillEmpty,
+					Query:          query,
+					Aggregation:    algorithm,
+					Interval:       interval,
+					FillEmpty:      metricFillEmpty,
+					PreserveSeries: true,
 				}, now)
 				if err != nil {
 					return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metric "+metricKey+": "+err.Error(), nil)
@@ -282,6 +286,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 						Time:  point.Bucket.Format(time.RFC3339Nano),
 						Value: publicAggregateMetricValue(point, metricFillEmpty),
 						Count: point.Count,
+						Tag:   point.Tags,
 						Tags:  point.Tags,
 					})
 				}
@@ -295,6 +300,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 					item.Points = append(item.Points, publicMetricPoint{
 						Time:   point.Timestamp.Format(time.RFC3339Nano),
 						Value:  publicMetricValue(point.Value),
+						Tag:    point.Tags,
 						Tags:   point.Tags,
 						Labels: point.Labels,
 					})
@@ -417,6 +423,11 @@ func splitPublicMetricSeries(base publicMetricSeries) []publicMetricSeries {
 	for _, point := range base.Points {
 		entityID := base.EntityID
 		tags := point.Tags
+		if len(tags) == 0 {
+			tags = point.Tag
+		}
+		point.Tag = tags
+		point.Tags = tags
 		tagsKey := publicMetricTagsKey(tags)
 		key := entityID + "\x00" + tagsKey
 		group := groups[key]
@@ -446,6 +457,7 @@ func splitPublicMetricSeries(base publicMetricSeries) []publicMetricSeries {
 		group := groups[key]
 		item := base
 		item.EntityID = group.entityID
+		item.Tag = group.tags
 		item.Tags = group.tags
 		item.Points = group.points
 		item.Count = len(group.points)
@@ -721,8 +733,9 @@ func loadPublicPingMetricAggregateGroups(ctx context.Context, store *metric.Stor
 				End:        end,
 				Order:      metric.OrderAsc,
 			},
-			Aggregation: aggregation,
-			Interval:    interval,
+			Aggregation:    aggregation,
+			Interval:       interval,
+			PreserveSeries: true,
 		}, now)
 		if err != nil {
 			return nil, err

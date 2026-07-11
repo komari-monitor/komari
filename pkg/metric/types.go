@@ -349,6 +349,13 @@ type AggregateQuery struct {
 	//
 	// FillEmpty 会为空时间段输出零计数桶。
 	FillEmpty bool `json:"fill_empty,omitempty"`
+	// PreserveSeries keeps entity/tag identities as separate aggregate series on
+	// rollup-backed reads. The default preserves the historical rollup behavior
+	// of merging all matched series into each output bucket.
+	//
+	// PreserveSeries 在基于 rollup 的读取中保留 entity/tag 维度为独立聚合序列。
+	// 默认值保留历史 rollup 行为：把匹配到的序列合并进同一个输出桶。
+	PreserveSeries bool `json:"preserve_series,omitempty"`
 	// BucketLimit and BucketOffset page over the produced aggregate buckets, not
 	// the underlying raw points. They are applied consistently across every
 	// backend and aggregation type. The embedded Query.Limit/Query.Offset are

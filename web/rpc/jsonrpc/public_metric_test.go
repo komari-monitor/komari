@@ -30,11 +30,42 @@ func TestSplitPublicMetricSeriesKeepsTagSeries(t *testing.T) {
 	if got[0].Tags["device_index"] != "0" || got[0].Count != 2 {
 		t.Fatalf("unexpected first series: %#v", got[0])
 	}
+	if got[0].Tag["device_index"] != "0" {
+		t.Fatalf("tag alias was not set on first series: %#v", got[0])
+	}
 	if got[1].Tags["device_index"] != "1" || got[1].Count != 1 {
 		t.Fatalf("unexpected second series: %#v", got[1])
 	}
 	if got[0].Points[0].Tags["device_index"] != "0" || got[1].Points[0].Tags["device_index"] != "1" {
 		t.Fatalf("point tags were not preserved: %#v", got)
+	}
+	if got[0].Points[0].Tag["device_index"] != "0" || got[1].Points[0].Tag["device_index"] != "1" {
+		t.Fatalf("point tag aliases were not preserved: %#v", got)
+	}
+}
+
+func TestPublicMetricJSONIncludesTagAlias(t *testing.T) {
+	payload, err := json.Marshal(publicMetricSeries{
+		MetricKey: "ping.loss",
+		EntityID:  "node-a",
+		Tag:       map[string]string{"task_id": "7"},
+		Tags:      map[string]string{"task_id": "7"},
+		Points: []publicMetricPoint{{
+			Time:  "2026-06-18T00:00:00Z",
+			Value: publicMetricValue(0),
+			Tag:   map[string]string{"task_id": "7"},
+			Tags:  map[string]string{"task_id": "7"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal series: %v", err)
+	}
+	text := string(payload)
+	if !strings.Contains(text, `"tag":{"task_id":"7"}`) {
+		t.Fatalf("series tag alias missing: %s", text)
+	}
+	if !strings.Contains(text, `"tags":{"task_id":"7"}`) {
+		t.Fatalf("series tags missing: %s", text)
 	}
 }
 
