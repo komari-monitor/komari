@@ -14,6 +14,10 @@ on:
         description: "Release tag to regenerate notes for. Leave empty to use the latest release."
         required: false
         type: string
+      base_ref:
+        description: "Base ref or SHA for the release comparison. Snapshot builds pass the previous main SHA."
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -21,6 +25,7 @@ permissions:
 jobs:
   update-release-notes:
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'Snapshot-') }}
 
     steps:
       - name: Generate and apply release notes
@@ -91,7 +96,7 @@ jobs:
               return { tag: release.tag_name, release };
             }
 
-            async function getPreviousStableReleaseTag(tag, release) {
+            async function getPreviousReleaseTag(tag, release) {
               const releases = await github.paginate(github.rest.repos.listReleases, {
                 owner,
                 repo,
@@ -99,8 +104,10 @@ jobs:
               });
 
               const currentTime = releaseTimestamp(release);
+              const currentIsSnapshot = isSnapshotTag(tag);
+              const currentIsStable = isStableRelease(release);
               const candidates = releases
-                .filter((item) => isStableRelease(item) && item.tag_name !== tag)
+                .filter((item) => !item.draft && item.tag_name !== tag)
                 .filter((item) => {
                   if (!Number.isFinite(currentTime)) {
                     return true;
@@ -109,12 +116,71 @@ jobs:
                   const itemTime = releaseTimestamp(item);
                   return Number.isFinite(itemTime) && itemTime < currentTime;
                 })
+                .filter((item) => {
+                  if (currentIsSnapshot) {
+                    return isSnapshotTag(item.tag_name);
+                  }
+
+                  if (currentIsStable) {
+                    return isStableRelease(item);
+                  }
+
+                  return item.prerelease && !isSnapshotTag(item.tag_name);
+                })
                 .sort((left, right) => releaseTimestamp(right) - releaseTimestamp(left));
 
               return candidates[0]?.tag_name || "";
             }
 
-            async function getGeneratedNotes(tag, release, previousStableTag) {
+            async function resolveComparisonBase(tag, release) {
+              const requestedBaseRef = clean(context.payload.client_payload?.base_ref)
+                || clean(core.getInput("base_ref"));
+
+              if (requestedBaseRef) {
+                return {
+                  ref: requestedBaseRef,
+                  previousTag: "",
+                  source: "requested base ref",
+                };
+              }
+
+              const previousTag = await getPreviousReleaseTag(tag, release);
+              if (previousTag) {
+                return {
+                  ref: previousTag,
+                  previousTag,
+                  source: isSnapshotTag(tag) ? "previous snapshot release" : "previous release in the same channel",
+                };
+              }
+
+              if (isSnapshotTag(tag)) {
+                try {
+                  const commit = (await github.rest.repos.getCommit({
+                    owner,
+                    repo,
+                    ref: release.target_commitish || tag,
+                  })).data;
+                  const parentSha = commit.parents?.[0]?.sha || "";
+                  if (parentSha) {
+                    return {
+                      ref: parentSha,
+                      previousTag: "",
+                      source: "snapshot target parent commit",
+                    };
+                  }
+                } catch (error) {
+                  core.warning(`Failed to resolve parent commit for ${tag}: ${error.message}`);
+                }
+              }
+
+              return {
+                ref: "",
+                previousTag: "",
+                source: "none",
+              };
+            }
+
+            async function getGeneratedNotes(tag, release, previousTag) {
               const params = {
                 owner,
                 repo,
@@ -122,8 +188,8 @@ jobs:
                 target_commitish: release.target_commitish || undefined,
               };
 
-              if (previousStableTag) {
-                params.previous_tag_name = previousStableTag;
+              if (previousTag) {
+                params.previous_tag_name = previousTag;
               }
 
               const generated = await github.request(
@@ -134,8 +200,8 @@ jobs:
               return clean(generated.data.body);
             }
 
-            async function getComparison(previousStableTag, tag) {
-              if (!previousStableTag) {
+            async function getComparison(baseRef, tag) {
+              if (!baseRef) {
                 return { commits: [], files: [], htmlUrl: "" };
               }
 
@@ -147,7 +213,7 @@ jobs:
                 const response = await github.rest.repos.compareCommitsWithBasehead({
                   owner,
                   repo,
-                  basehead: `${previousStableTag}...${tag}`,
+                  basehead: `${baseRef}...${tag}`,
                   per_page: 100,
                   page,
                 });
@@ -177,16 +243,21 @@ jobs:
               return `- ${subject} ([${shortSha}](${commit.html_url}))${author}`;
             }
 
-            function buildCommitSection(previousStableTag, tag, commits) {
-              if (!previousStableTag) {
-                return "## Commits\n\nNo previous stable release tag was found; commit comparison is unavailable.";
+            function buildWhatsChangedSection(baseRef, tag, comparison) {
+              if (!baseRef) {
+                return "## What's Changed\n\nNo comparison base was found for this release.";
               }
 
-              if (commits.length === 0) {
-                return `## Commits\n\nNo commits found between \`${previousStableTag}\` and \`${tag}\`.`;
+              if (comparison.commits.length === 0) {
+                return `## What's Changed\n\nNo commits found between \`${baseRef}\` and \`${tag}\`.`;
               }
 
-              return ["## Commits", "", ...commits.map(renderCommitLine)].join("\n");
+              const lines = ["## What's Changed", "", ...comparison.commits.map(renderCommitLine)];
+              if (comparison.htmlUrl) {
+                lines.push("", `**Full Changelog**: ${comparison.htmlUrl}`);
+              }
+
+              return lines.join("\n");
             }
 
             async function getPullRequestContext(commits) {
@@ -272,7 +343,7 @@ jobs:
               }).join("\n\n");
             }
 
-            function buildAiContext({ tag, release, previousStableTag, generatedBody, comparison, pullRequests, webReleaseSection }) {
+            function buildAiContext({ tag, release, comparisonBase, whatsChangedSection, comparison, pullRequests, webReleaseSection }) {
               const sections = [];
 
               appendWithinLimit(sections, [
@@ -282,11 +353,12 @@ jobs:
                 `Prerelease: ${release.prerelease ? "yes" : "no"}`,
                 `Snapshot tag: ${isSnapshotTag(tag) ? "yes" : "no"}`,
                 `Target commitish: ${release.target_commitish || "(unknown)"}`,
-                `Previous stable release tag: ${previousStableTag || "(none)"}`,
+                `Comparison base: ${comparisonBase.ref || "(none)"}`,
+                `Comparison base source: ${comparisonBase.source}`,
                 `Compare URL: ${comparison.htmlUrl || "(unavailable)"}`,
               ].join("\n"), AI_CONTEXT_CHAR_LIMIT);
 
-              appendWithinLimit(sections, `GitHub generated release notes:\n${generatedBody}`, AI_CONTEXT_CHAR_LIMIT);
+              appendWithinLimit(sections, `What's Changed section:\n${whatsChangedSection}`, AI_CONTEXT_CHAR_LIMIT);
               appendWithinLimit(sections, `Changed files and patch excerpts:\n${buildChangedFilesContext(comparison.files)}`, AI_CONTEXT_CHAR_LIMIT);
               appendWithinLimit(sections, `Associated pull requests:\n${buildPullRequestContext(pullRequests)}`, AI_CONTEXT_CHAR_LIMIT);
               appendWithinLimit(sections, `Commit details:\n${buildCommitContext(comparison.commits)}`, AI_CONTEXT_CHAR_LIMIT);
@@ -315,17 +387,21 @@ jobs:
               return `${trimmed}/v1/chat/completions`;
             }
 
-            function normalizeAiSummary(markdown) {
+            function normalizeReleaseSummary(markdown) {
               const summary = clean(markdown);
               if (!summary) {
                 return "";
               }
 
-              if (/^##\s+AI Summary\b/im.test(summary)) {
-                return summary;
+              const withoutAiHeading = clean(summary
+                .replace(/^#{1,6}\s+AI Summary\b\s*/im, "")
+                .replace(/^\*\*AI Summary\*\*\s*/im, ""));
+              const whatsChangedIndex = withoutAiHeading.search(/^##\s+What's Changed\b/im);
+              if (whatsChangedIndex >= 0) {
+                return clean(withoutAiHeading.slice(0, whatsChangedIndex));
               }
 
-              return `## AI Summary\n\n${summary}`;
+              return withoutAiHeading;
             }
 
             async function callOpenAiChatCompletion(url, apiKey, model, messages) {
@@ -362,13 +438,13 @@ jobs:
               }
             }
 
-            async function buildAiSummarySection({ tag, release, previousStableTag, generatedBody, comparison, webReleaseSection }) {
+            async function buildReleaseSummarySection({ tag, release, comparisonBase, whatsChangedSection, comparison, webReleaseSection }) {
               const apiKey = clean(process.env.OPENAI_API_KEY);
               const baseUrl = clean(process.env.OPENAI_BASE_URL);
               const model = clean(process.env.OPENAI_MODEL);
 
               if (!apiKey || !baseUrl || !model) {
-                core.warning("OPENAI_API_KEY, OPENAI_BASE_URL, or OPENAI_MODEL is missing. Skipping AI release summary.");
+                core.warning("OPENAI_API_KEY, OPENAI_BASE_URL, or OPENAI_MODEL is missing. Skipping generated release summary.");
                 return "";
               }
 
@@ -376,8 +452,8 @@ jobs:
               const aiContext = buildAiContext({
                 tag,
                 release,
-                previousStableTag,
-                generatedBody,
+                comparisonBase,
+                whatsChangedSection,
                 comparison,
                 pullRequests,
                 webReleaseSection,
@@ -389,19 +465,23 @@ jobs:
                   content: [
                     "You write accurate release notes for the Komari server project.",
                     "Use only the supplied repository context.",
+                    "Include both Komari server changes and Komari Web frontend changes when frontend release notes are supplied.",
                     "Prioritize user-visible behavior, compatibility or migration notes, operations/deployment changes, security fixes, and important bug fixes.",
                     "Do not invent features or implementation details that are not supported by the context.",
-                    "Write concise Markdown. Match the primary language of the provided release-note context; if unclear, use English.",
+                    "Write concise Markdown in Simplified Chinese.",
                   ].join(" "),
                 },
                 {
                   role: "user",
                   content: [
-                    `Create an AI-written summary for release ${tag}.`,
-                    previousStableTag
-                      ? `The release range starts at the previous stable release ${previousStableTag}; snapshot and prerelease tags inside the range are only intermediate builds.`
-                      : "No previous stable release was found, so summarize the available context carefully.",
-                    "Return only Markdown for this section. Use the heading '## AI Summary'. Add a short '### Upgrade Notes' subsection only when there are concrete upgrade, migration, compatibility, or deployment notes.",
+                    `Create the release summary section for release ${tag}.`,
+                    comparisonBase.ref
+                      ? `Summarize only changes in the comparison ${comparisonBase.ref}...${tag}.`
+                      : "No comparison base was found, so summarize only the supplied release context.",
+                    "Return only Markdown for the summary section that appears before '## What's Changed'.",
+                    "Do not use the heading 'AI Summary'. Do not add a 'What's Changed' section.",
+                    "Use these top-level headings, in this order: '## 主要更新内容', '## Bug修复', and '## 其他'.",
+                    "Omit '## Bug修复' when there are no concrete bug fixes. Keep bullets short and specific.",
                     "",
                     aiContext,
                   ].join("\n"),
@@ -411,9 +491,9 @@ jobs:
               try {
                 const url = buildChatCompletionsUrl(baseUrl);
                 const summary = await callOpenAiChatCompletion(url, apiKey, model, messages);
-                return normalizeAiSummary(summary);
+                return normalizeReleaseSummary(summary);
               } catch (error) {
-                core.warning(`AI release summary failed: ${error.message}`);
+                core.warning(`Generated release summary failed: ${error.message}`);
                 return "";
               }
             }
@@ -456,33 +536,36 @@ jobs:
               return;
             }
 
-            const previousStableTag = await getPreviousStableReleaseTag(tag, release);
-            core.info(previousStableTag
-              ? `Previous stable release for ${tag}: ${previousStableTag}`
-              : `No previous stable release found for ${tag}.`);
+            const comparisonBase = await resolveComparisonBase(tag, release);
+            core.info(comparisonBase.ref
+              ? `Comparison base for ${tag}: ${comparisonBase.ref} (${comparisonBase.source}).`
+              : `No comparison base found for ${tag}.`);
 
-            const generatedBody = await getGeneratedNotes(tag, release, previousStableTag);
-            if (!generatedBody) {
-              core.setFailed(`GitHub returned empty release notes for ${tag}.`);
+            const comparison = await getComparison(comparisonBase.ref, tag);
+            const whatsChangedSection = comparisonBase.previousTag
+              ? await getGeneratedNotes(tag, release, comparisonBase.previousTag)
+              : (!comparisonBase.ref && !isSnapshotTag(tag)
+                ? await getGeneratedNotes(tag, release, "")
+                : buildWhatsChangedSection(comparisonBase.ref, tag, comparison));
+
+            if (!whatsChangedSection) {
+              core.setFailed(`Failed to build What's Changed section for ${tag}.`);
               return;
             }
 
-            const comparison = await getComparison(previousStableTag, tag);
             const webReleaseSection = await buildWebReleaseSection(tag);
-            const aiSummarySection = await buildAiSummarySection({
+            const releaseSummarySection = await buildReleaseSummarySection({
               tag,
               release,
-              previousStableTag,
-              generatedBody,
+              comparisonBase,
+              whatsChangedSection,
               comparison,
               webReleaseSection,
             });
 
             const body = [
-              aiSummarySection,
-              generatedBody,
-              buildCommitSection(previousStableTag, tag, comparison.commits),
-              webReleaseSection,
+              releaseSummarySection,
+              whatsChangedSection,
             ].filter(Boolean).join("\n\n");
 
             if (clean(release.body) === clean(body)) {
