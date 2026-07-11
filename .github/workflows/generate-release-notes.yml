@@ -83,7 +83,7 @@ jobs:
             async function resolveRelease() {
               const requestedTag = clean(context.payload.release?.tag_name)
                 || clean(context.payload.client_payload?.tag)
-                || clean(core.getInput("tag"));
+                || clean(context.payload.inputs?.tag);
 
               if (requestedTag) {
                 const release = context.payload.release?.tag_name === requestedTag
@@ -134,7 +134,7 @@ jobs:
 
             async function resolveComparisonBase(tag, release) {
               const requestedBaseRef = clean(context.payload.client_payload?.base_ref)
-                || clean(core.getInput("base_ref"));
+                || clean(context.payload.inputs?.base_ref);
 
               if (requestedBaseRef) {
                 return {
