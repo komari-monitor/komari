@@ -166,6 +166,20 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 	if deleted != 2 {
 		t.Fatalf("expected 2 deleted points, got %d", deleted)
 	}
+
+	storageSize, err := store.StorageSize(ctx)
+	if err != nil {
+		t.Fatalf("storage size: %v", err)
+	}
+	if storageSize <= 0 {
+		t.Fatalf("storage size = %d, want a positive value", storageSize)
+	}
+	if err := store.ReclaimSpace(ctx); err != nil {
+		t.Fatalf("reclaim storage space: %v", err)
+	}
+	if err := store.Ping(ctx); err != nil {
+		t.Fatalf("store unusable after space reclaim: %v", err)
+	}
 }
 
 // dropIntegrationTables drops integration-test tables.

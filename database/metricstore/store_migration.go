@@ -52,6 +52,7 @@ var (
 	storeMigProgress StoreMigrationProgress
 	storeMigCancel   context.CancelFunc
 	storeMigDone     chan struct{}
+	storeClosing     bool
 )
 
 // IsStoreMigrationRunning 报告是否有 store-to-store 迁移正在运行。
@@ -92,11 +93,6 @@ func ResolveStoreMigrationSourceFingerprint(driver, dsn string) string {
 // 返回错误表示“未能启动”（例如已有迁移在跑、源与目标相同、目标未初始化等）；
 // 迁移过程中的错误通过 GetStoreMigrationProgress().Status == "failed" 与 Error 暴露。
 func StartStoreMigration(sourceDriver, sourceDSN string) error {
-	dst := GetStore()
-	if dst == nil {
-		return fmt.Errorf("metric store not initialized")
-	}
-
 	cfg, err := config.GetManyAs[MetricStoreConfig]()
 	if err != nil {
 		return fmt.Errorf("failed to load metric store config: %w", err)
@@ -105,15 +101,39 @@ func StartStoreMigration(sourceDriver, sourceDSN string) error {
 	sourceFP := ResolveStoreMigrationSourceFingerprint(sourceDriver, sourceDSN)
 
 	if sourceFP == targetFP {
-		return fmt.Errorf("source and target metrics database are the same (%s); nothing to migrate", targetFP)
+		return fmt.Errorf("source and target metrics database are the same; nothing to migrate")
 	}
 
 	srcCfg, err := configFromFingerprint(sourceFP, cfg)
 	if err != nil {
 		return fmt.Errorf("resolve source metrics store: %w", err)
 	}
+	if !storeOperations.TryAcquire() {
+		return ErrStoreBusy
+	}
+	exclusiveLeaseHandedOff := false
+	defer func() {
+		if !exclusiveLeaseHandedOff {
+			storeOperations.Release()
+		}
+	}()
+
+	storeMu.RLock()
+	dst := store
+	activeFingerprint := storeFingerprint
+	storeMu.RUnlock()
+	if dst == nil {
+		return ErrStoreNotInitialized
+	}
+	if activeFingerprint != targetFP {
+		return fmt.Errorf("active metric store does not match the configured migration target; wait for hot reload and retry")
+	}
 
 	storeMigMu.Lock()
+	if storeClosing {
+		storeMigMu.Unlock()
+		return ErrStoreBusy
+	}
 	if storeMigCancel != nil {
 		storeMigMu.Unlock()
 		return fmt.Errorf("a store migration is already in progress")
@@ -133,6 +153,7 @@ func StartStoreMigration(sourceDriver, sourceDSN string) error {
 	}
 	storeMigMu.Unlock()
 
+	exclusiveLeaseHandedOff = true
 	go runStoreMigration(ctx, cancel, done, srcCfg, cfg, dst, targetFP)
 	return nil
 }
@@ -140,12 +161,14 @@ func StartStoreMigration(sourceDriver, sourceDSN string) error {
 // runStoreMigration 执行实际的搬运逻辑（在独立 goroutine 中）。
 func runStoreMigration(ctx context.Context, cancel context.CancelFunc, done chan struct{}, srcCfg *MetricStoreConfig, cfg *MetricStoreConfig, dst *metric.Store, targetFP string) {
 	defer func() {
+		cancel()
+		storeOperations.Release()
+
 		storeMigMu.Lock()
 		storeMigCancel = nil
 		storeMigDone = nil
-		storeMigMu.Unlock()
-		cancel()
 		close(done)
+		storeMigMu.Unlock()
 	}()
 
 	src, err := openSourceStore(ctx, srcCfg)
@@ -180,7 +203,7 @@ func runStoreMigration(ctx context.Context, cancel context.CancelFunc, done chan
 		log.Printf("[store-migration] failed to persist migration target fingerprint: %v", err)
 	}
 	finishStoreMigration("completed", nil)
-	log.Printf("[store-migration] completed via API (%d points) target=%s", total, targetFP)
+	log.Printf("[store-migration] completed via API (%d points) target_driver=%s", total, ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
 }
 
 // finishStoreMigration 统一收尾：设置终态状态、结束时间与错误信息。
@@ -201,22 +224,62 @@ func finishStoreMigration(status string, err error) {
 // CancelStoreMigration 请求取消正在运行的 store-to-store 迁移，并等待其退出。
 // 由于写入是幂等 upsert，取消后可安全重新发起，不会产生重复数据。
 func CancelStoreMigration() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return stopStoreMigration(ctx, true)
+}
+
+func stopStoreMigration(ctx context.Context, requireRunning bool) error {
 	storeMigMu.Lock()
 	cancel := storeMigCancel
 	done := storeMigDone
 	storeMigMu.Unlock()
 
 	if cancel == nil {
-		return fmt.Errorf("no store migration is currently running")
+		if requireRunning {
+			return fmt.Errorf("no store migration is currently running")
+		}
+		return nil
 	}
 	cancel()
 
 	select {
 	case <-done:
 		return nil
-	case <-time.After(30 * time.Second):
-		return fmt.Errorf("timed out waiting for store migration to cancel")
+	case <-ctx.Done():
+		return fmt.Errorf("wait for store migration to cancel: %w", ctx.Err())
 	}
+}
+
+func stopStoreMigrationForClose(ctx context.Context) error {
+	storeMigMu.Lock()
+	storeClosing = true
+	cancel := storeMigCancel
+	done := storeMigDone
+	storeMigMu.Unlock()
+
+	if cancel == nil {
+		return nil
+	}
+	cancel()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("wait for store migration to cancel: %w", ctx.Err())
+	}
+}
+
+func clearStoreClosing() {
+	storeMigMu.Lock()
+	storeClosing = false
+	storeMigMu.Unlock()
+}
+
+func isStoreClosing() bool {
+	storeMigMu.Lock()
+	defer storeMigMu.Unlock()
+	return storeClosing
 }
 
 // maskDSN 对 DSN 做粗粒度脱敏，避免在 API 响应/日志中泄露密码。

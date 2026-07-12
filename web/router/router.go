@@ -145,14 +145,12 @@ func registerAdminRoutes(r *gin.Engine) {
 		settings.GET("/message-sender", jsonRpc.Bind("admin:getMessageSenderProvider", jsonRpc.WithQuery("provider")))
 	}
 
-
-	// database 运维（压缩/大小）
+	// database storage inspection and maintenance
 	databaseGroup := g.Group("/database")
 	{
 		databaseGroup.GET("/size", jsonRpc.Bind("admin:getDatabaseSize"))
-		databaseGroup.POST("/vacuum", jsonRpc.Bind("admin:vacuumDatabase", jsonRpc.WithMessage("database vacuumed")))
+		databaseGroup.POST("/vacuum", jsonRpc.Bind("admin:vacuumDatabase"))
 	}
-
 
 	// clients
 	clientGroup := g.Group("/client")

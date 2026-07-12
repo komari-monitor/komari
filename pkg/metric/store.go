@@ -50,6 +50,11 @@ type Store struct {
 	//
 	// tables 保存当前 Store 的实际表名。
 	tables tables
+	// maintenanceMu serializes physical storage maintenance while allowing
+	// concurrent size reads.
+	//
+	// maintenanceMu 串行化物理存储维护，同时允许并发读取存储大小。
+	maintenanceMu sync.RWMutex
 	// mu protects closed state.
 	//
 	// mu 保护 closed 状态。

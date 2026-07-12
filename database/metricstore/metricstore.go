@@ -45,12 +45,12 @@ const (
 )
 
 var (
-	store     *metric.Store
-	storeMu   sync.RWMutex
-	storeOnce sync.Once
-	reloadMu  sync.Mutex
-	compactMu sync.Mutex
-	compactAt int
+	store            *metric.Store
+	storeFingerprint string
+	storeMu          sync.RWMutex
+	storeOnce        sync.Once
+	storeOperations  = newStoreOperationGate()
+	compactAt        int
 )
 
 var ErrCompactInProgress = errors.New("metric store compact already in progress")
@@ -363,7 +363,9 @@ func InitializeStore() error {
 
 		storeMu.Lock()
 		store = s
+		storeFingerprint = targetFingerprint(cfg)
 		storeMu.Unlock()
+		clearStoreClosing()
 
 		log.Printf("Metric store initialized successfully (driver=%s, retention=%d days)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN), cfg.RetentionDays)
 	})
@@ -379,8 +381,13 @@ func InitializeStore() error {
 // 搬运到新目标（如 MySQL/PostgreSQL）。跨库数据迁移由启动迁移
 // （RunStartupMigration）在下次启动时按目标指纹自动完成。
 func Reload(ctx context.Context) error {
-	reloadMu.Lock()
-	defer reloadMu.Unlock()
+	if err := storeOperations.Acquire(ctx); err != nil {
+		return fmt.Errorf("wait for metric store operations before reload: %w", err)
+	}
+	defer storeOperations.Release()
+	if isStoreClosing() {
+		return ErrStoreBusy
+	}
 
 	cfg, err := config.GetManyAs[MetricStoreConfig]()
 	if err != nil {
@@ -396,6 +403,7 @@ func Reload(ctx context.Context) error {
 	storeMu.Lock()
 	old := store
 	store = s
+	storeFingerprint = targetFingerprint(cfg)
 	storeMu.Unlock()
 
 	if old != nil {
@@ -421,18 +429,19 @@ func IsEnabled() bool {
 }
 
 func Compact(ctx context.Context, now time.Time) (int, error) {
-	if !compactMu.TryLock() {
+	if !storeOperations.TryAcquire() {
 		return 0, ErrCompactInProgress
 	}
-	defer compactMu.Unlock()
+	defer storeOperations.Release()
 
 	storeMu.RLock()
-	defer storeMu.RUnlock()
-	if store == nil {
+	activeStore := store
+	storeMu.RUnlock()
+	if activeStore == nil {
 		return 0, fmt.Errorf("metric store not initialized")
 	}
 
-	defs, err := store.ListMetrics(ctx)
+	defs, err := activeStore.ListMetrics(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -448,7 +457,7 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 	start := compactAt
 	for i := 0; i < len(defs); i++ {
 		idx := (start + i) % len(defs)
-		n, err := store.CompactMetric(ctx, defs[idx].Name, now)
+		n, err := activeStore.CompactMetric(ctx, defs[idx].Name, now)
 		if err != nil {
 			compactAt = idx
 			return total, fmt.Errorf("compact metric %q: %w", defs[idx].Name, err)
@@ -456,22 +465,40 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 		total += n
 		compactAt = (idx + 1) % len(defs)
 	}
-	if _, err := store.CleanupExpired(ctx, now); err != nil {
+	if _, err := activeStore.CleanupExpired(ctx, now); err != nil {
 		return total, fmt.Errorf("clean up expired raw metrics: %w", err)
 	}
 	return total, nil
 }
 
-// CloseStore 关闭 metric store
+// CloseStore closes the metric store after stopping any API-triggered migration.
 func CloseStore() error {
+	return CloseStoreContext(context.Background())
+}
+
+// CloseStoreContext stops the asynchronous store migration before taking the
+// store write lock, so shutdown cannot wait forever on the migration's lease.
+func CloseStoreContext(ctx context.Context) error {
+	if err := stopStoreMigrationForClose(ctx); err != nil {
+		clearStoreClosing()
+		return err
+	}
+	if err := storeOperations.Acquire(ctx); err != nil {
+		clearStoreClosing()
+		return fmt.Errorf("wait for metric store operations before close: %w", err)
+	}
+	defer storeOperations.Release()
+
 	storeMu.Lock()
 	defer storeMu.Unlock()
 
 	if store != nil {
 		err := store.Close()
 		store = nil
+		storeFingerprint = ""
 		return err
 	}
+	storeFingerprint = ""
 	return nil
 }
 

@@ -135,8 +135,8 @@ func (a *App) InitStores() error {
 		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize metric store: %v", err))
 		return fmt.Errorf("failed to initialize metric store: %w", err)
 	}
-	a.addCleanup("metric-store", func(context.Context) error {
-		return metricstore.CloseStore()
+	a.addCleanup("metric-store", func(ctx context.Context) error {
+		return metricstore.CloseStoreContext(ctx)
 	})
 
 	if err := migrations.RunMetricStoreMigrations(migrations.MetricContext{
