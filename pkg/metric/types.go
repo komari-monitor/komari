@@ -143,9 +143,9 @@ type Definition struct {
 	//
 	// Unit 表示数值单位，例如 bytes 或 percent。
 	Unit string `json:"unit,omitempty"`
-	// RetentionDays controls raw-point retention for this metric.
+	// RetentionDays controls historical data retention for this metric.
 	//
-	// RetentionDays 控制该指标原始点的保留天数。
+	// RetentionDays 控制该指标历史数据的保留天数。
 	RetentionDays int `json:"retention_days,omitempty"`
 	// Metadata stores caller-defined metric metadata.
 	//

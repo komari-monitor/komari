@@ -3,23 +3,24 @@ package metric
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 )
 
-// Compact runs the store's RollupPolicy over every metric: it rebuilds the
-// rollup tiers up to `now` and enforces every retention window (raw points and
-// each tier). It is the explicit maintenance entry point — call it from a cron
-// job or scheduler. It is safe to call repeatedly and is idempotent for
-// unchanged windows.
+// Compact runs the store's RollupPolicy over every metric: it advances the
+// rollup tiers to `now` and enforces every retention window (raw points and each
+// tier). With finite raw retention, only newly eligible and late raw points are
+// propagated. It is safe to call repeatedly and is idempotent for unchanged
+// windows.
 //
 // Returns the number of rollup buckets written across all tiers and metrics.
 //
-// Compact 会对所有指标执行 Store 的 RollupPolicy：它会重建截至 `now` 的
-// rollup 层，并执行每个保留窗口（原始点和各层级）。这是显式维护入口，
-// 应从 cron 任务或调度器调用。它可以重复安全调用，未变化窗口保持幂等。
+// Compact 会对所有指标执行 Store 的 RollupPolicy：它会把 rollup 层推进到
+// `now`，并执行每个保留窗口（原始点和各层级）。原始点保留期有限时，只会级联
+// 本轮新到期及迟到的原始点。它可以重复安全调用，未变化窗口保持幂等。
 //
 // 返回所有指标、所有层级中写入的 rollup 桶数量。
 func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
@@ -44,10 +45,10 @@ func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 	return total, nil
 }
 
-// CompactMetric compacts a single metric. It builds the finest tier from raw
-// points, then each coarser tier from the tier below it, upserts the resulting
-// buckets, and finally deletes data that has aged out of each retention window
-// (raw points first, then each tier).
+// CompactMetric compacts a single metric. With finite raw retention it consumes
+// newly eligible raw points as a delta and propagates that delta through every
+// tier. When raw is retained forever it falls back to rebuilding tiers. It then
+// deletes data that has aged out of each retention window.
 //
 // The entire compaction is performed within a SERIALIZABLE transaction to
 // guarantee that the raw scan and the raw deletion observe the same snapshot.
@@ -65,9 +66,9 @@ func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 // combination (e.g. a GPU device_index) is summarized into its own series and
 // can be queried independently after the raw points are gone.
 //
-// CompactMetric 会压缩单个指标。它先由原始点构建最细层，再由下一层之下的
-// 层级逐层合成更粗层，upsert 生成的桶，最后删除每个保留窗口中过期的数据
-// （先删除原始点，再删除各层级）。
+// CompactMetric 会压缩单个指标。原始点保留期有限时，它把本轮新到期的原始点
+// 作为增量逐层传播；原始点永久保留时则回退到全量重建。最后删除各保留窗口中
+// 已过期的数据。
 //
 // 整个 compaction 在一个 SERIALIZABLE 事务内执行，以保证 raw 扫描和 raw 删除
 // 看到同一个快照。否则在 PostgreSQL/MySQL 的默认隔离级别下，扫描之后、删除
@@ -84,6 +85,18 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	if !policy.Enabled() {
 		return 0, nil
 	}
+	def, err := s.GetMetric(ctx, metricName)
+	if errors.Is(err, ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	retentionDays := def.RetentionDays
+	if retentionDays <= 0 {
+		retentionDays = s.cfg.DefaultRetentionDays
+	}
+	policy = policy.withMetricRetention(time.Duration(retentionDays) * 24 * time.Hour)
 	now = now.UTC()
 
 	// Retry the whole compaction on a transient serialization/deadlock failure.
@@ -93,7 +106,7 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	const maxAttempts = 5
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		written, err := s.compactMetricOnce(ctx, metricName, now)
+		written, err := s.compactMetricOnce(ctx, metricName, now, policy)
 		if err == nil {
 			return written, nil
 		}
@@ -108,7 +121,7 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 // compactMetricOnce runs a single compaction attempt inside one transaction.
 //
 // compactMetricOnce 在单个事务内执行一次 compaction 尝试。
-func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now time.Time) (int, error) {
+func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now time.Time, policy RollupPolicy) (int, error) {
 	// Use a transaction to ensure consistency between raw scan, rollup write, and
 	// raw deletion. The isolation level is backend-specific (SERIALIZABLE on
 	// PostgreSQL/MySQL, default on SQLite) so late-arriving points cannot be
@@ -119,7 +132,7 @@ func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now ti
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	written, err := s.compactMetricWithinTx(ctx, metricName, now, tx)
+	written, err := s.compactMetricWithinTx(ctx, metricName, now, policy, tx)
 	if err != nil {
 		return written, err
 	}
@@ -172,11 +185,49 @@ func isRetryableSerializationError(err error) bool {
 // compactMetricWithinTx is the actual compaction logic, meant to be called
 // within a transaction. The tx parameter is passed explicitly to all operations
 // that need transactional consistency.
-func (s *Store) compactMetricWithinTx(ctx context.Context, metricName string, now time.Time, tx *sql.Tx) (int, error) {
-	policy := s.cfg.RollupPolicy
+func (s *Store) compactMetricWithinTx(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, tx *sql.Tx) (int, error) {
 	if !policy.Enabled() {
 		return 0, nil
 	}
+	if policy.RawRetention > 0 {
+		return s.compactMetricIncrementalWithinTx(ctx, metricName, now, policy, tx)
+	}
+	return s.compactMetricFullWithinTx(ctx, metricName, now, policy, tx)
+}
+
+// compactMetricIncrementalWithinTx rolls only raw points crossing the hot-data
+// cutoff and propagates that delta through every coarser tier. Because those raw
+// points are deleted in the same transaction, each sample is merged exactly
+// once, including late samples for buckets that already exist.
+func (s *Store) compactMetricIncrementalWithinTx(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, tx *sql.Tx) (int, error) {
+	comp := policy.compression()
+	rawCutoff := policy.rawCutoff(now)
+	delta, err := s.buildFinestTierBefore(ctx, tx, metricName, policy.Tiers[0].Interval, comp, rawCutoff)
+	if err != nil {
+		return 0, err
+	}
+
+	written := 0
+	for tierIdx, tier := range policy.Tiers {
+		if tierIdx > 0 {
+			delta = buildCoarserBucketsFromDelta(delta, tier.Interval, comp)
+		}
+		n, err := s.mergeRollupBucketsTx(ctx, metricName, tier.Interval, delta, tx)
+		if err != nil {
+			return written, err
+		}
+		written += n
+	}
+
+	if err := s.enforceRetentionWithinTx(ctx, metricName, now, policy, tx); err != nil {
+		return written, err
+	}
+	return written, nil
+}
+
+// compactMetricFullWithinTx retains the rebuild behavior required when raw
+// points are kept forever and therefore cannot act as a consumed delta queue.
+func (s *Store) compactMetricFullWithinTx(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, tx *sql.Tx) (int, error) {
 	comp := policy.compression()
 
 	written := 0
@@ -234,24 +285,31 @@ func (s *Store) compactMetricWithinTx(ctx context.Context, metricName string, no
 		prevDelta = currentDelta
 	}
 
-	// Enforce retention windows after all tiers are materialized, so a coarser
-	// tier is always built before the finer source it depends on is trimmed.
+	if err := s.enforceRetentionWithinTx(ctx, metricName, now, policy, tx); err != nil {
+		return written, err
+	}
+	return written, nil
+}
+
+// enforceRetentionWithinTx trims raw and rollup tiers after coarser data has
+// been materialized. Cutoffs retain a bucket that straddles the boundary.
+func (s *Store) enforceRetentionWithinTx(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, tx *sql.Tx) error {
 	if policy.RawRetention > 0 {
-		cutoff := policy.rawCutoff(now)
-		if _, err := s.DeleteBeforeTx(ctx, metricName, cutoff, tx); err != nil {
-			return written, err
+		if _, err := s.DeleteBeforeTx(ctx, metricName, policy.rawCutoff(now), tx); err != nil {
+			return err
 		}
 	}
 	for i, tier := range policy.Tiers {
-		cutoff := now.Add(-tier.Retention)
+		alignment := tier.Interval
 		if i+1 < len(policy.Tiers) {
-			cutoff = alignRollupRetentionCutoff(cutoff, policy.Tiers[i+1].Interval)
+			alignment = policy.Tiers[i+1].Interval
 		}
+		cutoff := alignRollupRetentionCutoff(now.Add(-tier.Retention), alignment)
 		if err := s.deleteRollupsBeforeTx(ctx, metricName, tier.Interval, cutoff, tx); err != nil {
-			return written, err
+			return err
 		}
 	}
-	return written, nil
+	return nil
 }
 
 func alignRollupRetentionCutoff(cutoff time.Time, nextInterval time.Duration) time.Time {
@@ -288,13 +346,25 @@ type rollupKey struct {
 // buildFinestTier 扫描某指标的原始点，并按给定 interval 分桶，key 为
 // （实体、标签集合、桶起点）。每个点的标签 map 决定它属于哪条序列。
 func (s *Store) buildFinestTier(ctx context.Context, q querier, metricName string, interval time.Duration, comp float64) (map[rollupKey]*rollupBucket, error) {
+	return s.buildFinestTierBefore(ctx, q, metricName, interval, comp, time.Time{})
+}
+
+// buildFinestTierBefore aggregates only raw points older than before. A zero
+// cutoff preserves the full-rebuild behavior used when raw is retained forever.
+func (s *Store) buildFinestTierBefore(ctx context.Context, q querier, metricName string, interval time.Duration, comp float64, before time.Time) (map[rollupKey]*rollupBucket, error) {
 	size := interval.Nanoseconds()
 	out := make(map[rollupKey]*rollupBucket)
+	args := []any{metricName}
+	where := "metric_name = " + s.dialect.placeholder(1)
+	if !before.IsZero() {
+		args = append(args, before.UTC().UnixNano())
+		where += " AND ts_nano < " + s.dialect.placeholder(2)
+	}
 	sqlText := fmt.Sprintf(
-		`SELECT entity_id, ts_nano, value, tags FROM %s WHERE metric_name = %s ORDER BY ts_nano ASC`,
-		s.tables.points, s.dialect.placeholder(1),
+		`SELECT entity_id, ts_nano, value, tags FROM %s WHERE %s ORDER BY ts_nano ASC`,
+		s.tables.points, where,
 	)
-	rows, err := q.QueryContext(ctx, sqlText, metricName)
+	rows, err := q.QueryContext(ctx, sqlText, args...)
 
 	if err != nil {
 		return nil, err
@@ -419,6 +489,58 @@ func (s *Store) scanRollupRows(ctx context.Context, q querier, metricName string
 	}
 	defer rows.Close()
 	return scanStoredRollups(rows)
+}
+
+// mergeRollupBucketsTx merges a consumed raw-data delta into the affected
+// rollup buckets. Existing buckets are read by their indexed primary key, so a
+// compact run performs work proportional to new/late data rather than to the
+// complete retained history.
+func (s *Store) mergeRollupBucketsTx(ctx context.Context, metricName string, interval time.Duration, buckets map[rollupKey]*rollupBucket, tx *sql.Tx) (int, error) {
+	if len(buckets) == 0 {
+		return 0, nil
+	}
+
+	keys := make([]rollupKey, 0, len(buckets))
+	for key := range buckets {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].entityID != keys[j].entityID {
+			return keys[i].entityID < keys[j].entityID
+		}
+		if keys[i].tagsHash != keys[j].tagsHash {
+			return keys[i].tagsHash < keys[j].tagsHash
+		}
+		return keys[i].bucket < keys[j].bucket
+	})
+
+	stmt := s.dialect.upsertRollupSQL(s.tables)
+	resolution := interval.Nanoseconds()
+	createdAt := time.Now().UTC().UnixNano()
+	for _, key := range keys {
+		bucket := buckets[key]
+		existing, err := s.readRollupBucketTx(ctx, metricName, key.entityID, key.tagsHash, interval, key.bucket, tx)
+		if err != nil {
+			return 0, err
+		}
+		if existing != nil {
+			existing.mergeStored(bucket)
+			bucket = existing
+		}
+		tagsJSON := bucket.tagsJSON
+		if tagsJSON == "" {
+			tagsJSON = "{}"
+		}
+		if _, err := tx.ExecContext(ctx, stmt,
+			metricName, key.entityID, key.tagsHash, tagsJSON, resolution, key.bucket,
+			bucket.count, bucket.sum, bucket.sumSq, bucket.min, bucket.max,
+			bucket.firstVal, bucket.firstTS, bucket.lastVal, bucket.lastTS,
+			bucket.digest.Encode(), createdAt,
+		); err != nil {
+			return 0, err
+		}
+	}
+	return len(keys), nil
 }
 
 // writeRollupBuckets upserts a set of computed buckets for one resolution.

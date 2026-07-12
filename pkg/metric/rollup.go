@@ -89,6 +89,23 @@ func (p RollupPolicy) rawCutoff(now time.Time) time.Time {
 	return time.Unix(0, floorDivNano(cutoff.UnixNano(), interval)).UTC()
 }
 
+// withMetricRetention applies a metric definition as an upper bound on every
+// rollup tier while preserving the store policy's configured maxima.
+func (p RollupPolicy) withMetricRetention(retention time.Duration) RollupPolicy {
+	if retention <= 0 || len(p.Tiers) == 0 {
+		return p
+	}
+
+	out := p
+	out.Tiers = append([]RollupTier(nil), p.Tiers...)
+	for i := range out.Tiers {
+		if out.Tiers[i].Retention > retention {
+			out.Tiers[i].Retention = retention
+		}
+	}
+	return out
+}
+
 // Validate enforces the structural rules that make cascading composition and
 // retention well-defined.
 //

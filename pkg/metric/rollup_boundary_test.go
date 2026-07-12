@@ -345,3 +345,43 @@ func TestCompactDoesNotDoubleCountRawBucketAfterCutoffAdvances(t *testing.T) {
 		t.Fatalf("compaction should not double-count a bucket after cutoff advances, got %#v", got)
 	}
 }
+
+func TestSeriesHybridIncludesPartialCoarseBucketAtRawCutoff(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 10 * time.Minute,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 20 * time.Minute},
+			{Interval: time.Hour, Retention: 24 * time.Hour},
+		},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "coarse-cutoff", Type: TypeGauge}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	now := time.Date(2026, 6, 18, 12, 50, 0, 0, time.UTC)
+	old := now.Add(-40 * time.Minute)
+	recent := now.Add(-5 * time.Minute)
+	if err := s.WriteBatch(ctx, []Point{
+		{MetricName: "coarse-cutoff", EntityID: "n1", Timestamp: old, Value: 10},
+		{MetricName: "coarse-cutoff", EntityID: "n1", Timestamp: recent, Value: 100},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, now); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+
+	got, err := s.Series(ctx, AggregateQuery{
+		Query:       Query{MetricName: "coarse-cutoff", EntityID: "n1", Start: now.Add(-2 * time.Hour), End: now},
+		Aggregation: AggAvg,
+		Interval:    time.Hour,
+	}, now)
+	if err != nil {
+		t.Fatalf("series: %v", err)
+	}
+	if len(got) != 1 || got[0].Count != 2 || math.Abs(got[0].Value-55) > 1e-9 {
+		t.Fatalf("expected coarse rollup and recent raw point, got %#v", got)
+	}
+}
