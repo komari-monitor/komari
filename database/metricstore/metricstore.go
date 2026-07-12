@@ -67,13 +67,13 @@ const (
 // 注意：metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）。
 // 未显式配置时默认使用 SQLite（./data/metrics.db）。
 type MetricStoreConfig struct {
-	Driver              string `json:"metric_db_driver" default:"sqlite"`          // 数据库类型: sqlite, mysql, postgresql
-	DSN                 string `json:"metric_db_dsn" default:"./data/metrics.db"`  // 数据库连接串
-	RetentionDays       int    `json:"metric_retention_days" default:"90"`         // 数据保留天数
-	DownsamplingEnabled bool   `json:"metric_downsampling_enabled" default:"true"` // 是否启用分层降采样
-	TablePrefix         string `json:"metric_table_prefix" default:"metric_"`      // 表名前缀
-	MaxOpenConns        int    `json:"metric_max_open_conns" default:"25"`         // 最大连接数
-	MaxIdleConns        int    `json:"metric_max_idle_conns" default:"5"`          // 最大空闲连接数
+	Driver              string `json:"metric_db_driver" default:"sqlite"`           // 数据库类型: sqlite, mysql, postgresql
+	DSN                 string `json:"metric_db_dsn" default:"./data/metrics.db"`   // 数据库连接串
+	RetentionDays       int    `json:"metric_retention_days" default:"90"`          // 数据保留天数
+	DownsamplingEnabled bool   `json:"metric_downsampling_enabled" default:"false"` // 是否启用分层降采样
+	TablePrefix         string `json:"metric_table_prefix" default:"metric_"`       // 表名前缀
+	MaxOpenConns        int    `json:"metric_max_open_conns" default:"25"`          // 最大连接数
+	MaxIdleConns        int    `json:"metric_max_idle_conns" default:"5"`           // 最大空闲连接数
 }
 
 // MetricStoreConfigKeys 配置键
