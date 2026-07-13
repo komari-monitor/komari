@@ -3,11 +3,6 @@ name: Generate Release Notes
 on:
   release:
     types: [published]
-  repository_dispatch:
-    types:
-      - komari-web-release-published
-  schedule:
-    - cron: "41 * * * *"
   workflow_dispatch:
     inputs:
       tag:
