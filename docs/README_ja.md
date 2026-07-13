@@ -40,7 +40,12 @@ curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/install-
 chmod +x install-komari.sh
 sudo ./install-komari.sh
 ```
-
+中国本土のユーザー向けインストールスクリプト
+```bash
+curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/cn-install-komari.sh -o cn-install-komari.sh
+chmod +x cn-install-komari.sh
+sudo ./cn-install-komari.sh
+```
 ### 2. Docker展開
 
 1. データディレクトリを作成します:
