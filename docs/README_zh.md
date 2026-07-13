@@ -41,6 +41,14 @@ chmod +x install-komari.sh
 sudo ./install-komari.sh
 ```
 
+适用于中国大陆用户的安装脚本
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/cn-install-komari.sh -o cn-install-komari.sh
+chmod +x cn-install-komari.sh
+sudo ./cn-install-komari.sh
+```
+
 ### 2. Docker 部署
 
 1. 创建数据目录：
