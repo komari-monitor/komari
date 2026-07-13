@@ -11,9 +11,10 @@ import (
 // 这些方法返回登录页渲染所需的元信息(站点配置、版本、当前登录态占位)。
 // 不在此白名单的 public:* 方法(如 getNodesInformation)会被私有站点拦截。
 var privateSiteLoginWhitelist = map[string]bool{
-	"public:getMe":             true,
-	"public:getPublicSettings": true,
-	"public:getVersion":        true,
+	"public:getMe":              true,
+	"public:getPublicSettings":  true,
+	"public:getVersion":         true,
+	"public:recordVisitorEvent": true,
 }
 
 // Dispatch 是所有传输入口的统一分发点：私有站点检查 → 权限校验 → 执行方法。
