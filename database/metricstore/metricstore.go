@@ -551,7 +551,13 @@ func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
 		if err != nil && !errors.Is(err, metric.ErrNotFound) {
 			return fmt.Errorf("failed to get metric %s: %w", def.Name, err)
 		}
-		if err == nil && existing.RetentionDays > 0 {
+		if err == nil {
+			if existing.RetentionDays == 0 {
+				if _, err := s.SetMetricRetention(ctx, def.Name, 0); err != nil {
+					return fmt.Errorf("failed to preserve disabled metric %s: %w", def.Name, err)
+				}
+				continue
+			}
 			def.RetentionDays = existing.RetentionDays
 		}
 		if err := s.UpsertMetric(ctx, def); err != nil {

@@ -55,6 +55,9 @@ type Store struct {
 	//
 	// maintenanceMu 串行化物理存储维护，同时允许并发读取存储大小。
 	maintenanceMu sync.RWMutex
+	// retentionMu serializes a retention change with writes and compaction so a
+	// disabled metric cannot be repopulated by an in-flight operation.
+	retentionMu sync.RWMutex
 	// mu protects closed state.
 	//
 	// mu 保护 closed 状态。
@@ -528,6 +531,61 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	return tx.Commit()
 }
 
+// SetMetricRetention updates one metric's retention policy. A value of zero
+// disables persistence for that metric and atomically removes its raw and
+// rollup data. Negative values are invalid.
+func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDays int) (Definition, error) {
+	if err := s.ensureOpen(); err != nil {
+		return Definition{}, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Definition{}, fmt.Errorf("%w: metric name is required", ErrInvalidArgument)
+	}
+	if retentionDays < 0 {
+		return Definition{}, fmt.Errorf("%w: retention days cannot be negative", ErrInvalidArgument)
+	}
+
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Definition{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	updatedAt := time.Now().UTC().UnixNano()
+	result, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE %s SET retention_days = %s, updated_at = %s WHERE name = %s`,
+			s.tables.definitions, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3)),
+		retentionDays, updatedAt, name,
+	)
+	if err != nil {
+		return Definition{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Definition{}, err
+	}
+	if affected == 0 {
+		return Definition{}, fmt.Errorf("%w: metric %q", ErrNotFound, name)
+	}
+	if retentionDays == 0 {
+		for _, table := range []string{s.tables.points, s.tables.rollups} {
+			if _, err := tx.ExecContext(ctx,
+				fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, table, s.dialect.placeholder(1)), name,
+			); err != nil {
+				return Definition{}, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Definition{}, err
+	}
+	return s.GetMetric(ctx, name)
+}
+
 // DeleteEntity deletes all raw and rollup data for one entity across every metric.
 //
 // DeleteEntity 删除某个实体在所有指标下的原始点和 rollup 数据。
@@ -627,6 +685,15 @@ func (s *Store) WriteBatch(ctx context.Context, points []Point) error {
 	if len(points) == 0 {
 		return nil
 	}
+	s.retentionMu.RLock()
+	defer s.retentionMu.RUnlock()
+	points, err := s.filterDisabledMetricPoints(ctx, points)
+	if err != nil {
+		return err
+	}
+	if len(points) == 0 {
+		return nil
+	}
 	const batchSize = 1000
 	// A single chunk is one statement; send it directly. Multiple chunks are
 	// wrapped in one transaction so the batch is all-or-nothing rather than
@@ -649,6 +716,31 @@ func (s *Store) WriteBatch(ctx context.Context, points []Point) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// filterDisabledMetricPoints preserves the historic behavior for unknown
+// metrics while dropping points whose known definition has zero retention.
+func (s *Store) filterDisabledMetricPoints(ctx context.Context, points []Point) ([]Point, error) {
+	defs, err := s.ListMetrics(ctx)
+	if err != nil {
+		return nil, err
+	}
+	disabled := make(map[string]struct{})
+	for _, def := range defs {
+		if def.RetentionDays == 0 {
+			disabled[def.Name] = struct{}{}
+		}
+	}
+	if len(disabled) == 0 {
+		return points, nil
+	}
+	filtered := make([]Point, 0, len(points))
+	for _, point := range points {
+		if _, ok := disabled[point.MetricName]; !ok {
+			filtered = append(filtered, point)
+		}
+	}
+	return filtered, nil
 }
 
 // execer is satisfied by both *sql.DB and *sql.Tx, letting writeBatch run either
@@ -1043,11 +1135,15 @@ func (s *Store) CleanupExpired(ctx context.Context, now time.Time) (int64, error
 	}
 	var total int64
 	for _, def := range defs {
-		retentionDays := def.RetentionDays
-		if retentionDays <= 0 {
-			retentionDays = s.cfg.DefaultRetentionDays
+		if def.RetentionDays == 0 {
+			deleted, err := s.DeleteSeries(ctx, Query{MetricName: def.Name})
+			if err != nil {
+				return total, err
+			}
+			total += deleted
+			continue
 		}
-		deleted, err := s.DeleteBefore(ctx, def.Name, now.AddDate(0, 0, -retentionDays))
+		deleted, err := s.DeleteBefore(ctx, def.Name, now.AddDate(0, 0, -def.RetentionDays))
 		if err != nil {
 			return total, err
 		}

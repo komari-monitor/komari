@@ -867,3 +867,64 @@ func TestCompactHonorsMetricRetentionForCoarsestTier(t *testing.T) {
 		t.Fatalf("metric retention leaked across definitions: %#v", longer)
 	}
 }
+
+func TestZeroRetentionPurgesDataAndDisablesFurtherPersistence(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 15 * time.Minute,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 48 * time.Hour},
+			{Interval: 5 * time.Minute, Retention: 14 * 24 * time.Hour},
+			{Interval: time.Hour, Retention: 30 * 24 * time.Hour},
+		},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "disabled", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	if err := s.Write(ctx, Point{MetricName: "disabled", EntityID: "node", Timestamp: now.Add(-time.Hour), Value: 1}); err != nil {
+		t.Fatalf("write initial point: %v", err)
+	}
+	if _, err := s.CompactMetric(ctx, "disabled", now); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	rollups, err := s.AggregateRollup(ctx, AggregateQuery{
+		Query:       Query{MetricName: "disabled", EntityID: "node", Start: now.Add(-2 * time.Hour), End: now},
+		Aggregation: AggSum,
+		Interval:    time.Minute,
+	}, time.Minute)
+	if err != nil || len(rollups) == 0 {
+		t.Fatalf("expected persisted rollup before disable, got %#v, err=%v", rollups, err)
+	}
+
+	def, err := s.SetMetricRetention(ctx, "disabled", 0)
+	if err != nil {
+		t.Fatalf("set zero retention: %v", err)
+	}
+	if def.RetentionDays != 0 {
+		t.Fatalf("retention = %d, want 0", def.RetentionDays)
+	}
+	raw, err := s.Query(ctx, Query{MetricName: "disabled", EntityID: "node", Start: now.Add(-2 * time.Hour), End: now})
+	if err != nil || len(raw) != 0 {
+		t.Fatalf("raw data remained after disable: %#v, err=%v", raw, err)
+	}
+	rollups, err = s.AggregateRollup(ctx, AggregateQuery{
+		Query:       Query{MetricName: "disabled", EntityID: "node", Start: now.Add(-2 * time.Hour), End: now},
+		Aggregation: AggSum,
+		Interval:    time.Minute,
+	}, time.Minute)
+	if err != nil || len(rollups) != 0 {
+		t.Fatalf("rollup data remained after disable: %#v, err=%v", rollups, err)
+	}
+	if err := s.Write(ctx, Point{MetricName: "disabled", EntityID: "node", Timestamp: now, Value: 2}); err != nil {
+		t.Fatalf("write disabled metric: %v", err)
+	}
+	raw, err = s.Query(ctx, Query{MetricName: "disabled", EntityID: "node", Start: now.Add(-time.Hour), End: now.Add(time.Hour)})
+	if err != nil || len(raw) != 0 {
+		t.Fatalf("disabled metric persisted a new point: %#v, err=%v", raw, err)
+	}
+	if written, err := s.CompactMetric(ctx, "disabled", now); err != nil || written != 0 {
+		t.Fatalf("disabled metric compacted %d buckets, err=%v", written, err)
+	}
+}

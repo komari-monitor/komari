@@ -123,6 +123,19 @@ func TestCreateMetricDefinitionsUsesExplicitRetentionAndPreservesOverrides(t *te
 	if cpu.RetentionDays != 60 {
 		t.Fatalf("cpu retention = %d, want preserved override 60", cpu.RetentionDays)
 	}
+	if _, err := s.SetMetricRetention(ctx, MetricCPU, 0); err != nil {
+		t.Fatalf("disable cpu retention: %v", err)
+	}
+	if err := createMetricDefinitions(ctx, s); err != nil {
+		t.Fatalf("refresh disabled definition: %v", err)
+	}
+	cpu, err = s.GetMetric(ctx, MetricCPU)
+	if err != nil {
+		t.Fatalf("reload disabled cpu definition: %v", err)
+	}
+	if cpu.RetentionDays != 0 {
+		t.Fatalf("cpu retention = %d, want preserved disabled state", cpu.RetentionDays)
+	}
 }
 
 func TestGetRetentionSummaryUsesAllMetricDefinitions(t *testing.T) {
@@ -164,6 +177,16 @@ func TestGetRetentionSummaryUsesAllMetricDefinitions(t *testing.T) {
 	}
 	if !summary.AllPositive || summary.MaxDays != 60 {
 		t.Fatalf("unexpected summary: %#v", summary)
+	}
+	if _, err := s.SetMetricRetention(ctx, "short", 0); err != nil {
+		t.Fatalf("disable short metric: %v", err)
+	}
+	summary, err = GetRetentionSummary(ctx)
+	if err != nil {
+		t.Fatalf("summarize disabled metric: %v", err)
+	}
+	if summary.AllPositive || summary.MaxDays != 60 {
+		t.Fatalf("unexpected disabled summary: %#v", summary)
 	}
 }
 

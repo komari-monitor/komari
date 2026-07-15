@@ -81,6 +81,8 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
 	}
+	s.retentionMu.RLock()
+	defer s.retentionMu.RUnlock()
 	policy := s.cfg.RollupPolicy
 	if !policy.Enabled() {
 		return 0, nil
@@ -92,11 +94,11 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	if err != nil {
 		return 0, err
 	}
-	retentionDays := def.RetentionDays
-	if retentionDays <= 0 {
-		retentionDays = s.cfg.DefaultRetentionDays
+	if def.RetentionDays == 0 {
+		_, err := s.DeleteSeries(ctx, Query{MetricName: metricName})
+		return 0, err
 	}
-	policy = policy.withMetricRetention(time.Duration(retentionDays) * 24 * time.Hour)
+	policy = policy.withMetricRetention(time.Duration(def.RetentionDays) * 24 * time.Hour)
 	now = now.UTC()
 
 	// Retry the whole compaction on a transient serialization/deadlock failure.
