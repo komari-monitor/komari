@@ -1,6 +1,7 @@
 package client
 
 import (
+	"log"
 	"time"
 
 	"github.com/komari-monitor/komari/database/clients"
@@ -23,15 +24,19 @@ func ingestReport(uuid string, report v1.Report, protocolVersion int, markPresen
 	if err != nil {
 		return err
 	}
-	if err := clients.UpdateBillingUsage(uuid, savedReport); err != nil {
-		return err
-	}
+	updateBillingUsageBestEffort(uuid, savedReport, clients.UpdateBillingUsage)
 	agent_runtime.SetLatestReport(uuid, &savedReport)
 	agent_runtime.SetClientProtocolVersion(uuid, protocolVersion)
 	if markPresence {
 		refreshPostPresence(uuid)
 	}
 	return nil
+}
+
+func updateBillingUsageBestEffort(uuid string, report v1.Report, update func(string, v1.Report) error) {
+	if err := update(uuid, report); err != nil {
+		log.Printf("Failed to update billing usage for client %s: %v", uuid, err)
+	}
 }
 
 // ingestBasicInfo 保存客户端基础信息。fallbackIP 在上报未携带 IP 时用作兜底。

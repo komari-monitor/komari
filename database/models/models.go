@@ -34,7 +34,7 @@ type Client struct {
 	AutoRenewal                   bool      `json:"auto_renewal" gorm:"default:false"` // 是否自动续费
 	Currency                      string    `json:"currency" gorm:"type:varchar(20);default:'$'"`
 	ExpiredAt                     LocalTime `json:"expired_at" gorm:"type:timestamp"`
-	TrafficRate                   float64   `json:"traffic_rate" gorm:"default:0"` // 每 TiB 流量的实时估算单价
+	TrafficRate                   float64   `json:"traffic_rate" gorm:"default:0"` // 每 TiB（1024^4 bytes）流量的实时估算单价
 	TimeRate                      float64   `json:"time_rate" gorm:"default:0"`    // 每小时运行时间的实时估算单价
 	StartupFee                    float64   `json:"startup_fee" gorm:"default:0"`  // 首次成功上报时计入一次
 	FirstAgentReportedAt          LocalTime `json:"first_agent_reported_at" gorm:"type:timestamp"`
