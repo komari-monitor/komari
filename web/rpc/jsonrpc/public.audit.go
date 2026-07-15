@@ -3,21 +3,48 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
 const (
-	visitorAuditMaxEventLen   = 64
-	visitorAuditMaxPathLen    = 512
-	visitorAuditMaxRouteLen   = 128
-	visitorAuditMaxTargetLen  = 128
-	visitorAuditMaxDetailLen  = 2048
-	visitorAuditMaxMessageLen = 4096
+	visitorAuditMaxEventLen     = 64
+	visitorAuditMaxPathLen      = 512
+	visitorAuditMaxRouteLen     = 128
+	visitorAuditMaxTargetLen    = 128
+	visitorAuditMaxUserAgentLen = 512
+	visitorAuditMaxDetailLen    = 2048
+	visitorAuditMaxMessageLen   = 4096
+	visitorAuditRatePerMinute   = 30
+	visitorAuditRateBurst       = 10
+	visitorAuditRateMaxEntries  = 10000
+	visitorAuditLimiterEntryTTL = 10 * time.Minute
+	visitorAuditCleanupInterval = time.Minute
+	visitorAuditMessagePrefix   = "visitor event: "
+	visitorAuditUnknownIPKey    = "<unknown>"
 )
+
+type visitorAuditRateState struct {
+	tokens     float64
+	lastRefill time.Time
+	lastSeen   time.Time
+}
+
+type visitorAuditRateLimiter struct {
+	mu          sync.Mutex
+	entries     map[string]*visitorAuditRateState
+	lastCleanup time.Time
+}
+
+var visitorAuditLimiter = newVisitorAuditRateLimiter()
 
 type visitorAuditParams struct {
 	Event     string         `json:"event"`
@@ -56,16 +83,6 @@ func init() {
 }
 
 func publicRecordVisitorEvent(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	var params visitorAuditParams
-	if err := req.BindParams(&params); err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid params: "+err.Error(), nil)
-	}
-
-	event := normalizeVisitorAuditEvent(firstNonEmpty(params.Event, params.Action, params.Operation))
-	if event == "" {
-		return nil, rpc.MakeError(rpc.InvalidParams, "event is required", nil)
-	}
-
 	meta := rpc.MetaFromContext(ctx)
 	ip := ""
 	uuid := ""
@@ -76,13 +93,34 @@ func publicRecordVisitorEvent(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		userAgent = meta.UserAgent
 	}
 
+	if !visitorAuditLimiter.Allow(ip, time.Now()) {
+		return map[string]any{"status": "rate_limited"}, nil
+	}
+	enabled, err := config.GetAs[bool](config.VisitorAuditEnabledKey, false)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to get visitor audit configuration", nil)
+	}
+	if !enabled {
+		return map[string]any{"status": "disabled"}, nil
+	}
+
+	var params visitorAuditParams
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid params: "+err.Error(), nil)
+	}
+
+	event := normalizeVisitorAuditEvent(firstNonEmpty(params.Event, params.Action, params.Operation))
+	if event == "" {
+		return nil, rpc.MakeError(rpc.InvalidParams, "event is required", nil)
+	}
+
 	message, err := buildVisitorAuditMessage(visitorAuditMessage{
 		Event:     event,
-		Path:      truncateString(strings.TrimSpace(params.Path), visitorAuditMaxPathLen),
-		Route:     truncateString(strings.TrimSpace(params.Route), visitorAuditMaxRouteLen),
-		Target:    truncateString(strings.TrimSpace(params.Target), visitorAuditMaxTargetLen),
-		UserAgent: truncateString(strings.TrimSpace(userAgent), visitorAuditMaxPathLen),
-		Detail:    trimVisitorAuditDetail(params.Detail),
+		Path:      strings.TrimSpace(params.Path),
+		Route:     strings.TrimSpace(params.Route),
+		Target:    strings.TrimSpace(params.Target),
+		UserAgent: strings.TrimSpace(userAgent),
+		Detail:    params.Detail,
 	})
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid detail", nil)
@@ -92,13 +130,56 @@ func publicRecordVisitorEvent(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	return map[string]any{"status": "success"}, nil
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
+func newVisitorAuditRateLimiter() *visitorAuditRateLimiter {
+	return &visitorAuditRateLimiter{entries: make(map[string]*visitorAuditRateState)}
+}
+
+func (l *visitorAuditRateLimiter) Allow(ip string, now time.Time) bool {
+	key := strings.TrimSpace(ip)
+	if key == "" {
+		key = visitorAuditUnknownIPKey
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.lastCleanup.IsZero() || now.Sub(l.lastCleanup) >= visitorAuditCleanupInterval {
+		l.cleanupLocked(now)
+	}
+
+	state, ok := l.entries[key]
+	if !ok {
+		if len(l.entries) >= visitorAuditRateMaxEntries {
+			return false
+		}
+		l.entries[key] = &visitorAuditRateState{
+			tokens:     visitorAuditRateBurst - 1,
+			lastRefill: now,
+			lastSeen:   now,
+		}
+		return true
+	}
+
+	if now.After(state.lastRefill) {
+		elapsedMinutes := now.Sub(state.lastRefill).Minutes()
+		state.tokens = min(float64(visitorAuditRateBurst), state.tokens+elapsedMinutes*visitorAuditRatePerMinute)
+		state.lastRefill = now
+	}
+	state.lastSeen = now
+	if state.tokens < 1 {
+		return false
+	}
+	state.tokens--
+	return true
+}
+
+func (l *visitorAuditRateLimiter) cleanupLocked(now time.Time) {
+	for key, state := range l.entries {
+		if now.Sub(state.lastSeen) >= visitorAuditLimiterEntryTTL {
+			delete(l.entries, key)
 		}
 	}
-	return ""
+	l.lastCleanup = now
 }
 
 func normalizeVisitorAuditEvent(event string) string {
@@ -108,18 +189,26 @@ func normalizeVisitorAuditEvent(event string) string {
 	}
 	var builder strings.Builder
 	builder.Grow(len(event))
+	written := 0
 	for _, r := range event {
+		allowed := false
 		switch {
 		case r == '_' || r == '-' || r == ':' || r == '.':
-			builder.WriteRune(r)
+			allowed = true
 		case unicode.IsLetter(r) || unicode.IsDigit(r):
-			builder.WriteRune(r)
+			allowed = true
 		case unicode.IsSpace(r):
-			builder.WriteByte('_')
+			r = '_'
+			allowed = true
 		}
-		if builder.Len() >= visitorAuditMaxEventLen {
+		if !allowed {
+			continue
+		}
+		if written >= visitorAuditMaxEventLen {
 			break
 		}
+		builder.WriteRune(r)
+		written++
 	}
 	return builder.String()
 }
@@ -139,20 +228,61 @@ func trimVisitorAuditDetail(detail map[string]any) map[string]any {
 }
 
 func buildVisitorAuditMessage(message visitorAuditMessage) (string, error) {
-	encoded, err := json.Marshal(message)
-	if err != nil {
-		return "", err
+	message.Event = truncateString(strings.TrimSpace(message.Event), visitorAuditMaxEventLen)
+	message.Path = truncateString(strings.TrimSpace(message.Path), visitorAuditMaxPathLen)
+	message.Route = truncateString(strings.TrimSpace(message.Route), visitorAuditMaxRouteLen)
+	message.Target = truncateString(strings.TrimSpace(message.Target), visitorAuditMaxTargetLen)
+	message.UserAgent = truncateString(strings.TrimSpace(message.UserAgent), visitorAuditMaxUserAgentLen)
+	message.Detail = trimVisitorAuditDetail(message.Detail)
+
+	detailReduced := false
+	for {
+		encoded, err := json.Marshal(message)
+		if err != nil {
+			return "", err
+		}
+		if len(visitorAuditMessagePrefix)+len(encoded) <= visitorAuditMaxMessageLen {
+			return visitorAuditMessagePrefix + string(encoded), nil
+		}
+
+		if message.Detail != nil && !detailReduced {
+			message.Detail = map[string]any{"truncated": true}
+			detailReduced = true
+			continue
+		}
+		if !shrinkLongestVisitorAuditField(&message) {
+			return "", errors.New("visitor audit message exceeds maximum length")
+		}
 	}
-	text := "visitor event: " + string(encoded)
-	return truncateString(text, visitorAuditMaxMessageLen), nil
+}
+
+func shrinkLongestVisitorAuditField(message *visitorAuditMessage) bool {
+	fields := []*string{&message.Path, &message.UserAgent, &message.Route, &message.Target}
+	var longest *string
+	longestLen := 0
+	for _, field := range fields {
+		if size := utf8.RuneCountInString(*field); size > longestLen {
+			longest = field
+			longestLen = size
+		}
+	}
+	if longest == nil {
+		return false
+	}
+	*longest = truncateString(*longest, longestLen/2)
+	return true
 }
 
 func truncateString(value string, limit int) string {
-	if limit <= 0 || len(value) <= limit {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
 		return value
 	}
 	if limit <= 3 {
-		return value[:limit]
+		return string(runes[:limit])
 	}
-	return value[:limit-3] + "..."
+	return string(runes[:limit-3]) + "..."
 }

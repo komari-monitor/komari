@@ -10,6 +10,7 @@
 - 写入位置：现有审计日志表 `models.Log`
 - 管理端读取：复用现有 `admin:getLogs`
 - 日志类型：`msg_type = "visitor"`
+- 默认状态：关闭，需设置 `visitor_audit_enabled = true`
 
 该接口不会信任前端传入的 IP。来源 IP 和 User-Agent 由后端从请求上下文记录。
 
@@ -18,6 +19,17 @@
 `public:recordVisitorEvent` 属于 `public` 命名空间，访客可调用。
 
 私有站点模式下，该方法也在登录页白名单内，便于记录登录前/前台访问事件。
+
+这是有意保留的行为；总开关关闭时，白名单中的方法仍可调用，但不会写库。
+
+## 启用
+
+存量实例和新实例默认都不会开放匿名日志写入。管理员可通过
+`admin:editSettings` 将 `visitor_audit_enabled` 设为 `true`。公开设置
+`public:getPublicSettings` 也会返回这个字段，主题可据此决定是否上报。
+
+未启用时接口返回 `status = "disabled"`。启用后，每个来源 IP 使用内存令牌桶限流：
+平均每分钟 30 次，允许短时突发 10 次；超限时返回 `status = "rate_limited"`，不写库。
 
 ## 请求参数
 
@@ -48,12 +60,15 @@ event > action > operation
 
 ## 字段限制
 
+字符串字段按 Unicode 字符计数，`detail` 和最终 message 按序列化后的字节数计数。
+
 | 字段 | 最大长度 |
 | --- | ---: |
 | `event` | 64 |
 | `path` | 512 |
 | `route` | 128 |
 | `target` | 128 |
+| User-Agent | 512 |
 | `detail` JSON | 2048 |
 | 最终日志 message | 4096 |
 
@@ -102,7 +117,7 @@ curl -X POST http://localhost:25774/api/rpc2 \
   }'
 ```
 
-成功返回：
+写入成功返回：
 
 ```json
 {
@@ -113,6 +128,8 @@ curl -X POST http://localhost:25774/api/rpc2 \
   "id": 1
 }
 ```
+
+`disabled` 和 `rate_limited` 也属于正常响应，不会返回 JSON-RPC 错误；主题上报不应影响主流程。
 
 ## 请求示例：打开节点详情
 
@@ -261,17 +278,15 @@ admin:getLogs
   "method": "admin:getLogs",
   "params": {
     "limit": "100",
-    "page": "1"
+    "page": "1",
+    "msg_type": "visitor"
   },
   "id": 10
 }
 ```
 
-返回中的访客记录可通过以下条件筛选：
-
-```text
-msg_type === "visitor"
-```
+`msg_type` 为可选的精确匹配过滤参数。传入 `visitor` 后，计数和分页都会在 SQL 查询层过滤，
+无需先拉取所有日志再由前端筛选。
 
 ## 安全注意事项
 
