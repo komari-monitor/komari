@@ -22,6 +22,7 @@ func DeleteClient(clientUuid string) error {
 	if err != nil {
 		return err
 	}
+	forgetBillingUsage(clientUuid)
 	return nil
 }
 
@@ -260,6 +261,31 @@ func SaveClient(updates map[string]interface{}) error {
 				return fmt.Errorf("traffic_limit must be a valid non-negative int64 value, got %v", val)
 			}
 		}
+	}
+
+	for _, key := range []string{
+		"billing_traffic_bytes",
+		"billing_last_total_up",
+		"billing_last_total_down",
+		"billing_traffic_baseline_set",
+		"first_agent_reported_at_estimated",
+	} {
+		if _, exists := updates[key]; exists {
+			return fmt.Errorf("%s is managed by the server", key)
+		}
+	}
+
+	for _, key := range []string{"traffic_rate", "time_rate", "startup_fee"} {
+		if value, exists := updates[key]; exists {
+			numericValue, ok := value.(float64)
+			if !ok || math.IsNaN(numericValue) || math.IsInf(numericValue, 0) || numericValue < 0 || numericValue > 1e12 {
+				return fmt.Errorf("%s must be a finite non-negative number no greater than 1e12", key)
+			}
+		}
+	}
+
+	if _, exists := updates["first_agent_reported_at"]; exists {
+		updates["first_agent_reported_at_estimated"] = false
 	}
 
 	updates["updated_at"] = time.Now()

@@ -3,6 +3,7 @@ package client
 import (
 	"time"
 
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
@@ -20,6 +21,9 @@ func ingestReport(uuid string, report v1.Report, protocolVersion int, markPresen
 	report.UUID = uuid
 	savedReport, err := SaveClientReport(uuid, report)
 	if err != nil {
+		return err
+	}
+	if err := clients.UpdateBillingUsage(uuid, savedReport); err != nil {
 		return err
 	}
 	agent_runtime.SetLatestReport(uuid, &savedReport)

@@ -425,6 +425,8 @@ func doInitialize() error {
 	// 基于配置中的版本标记检测升级并自动备份 ./data，便于回滚。
 	backupOnVersionUpgrade()
 
+	hadBillingAnchorColumn := instance.Migrator().HasColumn(&models.Client{}, "FirstAgentReportedAt")
+
 	// 自动迁移模型
 	//
 	// 注意：负载/GPU/ping 历史监控数据运行期全部走 metric store（默认 SQLite
@@ -449,6 +451,11 @@ func doInitialize() error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create tables: %w", err)
+	}
+	if !hadBillingAnchorColumn {
+		if err := migrations.BackfillClientBillingAnchors(instance); err != nil {
+			return fmt.Errorf("failed to backfill client billing anchors: %w", err)
+		}
 	}
 	if err := instance.AutoMigrate(
 		&models.Session{},

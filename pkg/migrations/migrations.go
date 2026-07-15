@@ -129,6 +129,21 @@ func Run(ctx Context) error {
 	return nil
 }
 
+// BackfillClientBillingAnchors marks pre-feature clients as estimates based on
+// their creation time. It is called only when the billing anchor column is first
+// introduced, after AutoMigrate has created the new columns.
+func BackfillClientBillingAnchors(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("migration database is nil")
+	}
+	return db.Model(&models.Client{}).
+		Where("first_agent_reported_at IS NULL AND created_at IS NOT NULL").
+		Updates(map[string]interface{}{
+			"first_agent_reported_at":           gorm.Expr("created_at"),
+			"first_agent_reported_at_estimated": true,
+		}).Error
+}
+
 func hasLegacyConfigTable(db *gorm.DB) bool {
 	if !db.Migrator().HasTable("configs") {
 		return false
