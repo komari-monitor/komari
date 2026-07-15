@@ -21,13 +21,23 @@ import (
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
+	"gorm.io/gorm"
 )
 
 // admin.system.go
 // 系统/运维类 RPC2 方法（admin 命名空间）：日志、远程执行、测试。
 
 func init() {
-	reg("getLogs", adminGetLogs, "Get audit logs (paged)")
+	RegisterWithGroupAndMeta("getLogs", rpc.RoleAdmin, adminGetLogs, &rpc.MethodMeta{
+		Name:    "admin:getLogs",
+		Summary: "Get audit logs (paged, optionally filtered by message type)",
+		Params: []rpc.ParamMeta{
+			{Name: "limit", Type: "string", Description: "Page size (default 100)"},
+			{Name: "page", Type: "string", Description: "One-based page number (default 1)"},
+			{Name: "msg_type", Type: "string", Description: "Optional exact message type filter"},
+		},
+		Returns: "{ logs: Log[], total: number }",
+	})
 	reg("exec", adminExec, "Execute a command on clients")
 
 	reg("testSendMessage", adminTestSendMessage, "Send a test notification")
@@ -38,8 +48,9 @@ func init() {
 
 func adminGetLogs(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
-		Limit string `json:"limit"`
-		Page  string `json:"page"`
+		Limit   string `json:"limit"`
+		Page    string `json:"page"`
+		MsgType string `json:"msg_type"`
 	}
 	req.BindParams(&params)
 	if params.Limit == "" {
@@ -57,16 +68,33 @@ func adminGetLogs(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid page: "+params.Page, nil)
 	}
 	db := dbcore.GetDBInstance()
-	var logs []models.Log
-	offset := (pageInt - 1) * limitInt
-	var total int64
-	if err := db.Model(&models.Log{}).Count(&total).Error; err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to count logs: "+err.Error(), nil)
-	}
-	if err := db.Order("time desc").Limit(limitInt).Offset(offset).Find(&logs).Error; err != nil {
+	logs, total, err := queryAdminLogs(db, limitInt, pageInt, params.MsgType)
+	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to retrieve logs: "+err.Error(), nil)
 	}
 	return map[string]any{"logs": logs, "total": total}, nil
+}
+
+func queryAdminLogs(db *gorm.DB, limit, page int, msgType string) ([]models.Log, int64, error) {
+	var logs []models.Log
+	var total int64
+	offset := (page - 1) * limit
+	countQuery := filterAdminLogsByMessageType(db.Model(&models.Log{}), msgType)
+	logsQuery := filterAdminLogsByMessageType(db.Model(&models.Log{}), msgType)
+	if err := countQuery.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := logsQuery.Order("time desc").Limit(limit).Offset(offset).Find(&logs).Error; err != nil {
+		return nil, 0, err
+	}
+	return logs, total, nil
+}
+
+func filterAdminLogsByMessageType(query *gorm.DB, msgType string) *gorm.DB {
+	if msgType = strings.TrimSpace(msgType); msgType != "" {
+		return query.Where("msg_type = ?", msgType)
+	}
+	return query
 }
 
 func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {

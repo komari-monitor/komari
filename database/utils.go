@@ -135,6 +135,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		"ping_record_preserve_time": metricCfg.RetentionDays * 24, //兼容旧版本主题
 		"metric_retention_days":     metricCfg.RetentionDays,
 		"private_site":              cst.PrivateSite,
+		"visitor_audit_enabled":     cst.VisitorAuditEnabled,
 		"theme":                     cst.Theme,
 		"theme_settings":            tc_data,
 	}, nil
