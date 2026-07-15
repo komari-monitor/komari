@@ -514,7 +514,7 @@ func CloseStoreContext(ctx context.Context) error {
 	return nil
 }
 
-const defaultBuiltinMetricRetentionDays = 30
+const defaultBuiltinMetricRetentionDays = 1
 
 // createMetricDefinitions creates built-in definitions with explicit policies.
 func createMetricDefinitions(ctx context.Context, s *metric.Store) error {

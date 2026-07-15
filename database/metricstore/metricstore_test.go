@@ -82,6 +82,10 @@ func TestBuildMetricConfigCanDisableDownsampling(t *testing.T) {
 }
 
 func TestCreateMetricDefinitionsUsesExplicitRetentionAndPreservesOverrides(t *testing.T) {
+	if defaultBuiltinMetricRetentionDays != 1 {
+		t.Fatalf("default built-in metric retention = %d, want 1 day", defaultBuiltinMetricRetentionDays)
+	}
+
 	ctx := context.Background()
 	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1)))
 	if err != nil {
