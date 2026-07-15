@@ -409,13 +409,15 @@ func registerScheduledWork() {
 }
 
 func cleanupScheduledData() {
-	cfg, _ := config.GetManyAs[metricstore.MetricStoreConfig]()
-	retentionDays := cfg.RetentionDays
-	if retentionDays <= 0 {
-		retentionDays = 30
+	retention, err := metricstore.GetRetentionSummary(context.Background())
+	if err != nil {
+		log.Printf("Failed to summarize metric retention for task-result cleanup: %v", err)
+	} else if retention.MaxDays > 0 {
+		before := time.Now().Add(-24 * time.Hour * time.Duration(retention.MaxDays))
+		if err := tasks.ClearTaskResultsByTimeBefore(before); err != nil {
+			log.Printf("Failed to clean expired task results: %v", err)
+		}
 	}
-	before := time.Now().Add(-24 * time.Hour * time.Duration(retentionDays))
-	tasks.ClearTaskResultsByTimeBefore(before)
 
 	auditlog.RemoveOldLogs()
 	accounts.RemoveExpiredSessions()

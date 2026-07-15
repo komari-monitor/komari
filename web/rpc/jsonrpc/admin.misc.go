@@ -114,7 +114,6 @@ func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonR
 var metricStoreConfigKeys = map[string]struct{}{
 	metricstore.MetricDBDriverKey:            {},
 	metricstore.MetricDBDSNKey:               {},
-	metricstore.MetricRetentionDaysKey:       {},
 	metricstore.MetricDownsamplingEnabledKey: {},
 	metricstore.MetricTablePrefixKey:         {},
 	metricstore.MetricMaxOpenConnsKey:        {},
@@ -213,9 +212,6 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 		if s, ok := v.(string); ok {
 			merged.DSN = s
 		}
-	}
-	if v, ok := cfg[metricstore.MetricRetentionDaysKey]; ok {
-		merged.RetentionDays = toInt(v, merged.RetentionDays)
 	}
 	if v, ok := cfg[metricstore.MetricDownsamplingEnabledKey]; ok {
 		merged.DownsamplingEnabled = toBool(v, merged.DownsamplingEnabled)

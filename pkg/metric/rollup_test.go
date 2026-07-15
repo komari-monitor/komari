@@ -824,7 +824,7 @@ func TestCompactHonorsMetricRetentionForCoarsestTier(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "retained", Type: TypeGauge, RetentionDays: 60}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.CreateMetric(ctx, Definition{Name: "longer-retained", Type: TypeGauge, RetentionDays: 90}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "longer-retained", Type: TypeGauge, RetentionDays: 120}); err != nil {
 		t.Fatalf("create longer metric: %v", err)
 	}
 	now := time.Date(2026, 7, 12, 12, 30, 0, 0, time.UTC)
@@ -832,7 +832,7 @@ func TestCompactHonorsMetricRetentionForCoarsestTier(t *testing.T) {
 		{MetricName: "retained", EntityID: "n1", Timestamp: now.Add(-70 * 24 * time.Hour), Value: 1},
 		{MetricName: "retained", EntityID: "n1", Timestamp: now.Add(-60*24*time.Hour + 10*time.Minute), Value: 2},
 		{MetricName: "retained", EntityID: "n1", Timestamp: now.Add(-50 * 24 * time.Hour), Value: 3},
-		{MetricName: "longer-retained", EntityID: "n1", Timestamp: now.Add(-70 * 24 * time.Hour), Value: 4},
+		{MetricName: "longer-retained", EntityID: "n1", Timestamp: now.Add(-100 * 24 * time.Hour), Value: 4},
 	}
 	if err := s.WriteBatch(ctx, points); err != nil {
 		t.Fatalf("write: %v", err)
@@ -856,7 +856,7 @@ func TestCompactHonorsMetricRetentionForCoarsestTier(t *testing.T) {
 		t.Fatalf("unexpected retained values: %#v", got)
 	}
 	longer, err := s.AggregateRollup(ctx, AggregateQuery{
-		Query:       Query{MetricName: "longer-retained", EntityID: "n1", Start: now.Add(-80 * 24 * time.Hour), End: now},
+		Query:       Query{MetricName: "longer-retained", EntityID: "n1", Start: now.Add(-130 * 24 * time.Hour), End: now},
 		Aggregation: AggSum,
 		Interval:    time.Hour,
 	}, time.Hour)

@@ -30,7 +30,6 @@ func configFromFingerprint(fingerprint string, base *MetricStoreConfig) (*Metric
 	return &MetricStoreConfig{
 		Driver:              driver,
 		DSN:                 dsn,
-		RetentionDays:       base.RetentionDays,
 		DownsamplingEnabled: base.DownsamplingEnabled,
 		TablePrefix:         base.TablePrefix,
 		MaxOpenConns:        base.MaxOpenConns,
