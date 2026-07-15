@@ -122,19 +122,10 @@ func migrateBetweenStores(ctx context.Context, src, dst *metric.Store, observe s
 			observe(def.Name, i, len(defs), 0)
 		}
 		// 目标库先建立指标定义，保证后续写入的指标存在。
-		retentionDays := def.RetentionDays
-		if retentionDays == 0 {
-			// UpsertMetric retains its legacy default for omitted retention. Persist
-			// an explicit zero through SetMetricRetention immediately afterwards.
-			def.RetentionDays = 1
-		}
 		if err := dst.UpsertMetric(ctx, def); err != nil {
 			return total, fmt.Errorf("upsert metric %q on target: %w", def.Name, err)
 		}
-		if retentionDays == 0 {
-			if _, err := dst.SetMetricRetention(ctx, def.Name, 0); err != nil {
-				return total, fmt.Errorf("disable metric %q on target: %w", def.Name, err)
-			}
+		if def.RetentionDays == 0 {
 			continue
 		}
 

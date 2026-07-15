@@ -27,9 +27,6 @@ func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
 	}
-	if !s.cfg.RollupPolicy.Enabled() {
-		return 0, nil
-	}
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
 		return 0, err
@@ -84,9 +81,6 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	s.retentionMu.RLock()
 	defer s.retentionMu.RUnlock()
 	policy := s.cfg.RollupPolicy
-	if !policy.Enabled() {
-		return 0, nil
-	}
 	def, err := s.GetMetric(ctx, metricName)
 	if errors.Is(err, ErrNotFound) {
 		return 0, nil
@@ -97,6 +91,9 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	if def.RetentionDays == 0 {
 		_, err := s.DeleteSeries(ctx, Query{MetricName: metricName})
 		return 0, err
+	}
+	if !policy.Enabled() {
+		return 0, nil
 	}
 	policy = policy.withMetricRetention(time.Duration(def.RetentionDays) * 24 * time.Hour)
 	now = now.UTC()

@@ -33,7 +33,7 @@ func newRollupStore(t *testing.T, policy RollupPolicy) *Store {
 func TestArbitraryPercentileOverRaw(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "lat", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "lat", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -113,7 +113,7 @@ func TestCompactBuildsFinestTier(t *testing.T) {
 		Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "m", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "m", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -189,7 +189,7 @@ func TestCompactCascadeFineToCoarse(t *testing.T) {
 		},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "c", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "c", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -244,7 +244,7 @@ func TestCompactDoesNotOverwriteCoarseRollupWithPartialFineRows(t *testing.T) {
 		},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "partial", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "partial", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -315,7 +315,7 @@ func TestCompactMergesLateFineDeltaLargerThanCoarseBucket(t *testing.T) {
 		},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "latebig", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "latebig", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -361,7 +361,7 @@ func TestRetentionDropsRawButPercentileSurvives(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 365 * 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "old", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "old", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -416,7 +416,7 @@ func TestCompactMergesLateRawIntoExpiredRollup(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "late", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "late", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -547,7 +547,7 @@ func TestSeriesRoutesByAge(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 30 * 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "sr", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "sr", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
@@ -628,7 +628,7 @@ func TestSeriesAcrossRetentionIncludesUncompactedRecentRaw(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "hybrid", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "hybrid", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
@@ -711,7 +711,7 @@ func TestCompactIdempotent(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}}}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "idem", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "idem", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -763,7 +763,7 @@ func TestCompactWithRawRetentionOnlyWritesChangedBuckets(t *testing.T) {
 		},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "incremental", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "incremental", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -879,10 +879,24 @@ func TestZeroRetentionPurgesDataAndDisablesFurtherPersistence(t *testing.T) {
 		},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "disabled", Type: TypeGauge, RetentionDays: 30}); err != nil {
-		t.Fatalf("create: %v", err)
+	if err := s.CreateMetric(ctx, Definition{Name: "disabled", Type: TypeGauge, RetentionDays: 0}); err != nil {
+		t.Fatalf("create disabled metric: %v", err)
 	}
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	def, err := s.GetMetric(ctx, "disabled")
+	if err != nil || def.RetentionDays != 0 {
+		t.Fatalf("CreateMetric did not persist zero retention: %#v, err=%v", def, err)
+	}
+	if err := s.Write(ctx, Point{MetricName: "disabled", EntityID: "node", Timestamp: now, Value: 1}); err != nil {
+		t.Fatalf("write disabled metric: %v", err)
+	}
+	raw, err := s.Query(ctx, Query{MetricName: "disabled", EntityID: "node", Start: now.Add(-time.Hour), End: now.Add(time.Hour)})
+	if err != nil || len(raw) != 0 {
+		t.Fatalf("CreateMetric zero persisted data: %#v, err=%v", raw, err)
+	}
+	if err := s.UpsertMetric(ctx, Definition{Name: "disabled", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("enable metric: %v", err)
+	}
 	if err := s.Write(ctx, Point{MetricName: "disabled", EntityID: "node", Timestamp: now.Add(-time.Hour), Value: 1}); err != nil {
 		t.Fatalf("write initial point: %v", err)
 	}
@@ -898,14 +912,14 @@ func TestZeroRetentionPurgesDataAndDisablesFurtherPersistence(t *testing.T) {
 		t.Fatalf("expected persisted rollup before disable, got %#v, err=%v", rollups, err)
 	}
 
-	def, err := s.SetMetricRetention(ctx, "disabled", 0)
-	if err != nil {
-		t.Fatalf("set zero retention: %v", err)
+	if err := s.UpsertMetric(ctx, Definition{Name: "disabled", Type: TypeGauge, RetentionDays: 0}); err != nil {
+		t.Fatalf("upsert zero retention: %v", err)
 	}
-	if def.RetentionDays != 0 {
-		t.Fatalf("retention = %d, want 0", def.RetentionDays)
+	def, err = s.GetMetric(ctx, "disabled")
+	if err != nil || def.RetentionDays != 0 {
+		t.Fatalf("UpsertMetric did not persist zero retention: %#v, err=%v", def, err)
 	}
-	raw, err := s.Query(ctx, Query{MetricName: "disabled", EntityID: "node", Start: now.Add(-2 * time.Hour), End: now})
+	raw, err = s.Query(ctx, Query{MetricName: "disabled", EntityID: "node", Start: now.Add(-2 * time.Hour), End: now})
 	if err != nil || len(raw) != 0 {
 		t.Fatalf("raw data remained after disable: %#v, err=%v", raw, err)
 	}
@@ -926,5 +940,30 @@ func TestZeroRetentionPurgesDataAndDisablesFurtherPersistence(t *testing.T) {
 	}
 	if written, err := s.CompactMetric(ctx, "disabled", now); err != nil || written != 0 {
 		t.Fatalf("disabled metric compacted %d buckets, err=%v", written, err)
+	}
+}
+
+func TestCompactPurgesZeroRetentionWithoutRollups(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	if err := s.CreateMetric(ctx, Definition{Name: "disabled", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	if err := s.Write(ctx, Point{MetricName: "disabled", EntityID: "node", Timestamp: now, Value: 1}); err != nil {
+		t.Fatalf("write point: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		fmt.Sprintf("UPDATE %s SET retention_days = ? WHERE name = ?", s.tables.definitions),
+		0, "disabled",
+	); err != nil {
+		t.Fatalf("seed disabled definition: %v", err)
+	}
+	if written, err := s.Compact(ctx, now); err != nil || written != 0 {
+		t.Fatalf("compact = %d, err=%v", written, err)
+	}
+	points, err := s.Query(ctx, Query{MetricName: "disabled", EntityID: "node", Start: now.Add(-time.Hour), End: now.Add(time.Hour)})
+	if err != nil || len(points) != 0 {
+		t.Fatalf("zero-retention data remained without rollups: %#v, err=%v", points, err)
 	}
 }

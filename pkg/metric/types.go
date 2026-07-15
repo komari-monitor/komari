@@ -164,13 +164,10 @@ type Definition struct {
 
 // withDefaults fills default values on a metric definition.
 //
-// withDefaults 为指标定义填充默认类型和默认保留天数。
-func (d Definition) withDefaults(defaultRetentionDays int) Definition {
+// withDefaults 为指标定义填充默认类型。
+func (d Definition) withDefaults() Definition {
 	if d.Type == "" {
 		d.Type = TypeGauge
-	}
-	if d.RetentionDays == 0 {
-		d.RetentionDays = defaultRetentionDays
 	}
 	return d
 }

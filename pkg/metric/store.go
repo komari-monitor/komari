@@ -72,9 +72,6 @@ type Store struct {
 //
 // Open 根据配置打开 Store，初始化连接池，并在需要时执行自动迁移。
 func Open(ctx context.Context, cfg Config) (*Store, error) {
-	if cfg.DefaultRetentionDays == 0 {
-		cfg.DefaultRetentionDays = 90
-	}
 	if cfg.TablePrefix == "" {
 		cfg.TablePrefix = "metric_"
 	}
@@ -384,7 +381,7 @@ func (s *Store) CreateMetric(ctx context.Context, def Definition) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	def = def.withDefaults(s.cfg.DefaultRetentionDays)
+	def = def.withDefaults()
 	if err := def.Validate(); err != nil {
 		return err
 	}
@@ -431,9 +428,15 @@ func (s *Store) UpsertMetric(ctx context.Context, def Definition) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	def = def.withDefaults(s.cfg.DefaultRetentionDays)
+	def = def.withDefaults()
 	if err := def.Validate(); err != nil {
 		return err
+	}
+	if def.RetentionDays == 0 {
+		// Serialize the zero-retention transition with writes and compaction before
+		// changing the definition or removing data left by an enabled definition.
+		s.retentionMu.Lock()
+		defer s.retentionMu.Unlock()
 	}
 	metadata, err := encodeMap(def.Metadata)
 	if err != nil {
@@ -452,6 +455,10 @@ func (s *Store) UpsertMetric(ctx context.Context, def Definition) error {
 		now,
 		now,
 	)
+	if err != nil || def.RetentionDays != 0 {
+		return err
+	}
+	_, err = s.DeleteSeries(ctx, Query{MetricName: def.Name})
 	return err
 }
 

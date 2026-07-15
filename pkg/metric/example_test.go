@@ -32,10 +32,10 @@ func Example_rollupTags() {
 	defer store.Close()
 
 	if err := store.CreateMetric(ctx, metric.Definition{
-		Name: "gpu.usage",
-		Type: metric.TypeGauge,
-		Unit: "%",
-	}); err != nil {
+		Name:          "gpu.usage",
+		Type:          metric.TypeGauge,
+		Unit:          "%",
+		RetentionDays: 30}); err != nil {
 		log.Fatal(err)
 	}
 
@@ -117,15 +117,15 @@ func Example_agentFleetLifecycle() {
 	defer store.Close()
 
 	for _, def := range []metric.Definition{
-		{Name: "cpu.usage", Type: metric.TypeGauge, Unit: "%"},
-		{Name: "mem.usage", Type: metric.TypeGauge, Unit: "%"},
-		{Name: "disk.usage", Type: metric.TypeGauge, Unit: "%"},
-		{Name: "swap.usage", Type: metric.TypeGauge, Unit: "%"},
-		{Name: "net.in.bytes", Type: metric.TypeCounter, Unit: "bytes"},
-		{Name: "net.out.bytes", Type: metric.TypeCounter, Unit: "bytes"},
-		{Name: "process.count", Type: metric.TypeGauge, Unit: "count"},
-		{Name: "gpu.usage", Type: metric.TypeGauge, Unit: "%"},
-		{Name: "ping.latency_ms", Type: metric.TypeGauge, Unit: "ms"},
+		{Name: "cpu.usage", Type: metric.TypeGauge, Unit: "%", RetentionDays: 30},
+		{Name: "mem.usage", Type: metric.TypeGauge, Unit: "%", RetentionDays: 30},
+		{Name: "disk.usage", Type: metric.TypeGauge, Unit: "%", RetentionDays: 30},
+		{Name: "swap.usage", Type: metric.TypeGauge, Unit: "%", RetentionDays: 30},
+		{Name: "net.in.bytes", Type: metric.TypeCounter, Unit: "bytes", RetentionDays: 30},
+		{Name: "net.out.bytes", Type: metric.TypeCounter, Unit: "bytes", RetentionDays: 30},
+		{Name: "process.count", Type: metric.TypeGauge, Unit: "count", RetentionDays: 30},
+		{Name: "gpu.usage", Type: metric.TypeGauge, Unit: "%", RetentionDays: 30},
+		{Name: "ping.latency_ms", Type: metric.TypeGauge, Unit: "ms", RetentionDays: 30},
 	} {
 		if err := store.UpsertMetric(ctx, def); err != nil {
 			log.Fatal(err)
@@ -158,7 +158,7 @@ func Example_agentFleetLifecycle() {
 			}
 			if err := store.UpsertMetric(ctx, metric.Definition{
 				Name: "ping.latency_ms", Type: metric.TypeGauge, Unit: "ms",
-			}); err != nil {
+				RetentionDays: 30}); err != nil {
 				log.Fatal(err)
 			}
 		case 85:

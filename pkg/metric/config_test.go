@@ -12,7 +12,6 @@ func TestBackendBuildersApplyOptions(t *testing.T) {
 	cfg := SQLite(
 		"file:metrics.db?cache=shared",
 		WithTablePrefix("x_metric_"),
-		WithDefaultRetention(180),
 		WithAutoMigrate(false),
 		WithMaxOpenConns(10),
 		WithMaxIdleConns(2),
@@ -25,9 +24,6 @@ func TestBackendBuildersApplyOptions(t *testing.T) {
 	}
 	if cfg.TablePrefix != "x_metric_" {
 		t.Fatalf("table prefix option was not applied: %q", cfg.TablePrefix)
-	}
-	if cfg.DefaultRetentionDays != 180 {
-		t.Fatalf("default retention option was not applied: %d", cfg.DefaultRetentionDays)
 	}
 	if cfg.AutoMigrate {
 		t.Fatalf("auto migrate option was not applied")
