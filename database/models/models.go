@@ -39,6 +39,7 @@ type Client struct {
 	StartupFee                    float64   `json:"startup_fee" gorm:"default:0"`  // 首次成功上报时计入一次
 	FirstAgentReportedAt          LocalTime `json:"first_agent_reported_at" gorm:"type:timestamp"`
 	FirstAgentReportedAtEstimated bool      `json:"first_agent_reported_at_estimated" gorm:"default:false"`
+	BillingStartupFeeApplied      bool      `json:"billing_startup_fee_applied" gorm:"default:false"`
 	BillingTrafficBytes           int64     `json:"billing_traffic_bytes" gorm:"type:bigint;default:0"`
 	BillingLastTotalUp            int64     `json:"-" gorm:"type:bigint;default:0"`
 	BillingLastTotalDown          int64     `json:"-" gorm:"type:bigint;default:0"`

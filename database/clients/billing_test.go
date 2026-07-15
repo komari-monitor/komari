@@ -21,6 +21,7 @@ func TestCalculateBillingUsageUpdatesInitializesFirstReport(t *testing.T) {
 
 	assert.Equal(t, models.FromTime(now), updates["first_agent_reported_at"])
 	assert.Equal(t, models.FromTime(time.Date(2026, time.February, 28, 12, 0, 0, 0, time.UTC)), updates["expired_at"])
+	assert.Equal(t, true, updates["billing_startup_fee_applied"])
 	assert.Equal(t, int64(100), updates["billing_last_total_up"])
 	assert.Equal(t, int64(200), updates["billing_last_total_down"])
 	_, hasTraffic := updates["billing_traffic_bytes"]
@@ -41,6 +42,20 @@ func TestCalculateBillingUsageUpdatesPreservesEstimatedAnchor(t *testing.T) {
 	_, overwroteAnchor := updates["first_agent_reported_at"]
 	assert.False(t, overwroteAnchor)
 	assert.Equal(t, models.FromTime(now.AddDate(0, 1, 0)), updates["expired_at"])
+	assert.Equal(t, true, updates["billing_startup_fee_applied"])
+}
+
+func TestCalculateBillingUsageUpdatesKeepsAppliedStartupFee(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	client := models.Client{
+		FirstAgentReportedAt:     models.FromTime(now.Add(-time.Hour)),
+		BillingStartupFeeApplied: true,
+	}
+
+	updates := calculateBillingUsageUpdates(client, v1.Report{UpdatedAt: now}, now)
+
+	_, rewroteStartupFeeState := updates["billing_startup_fee_applied"]
+	assert.False(t, rewroteStartupFeeState)
 }
 
 func TestCalculateBillingUsageUpdatesHandlesCounterReset(t *testing.T) {

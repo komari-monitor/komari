@@ -75,6 +75,9 @@ func calculateBillingUsageUpdates(client models.Client, report v1.Report, now ti
 		"billing_last_total_down":      report.Network.TotalDown,
 		"billing_traffic_baseline_set": true,
 	}
+	if !client.BillingStartupFeeApplied {
+		updates["billing_startup_fee_applied"] = true
+	}
 
 	if client.FirstAgentReportedAt.ToTime().IsZero() {
 		updates["first_agent_reported_at"] = models.FromTime(now)

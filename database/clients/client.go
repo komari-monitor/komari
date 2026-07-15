@@ -265,6 +265,7 @@ func SaveClient(updates map[string]interface{}) error {
 
 	for _, key := range []string{
 		"billing_traffic_bytes",
+		"billing_startup_fee_applied",
 		"billing_last_total_up",
 		"billing_last_total_down",
 		"billing_traffic_baseline_set",
