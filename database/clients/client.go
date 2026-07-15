@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils"
@@ -17,6 +19,11 @@ import (
 )
 
 func DeleteClient(clientUuid string) error {
+	// Clean the independent metric store before removing the client from the main DB.
+	if err := metricstore.DeleteEntity(context.Background(), clientUuid); err != nil {
+		return err
+	}
+
 	db := dbcore.GetDBInstance()
 	err := db.Delete(&models.Client{}, "uuid = ?", clientUuid).Error
 	if err != nil {

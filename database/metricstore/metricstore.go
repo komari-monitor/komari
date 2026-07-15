@@ -1198,3 +1198,15 @@ func DeletePingRecordsByTask(ctx context.Context, taskIDs []uint) error {
 	}
 	return nil
 }
+
+// DeleteEntity 删除指定 agent 在所有指标下的历史数据。
+func DeleteEntity(ctx context.Context, entityID string) error {
+	s := GetStore()
+	if s == nil {
+		return fmt.Errorf("metric store not enabled")
+	}
+	if _, err := s.DeleteEntity(ctx, entityID); err != nil {
+		return fmt.Errorf("failed to delete metric records for entity %s: %w", entityID, err)
+	}
+	return nil
+}
