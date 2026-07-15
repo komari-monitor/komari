@@ -79,6 +79,26 @@ func TestRunSkipsLegacyConfigMigrationForCurrentConfigItemTable(t *testing.T) {
 	}
 }
 
+func TestRunRemovesDeprecatedMetricRetentionConfig(t *testing.T) {
+	db := openTestDB(t, "migrations_remove_metric_retention")
+	if err := db.AutoMigrate(&appconfig.ConfigItem{}); err != nil {
+		t.Fatalf("migrate config item table: %v", err)
+	}
+	if err := db.Create(&appconfig.ConfigItem{Key: "metric_retention_days", Value: "90"}).Error; err != nil {
+		t.Fatalf("seed deprecated config: %v", err)
+	}
+	if err := Run(Context{DB: db}); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+	var count int64
+	if err := db.Model(&appconfig.ConfigItem{}).Where("key = ?", "metric_retention_days").Count(&count).Error; err != nil {
+		t.Fatalf("count deprecated config: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("deprecated metric retention config was not removed: %d", count)
+	}
+}
+
 func TestRunPreservesVersion120RuntimeShape(t *testing.T) {
 	db := openTestDB(t, "migrations_v120_runtime_shape")
 	if err := db.AutoMigrate(

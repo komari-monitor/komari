@@ -28,7 +28,7 @@ func newMemStore(t *testing.T) *Store {
 func TestCreateMetricRejectsDuplicate(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	def := Definition{Name: "dup.metric", Type: TypeGauge}
+	def := Definition{Name: "dup.metric", Type: TypeGauge, RetentionDays: 30}
 	if err := s.CreateMetric(ctx, def); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
@@ -44,10 +44,10 @@ func TestCreateMetricRejectsDuplicate(t *testing.T) {
 func TestUpsertMetricOverwrites(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "m", Type: TypeGauge, Unit: "ms"}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "m", Type: TypeGauge, Unit: "ms", RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.UpsertMetric(ctx, Definition{Name: "m", Type: TypeCounter, Unit: "count"}); err != nil {
+	if err := s.UpsertMetric(ctx, Definition{Name: "m", Type: TypeCounter, Unit: "count", RetentionDays: 30}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	got, err := s.GetMetric(ctx, "m")
@@ -65,7 +65,7 @@ func TestUpsertMetricOverwrites(t *testing.T) {
 func TestTagFilterPushdownWithPaging(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "req", Type: TypeCounter}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "req", Type: TypeCounter, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -110,7 +110,7 @@ func TestTagFilterPushdownWithPaging(t *testing.T) {
 func TestSQLAggregateMatchesInMemory(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "g", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "g", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -195,7 +195,7 @@ func TestAlignTimeNegativeTimestamp(t *testing.T) {
 func TestLatestReturnsMostRecent(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "l", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "l", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -228,7 +228,7 @@ func TestStatsDistinguishesNoDataFromUnknownMetric(t *testing.T) {
 	}
 
 	// Known metric but empty window -> ErrNoData.
-	if err := s.CreateMetric(ctx, Definition{Name: "known", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "known", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	_, err = s.Stats(ctx, Query{MetricName: "known", Start: base, End: base.Add(time.Hour)})
@@ -266,7 +266,7 @@ func TestStdDevPopMatchesCalculateStats(t *testing.T) {
 func TestAggregateStdDevSQLiteUsesMemoryPath(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "sd", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "sd", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -342,7 +342,7 @@ func TestSQLiteReadPoolOpens(t *testing.T) {
 		t.Fatalf("reader() should return the dedicated read pool")
 	}
 	// Round-trip a write (primary) and a read (read pool).
-	if err := store.CreateMetric(ctx, Definition{Name: "rp", Type: TypeGauge}); err != nil {
+	if err := store.CreateMetric(ctx, Definition{Name: "rp", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -379,7 +379,7 @@ func TestMemoryDSNSkipsReadPool(t *testing.T) {
 func TestWriteBatchAtomicAcrossChunks(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "atom", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "atom", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -409,7 +409,7 @@ func TestWriteBatchAtomicAcrossChunks(t *testing.T) {
 func TestAggregateBucketPagingSQLPath(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "bp", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "bp", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -447,7 +447,7 @@ func TestAggregateBucketPagingSQLPath(t *testing.T) {
 func TestAggregateBucketPagingMemoryPathMatchesSQL(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "bp2", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "bp2", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -488,7 +488,7 @@ func TestAggregateBucketPagingMemoryPathMatchesSQL(t *testing.T) {
 func TestAggregateSeparatesTagSeries(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "tagged.util", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "tagged.util", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -546,7 +546,7 @@ func assertTaggedAggregate(t *testing.T, points []AggregatePoint, device string,
 func TestAggregateIgnoresRawPointLimit(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "ig", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "ig", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -578,7 +578,7 @@ func TestAggregateIgnoresRawPointLimit(t *testing.T) {
 func TestJSONTagKeyWithSpecialChars(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	if err := s.CreateMetric(ctx, Definition{Name: "tk", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "tk", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)

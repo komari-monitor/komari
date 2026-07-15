@@ -3,10 +3,12 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -93,29 +95,24 @@ func adminUpdateMetricDefinition(ctx context.Context, req *rpc.JsonRpcRequest) (
 	if params.Name == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "name is required", nil)
 	}
-	if params.RetentionDays <= 0 {
-		return nil, rpc.MakeError(rpc.InvalidParams, "retention_days must be a positive integer", nil)
+	if params.RetentionDays < 0 {
+		return nil, rpc.MakeError(rpc.InvalidParams, "retention_days must be a non-negative integer", nil)
 	}
 	store := metricstore.GetStore()
 	if store == nil {
 		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
 	}
-	def, err := store.GetMetric(ctx, params.Name)
-	if err != nil {
+	def, err := store.SetMetricRetention(ctx, params.Name, params.RetentionDays)
+	if errors.Is(err, metric.ErrNotFound) {
 		return nil, rpc.MakeError(rpc.InvalidParams, "metric not found: "+params.Name, nil)
 	}
-	def.RetentionDays = params.RetentionDays
-	if err := store.UpsertMetric(ctx, def); err != nil {
+	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to update metric definition: "+err.Error(), nil)
 	}
 
 	actor, ip := auditActor(ctx)
 	auditlog.Log(ip, actor, "update metric definition: "+params.Name, "info")
 
-	def, err = store.GetMetric(ctx, params.Name)
-	if err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to reload metric definition: "+err.Error(), nil)
-	}
 	return metricDefinitionResponse{
 		Name:          def.Name,
 		Description:   metricDescriptionValue(def.Description),

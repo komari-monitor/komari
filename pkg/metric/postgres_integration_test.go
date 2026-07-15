@@ -52,18 +52,18 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 	defer dropIntegrationTables(t, store, prefix)
 
 	if err := store.CreateMetric(ctx, Definition{
-		Name:        "http.latency",
-		Type:        TypeGauge,
-		Unit:        "ms",
-		Description: "HTTP latency",
-		Metadata:    map[string]string{"source": "integration"},
-	}); err != nil {
+		Name:          "http.latency",
+		Type:          TypeGauge,
+		Unit:          "ms",
+		Description:   "HTTP latency",
+		Metadata:      map[string]string{"source": "integration"},
+		RetentionDays: 30}); err != nil {
 		t.Fatalf("create metric: %v", err)
 	}
-	if err := store.CreateMetric(ctx, Definition{Name: "http.latency", Type: TypeGauge}); err == nil {
+	if err := store.CreateMetric(ctx, Definition{Name: "http.latency", Type: TypeGauge, RetentionDays: 30}); err == nil {
 		t.Fatalf("duplicate CreateMetric should fail")
 	}
-	if err := store.UpsertMetric(ctx, Definition{Name: "http.latency", Type: TypeGauge, Unit: "milliseconds"}); err != nil {
+	if err := store.UpsertMetric(ctx, Definition{Name: "http.latency", Type: TypeGauge, Unit: "milliseconds", RetentionDays: 30}); err != nil {
 		t.Fatalf("upsert metric: %v", err)
 	}
 	def, err := store.GetMetric(ctx, "http.latency")

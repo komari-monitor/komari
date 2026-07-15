@@ -23,7 +23,7 @@ func TestAggregateRollupExcludesPartialBucket(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}}}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "win", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "win", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -72,7 +72,7 @@ func TestAggregateRollupEndBoundaryInclusive(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}}}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "edge", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "edge", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -123,7 +123,7 @@ func TestSeriesHybridMergesStraddlingBucket(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "straddle", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "straddle", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
@@ -192,7 +192,7 @@ func TestSeriesHybridSumAcrossBoundary(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "sumstraddle", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "sumstraddle", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
@@ -236,7 +236,7 @@ func TestSeriesHybridIncludesRawBetweenCutoffAndNextBucket(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "cutgap", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "cutgap", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -273,7 +273,7 @@ func TestSeriesHybridEndAtCutoffIncludesRawBoundary(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "cutedge", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "cutedge", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -310,7 +310,7 @@ func TestCompactDoesNotDoubleCountRawBucketAfterCutoffAdvances(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "nodup", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "nodup", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -356,7 +356,7 @@ func TestSeriesHybridIncludesPartialCoarseBucketAtRawCutoff(t *testing.T) {
 		},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "coarse-cutoff", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "coarse-cutoff", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 

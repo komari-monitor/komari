@@ -19,7 +19,7 @@ func TestRollupKeepsTagSeriesSeparate(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}}}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "util", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "util", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -111,7 +111,7 @@ func TestSeriesRollupFillEmptyPreservesTags(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 30 * 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "ping.loss", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "ping.loss", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
@@ -176,7 +176,7 @@ func TestRollupTagPercentileSurvivesRetention(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 365 * 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "lat", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "lat", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -241,7 +241,7 @@ func TestSeriesTagFilterRoutesPerTag(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 30 * 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "m", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "m", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
@@ -301,7 +301,7 @@ func TestDeleteSeriesRemovesTaggedTaskAcrossAgents(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "ping.latency_ms", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "ping.latency_ms", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
@@ -368,7 +368,7 @@ func TestDeleteMetricRemovesRollups(t *testing.T) {
 	s := newRollupStore(t, RollupPolicy{
 		Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	})
-	if err := s.CreateMetric(ctx, Definition{Name: "gone", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "gone", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)

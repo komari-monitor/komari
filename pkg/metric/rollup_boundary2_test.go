@@ -29,7 +29,7 @@ func TestSeriesHybridKeepsUncompactedRawNearCutoff(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "nearcut", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "nearcut", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	now := time.Date(2026, 6, 18, 12, 0, 30, 0, time.UTC)
@@ -94,7 +94,7 @@ func TestSeriesHybridEndEqualsCutoff(t *testing.T) {
 		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
 	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "endcut", Type: TypeGauge}); err != nil {
+	if err := s.CreateMetric(ctx, Definition{Name: "endcut", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)

@@ -125,6 +125,9 @@ func Run(ctx Context) error {
 			return err
 		}
 	}
+	if err := migrateDeprecatedMetricRetentionConfig(db); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -142,6 +145,13 @@ func BackfillClientBillingAnchors(db *gorm.DB) error {
 			"first_agent_reported_at":           gorm.Expr("created_at"),
 			"first_agent_reported_at_estimated": true,
 		}).Error
+}
+
+func migrateDeprecatedMetricRetentionConfig(db *gorm.DB) error {
+	if !db.Migrator().HasTable(&appconfig.ConfigItem{}) {
+		return nil
+	}
+	return db.Delete(&appconfig.ConfigItem{}, "key = ?", "metric_retention_days").Error
 }
 
 func hasLegacyConfigTable(db *gorm.DB) bool {

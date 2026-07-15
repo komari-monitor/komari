@@ -89,8 +89,9 @@ func (p RollupPolicy) rawCutoff(now time.Time) time.Time {
 	return time.Unix(0, floorDivNano(cutoff.UnixNano(), interval)).UTC()
 }
 
-// withMetricRetention applies a metric definition as an upper bound on every
-// rollup tier while preserving the store policy's configured maxima.
+// withMetricRetention applies the metric definition's retention to a rollup
+// policy. Fine tiers keep their configured short windows, while the final tier
+// follows the metric so definitions are never capped by a store-wide setting.
 func (p RollupPolicy) withMetricRetention(retention time.Duration) RollupPolicy {
 	if retention <= 0 || len(p.Tiers) == 0 {
 		return p
@@ -99,7 +100,9 @@ func (p RollupPolicy) withMetricRetention(retention time.Duration) RollupPolicy 
 	out := p
 	out.Tiers = append([]RollupTier(nil), p.Tiers...)
 	for i := range out.Tiers {
-		if out.Tiers[i].Retention > retention {
+		if i == len(out.Tiers)-1 {
+			out.Tiers[i].Retention = retention
+		} else if out.Tiers[i].Retention > retention {
 			out.Tiers[i].Retention = retention
 		}
 	}

@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"os"
@@ -53,7 +54,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 			cst.Description = "Komari Monitor, a simple server monitoring tool."
 		}
 	}
-	metricCfg, err := config.GetManyAs[metricstore.MetricStoreConfig]()
+	retention, err := metricstore.GetRetentionSummary(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -130,10 +131,9 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		"oauth_provider":            cst.OAuthProvider,
 		"disable_password_login":    cst.DisablePasswordLogin,
 		"cors_origin_check_enabled": cst.CorsOriginCheckEnabled,
-		"record_enabled":            metricCfg.RetentionDays > 0,  //兼容旧版本主题
-		"record_preserve_time":      metricCfg.RetentionDays * 24, //兼容旧版本主题
-		"ping_record_preserve_time": metricCfg.RetentionDays * 24, //兼容旧版本主题
-		"metric_retention_days":     metricCfg.RetentionDays,
+		"record_enabled":            retention.AllPositive, // 兼容旧版本主题
+		"record_preserve_time":      retention.MaxDays * 24,
+		"ping_record_preserve_time": retention.MaxDays * 24,
 		"private_site":              cst.PrivateSite,
 		"visitor_audit_enabled":     cst.VisitorAuditEnabled,
 		"theme":                     cst.Theme,
