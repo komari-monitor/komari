@@ -81,6 +81,57 @@ func TestBuildMetricConfigCanDisableDownsampling(t *testing.T) {
 	}
 }
 
+func TestGetPingRecordsReadsRollupsAfterRawCompaction(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	s, err := metric.Open(ctx, metric.SQLite(":memory:",
+		metric.WithMaxOpenConns(1),
+		metric.WithRollupPolicy(defaultRollupPolicy()),
+	))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	defer s.Close()
+	if err := s.UpsertMetric(ctx, metric.Definition{
+		Name:          MetricPingLatency,
+		Type:          metric.TypeGauge,
+		RetentionDays: 30,
+	}); err != nil {
+		t.Fatalf("create ping metric: %v", err)
+	}
+	if err := s.WriteBatch(ctx, []metric.Point{
+		{MetricName: MetricPingLatency, EntityID: "node-a", Timestamp: now.Add(-20 * time.Minute), Value: 20, Tags: map[string]string{"task_id": "7"}},
+		{MetricName: MetricPingLatency, EntityID: "node-a", Timestamp: now.Add(-10 * time.Minute), Value: 10, Tags: map[string]string{"task_id": "7"}},
+		{MetricName: MetricPingLatency, EntityID: "node-a", Timestamp: now.Add(-5 * time.Minute), Value: 5, Tags: map[string]string{"task_id": "7"}},
+	}); err != nil {
+		t.Fatalf("write ping points: %v", err)
+	}
+	if _, err := s.Compact(ctx, now); err != nil {
+		t.Fatalf("compact ping points: %v", err)
+	}
+
+	storeMu.Lock()
+	oldStore := store
+	store = s
+	storeMu.Unlock()
+	defer func() {
+		storeMu.Lock()
+		store = oldStore
+		storeMu.Unlock()
+	}()
+
+	records, err := GetPingRecords(ctx, "node-a", 7, now.Add(-30*time.Minute), now)
+	if err != nil {
+		t.Fatalf("get ping records: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("expected 3 ping records across raw and rollup data, got %d: %#v", len(records), records)
+	}
+	if records[0].Value != 5 || records[1].Value != 10 || records[2].Value != 20 {
+		t.Fatalf("unexpected ping values in descending order: %#v", records)
+	}
+}
+
 func TestCreateMetricDefinitionsUsesExplicitRetentionAndPreservesOverrides(t *testing.T) {
 	if defaultBuiltinMetricRetentionDays != 1 {
 		t.Fatalf("default built-in metric retention = %d, want 1 day", defaultBuiltinMetricRetentionDays)

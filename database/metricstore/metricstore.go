@@ -516,6 +516,26 @@ func CloseStoreContext(ctx context.Context) error {
 
 const defaultBuiltinMetricRetentionDays = 1
 
+var pingQueryIntervals = []time.Duration{
+	time.Second,
+	5 * time.Second,
+	10 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+	time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+	10 * time.Minute,
+	15 * time.Minute,
+	30 * time.Minute,
+	time.Hour,
+	2 * time.Hour,
+	3 * time.Hour,
+	6 * time.Hour,
+	12 * time.Hour,
+	24 * time.Hour,
+}
+
 // createMetricDefinitions creates built-in definitions with explicit policies.
 func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
 	definitions := []metric.Definition{
@@ -1003,7 +1023,11 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 	return records, nil
 }
 
-// GetPingRecords 从 metric store 查询 ping 记录
+// GetPingRecords 从 metric store 查询兼容旧接口的 ping 记录。
+//
+// 旧接口过去直接读取 ping_records 的原始点。启用 metric rollup 后，较旧
+// 的 raw 点会被压入 rollup 并删除，因此这里使用 Series 走与 queryMetrics
+// 相同的 raw/rollup 混合读取路径，并保留 task_id 标签。
 func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, end time.Time) ([]models.PingRecord, error) {
 	s := GetStore()
 	if s == nil {
@@ -1014,7 +1038,7 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 		MetricName: MetricPingLatency,
 		Start:      start,
 		End:        end,
-		Order:      metric.OrderDesc,
+		Order:      metric.OrderAsc,
 	}
 
 	if clientUUID != "" {
@@ -1025,7 +1049,14 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 		query.Tags = map[string]string{"task_id": fmt.Sprintf("%d", taskID)}
 	}
 
-	points, err := s.Query(ctx, query)
+	interval := pingQueryInterval(end.Sub(start), 4000)
+	interval = s.CompatibleSeriesInterval(start, time.Now(), interval)
+	points, err := s.Series(ctx, metric.AggregateQuery{
+		Query:          query,
+		Aggregation:    metric.AggLast,
+		Interval:       interval,
+		PreserveSeries: true,
+	}, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -1042,12 +1073,36 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 		records = append(records, models.PingRecord{
 			Client: p.EntityID,
 			TaskId: taskIDVal,
-			Time:   models.FromTime(p.Timestamp),
+			Time:   models.FromTime(p.Bucket),
 			Value:  int(p.Value),
 		})
 	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Time.ToTime().After(records[j].Time.ToTime())
+	})
 
 	return records, nil
+}
+
+func pingQueryInterval(rangeDuration time.Duration, maxPoints int) time.Duration {
+	if maxPoints <= 0 {
+		maxPoints = 4000
+	}
+	if rangeDuration <= 0 {
+		return time.Second
+	}
+	interval := time.Duration((rangeDuration.Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints))
+	if interval < time.Second {
+		return time.Second
+	}
+	result := time.Second
+	for _, candidate := range pingQueryIntervals {
+		if candidate > interval {
+			break
+		}
+		result = candidate
+	}
+	return result
 }
 
 // recordMetricNames 是负载/系统类指标（不含 ping）。ping 使用独立的保留策略，
