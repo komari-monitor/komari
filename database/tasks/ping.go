@@ -140,10 +140,6 @@ func SavePingRecord(record models.PingRecord) error {
 	return metricstore.WritePingRecord(context.Background(), record)
 }
 
-func DeletePingRecordsBefore(time time.Time) error {
-	return metricstore.DeletePingRecordsBefore(context.Background(), time)
-}
-
 func DeletePingRecords(id []uint) error {
 	return metricstore.DeletePingRecordsByTask(context.Background(), id)
 }

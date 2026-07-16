@@ -31,26 +31,6 @@ var (
 	}
 )
 
-// Get 获取原始值 (反序列化为 interface{})
-func Get(key string, defaul ...any) (any, error) {
-	var item ConfigItem
-	err := db.First(&item, "key = ?", key).Error
-	if err != nil {
-		if len(defaul) > 0 {
-			v := defaul[0]
-			err = Set(key, v)
-			return v, err
-		}
-		return nil, err
-	}
-
-	var val any
-	if err := json.Unmarshal([]byte(item.Value), &val); err != nil {
-		return nil, err
-	}
-	return val, nil
-}
-
 // GetAs 获取并转换为指定类型 (泛型)，支持数值类型自动转换
 func GetAs[T any](key string, defaul ...any) (T, error) {
 	var t T
@@ -180,9 +160,8 @@ func GetManyAs[T any]() (*T, error) {
 		}
 
 		defaultTag := field.Tag.Get("default")
-		hasDefault := defaultTag != "" || field.Tag.Get("default") == ""
 		// 检查是否显式定义了 default tag (即使值为空)
-		_, hasDefault = field.Tag.Lookup("default")
+		_, hasDefault := field.Tag.Lookup("default")
 
 		fields = append(fields, fieldInfo{
 			index:      i,
@@ -423,76 +402,6 @@ func Set(key string, value any) error {
 	}
 
 	newVal := map[string]any{key: value}
-	publishEvent(oldVal, newVal)
-	return nil
-}
-
-// SetMany 将结构体保存为多个配置项
-func SetManyAs[T any](config T) error {
-	val := reflect.ValueOf(config)
-	if val.Kind() == reflect.Ptr {
-		val = val.Elem()
-	}
-
-	typ := val.Type()
-	var items []ConfigItem
-
-	for i := 0; i < val.NumField(); i++ {
-		fieldType := typ.Field(i)
-		tag := fieldType.Tag.Get("json")
-
-		if tag == "" || tag == "-" {
-			continue
-		}
-
-		fieldValue := val.Field(i).Interface()
-
-		bytes, err := json.Marshal(fieldValue)
-		if err != nil {
-			return fmt.Errorf("marshal field %s failed: %w", fieldType.Name, err)
-		}
-
-		items = append(items, ConfigItem{
-			Key:   tag,
-			Value: string(bytes),
-		})
-	}
-
-	if len(items) == 0 {
-		return nil
-	}
-
-	keys := make([]string, 0, len(items))
-	newVal := make(map[string]any, len(items))
-	for _, it := range items {
-		keys = append(keys, it.Key)
-		var parsed any
-		if err := json.Unmarshal([]byte(it.Value), &parsed); err == nil {
-			newVal[it.Key] = parsed
-		}
-	}
-
-	oldVal := map[string]any{}
-	if len(keys) > 0 {
-		var oldItems []ConfigItem
-		if err := db.Where("key IN ?", keys).Find(&oldItems).Error; err == nil {
-			for _, oi := range oldItems {
-				var parsed any
-				if err := json.Unmarshal([]byte(oi.Value), &parsed); err == nil {
-					oldVal[oi.Key] = parsed
-				}
-			}
-		}
-	}
-
-	err := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"value"}),
-	}).Create(&items).Error
-	if err != nil {
-		return err
-	}
-
 	publishEvent(oldVal, newVal)
 	return nil
 }

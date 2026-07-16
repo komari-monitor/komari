@@ -545,101 +545,9 @@ func (s *Store) mergeRollupBucketsTx(ctx context.Context, metricName string, int
 	return len(keys), nil
 }
 
-// writeRollupBuckets upserts a set of computed buckets for one resolution.
-//
-// writeRollupBuckets 将某个分辨率下计算出的 rollup 桶批量 upsert 到数据库。
-func (s *Store) writeRollupBuckets(ctx context.Context, metricName string, interval time.Duration, buckets map[rollupKey]*rollupBucket) (int, error) {
-	return s.writeRollupBucketsWithMergePoint(ctx, metricName, interval, buckets, time.Time{})
-}
-
 // writeRollupBucketsTx upserts buckets within an existing transaction.
 func (s *Store) writeRollupBucketsTx(ctx context.Context, metricName string, interval time.Duration, buckets map[rollupKey]*rollupBucket, tx *sql.Tx) (int, error) {
 	return s.writeRollupBucketsWithMergePointTx(ctx, metricName, interval, buckets, time.Time{}, time.Time{}, nil, tx)
-}
-
-// writeRollupBucketsWithMergePoint is the internal implementation that optionally
-// merges buckets older than a cutoff point instead of replacing them.
-func (s *Store) writeRollupBucketsWithMergePoint(ctx context.Context, metricName string, interval time.Duration, buckets map[rollupKey]*rollupBucket, mergeCutoff time.Time) (int, error) {
-	if len(buckets) == 0 {
-		return 0, nil
-	}
-	keys := make([]rollupKey, 0, len(buckets))
-	for k := range buckets {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].entityID != keys[j].entityID {
-			return keys[i].entityID < keys[j].entityID
-		}
-		if keys[i].tagsHash != keys[j].tagsHash {
-			return keys[i].tagsHash < keys[j].tagsHash
-		}
-		return keys[i].bucket < keys[j].bucket
-	})
-
-	stmt := s.dialect.upsertRollupSQL(s.tables)
-	resNano := interval.Nanoseconds()
-	now := time.Now().UTC().UnixNano()
-	mergeCutoffNano := mergeCutoff.UnixNano()
-
-	run := func(ex execer) error {
-		for _, k := range keys {
-			b := buckets[k]
-			tagsJSON := b.tagsJSON
-			if tagsJSON == "" {
-				tagsJSON = "{}"
-			}
-
-			// If mergeCutoff is set and this bucket is older than the cutoff,
-			// merge with existing data instead of replacing it.
-			if !mergeCutoff.IsZero() && k.bucket < mergeCutoffNano {
-				// Read existing row if it exists
-				existing, err := s.readRollupBucket(ctx, metricName, k.entityID, k.tagsHash, interval, k.bucket)
-				if err != nil {
-					return err
-				}
-				if existing != nil {
-					// Merge the new bucket into the existing one
-					existing.mergeStored(b)
-					b = existing
-				}
-			}
-
-			// Column order must match rollupColumns in dialect_rollup.go:
-			// metric_name, entity_id, tags_hash, tags, resolution_nano, bucket_nano,
-			// count, sum, sum_sq, min_val, max_val, first_val, first_ts, last_val,
-			// last_ts, digest, created_at.
-			_, err := ex.ExecContext(ctx, stmt,
-				metricName, k.entityID, k.tagsHash, tagsJSON, resNano, k.bucket,
-				b.count, b.sum, b.sumSq, b.min, b.max,
-				b.firstVal, b.firstTS, b.lastVal, b.lastTS,
-				b.digest.Encode(), now,
-			)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	if len(keys) == 1 {
-		if err := run(s.db); err != nil {
-			return 0, err
-		}
-		return len(keys), nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := run(tx); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return len(keys), nil
 }
 
 // writeRollupBucketsWithMergePointTx is the transactional version that executes
@@ -724,63 +632,6 @@ func (s *Store) writeRollupBucketsWithMergePointTx(ctx context.Context, metricNa
 		written++
 	}
 	return written, nil
-}
-
-// readRollupBucket reads a single rollup bucket from storage, returning nil if
-// the bucket doesn't exist. Used to merge late-arriving data with existing rollups.
-func (s *Store) readRollupBucket(ctx context.Context, metricName, entityID, tagsHash string, interval time.Duration, bucketNano int64) (*rollupBucket, error) {
-	sqlText := fmt.Sprintf(
-		`SELECT count, sum, sum_sq, min_val, max_val, first_val, first_ts, last_val, last_ts, digest, tags
-		 FROM %s WHERE metric_name = %s AND resolution_nano = %s AND entity_id = %s
-		 AND tags_hash = %s AND bucket_nano = %s`,
-		s.tables.rollups,
-		s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3),
-		s.dialect.placeholder(4), s.dialect.placeholder(5),
-	)
-	row := s.reader().QueryRowContext(ctx, sqlText, metricName, interval.Nanoseconds(), entityID, tagsHash, bucketNano)
-
-	var count int64
-	var sum, sumSq, minV, maxV, firstV, lastV float64
-	var firstTS, lastTS int64
-	var digestBlob []byte
-	var rawTags any
-
-	err := row.Scan(&count, &sum, &sumSq, &minV, &maxV, &firstV, &firstTS, &lastV, &lastTS, &digestBlob, &rawTags)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	td, err := DecodeTDigest(digestBlob)
-	if err != nil {
-		return nil, err
-	}
-	tagsJSON, err := rawTagsToJSON(rawTags)
-	if err != nil {
-		return nil, err
-	}
-
-	return &rollupBucket{
-		count: count, sum: sum, sumSq: sumSq,
-		min: minV, max: maxV,
-		firstVal: firstV, firstTS: firstTS,
-		lastVal: lastV, lastTS: lastTS,
-		digest:   td,
-		tagsHash: tagsHash,
-		tagsJSON: tagsJSON,
-	}, nil
-}
-
-// deleteRollupsBefore deletes stored rollup rows older than a cutoff.
-func (s *Store) deleteRollupsBefore(ctx context.Context, metricName string, interval time.Duration, before time.Time) error {
-	sqlText := fmt.Sprintf(
-		`DELETE FROM %s WHERE metric_name = %s AND resolution_nano = %s AND bucket_nano < %s`,
-		s.tables.rollups, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3),
-	)
-	_, err := s.db.ExecContext(ctx, sqlText, metricName, interval.Nanoseconds(), before.UTC().UnixNano())
-	return err
 }
 
 // deleteRollupsBeforeTx deletes stored rollup rows within a transaction.

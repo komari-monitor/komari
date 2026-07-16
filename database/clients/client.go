@@ -13,7 +13,6 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils"
-	"gorm.io/gorm"
 
 	"github.com/google/uuid"
 )
@@ -129,24 +128,6 @@ func SaveClientInfo(update map[string]interface{}) error {
 	return nil
 }
 
-func EditClientName(clientUUID, clientName string) error {
-	db := dbcore.GetDBInstance()
-	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Update("name", clientName).Error
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func EditClientToken(clientUUID, token string) error {
-	db := dbcore.GetDBInstance()
-	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Update("token", token).Error
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 // CreateClient 创建新客户端
 func CreateClient() (clientUUID, token string, err error) {
 	db := dbcore.GetDBInstance()
@@ -212,19 +193,6 @@ func GetClientByUUID(uuid string) (client models.Client, err error) {
 	db := dbcore.GetDBInstance()
 	err = db.Where("uuid = ?", uuid).First(&client).Error
 	if err != nil {
-		return models.Client{}, err
-	}
-	return client, nil
-}
-
-// GetClientBasicInfo 获取指定 UUID 的客户端基本信息
-func GetClientBasicInfo(uuid string) (client models.Client, err error) {
-	db := dbcore.GetDBInstance()
-	err = db.Where("uuid = ?", uuid).First(&client).Error
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return models.Client{}, fmt.Errorf("客户端不存在: %s", uuid)
-		}
 		return models.Client{}, err
 	}
 	return client, nil

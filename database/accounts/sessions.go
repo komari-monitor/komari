@@ -111,20 +111,6 @@ func DeleteAllSessions() error {
 	return nil
 }
 
-func UpdateLatestOnline(session string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_online", time.Now()).Error
-}
-
-func UpdateLatestUserAgent(session, userAgent string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_user_agent", userAgent).Error
-}
-func UpdateLatestIp(session, ip string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_ip", ip).Error
-}
-
 func UpdateLatest(session, useragent, ip string) error {
 	db := dbcore.GetDBInstance()
 	return db.Model(&models.Session{}).Where("session = ?", session).Updates(map[string]interface{}{

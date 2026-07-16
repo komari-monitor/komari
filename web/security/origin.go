@@ -22,10 +22,6 @@ func SplitAllowlist(raw string) []string {
 	return entries
 }
 
-func HasAllowlist(raw string) bool {
-	return len(SplitAllowlist(raw)) > 0
-}
-
 func OriginMatchesHost(origin, host string) bool {
 	_, originHost, ok := normalizeOrigin(origin)
 	return ok && strings.EqualFold(originHost, host)

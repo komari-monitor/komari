@@ -399,11 +399,6 @@ func GetStore() *metric.Store {
 	return store
 }
 
-// IsEnabled 检查 metric store 是否已启用
-func IsEnabled() bool {
-	return GetStore() != nil
-}
-
 // RetentionSummary is the compatibility view of all persisted metric policies.
 type RetentionSummary struct {
 	AllPositive bool
@@ -481,11 +476,6 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 		return total, fmt.Errorf("clean up expired raw metrics: %w", err)
 	}
 	return total, nil
-}
-
-// CloseStore closes the metric store after stopping any API-triggered migration.
-func CloseStore() error {
-	return CloseStoreContext(context.Background())
 }
 
 // CloseStoreContext stops the asynchronous store migration before taking the
@@ -1136,22 +1126,6 @@ func DeleteAllRecords(ctx context.Context) error {
 	return nil
 }
 
-// DeleteRecordsBefore 删除指定时间之前的负载/系统类记录（不含 ping）。
-func DeleteRecordsBefore(ctx context.Context, before time.Time) error {
-	s := GetStore()
-	if s == nil {
-		return fmt.Errorf("metric store not enabled")
-	}
-
-	for _, metricName := range recordMetricNames {
-		if _, err := s.DeleteBefore(ctx, metricName, before); err != nil {
-			log.Printf("Failed to delete old metric %s: %v", metricName, err)
-		}
-	}
-
-	return nil
-}
-
 // DeleteAllPingRecords 删除全部 ping 记录（保留指标定义）。
 func DeleteAllPingRecords(ctx context.Context) error {
 	s := GetStore()
@@ -1161,20 +1135,6 @@ func DeleteAllPingRecords(ctx context.Context) error {
 	for _, metricName := range []string{MetricPingLatency, MetricPingLoss} {
 		if _, err := s.DeleteBefore(ctx, metricName, farFuture()); err != nil {
 			return fmt.Errorf("failed to delete ping records: %w", err)
-		}
-	}
-	return nil
-}
-
-// DeletePingRecordsBefore 删除指定时间之前的 ping 记录。
-func DeletePingRecordsBefore(ctx context.Context, before time.Time) error {
-	s := GetStore()
-	if s == nil {
-		return fmt.Errorf("metric store not enabled")
-	}
-	for _, metricName := range []string{MetricPingLatency, MetricPingLoss} {
-		if _, err := s.DeleteBefore(ctx, metricName, before); err != nil {
-			return fmt.Errorf("failed to delete ping records before %s: %w", before, err)
 		}
 	}
 	return nil
