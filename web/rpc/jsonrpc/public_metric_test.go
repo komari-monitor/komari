@@ -69,70 +69,81 @@ func TestPublicMetricJSONIncludesTagAlias(t *testing.T) {
 	}
 }
 
-func TestPublicMetricFillEmptyEmitsNullForEmptyBuckets(t *testing.T) {
+func TestAdaptiveFillPublicMetricSeriesUsesObservedInterval(t *testing.T) {
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
-	points, err := metric.AggregatePoints([]metric.Point{
-		{MetricName: "cpu.usage", EntityID: "node-a", Timestamp: base, Value: 10},
-		{MetricName: "cpu.usage", EntityID: "node-a", Timestamp: base.Add(2 * time.Minute), Value: 30},
-	}, metric.AggregateQuery{
-		Query: metric.Query{
-			MetricName: "cpu.usage",
-			EntityID:   "node-a",
-			Start:      base,
-			End:        base.Add(2 * time.Minute),
-		},
-		Aggregation: metric.AggAvg,
-		Interval:    time.Minute,
-		FillEmpty:   true,
-	})
-	if err != nil {
-		t.Fatalf("aggregate points: %v", err)
+	series := publicMetricSeries{
+		MetricKey:       "cpu.usage",
+		EntityID:        "node-a",
+		FillEmpty:       true,
+		IntervalSeconds: 1,
+		Tags:            map[string]string{"core": "0"},
+		Tag:             map[string]string{"core": "0"},
 	}
-	if len(points) != 3 {
-		t.Fatalf("expected 3 buckets with fill enabled, got %d: %#v", len(points), points)
-	}
-	if points[1].Count != 0 {
-		t.Fatalf("middle bucket should be empty, got %#v", points[1])
+	for i := 0; i < 10; i++ {
+		series.Points = append(series.Points, publicMetricPoint{
+			Time:  base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339Nano),
+			Value: publicMetricValue(float64(i)),
+		})
 	}
 
-	payload, err := json.Marshal(publicMetricPoint{
-		Time:  points[1].Bucket.Format(time.RFC3339Nano),
-		Value: publicAggregateMetricValue(points[1], true),
-		Count: points[1].Count,
-	})
-	if err != nil {
-		t.Fatalf("marshal point: %v", err)
+	got := adaptiveFillPublicMetricSeries(series, base, base.Add(9*time.Minute))
+	if got.IntervalSeconds != 60 {
+		t.Fatalf("expected observed 60s interval, got %v", got.IntervalSeconds)
 	}
-	if !strings.Contains(string(payload), `"value":null`) {
-		t.Fatalf("empty bucket should serialize as null, got %s", payload)
+	if len(got.Points) != 10 {
+		t.Fatalf("regular sparse series should not gain null buckets, got %#v", got.Points)
+	}
+	for _, point := range got.Points {
+		if point.Value == nil {
+			t.Fatalf("regular sparse series gained a null point: %#v", got.Points)
+		}
 	}
 }
 
-func TestPublicMetricFillEmptyDisabledKeepsOnlyExistingBuckets(t *testing.T) {
+func TestAdaptiveFillPublicMetricSeriesAddsCompactGapsAndBounds(t *testing.T) {
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
-	points, err := metric.AggregatePoints([]metric.Point{
-		{MetricName: "cpu.usage", EntityID: "node-a", Timestamp: base, Value: 10},
-		{MetricName: "cpu.usage", EntityID: "node-a", Timestamp: base.Add(2 * time.Minute), Value: 30},
-	}, metric.AggregateQuery{
-		Query: metric.Query{
-			MetricName: "cpu.usage",
-			EntityID:   "node-a",
-			Start:      base,
-			End:        base.Add(2 * time.Minute),
+	tags := map[string]string{"device_index": "0"}
+	series := publicMetricSeries{
+		MetricKey:       "gpu.device.usage",
+		EntityID:        "node-a",
+		IntervalSeconds: 1,
+		Tags:            tags,
+		Tag:             tags,
+		Points: []publicMetricPoint{
+			{Time: base.Format(time.RFC3339Nano), Value: publicMetricValue(10)},
+			{Time: base.Add(time.Minute).Format(time.RFC3339Nano), Value: publicMetricValue(20)},
+			{Time: base.Add(2 * time.Minute).Format(time.RFC3339Nano), Value: publicMetricValue(30)},
+			{Time: base.Add(4 * time.Minute).Format(time.RFC3339Nano), Value: publicMetricValue(40)},
 		},
-		Aggregation: metric.AggAvg,
-		Interval:    time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("aggregate points: %v", err)
 	}
-	if len(points) != 2 {
-		t.Fatalf("expected only existing buckets by default, got %d: %#v", len(points), points)
+	start := base.Add(-30 * time.Second)
+	end := base.Add(4*time.Minute + 30*time.Second)
+	got := adaptiveFillPublicMetricSeries(series, start, end)
+	if got.IntervalSeconds != 60 {
+		t.Fatalf("expected observed 60s interval, got %v", got.IntervalSeconds)
 	}
-	for _, point := range points {
-		if publicAggregateMetricValue(point, false) == nil {
-			t.Fatalf("non-fill query should keep numeric values: %#v", point)
+	if len(got.Points) != 7 {
+		t.Fatalf("expected four values, one gap and two bounds, got %#v", got.Points)
+	}
+	wantNullTimes := map[string]bool{
+		start.Format(time.RFC3339Nano):                     true,
+		base.Add(3 * time.Minute).Format(time.RFC3339Nano): true,
+		end.Format(time.RFC3339Nano):                       true,
+	}
+	for _, point := range got.Points {
+		if point.Value != nil {
+			continue
 		}
+		if !wantNullTimes[point.Time] {
+			t.Fatalf("unexpected null point at %s: %#v", point.Time, got.Points)
+		}
+		if point.Tags["device_index"] != "0" || point.Tag["device_index"] != "0" {
+			t.Fatalf("adaptive null point lost tags: %#v", point)
+		}
+		delete(wantNullTimes, point.Time)
+	}
+	if len(wantNullTimes) != 0 {
+		t.Fatalf("missing expected null points: %#v", wantNullTimes)
 	}
 }
 
@@ -142,11 +153,7 @@ func TestPublicPingMetricFillEmptyMapsMinusOneToNull(t *testing.T) {
 			t.Fatalf("raw %s -1 should become null when fill_empty is enabled, got %v", metricName, *value)
 		}
 	}
-	if value := publicAggregateMetricValue(metric.AggregatePoint{
-		MetricName: metricstore.MetricPingLatency,
-		Value:      -1,
-		Count:      1,
-	}, true); value != nil {
+	if value := publicRawMetricValue(metricstore.MetricPingLatency, -1, true); value != nil {
 		t.Fatalf("downsampled ping -1 should become null when fill_empty is enabled, got %v", *value)
 	}
 }
@@ -242,14 +249,19 @@ func TestPublicPingMetricStatsIncludesZeroVolatility(t *testing.T) {
 	}
 }
 
-func TestMetricDownsampleIntervalFloorsToStandardInterval(t *testing.T) {
+func TestMetricDownsampleIntervalCeilsToStandardInterval(t *testing.T) {
 	got := metricDownsampleInterval(30*24*time.Hour, 500)
-	if got != time.Hour {
-		t.Fatalf("30d/500 should floor to 1h, got %s", got)
+	if got != 2*time.Hour {
+		t.Fatalf("30d/500 should ceil to 2h, got %s", got)
 	}
 
 	got = metricDownsampleInterval(time.Hour, 500)
-	if got != 5*time.Second {
-		t.Fatalf("1h/500 should floor to 5s, got %s", got)
+	if got != 10*time.Second {
+		t.Fatalf("1h/500 should ceil to 10s, got %s", got)
+	}
+
+	got = metricDownsampleInterval(1000*24*time.Hour, 10)
+	if got != 100*24*time.Hour {
+		t.Fatalf("ranges beyond the standard table should ceil to whole days, got %s", got)
 	}
 }

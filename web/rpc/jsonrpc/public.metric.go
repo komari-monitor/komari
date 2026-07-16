@@ -274,7 +274,6 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 					Query:          query,
 					Aggregation:    algorithm,
 					Interval:       interval,
-					FillEmpty:      metricFillEmpty,
 					PreserveSeries: true,
 				}, now)
 				if err != nil {
@@ -284,7 +283,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				for _, point := range points {
 					item.Points = append(item.Points, publicMetricPoint{
 						Time:  point.Bucket.Format(time.RFC3339Nano),
-						Value: publicAggregateMetricValue(point, metricFillEmpty),
+						Value: publicRawMetricValue(point.MetricName, point.Value, metricFillEmpty),
 						Count: point.Count,
 						Tag:   point.Tags,
 						Tags:  point.Tags,
@@ -306,7 +305,12 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 					})
 				}
 			}
-			series = append(series, splitPublicMetricSeries(item)...)
+			for _, split := range splitPublicMetricSeries(item) {
+				if metricFillEmpty {
+					split = adaptiveFillPublicMetricSeries(split, start, end)
+				}
+				series = append(series, split)
+			}
 		}
 	}
 
@@ -464,6 +468,71 @@ func splitPublicMetricSeries(base publicMetricSeries) []publicMetricSeries {
 		out = append(out, item)
 	}
 	return out
+}
+
+// adaptiveFillPublicMetricSeries inserts only the null points needed to mark
+// chart boundaries and real collection gaps. The typical collection interval
+// is inferred per metric/entity/tag series, so sparse periodic data does not
+// expand into hundreds of artificial empty buckets.
+func adaptiveFillPublicMetricSeries(series publicMetricSeries, start, end time.Time) publicMetricSeries {
+	pointTimes := make([]time.Time, len(series.Points))
+	deltas := make([]time.Duration, 0, len(series.Points))
+	for i, point := range series.Points {
+		parsed, err := time.Parse(time.RFC3339Nano, point.Time)
+		if err != nil {
+			return series
+		}
+		pointTimes[i] = parsed
+		if i > 0 {
+			delta := parsed.Sub(pointTimes[i-1])
+			if delta > 0 {
+				deltas = append(deltas, delta)
+			}
+		}
+	}
+
+	expectedInterval := time.Duration(series.IntervalSeconds * float64(time.Second))
+	// Two deltas are the minimum needed to distinguish a regular cadence from
+	// one isolated long gap. A lower quartile keeps outages from inflating the
+	// inferred cadence when the rest of the series is regular.
+	if len(deltas) >= 2 {
+		sort.Slice(deltas, func(i, j int) bool { return deltas[i] < deltas[j] })
+		observedInterval := deltas[(len(deltas)-1)/4]
+		if observedInterval > expectedInterval {
+			expectedInterval = observedInterval
+		}
+	}
+	if expectedInterval > 0 {
+		series.IntervalSeconds = expectedInterval.Seconds()
+	}
+
+	nullPoint := func(at time.Time) publicMetricPoint {
+		return publicMetricPoint{
+			Time:  at.UTC().Format(time.RFC3339Nano),
+			Value: nil,
+			Tag:   series.Tag,
+			Tags:  series.Tags,
+		}
+	}
+	filled := make([]publicMetricPoint, 0, len(series.Points)+2)
+	if len(pointTimes) == 0 || start.Before(pointTimes[0]) {
+		filled = append(filled, nullPoint(start))
+	}
+	for i, point := range series.Points {
+		if i > 0 && expectedInterval > 0 && series.Points[i-1].Value != nil && point.Value != nil {
+			delta := pointTimes[i].Sub(pointTimes[i-1])
+			if delta > expectedInterval+expectedInterval/2 {
+				filled = append(filled, nullPoint(pointTimes[i-1].Add(expectedInterval)))
+			}
+		}
+		filled = append(filled, point)
+	}
+	if len(pointTimes) == 0 || pointTimes[len(pointTimes)-1].Before(end) {
+		filled = append(filled, nullPoint(end))
+	}
+	series.Points = filled
+	series.Count = len(filled)
+	return series
 }
 
 func publicMetricTagsKey(tags map[string]string) string {
@@ -693,11 +762,7 @@ func resolveMetricDownsample(metricKey string, params publicMetricQueryParams) b
 }
 
 func resolveMetricFillEmpty(params publicMetricQueryParams) bool {
-	fillEmpty := false
-	if params.FillEmpty != nil {
-		fillEmpty = *params.FillEmpty
-	}
-	return fillEmpty
+	return params.FillEmpty != nil && *params.FillEmpty
 }
 
 func publicMetricValue(value float64) *float64 {
@@ -709,13 +774,6 @@ func publicRawMetricValue(metricName string, value float64, fillEmpty bool) *flo
 		return nil
 	}
 	return publicMetricValue(value)
-}
-
-func publicAggregateMetricValue(point metric.AggregatePoint, fillEmpty bool) *float64 {
-	if fillEmpty && point.Count == 0 {
-		return nil
-	}
-	return publicRawMetricValue(point.MetricName, point.Value, fillEmpty)
 }
 
 func isNullPingMetricValue(metricName string, value float64, fillEmpty bool) bool {
@@ -1065,18 +1123,17 @@ func metricDownsampleInterval(rangeDuration time.Duration, maxPoints int) time.D
 	if interval < time.Second {
 		return time.Second
 	}
-	return floorMetricDownsampleInterval(interval)
+	return ceilMetricDownsampleInterval(interval)
 }
 
-func floorMetricDownsampleInterval(interval time.Duration) time.Duration {
-	out := time.Second
+func ceilMetricDownsampleInterval(interval time.Duration) time.Duration {
 	for _, candidate := range metricDownsampleStandardIntervals {
-		if candidate > interval {
-			break
+		if candidate >= interval {
+			return candidate
 		}
-		out = candidate
 	}
-	return out
+	day := metricDownsampleStandardIntervals[len(metricDownsampleStandardIntervals)-1]
+	return ((interval-1)/day + 1) * day
 }
 
 func maxInt(a, b int) int {

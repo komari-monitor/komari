@@ -81,66 +81,24 @@ func (s *Store) AggregateRollup(ctx context.Context, query AggregateQuery, resol
 
 // rollupGroupsToPoints turns the merged output buckets into ordered
 // AggregatePoints, computing the requested aggregation from each bucket's
-// summaries/digest. FillEmpty emits zero-count buckets for gaps, mirroring the
-// raw AggregatePoints behavior.
+// summaries/digest.
 //
 // rollupGroupsToPoints 将合并后的输出桶转换为有序 AggregatePoint，并根据
-// 每个桶的摘要或 digest 计算请求的聚合。FillEmpty 会为空洞输出零计数桶，
-// 与原始 AggregatePoints 行为一致。
+// 每个桶的摘要或 digest 计算请求的聚合。
 func rollupGroupsToPoints(groups map[rollupKey]*rollupBucket, query AggregateQuery) ([]AggregatePoint, error) {
 	if !query.PreserveSeries {
 		return mergedRollupGroupsToPoints(groups, query)
 	}
 
-	var keys []rollupKey
-	seriesTags := make(map[rollupSeriesKey]string)
-	if query.FillEmpty {
-		series := rollupSeriesKeys(groups)
-		if len(series) == 0 {
-			tagsHash, tagsJSON, err := tagsFingerprint(query.Tags)
-			if err != nil {
-				return nil, err
-			}
-			series = append(series, rollupSeriesKey{entityID: query.EntityID, tagsHash: tagsHash})
-			seriesTags[series[0]] = tagsJSON
-		} else {
-			for _, key := range series {
-				seriesTags[key] = rollupSeriesTagsJSON(groups, key)
-			}
-		}
-		for t := alignTime(query.Start, query.Interval); !t.After(query.End); t = t.Add(query.Interval) {
-			bucket := t.UnixNano()
-			for _, seriesKey := range series {
-				keys = append(keys, rollupKey{
-					entityID: seriesKey.entityID,
-					tagsHash: seriesKey.tagsHash,
-					bucket:   bucket,
-				})
-			}
-		}
-	} else {
-		for key := range groups {
-			keys = append(keys, key)
-		}
-		sortRollupKeys(keys)
+	keys := make([]rollupKey, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
 	}
+	sortRollupKeys(keys)
 
 	out := make([]AggregatePoint, 0, len(keys))
 	for _, key := range keys {
 		b := groups[key]
-		if b == nil {
-			tags, err := rollupTagsFromJSON(seriesTags[rollupSeriesKey{entityID: key.entityID, tagsHash: key.tagsHash}])
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, AggregatePoint{
-				MetricName: query.MetricName,
-				EntityID:   key.entityID,
-				Bucket:     time.Unix(0, key.bucket).UTC(),
-				Tags:       tags,
-			})
-			continue
-		}
 		v, ok := b.value(query.Aggregation)
 		if !ok {
 			return nil, fmt.Errorf("%w: aggregation %q not supported over rollups", ErrInvalidArgument, query.Aggregation)
@@ -162,31 +120,16 @@ func rollupGroupsToPoints(groups map[rollupKey]*rollupBucket, query AggregateQue
 }
 
 func mergedRollupGroupsToPoints(groups map[rollupKey]*rollupBucket, query AggregateQuery) ([]AggregatePoint, error) {
-	var keys []rollupKey
-	if query.FillEmpty {
-		for t := alignTime(query.Start, query.Interval); !t.After(query.End); t = t.Add(query.Interval) {
-			keys = append(keys, rollupKey{bucket: t.UnixNano()})
-		}
-	} else {
-		for key := range groups {
-			keys = append(keys, key)
-		}
-		sortRollupKeys(keys)
+	keys := make([]rollupKey, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
 	}
+	sortRollupKeys(keys)
 
 	tags := cloneStringMap(query.Tags)
 	out := make([]AggregatePoint, 0, len(keys))
 	for _, key := range keys {
 		b := groups[key]
-		if b == nil {
-			out = append(out, AggregatePoint{
-				MetricName: query.MetricName,
-				EntityID:   query.EntityID,
-				Bucket:     time.Unix(0, key.bucket).UTC(),
-				Tags:       cloneStringMap(tags),
-			})
-			continue
-		}
 		v, ok := b.value(query.Aggregation)
 		if !ok {
 			return nil, fmt.Errorf("%w: aggregation %q not supported over rollups", ErrInvalidArgument, query.Aggregation)
@@ -349,40 +292,6 @@ func foldedRollupKey(entityID, tagsHash string, bucket int64, preserveSeries boo
 		return rollupKey{bucket: bucket}
 	}
 	return rollupKey{entityID: entityID, tagsHash: tagsHash, bucket: bucket}
-}
-
-type rollupSeriesKey struct {
-	entityID string
-	tagsHash string
-}
-
-func rollupSeriesKeys(groups map[rollupKey]*rollupBucket) []rollupSeriesKey {
-	seen := make(map[rollupSeriesKey]struct{})
-	keys := make([]rollupSeriesKey, 0)
-	for key := range groups {
-		series := rollupSeriesKey{entityID: key.entityID, tagsHash: key.tagsHash}
-		if _, ok := seen[series]; ok {
-			continue
-		}
-		seen[series] = struct{}{}
-		keys = append(keys, series)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].entityID != keys[j].entityID {
-			return keys[i].entityID < keys[j].entityID
-		}
-		return keys[i].tagsHash < keys[j].tagsHash
-	})
-	return keys
-}
-
-func rollupSeriesTagsJSON(groups map[rollupKey]*rollupBucket, series rollupSeriesKey) string {
-	for key, bucket := range groups {
-		if key.entityID == series.entityID && key.tagsHash == series.tagsHash && bucket != nil {
-			return bucket.tagsJSON
-		}
-	}
-	return "{}"
 }
 
 func sortRollupKeys(keys []rollupKey) {

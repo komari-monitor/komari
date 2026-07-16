@@ -997,9 +997,9 @@ func (s *Store) Aggregate(ctx context.Context, query AggregateQuery) ([]Aggregat
 	}
 	// Push simple reductions (avg/min/max/sum/count) down to SQL via GROUP BY on
 	// a time bucket so large ranges don't pull every raw point into memory.
-	// Percentiles, first/last, rate and empty-bucket filling need the ordered
-	// raw series, so those fall back to the in-memory aggregator.
-	if valueExpr, ok := sqlAggValueExpr(s.cfg.Driver, query.Aggregation); ok && !query.FillEmpty {
+	// Percentiles, first/last and rate need the ordered raw series, so those fall
+	// back to the in-memory aggregator.
+	if valueExpr, ok := sqlAggValueExpr(s.cfg.Driver, query.Aggregation); ok {
 		return s.aggregateInSQL(ctx, query, valueExpr)
 	}
 	// In-memory fallback. Strip the embedded raw-point Limit/Offset so the full
