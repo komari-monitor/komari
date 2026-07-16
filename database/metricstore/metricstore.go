@@ -578,65 +578,6 @@ func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
 	return nil
 }
 
-// WriteRecord 将 models.Record 写入 metric store
-func WriteRecord(ctx context.Context, rec models.Record) error {
-	s := GetStore()
-	if s == nil {
-		return fmt.Errorf("metric store not enabled")
-	}
-
-	ts := rec.Time.ToTime()
-	entityID := rec.Client
-
-	points := []metric.Point{
-		{MetricName: MetricCPU, EntityID: entityID, Timestamp: ts, Value: float64(rec.Cpu)},
-		{MetricName: MetricGPU, EntityID: entityID, Timestamp: ts, Value: float64(rec.Gpu)},
-		{MetricName: MetricRAM, EntityID: entityID, Timestamp: ts, Value: float64(rec.Ram)},
-		{MetricName: MetricRAMTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.RamTotal)},
-		{MetricName: MetricSwap, EntityID: entityID, Timestamp: ts, Value: float64(rec.Swap)},
-		{MetricName: MetricSwapTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.SwapTotal)},
-		{MetricName: MetricLoad, EntityID: entityID, Timestamp: ts, Value: float64(rec.Load)},
-		{MetricName: MetricTemp, EntityID: entityID, Timestamp: ts, Value: float64(rec.Temp)},
-		{MetricName: MetricDisk, EntityID: entityID, Timestamp: ts, Value: float64(rec.Disk)},
-		{MetricName: MetricDiskTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.DiskTotal)},
-		{MetricName: MetricNetIn, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetIn)},
-		{MetricName: MetricNetOut, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetOut)},
-		{MetricName: MetricNetTotalUp, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetTotalUp)},
-		{MetricName: MetricNetTotalDown, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetTotalDown)},
-		{MetricName: MetricTrafficUp, EntityID: entityID, Timestamp: ts, Value: float64(rec.TrafficUp)},
-		{MetricName: MetricTrafficDown, EntityID: entityID, Timestamp: ts, Value: float64(rec.TrafficDown)},
-		{MetricName: MetricProcess, EntityID: entityID, Timestamp: ts, Value: float64(rec.Process)},
-		{MetricName: MetricConnections, EntityID: entityID, Timestamp: ts, Value: float64(rec.Connections)},
-		{MetricName: MetricConnectionsUDP, EntityID: entityID, Timestamp: ts, Value: float64(rec.ConnectionsUdp)},
-	}
-
-	return s.WriteBatch(ctx, points)
-}
-
-// WriteGPURecord 将 models.GPURecord 写入 metric store
-func WriteGPURecord(ctx context.Context, rec models.GPURecord) error {
-	s := GetStore()
-	if s == nil {
-		return fmt.Errorf("metric store not enabled")
-	}
-
-	ts := rec.Time.ToTime()
-	entityID := rec.Client
-	tags := map[string]string{
-		"device_index": fmt.Sprintf("%d", rec.DeviceIndex),
-		"device_name":  rec.DeviceName,
-	}
-
-	points := []metric.Point{
-		{MetricName: MetricGPUMem, EntityID: entityID, Timestamp: ts, Value: float64(rec.MemUsed), Tags: tags},
-		{MetricName: MetricGPUMemTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.MemTotal), Tags: tags},
-		{MetricName: MetricGPUDeviceUsage, EntityID: entityID, Timestamp: ts, Value: float64(rec.Utilization), Tags: tags},
-		{MetricName: MetricGPUTemp, EntityID: entityID, Timestamp: ts, Value: float64(rec.Temperature), Tags: tags},
-	}
-
-	return s.WriteBatch(ctx, points)
-}
-
 // WritePingRecord 将 ping 记录写入 metric store
 func WritePingRecord(ctx context.Context, rec models.PingRecord) error {
 	s := GetStore()
@@ -754,7 +695,7 @@ func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, c
 				End:        end,
 				Order:      metric.OrderAsc,
 			},
-			Aggregation: metric.AggAvg,
+			Aggregation: recordMetricAggregation(metricName),
 			Interval:    interval,
 		}, now)
 		if err != nil {
@@ -782,6 +723,17 @@ func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, c
 	}
 	sortRecords(records)
 	return records, nil
+}
+
+func recordMetricAggregation(metricName string) metric.Aggregation {
+	switch metricName {
+	case MetricTrafficUp, MetricTrafficDown:
+		return metric.AggSum
+	case MetricNetTotalUp, MetricNetTotalDown:
+		return metric.AggLast
+	default:
+		return metric.AggAvg
+	}
 }
 
 func recordSeriesInterval(s *metric.Store, start, end, now time.Time) time.Duration {
@@ -888,57 +840,6 @@ func sortRecords(records []models.Record) {
 		}
 		return records[i].Time.ToTime().Before(records[j].Time.ToTime())
 	})
-}
-
-// GetLatestTrafficBefore 查询每个客户端在指定时间之前最新的累计流量（用于计算增量基线）
-func GetLatestTrafficBefore(ctx context.Context, clientUUIDs []string, before time.Time) (map[string]models.Record, error) {
-	s := GetStore()
-	if s == nil {
-		return nil, fmt.Errorf("metric store not enabled")
-	}
-
-	result := make(map[string]models.Record, len(clientUUIDs))
-	end := before.Add(-time.Nanosecond)
-	for _, uuid := range clientUUIDs {
-		if uuid == "" {
-			continue
-		}
-		upPts, err := s.Query(ctx, metric.Query{
-			MetricName: MetricNetTotalUp,
-			EntityID:   uuid,
-			Start:      time.Unix(0, 0),
-			End:        end,
-			Order:      metric.OrderDesc,
-			Limit:      1,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(upPts) == 0 {
-			continue
-		}
-		rec := models.Record{
-			Client:     uuid,
-			Time:       models.FromTime(upPts[0].Timestamp),
-			NetTotalUp: int64(upPts[0].Value),
-		}
-		downPts, err := s.Query(ctx, metric.Query{
-			MetricName: MetricNetTotalDown,
-			EntityID:   uuid,
-			Start:      time.Unix(0, 0),
-			End:        end,
-			Order:      metric.OrderDesc,
-			Limit:      1,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(downPts) > 0 {
-			rec.NetTotalDown = int64(downPts[0].Value)
-		}
-		result[uuid] = rec
-	}
-	return result, nil
 }
 
 // GetGPURecordsByClientAndTime 从 metric store 查询 GPU 记录
@@ -1122,6 +1023,7 @@ func DeleteAllRecords(ctx context.Context) error {
 			log.Printf("Failed to delete metric %s: %v", metricName, err)
 		}
 	}
+	clearReportTrafficStates()
 
 	return nil
 }
@@ -1168,5 +1070,6 @@ func DeleteEntity(ctx context.Context, entityID string) error {
 	if _, err := s.DeleteEntity(ctx, entityID); err != nil {
 		return fmt.Errorf("failed to delete metric records for entity %s: %w", entityID, err)
 	}
+	deleteReportTrafficState(entityID)
 	return nil
 }

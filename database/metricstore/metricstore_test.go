@@ -7,6 +7,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/metric"
+	v1 "github.com/komari-monitor/komari/protocol/v1"
 )
 
 func TestDefaultRollupPolicy(t *testing.T) {
@@ -387,7 +388,19 @@ func TestGetRecordsByClientAndTimeReadsRollupsAfterRawCompaction(t *testing.T) {
 		Connections:    321,
 		ConnectionsUdp: 12,
 	}
-	if err := WriteRecord(ctx, rec); err != nil {
+	if _, err := WriteReport(ctx, v1.Report{
+		UUID:      rec.Client,
+		UpdatedAt: ts,
+		CPU:       v1.CPUReport{Usage: float64(rec.Cpu)},
+		Ram:       v1.RamReport{Used: rec.Ram, Total: rec.RamTotal},
+		Load:      v1.LoadReport{Load1: float64(rec.Load)},
+		Disk:      v1.DiskReport{Used: rec.Disk, Total: rec.DiskTotal},
+		Process:   rec.Process,
+		Connections: v1.ConnectionsReport{
+			TCP: rec.Connections,
+			UDP: rec.ConnectionsUdp,
+		},
+	}); err != nil {
 		t.Fatalf("write record: %v", err)
 	}
 	if _, err := s.Compact(ctx, now); err != nil {

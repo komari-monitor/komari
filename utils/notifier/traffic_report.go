@@ -15,7 +15,6 @@ import (
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
-	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/messageSender"
 )
 
@@ -246,5 +245,5 @@ func trafficDeltaOrFallback(storedDelta, currentTotal, previousTotal int64) int6
 	if storedDelta > 0 {
 		return storedDelta
 	}
-	return utils.ComputeTrafficDelta(currentTotal, previousTotal)
+	return metricstore.TrafficCounterDelta(currentTotal, previousTotal)
 }

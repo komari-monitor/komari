@@ -13,7 +13,7 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils"
-	report_cache "github.com/komari-monitor/komari/web/report"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
 // public.go
@@ -115,8 +115,7 @@ func publicGetClientRecentRecords(ctx context.Context, req *rpc.JsonRpcRequest) 
 	if !isLoginFromCtx(ctx) && isHiddenClient(params.UUID) {
 		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", nil) // 防止未登录获取隐藏客户端
 	}
-	recs, _ := report_cache.Records.Get(params.UUID)
-	return recs, nil
+	return agent_runtime.GetRecentReports(params.UUID), nil
 }
 
 // isHiddenClient 查询指定 uuid 是否为隐藏节点。

@@ -19,7 +19,6 @@ import (
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/connection"
-	report_cache "github.com/komari-monitor/komari/web/report"
 )
 
 const (
@@ -261,11 +260,4 @@ func processMessage(conn *connection.SafeConn, message []byte, uuid string) {
 		log.Printf("Unknown message type: %s", msgType.Type)
 		conn.WriteJSON(gin.H{"status": "error", "error": "Unknown message type"})
 	}
-}
-
-func SaveClientReport(uuid string, report v1.Report) (v1.Report, error) {
-	if report.CPU.Usage < 0.01 {
-		report.CPU.Usage = 0.01
-	}
-	return report_cache.AppendClientReport(uuid, report)
 }

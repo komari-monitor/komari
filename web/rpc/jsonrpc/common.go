@@ -18,7 +18,6 @@ import (
 	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/utils"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
-	report_cache "github.com/komari-monitor/komari/web/report"
 
 	cache "github.com/patrickmn/go-cache"
 )
@@ -270,7 +269,6 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 	return nodeMap, nil
 }
 
-
 func getPublicInfo(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	info, err := database.GetPublicInfo()
 	if err != nil {
@@ -495,8 +493,7 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 		}
 	}
 
-	raw, _ := report_cache.Records.Get(params.UUID)
-	reports, _ := raw.([]v1.Report)
+	reports := agent_runtime.GetRecentReports(params.UUID)
 
 	// 扁平化为 { count, records: [] }
 	type flatRecord struct {

@@ -32,7 +32,6 @@ import (
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/oauth"
-	report_cache "github.com/komari-monitor/komari/web/report"
 	"github.com/komari-monitor/komari/web/router"
 	"github.com/komari-monitor/komari/web/security"
 )
@@ -362,8 +361,8 @@ func registerScheduledWork() {
 	if err := corn.AddContextFunc("metrics:compact", "@every 5m", true, compactMetricStore); err != nil {
 		log.Println("Failed to add metric compact scheduled task:", err)
 	}
-	if err := corn.AddFunc("records:minute", "@every 1m", minuteScheduledWork); err != nil {
-		log.Println("Failed to add minute scheduled task:", err)
+	if err := corn.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
+		log.Println("Failed to add traffic notification task:", err)
 	}
 	if err := corn.AddFunc("notifier:expire", "0 0 9 * * *", notifier.CheckExpireScheduledWork); err != nil {
 		log.Println("Failed to add expire notification scheduled task:", err)
@@ -399,10 +398,4 @@ func compactMetricStore(ctx context.Context) {
 	if written > 0 {
 		log.Printf("Metric store compacted %d rollup buckets", written)
 	}
-}
-
-func minuteScheduledWork() {
-	report_cache.SaveClientReportToDB()
-	// 每分钟检查一次流量提醒
-	notifier.CheckTraffic()
 }

@@ -95,7 +95,9 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	if !policy.Enabled() {
 		return 0, nil
 	}
-	policy = policy.withMetricRetention(time.Duration(def.RetentionDays) * 24 * time.Hour)
+	effectivePolicy := policy.withMetricRetention(time.Duration(def.RetentionDays) * 24 * time.Hour)
+	obsoleteIntervals := rollupIntervalsOutsidePolicy(policy.Tiers, effectivePolicy.Tiers)
+	policy = effectivePolicy
 	now = now.UTC()
 
 	// Retry the whole compaction on a transient serialization/deadlock failure.
@@ -105,7 +107,7 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	const maxAttempts = 5
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		written, err := s.compactMetricOnce(ctx, metricName, now, policy)
+		written, err := s.compactMetricOnce(ctx, metricName, now, policy, obsoleteIntervals)
 		if err == nil {
 			return written, nil
 		}
@@ -120,7 +122,7 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 // compactMetricOnce runs a single compaction attempt inside one transaction.
 //
 // compactMetricOnce 在单个事务内执行一次 compaction 尝试。
-func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now time.Time, policy RollupPolicy) (int, error) {
+func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, obsoleteIntervals []time.Duration) (int, error) {
 	// Use a transaction to ensure consistency between raw scan, rollup write, and
 	// raw deletion. The isolation level is backend-specific (SERIALIZABLE on
 	// PostgreSQL/MySQL, default on SQLite) so late-arriving points cannot be
@@ -131,6 +133,9 @@ func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now ti
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := s.deleteRollupsForIntervalsTx(ctx, metricName, obsoleteIntervals, tx); err != nil {
+		return 0, err
+	}
 	written, err := s.compactMetricWithinTx(ctx, metricName, now, policy, tx)
 	if err != nil {
 		return written, err
@@ -143,6 +148,20 @@ func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now ti
 		return written, err
 	}
 	return written, nil
+}
+
+func rollupIntervalsOutsidePolicy(configured, effective []RollupTier) []time.Duration {
+	active := make(map[time.Duration]struct{}, len(effective))
+	for _, tier := range effective {
+		active[tier.Interval] = struct{}{}
+	}
+	obsolete := make([]time.Duration, 0, len(configured))
+	for _, tier := range configured {
+		if _, ok := active[tier.Interval]; !ok {
+			obsolete = append(obsolete, tier.Interval)
+		}
+	}
+	return obsolete
 }
 
 // isRetryableSerializationError reports whether err is a transient
@@ -312,6 +331,27 @@ func (s *Store) enforceRetentionWithinTx(ctx context.Context, metricName string,
 		}
 	}
 	return nil
+}
+
+// deleteRollupsForIntervalsTx removes rows from resolutions that are no longer
+// part of a metric's effective retention policy.
+func (s *Store) deleteRollupsForIntervalsTx(ctx context.Context, metricName string, intervals []time.Duration, tx *sql.Tx) error {
+	if len(intervals) == 0 {
+		return nil
+	}
+	args := make([]any, 1, len(intervals)+1)
+	args[0] = metricName
+	placeholders := make([]string, len(intervals))
+	for i, interval := range intervals {
+		placeholders[i] = s.dialect.placeholder(i + 2)
+		args = append(args, interval.Nanoseconds())
+	}
+	sqlText := fmt.Sprintf(
+		`DELETE FROM %s WHERE metric_name = %s AND resolution_nano IN (%s)`,
+		s.tables.rollups, s.dialect.placeholder(1), strings.Join(placeholders, ", "),
+	)
+	_, err := tx.ExecContext(ctx, sqlText, args...)
+	return err
 }
 
 func alignRollupRetentionCutoff(cutoff time.Time, nextInterval time.Duration) time.Time {
