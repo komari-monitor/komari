@@ -12,7 +12,7 @@ var (
 	connectedClients  = make(map[string]*connection.SafeConn)
 	connectedClientV2 = make(map[string]bool)
 	latestReport      = make(map[string]*v1.Report)
-	// presenceOnly stores online state for non-WebSocket agents (e.g., Nezha gRPC)
+	// presenceOnly stores online state for non-WebSocket agents.
 	// value keeps connectionID and a soft expiration to avoid flicker
 	presenceOnly = make(map[string]struct {
 		id     int64

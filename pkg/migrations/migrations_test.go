@@ -99,6 +99,39 @@ func TestRunRemovesDeprecatedMetricRetentionConfig(t *testing.T) {
 	}
 }
 
+func TestRunRemovesCompatibilityConfig(t *testing.T) {
+	db := openTestDB(t, "migrations_remove_compatibility_config")
+	if err := db.AutoMigrate(&appconfig.ConfigItem{}); err != nil {
+		t.Fatalf("migrate config item table: %v", err)
+	}
+	for _, key := range []string{"nezha_compat_enabled", "nezha_compat_listen"} {
+		if err := db.Create(&appconfig.ConfigItem{Key: key, Value: "true"}).Error; err != nil {
+			t.Fatalf("seed removed config %q: %v", key, err)
+		}
+	}
+	if err := db.Create(&appconfig.ConfigItem{Key: "sitename", Value: `"Komari"`}).Error; err != nil {
+		t.Fatalf("seed retained config: %v", err)
+	}
+
+	if err := Run(Context{DB: db}); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	var count int64
+	if err := db.Model(&appconfig.ConfigItem{}).Where("key IN ?", []string{
+		"nezha_compat_enabled",
+		"nezha_compat_listen",
+	}).Count(&count).Error; err != nil {
+		t.Fatalf("count removed config: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("removed compatibility config remains: %d", count)
+	}
+	if err := db.First(&appconfig.ConfigItem{}, "key = ?", "sitename").Error; err != nil {
+		t.Fatalf("unrelated config was removed: %v", err)
+	}
+}
+
 func TestRunPreservesVersion120RuntimeShape(t *testing.T) {
 	db := openTestDB(t, "migrations_v120_runtime_shape")
 	if err := db.AutoMigrate(

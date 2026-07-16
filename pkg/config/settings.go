@@ -22,9 +22,6 @@ type Settings struct {
 	// GeoIP 配置
 	GeoIpEnabled  bool   `json:"geo_ip_enabled" default:"true"`
 	GeoIpProvider string `json:"geo_ip_provider" default:"ipinfo"` // empty, mmdb, ip-api, geojs
-	// Nezha 兼容（Agent gRPC）
-	NezhaCompatEnabled bool   `json:"nezha_compat_enabled" default:"false"`
-	NezhaCompatListen  string `json:"nezha_compat_listen" default:""` // 例如 0.0.0.0:5555
 	// OAuth 配置
 	OAuthEnabled         bool   `json:"o_auth_enabled" default:"false"`
 	OAuthProvider        string `json:"o_auth_provider" default:"github"`
@@ -62,8 +59,6 @@ const (
 	BaseScriptsURLKey         = "base_scripts_url"
 	GeoIpEnabledKey           = "geo_ip_enabled"
 	GeoIpProviderKey          = "geo_ip_provider"
-	NezhaCompatEnabledKey     = "nezha_compat_enabled"
-	NezhaCompatListenKey      = "nezha_compat_listen"
 	OAuthEnabledKey           = "o_auth_enabled"
 	OAuthProviderKey          = "o_auth_provider"
 	DisablePasswordLoginKey   = "disable_password_login"

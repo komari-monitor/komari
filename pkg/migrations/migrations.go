@@ -27,8 +27,6 @@ type legacyModelConfig struct {
 	EulaAccepted               bool    `json:"eula_accepted" gorm:"default:false"`
 	GeoIpEnabled               bool    `json:"geo_ip_enabled" gorm:"default:true"`
 	GeoIpProvider              string  `json:"geo_ip_provider" gorm:"type:varchar(20);default:'ip-api'"`
-	NezhaCompatEnabled         bool    `json:"nezha_compat_enabled" gorm:"default:false"`
-	NezhaCompatListen          string  `json:"nezha_compat_listen" gorm:"type:varchar(100);default:''"`
 	OAuthEnabled               bool    `json:"o_auth_enabled" gorm:"default:false"`
 	OAuthProvider              string  `json:"o_auth_provider" gorm:"type:varchar(50);default:'github'"`
 	DisablePasswordLogin       bool    `json:"disable_password_login" gorm:"default:false"`
@@ -63,8 +61,6 @@ type legacyConfig struct {
 	BaseScriptsURLKey          string    `json:"base_scripts_url"`
 	GeoIpEnabled               bool      `json:"geo_ip_enabled"`
 	GeoIpProvider              string    `json:"geo_ip_provider"`
-	NezhaCompatEnabled         bool      `json:"nezha_compat_enabled"`
-	NezhaCompatListen          string    `json:"nezha_compat_listen"`
 	OAuthEnabled               bool      `json:"o_auth_enabled"`
 	OAuthProvider              string    `json:"o_auth_provider"`
 	DisablePasswordLogin       bool      `json:"disable_password_login"`
@@ -128,6 +124,9 @@ func Run(ctx Context) error {
 	if err := migrateDeprecatedMetricRetentionConfig(db); err != nil {
 		return err
 	}
+	if err := migrateRemovedCompatibilityConfig(db); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -137,6 +136,16 @@ func migrateDeprecatedMetricRetentionConfig(db *gorm.DB) error {
 		return nil
 	}
 	return db.Delete(&appconfig.ConfigItem{}, "key = ?", "metric_retention_days").Error
+}
+
+func migrateRemovedCompatibilityConfig(db *gorm.DB) error {
+	if !db.Migrator().HasTable(&appconfig.ConfigItem{}) {
+		return nil
+	}
+	return db.Delete(&appconfig.ConfigItem{}, "key IN ?", []string{
+		"nezha_compat_enabled",
+		"nezha_compat_listen",
+	}).Error
 }
 
 func hasLegacyConfigTable(db *gorm.DB) bool {

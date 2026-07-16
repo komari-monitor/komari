@@ -31,7 +31,6 @@ import (
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/api"
-	"github.com/komari-monitor/komari/web/nezha"
 	"github.com/komari-monitor/komari/web/oauth"
 	report_cache "github.com/komari-monitor/komari/web/report"
 	"github.com/komari-monitor/komari/web/router"
@@ -47,14 +46,14 @@ type cleanupFunc struct {
 // App 显式建模服务端的启动生命周期。
 //
 // 过去 RunServer 把目录创建、数据库、metric store、GeoIP、定时任务、通知、OAuth、
-// Nezha、Gin 中间件、路由、HTTP 启动与 shutdown 全部混在一个函数里，
+// Gin 中间件、路由、HTTP 启动与 shutdown 全部混在一个函数里，
 // 启动顺序只能靠通读整段代码推断，异步初始化过早且吞掉错误，关闭也不完整。
 //
 // App 把这些拆成有序阶段：
 //
 //	Bootstrap    基础设施：目录、数据库、默认管理员、配置快照
 //	InitStores   存储：metric store
-//	InitProviders 外部 provider：OAuth（同步，路由依赖）、GeoIP、消息发送、Nezha 兼容
+//	InitProviders 外部 provider：OAuth（同步，路由依赖）、GeoIP、消息发送
 //	StartBackground 后台：定时任务
 //	BuildRouter  构建 Gin 引擎与路由
 //	Run          启动 HTTP 服务并阻塞直到收到信号
@@ -159,7 +158,7 @@ func (a *App) InitStores() error {
 // InitProviders 初始化外部 provider。
 //
 // OAuth 必须在 HTTP 服务开始接收请求之前同步完成，否则 oauth.CurrentProvider()
-// 存在空指针风险；GeoIP 与消息发送允许后台初始化；Nezha 兼容按配置决定是否启动。
+// 存在空指针风险；GeoIP 与消息发送允许后台初始化。
 func (a *App) InitProviders() error {
 	// OAuth：同步初始化并处理错误，保证路由可用前 provider 已就绪。
 	if err := oauth.Initialize(); err != nil {
@@ -181,23 +180,6 @@ func (a *App) InitProviders() error {
 	messageSender.Initialize()
 	a.addCleanup("message-sender", func(context.Context) error {
 		return messageSender.Shutdown()
-	})
-
-	// Nezha 兼容 gRPC 服务：按配置启动，且无论初始是否启动都登记清理，
-	// 以覆盖运行期通过热重载开启的情况。
-	if a.settings.NezhaCompatEnabled {
-		listen := a.settings.NezhaCompatListen
-		go func() {
-			if err := nezha.StartNezhaCompat(listen); err != nil {
-				log.Printf("Nezha compat server error: %v", err)
-				auditlog.EventLog("error", fmt.Sprintf("Nezha compat server error: %v", err))
-			}
-		}()
-	}
-	a.addCleanup("nezha-compat", func(context.Context) error {
-		// 未运行时 StopNezhaCompat 返回错误，属正常情况，忽略即可。
-		_ = nezha.StopNezhaCompat()
-		return nil
 	})
 
 	return nil
@@ -229,24 +211,6 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 			log.Printf("Using %s as OIDC provider", oidcProvider.Name)
 			if err := oauth.LoadProvider(oidcProvider.Name, oidcProvider.Addition); err != nil {
 				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
-			}
-		}
-	})
-
-	// Nezha 兼容服务开关。
-	a.reload.Register("nezha-compat", func(event config.ConfigEvent) {
-		if ok, t := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey); ok {
-			if t {
-				l, _ := config.GetAs[string](config.NezhaCompatListenKey)
-				if err := nezha.StartNezhaCompat(l); err != nil {
-					log.Printf("start Nezha compat server error: %v", err)
-					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
-				}
-			} else {
-				if err := nezha.StopNezhaCompat(); err != nil {
-					log.Printf("stop Nezha compat server error: %v", err)
-					auditlog.EventLog("error", fmt.Sprintf("stop Nezha compat server error: %v", err))
-				}
 			}
 		}
 	})
