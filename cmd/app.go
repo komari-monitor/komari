@@ -408,14 +408,13 @@ func registerScheduledWork() {
 	notifier.InitTrafficReportSchedule()
 }
 
+const taskResultRetentionDays = 30
+
 func cleanupScheduledData() {
-	cfg, _ := config.GetManyAs[metricstore.MetricStoreConfig]()
-	retentionDays := cfg.RetentionDays
-	if retentionDays <= 0 {
-		retentionDays = 30
+	before := time.Now().Add(-24 * time.Hour * taskResultRetentionDays)
+	if err := tasks.ClearTaskResultsByTimeBefore(before); err != nil {
+		log.Printf("Failed to clean expired task results: %v", err)
 	}
-	before := time.Now().Add(-24 * time.Hour * time.Duration(retentionDays))
-	tasks.ClearTaskResultsByTimeBefore(before)
 
 	auditlog.RemoveOldLogs()
 	accounts.RemoveExpiredSessions()

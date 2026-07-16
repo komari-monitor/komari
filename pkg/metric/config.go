@@ -33,10 +33,6 @@ type Config struct {
 	//
 	// TablePrefix 是 Store 管理的所有表名前缀。
 	TablePrefix string
-	// DefaultRetentionDays is used when a metric definition omits retention.
-	//
-	// DefaultRetentionDays 在指标定义未设置保留时间时使用。
-	DefaultRetentionDays int
 	// AutoMigrate controls whether Open creates or updates the schema.
 	//
 	// AutoMigrate 控制 Open 是否创建或更新表结构。
@@ -151,15 +147,14 @@ type Option func(*Config)
 // DefaultConfig 返回指定后端的默认配置。
 func DefaultConfig(driver Driver, dsn string) Config {
 	return Config{
-		Driver:               driver,
-		DSN:                  dsn,
-		TablePrefix:          "metric_",
-		DefaultRetentionDays: 90,
-		AutoMigrate:          true,
-		MaxOpenConns:         25,
-		MaxIdleConns:         5,
-		ConnMaxLifetime:      time.Hour,
-		ConnectTimeout:       10 * time.Second,
+		Driver:          driver,
+		DSN:             dsn,
+		TablePrefix:     "metric_",
+		AutoMigrate:     true,
+		MaxOpenConns:    25,
+		MaxIdleConns:    5,
+		ConnMaxLifetime: time.Hour,
+		ConnectTimeout:  10 * time.Second,
 		SQLite: SQLiteOptions{
 			PerformanceProfile: SQLiteProfileBalanced,
 			BusyTimeout:        5 * time.Second,
@@ -265,15 +260,6 @@ func WithDB(db *sql.DB) Option {
 func WithTablePrefix(prefix string) Option {
 	return func(c *Config) {
 		c.TablePrefix = prefix
-	}
-}
-
-// WithDefaultRetention sets the default metric retention in days.
-//
-// WithDefaultRetention 设置指标默认保留天数。
-func WithDefaultRetention(days int) Option {
-	return func(c *Config) {
-		c.DefaultRetentionDays = days
 	}
 }
 
@@ -441,9 +427,6 @@ func (c Config) Validate() error {
 		if !(r == '_' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
 			return fmt.Errorf("%w: table prefix must contain only letters, digits, and underscores", ErrInvalidArgument)
 		}
-	}
-	if c.DefaultRetentionDays <= 0 {
-		return fmt.Errorf("%w: default retention days must be positive", ErrInvalidArgument)
 	}
 	if err := c.RollupPolicy.Validate(); err != nil {
 		return err

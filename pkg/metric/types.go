@@ -143,9 +143,10 @@ type Definition struct {
 	//
 	// Unit 表示数值单位，例如 bytes 或 percent。
 	Unit string `json:"unit,omitempty"`
-	// RetentionDays controls historical data retention for this metric.
+	// RetentionDays controls historical data retention for this metric. A value
+	// of zero disables persistence and removes existing metric data.
 	//
-	// RetentionDays 控制该指标历史数据的保留天数。
+	// RetentionDays 控制该指标历史数据的保留天数；零表示禁用持久化并清除已有数据。
 	RetentionDays int `json:"retention_days,omitempty"`
 	// Metadata stores caller-defined metric metadata.
 	//
@@ -163,13 +164,10 @@ type Definition struct {
 
 // withDefaults fills default values on a metric definition.
 //
-// withDefaults 为指标定义填充默认类型和默认保留天数。
-func (d Definition) withDefaults(defaultRetentionDays int) Definition {
+// withDefaults 为指标定义填充默认类型。
+func (d Definition) withDefaults() Definition {
 	if d.Type == "" {
 		d.Type = TypeGauge
-	}
-	if d.RetentionDays == 0 {
-		d.RetentionDays = defaultRetentionDays
 	}
 	return d
 }

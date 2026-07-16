@@ -21,7 +21,7 @@ func TestSQLiteStoreWriteQueryAggregate(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := store.CreateMetric(ctx, Definition{Name: "cpu.usage", Type: TypeGauge, Unit: "%"}); err != nil {
+	if err := store.CreateMetric(ctx, Definition{Name: "cpu.usage", Type: TypeGauge, Unit: "%", RetentionDays: 30}); err != nil {
 		t.Fatalf("create metric: %v", err)
 	}
 

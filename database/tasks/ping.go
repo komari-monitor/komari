@@ -47,6 +47,12 @@ func AddPingTask(clients []string, defaultOn bool, name string, target, task_typ
 }
 
 func DeletePingTask(id []uint) error {
+	// The metric store is independent from the main database, so clean it first
+	// to avoid leaving history that can no longer be addressed through the task.
+	if err := DeletePingRecords(id); err != nil {
+		return err
+	}
+
 	db := dbcore.GetDBInstance()
 	result := db.Where("id IN ?", id).Delete(&models.PingTask{})
 	if result.RowsAffected == 0 {

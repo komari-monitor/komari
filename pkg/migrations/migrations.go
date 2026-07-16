@@ -125,8 +125,18 @@ func Run(ctx Context) error {
 			return err
 		}
 	}
+	if err := migrateDeprecatedMetricRetentionConfig(db); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+func migrateDeprecatedMetricRetentionConfig(db *gorm.DB) error {
+	if !db.Migrator().HasTable(&appconfig.ConfigItem{}) {
+		return nil
+	}
+	return db.Delete(&appconfig.ConfigItem{}, "key = ?", "metric_retention_days").Error
 }
 
 func hasLegacyConfigTable(db *gorm.DB) bool {
