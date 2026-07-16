@@ -1,6 +1,25 @@
 package admin
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/komari-monitor/komari/database/models"
+)
+
+func TestNormalizeEmbeddedDefaultTheme(t *testing.T) {
+	theme := normalizeEmbeddedDefaultTheme(models.Theme{
+		Name:    "Komari Glassmorphism",
+		Short:   "Glassmorphism",
+		Version: "3.1.9",
+	})
+
+	if theme.Short != "default" {
+		t.Fatalf("normalizeEmbeddedDefaultTheme().Short = %q, want default", theme.Short)
+	}
+	if theme.Name != "Komari Glassmorphism" || theme.Version != "3.1.9" {
+		t.Fatalf("normalizeEmbeddedDefaultTheme() changed theme metadata: %#v", theme)
+	}
+}
 
 // TestIsValidThemeShort_PathTraversal 防止 DeleteTheme/UpdateTheme/SetTheme
 // 的路径穿越漏洞：req.Short 直接进入 filepath.Join("./data/theme", short)，

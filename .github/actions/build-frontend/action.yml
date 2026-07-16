@@ -1,13 +1,16 @@
 name: Build frontend theme
-description: Clone komari-web, build the default theme, and optionally upload it as an artifact.
+description: Build Komari Glassmorphism as the embedded default theme and optionally upload it as an artifact.
 
 inputs:
-  node-version:
-    description: Node.js version used to build komari-web.
-    default: "23"
+  bun-version:
+    description: Bun version used to build the theme.
+    default: "1.3.14"
   repository:
-    description: komari-web repository URL.
-    default: https://github.com/komari-monitor/komari-web
+    description: Glassmorphism theme repository URL.
+    default: https://github.com/sanrokamlan-prog/komari-theme-Glassmorphism
+  theme-ref:
+    description: Immutable theme tag or commit to embed.
+    default: v3.1.9
   artifact-name:
     description: Optional artifact name for the packed frontend theme.
     default: ""
@@ -15,30 +18,38 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
       with:
-        node-version: ${{ inputs.node-version }}
+        bun-version: ${{ inputs.bun-version }}
 
     - name: Clone and build frontend
       shell: bash
       run: |
         set -euxo pipefail
-        rm -rf komari-web
-        git clone --depth=1 "${{ inputs.repository }}" komari-web
-        cd komari-web
-        npm install
-        npm run build
+        rm -rf komari-theme
+        git clone --depth=1 --branch "${{ inputs.theme-ref }}" "${{ inputs.repository }}" komari-theme
+        cd komari-theme
+        bun install --frozen-lockfile
+        bun run build
         cd ..
 
         mkdir -p web/public/defaultTheme/dist
         rm -rf web/public/defaultTheme/dist/*
-        cp -r komari-web/dist/* web/public/defaultTheme/dist/
-        cp -f komari-web/komari-theme.json web/public/defaultTheme/
-        if [ -f komari-web/preview.png ]; then cp -f komari-web/preview.png web/public/defaultTheme/; fi
-        if [ -f komari-web/perview.png ]; then cp -f komari-web/perview.png web/public/defaultTheme/; fi
+        cp -r komari-theme/dist/* web/public/defaultTheme/dist/
+        cp -f komari-theme/komari-theme.json web/public/defaultTheme/
+        cp -f komari-theme/docs/preview.png web/public/defaultTheme/preview.png
+
+        # Embedded assets are always served from /themes/default, regardless of
+        # the source theme's installable short name.
+        jq '.short = "default"' web/public/defaultTheme/komari-theme.json > web/public/defaultTheme/komari-theme.json.tmp
+        mv web/public/defaultTheme/komari-theme.json.tmp web/public/defaultTheme/komari-theme.json
+
         if [ -f web/public/defaultTheme/preview.png ] && [ ! -f web/public/defaultTheme/perview.png ]; then cp -f web/public/defaultTheme/preview.png web/public/defaultTheme/perview.png; fi
         if [ -f web/public/defaultTheme/perview.png ] && [ ! -f web/public/defaultTheme/preview.png ]; then cp -f web/public/defaultTheme/perview.png web/public/defaultTheme/preview.png; fi
+
+        test -f web/public/defaultTheme/dist/index.html
+        test "$(jq -r '.short' web/public/defaultTheme/komari-theme.json)" = "default"
 
     - name: Pack frontend artifact
       if: ${{ inputs.artifact-name != '' }}

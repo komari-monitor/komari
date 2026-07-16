@@ -76,6 +76,7 @@ func ListThemes(c *gin.Context) {
 		dt := models.Theme{}
 		err := json.Unmarshal(defaultTheme, &dt)
 		if err == nil {
+			dt = normalizeEmbeddedDefaultTheme(dt)
 			themes = append(themes, dt)
 		}
 
@@ -90,6 +91,11 @@ func ListThemes(c *gin.Context) {
 	}
 
 	api.RespondSuccess(c, themes)
+}
+
+func normalizeEmbeddedDefaultTheme(theme models.Theme) models.Theme {
+	theme.Short = public.DefaultTheme
+	return theme
 }
 
 // DeleteTheme 删除主题
