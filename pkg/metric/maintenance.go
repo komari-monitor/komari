@@ -235,21 +235,27 @@ func maintenanceActionFor(driver Driver) MaintenanceAction {
 
 func managedStorageSizeQuery(driver Driver, t tables) (string, []any, error) {
 	names := managedTableNames(t)
+	d := newDialect(driver)
+	placeholders := make([]string, len(names))
+	for i := range names {
+		placeholders[i] = d.placeholder(i + 1)
+	}
+	inClause := strings.Join(placeholders, ", ")
 	switch driver {
 	case DriverMySQL:
-		return `SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0)
+		return fmt.Sprintf(`SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0)
 FROM information_schema.TABLES
 WHERE TABLE_SCHEMA = DATABASE()
-  AND TABLE_NAME IN (?, ?, ?)`, stringsToAny(names), nil
+	  AND TABLE_NAME IN (%s)`, inClause), stringsToAny(names), nil
 	case DriverPostgreSQL:
 		for i := range names {
 			names[i] = strings.ToLower(names[i])
 		}
-		return `SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0)
+		return fmt.Sprintf(`SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0)
 FROM pg_catalog.pg_class AS c
 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
 WHERE n.nspname = current_schema()
-  AND c.relname IN ($1, $2, $3)`, stringsToAny(names), nil
+	  AND c.relname IN (%s)`, inClause), stringsToAny(names), nil
 	default:
 		return "", nil, fmt.Errorf("%w: storage-size query is unavailable for driver %q", ErrInvalidArgument, driver)
 	}
@@ -276,7 +282,11 @@ func managedReclaimQuery(driver Driver, t tables) (string, error) {
 }
 
 func managedTableNames(t tables) []string {
-	return []string{t.definitions, t.points, t.rollups}
+	names := []string{t.definitions, t.points, t.rollups}
+	if t.watermarks != "" {
+		names = append(names, t.watermarks)
+	}
+	return names
 }
 
 func quoteMaintenanceIdentifier(driver Driver, identifier string) string {

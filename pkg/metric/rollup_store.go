@@ -135,6 +135,9 @@ func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now ti
 	if err != nil {
 		return written, err
 	}
+	if err := s.persistCompactionWatermarkTx(ctx, metricName, policy.rawCutoff(now), tx); err != nil {
+		return written, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return written, err

@@ -42,6 +42,9 @@ type dialect interface {
 	//
 	// upsertRollupSQL 为单个 rollup 桶单元构造单行 upsert。
 	upsertRollupSQL(t tables) string
+	// upsertCompactionWatermarkSQL builds a single-row upsert for the metric's
+	// persisted compaction watermark.
+	upsertCompactionWatermarkSQL(t tables) string
 	// compactTxOptions returns the transaction options used for the compaction
 	// transaction. PostgreSQL/MySQL escalate to SERIALIZABLE so the raw scan and
 	// the raw deletion share one snapshot and a point inserted between them
@@ -71,6 +74,10 @@ type tables struct {
 	//
 	// rollups 是降采样 rollup 表。
 	rollups string
+	// watermarks stores the last successfully compacted raw boundary per metric.
+	//
+	// watermarks 保存每个指标最近一次成功压缩到的 raw 边界。
+	watermarks string
 }
 
 // newDialect returns the SQL dialect implementation for a backend.
@@ -144,6 +151,16 @@ func (sqliteDialect) upsertPointSQL(t tables, rowCount int) string {
 		created_at = excluded.created_at`)
 }
 
+// upsertCompactionWatermarkSQL builds the SQLite watermark upsert.
+func (sqliteDialect) upsertCompactionWatermarkSQL(t tables) string {
+	return fmt.Sprintf(`INSERT INTO %s
+		(metric_name, watermark_nano, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(metric_name) DO UPDATE SET
+			watermark_nano = excluded.watermark_nano,
+			updated_at = excluded.updated_at`, t.watermarks)
+}
+
 // mysqlDialect implements SQL rendering for MySQL.
 //
 // mysqlDialect 实现 MySQL 方言。
@@ -201,6 +218,16 @@ func (mysqlDialect) upsertPointSQL(t tables, rowCount int) string {
 		created_at = VALUES(created_at)`)
 }
 
+// upsertCompactionWatermarkSQL builds the MySQL watermark upsert.
+func (mysqlDialect) upsertCompactionWatermarkSQL(t tables) string {
+	return fmt.Sprintf(`INSERT INTO %s
+		(metric_name, watermark_nano, updated_at)
+		VALUES (?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			watermark_nano = VALUES(watermark_nano),
+			updated_at = VALUES(updated_at)`, t.watermarks)
+}
+
 // postgresDialect implements SQL rendering for PostgreSQL.
 //
 // postgresDialect 实现 PostgreSQL 方言。
@@ -256,6 +283,16 @@ func (postgresDialect) upsertPointSQL(t tables, rowCount int) string {
 		tags = EXCLUDED.tags,
 		labels = EXCLUDED.labels,
 		created_at = EXCLUDED.created_at`)
+}
+
+// upsertCompactionWatermarkSQL builds the PostgreSQL watermark upsert.
+func (postgresDialect) upsertCompactionWatermarkSQL(t tables) string {
+	return fmt.Sprintf(`INSERT INTO %s
+		(metric_name, watermark_nano, updated_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT(metric_name) DO UPDATE SET
+			watermark_nano = EXCLUDED.watermark_nano,
+			updated_at = EXCLUDED.updated_at`, t.watermarks)
 }
 
 // buildInsertPointsSQL builds a multi-row insert statement for metric points.

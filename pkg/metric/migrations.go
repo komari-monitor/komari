@@ -66,6 +66,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 		)`, s.tables.rollups, pk, jsonType, blob),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_rollups_lookup_idx ON %s (metric_name, entity_id, tags_hash, resolution_nano, bucket_nano)`, s.cfg.TablePrefix, s.tables.rollups),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_rollups_res_time_idx ON %s (metric_name, resolution_nano, bucket_nano)`, s.cfg.TablePrefix, s.tables.rollups),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+			metric_name VARCHAR(191) PRIMARY KEY,
+			watermark_nano BIGINT NOT NULL,
+			updated_at BIGINT NOT NULL
+		)`, s.tables.watermarks),
 	}
 
 	if s.cfg.Driver == DriverMySQL {
@@ -117,6 +122,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 				UNIQUE KEY uq_rollup (metric_name, entity_id, tags_hash, resolution_nano, bucket_nano),
 				INDEX idx_rollup_res_time (metric_name, resolution_nano, bucket_nano)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`, s.tables.rollups, pk, jsonType, blob),
+			fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+				metric_name VARCHAR(191) PRIMARY KEY,
+				watermark_nano BIGINT NOT NULL,
+				updated_at BIGINT NOT NULL
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`, s.tables.watermarks),
 		}
 	}
 
@@ -170,6 +180,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 			)`, s.tables.rollups, pk, jsonType, blob),
 			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_rollups_lookup_idx ON %s (metric_name, entity_id, tags_hash, resolution_nano, bucket_nano)`, s.cfg.TablePrefix, s.tables.rollups),
 			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_rollups_res_time_idx ON %s (metric_name, resolution_nano, bucket_nano)`, s.cfg.TablePrefix, s.tables.rollups),
+			fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+				metric_name VARCHAR(191) PRIMARY KEY,
+				watermark_nano BIGINT NOT NULL,
+				updated_at BIGINT NOT NULL
+			)`, s.tables.watermarks),
 		}
 	}
 

@@ -593,6 +593,10 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 	now = now.UTC()
 
 	rawCutoff := policy.rawCutoff(now)
+	watermark, hasWatermark, err := s.compactionWatermark(ctx, q.MetricName)
+	if err != nil {
+		return nil, err
+	}
 
 	// Whole window inside raw retention (or raw kept forever) -> raw.
 	if rawCutoff.IsZero() || !q.Start.Before(rawCutoff) {
@@ -606,7 +610,23 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 
 	servicingTier := bestRollupTier(policy, query.Interval, q.Start, now)
 	if q.Start.Before(rawCutoff) && !q.End.Before(rawCutoff) && servicingTier != nil {
-		return s.seriesHybrid(ctx, query, rawCutoff, servicingTier)
+		if hasWatermark {
+			boundary := rawCutoff
+			if watermark.Before(boundary) {
+				boundary = watermark
+			}
+			if !q.Start.Before(boundary) {
+				return s.Aggregate(ctx, query)
+			}
+			return s.seriesHybrid(ctx, query, boundary, servicingTier)
+		}
+
+		// Existing stores may have rollups but no watermark yet. Read all raw
+		// data from the requested start and use the dynamic cutoff only as the
+		// rollup scan's upper bound. Compaction's raw/rollup invariant makes
+		// these two ranges disjoint; the next successful compact persists the
+		// precise boundary for subsequent queries.
+		return s.seriesHybridWithRollupEnd(ctx, query, q.Start, rawCutoff, servicingTier)
 	}
 
 	if servicingTier == nil {
@@ -646,6 +666,10 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 // 包含 raw 截止点的 rollup 桶可能尚未完整；它只包含截止点之前已压缩的数据。读取
 // 该桶，再合入截止点及之后的 raw 点，可以在粗粒度层级上避免重叠和缺口。
 func (s *Store) seriesHybrid(ctx context.Context, query AggregateQuery, boundary time.Time, tier *RollupTier) ([]AggregatePoint, error) {
+	return s.seriesHybridWithRollupEnd(ctx, query, boundary, boundary, tier)
+}
+
+func (s *Store) seriesHybridWithRollupEnd(ctx context.Context, query AggregateQuery, boundary, rollupEnd time.Time, tier *RollupTier) ([]AggregatePoint, error) {
 	q := query.Query.normalized()
 	comp := s.cfg.RollupPolicy.compression()
 	resNano := tier.Interval.Nanoseconds()
@@ -657,7 +681,7 @@ func (s *Store) seriesHybrid(ctx context.Context, query AggregateQuery, boundary
 
 	// Old half: include the rollup bucket containing splitAt. That bucket only
 	// contains compacted points before splitAt; the raw half starts at splitAt.
-	upperBucket := floorDivNano(splitAt, resNano)
+	upperBucket := floorDivNano(rollupEnd.UTC().UnixNano(), resNano)
 	if upperBucket >= startNano {
 		rows, err := s.scanRollupRowsBetween(ctx, q.MetricName, q.EntityID, q.Tags, resNano, startNano, upperBucket)
 		if err != nil {

@@ -78,6 +78,7 @@ func TestMaintenanceMappings(t *testing.T) {
 		definitions: "Metric_definitions",
 		points:      "Metric_points",
 		rollups:     "Metric_rollups",
+		watermarks:  "Metric_compaction_watermarks",
 	}
 
 	tests := []struct {
@@ -100,18 +101,18 @@ func TestMaintenanceMappings(t *testing.T) {
 			name:       "mysql",
 			driver:     DriverMySQL,
 			action:     MaintenanceOptimize,
-			reclaim:    "OPTIMIZE TABLE `Metric_definitions`, `Metric_points`, `Metric_rollups`",
-			sizeParts:  []string{"information_schema.TABLES", "TABLE_SCHEMA = DATABASE()", "TABLE_NAME IN (?, ?, ?)"},
-			sizeArgs:   []any{"Metric_definitions", "Metric_points", "Metric_rollups"},
+			reclaim:    "OPTIMIZE TABLE `Metric_definitions`, `Metric_points`, `Metric_rollups`, `Metric_compaction_watermarks`",
+			sizeParts:  []string{"information_schema.TABLES", "TABLE_SCHEMA = DATABASE()", "TABLE_NAME IN (?, ?, ?, ?)"},
+			sizeArgs:   []any{"Metric_definitions", "Metric_points", "Metric_rollups", "Metric_compaction_watermarks"},
 			hasSizeSQL: true,
 		},
 		{
 			name:       "postgresql",
 			driver:     DriverPostgreSQL,
 			action:     MaintenanceVacuumFull,
-			reclaim:    `VACUUM (FULL, ANALYZE) "metric_definitions", "metric_points", "metric_rollups"`,
-			sizeParts:  []string{"pg_total_relation_size(c.oid)", "n.nspname = current_schema()", "c.relname IN ($1, $2, $3)"},
-			sizeArgs:   []any{"metric_definitions", "metric_points", "metric_rollups"},
+			reclaim:    `VACUUM (FULL, ANALYZE) "metric_definitions", "metric_points", "metric_rollups", "metric_compaction_watermarks"`,
+			sizeParts:  []string{"pg_total_relation_size(c.oid)", "n.nspname = current_schema()", "c.relname IN ($1, $2, $3, $4)"},
+			sizeArgs:   []any{"metric_definitions", "metric_points", "metric_rollups", "metric_compaction_watermarks"},
 			hasSizeSQL: true,
 		},
 	}
