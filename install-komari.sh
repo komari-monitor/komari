@@ -226,6 +226,9 @@ detect_arch() {
         riscv64)
             echo "riscv64"
             ;;
+        loongarch64|loong64)
+            echo "loong64"
+            ;;
         *)
             log_error "不支持的架构: $arch"
             exit 1
