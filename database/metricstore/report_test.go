@@ -118,6 +118,57 @@ func TestWriteReportStoresRawMetricsAndResetAwareTraffic(t *testing.T) {
 	assertMetricValues(t, s, MetricTrafficDown, report.UUID, now.Add(-time.Second), now.Add(time.Second), []float64{20})
 }
 
+func TestReportBatcherFlushesQueuedReports(t *testing.T) {
+	ctx := context.Background()
+	s := useReportTestStore(t, nil)
+	StartReportBatcher()
+	t.Cleanup(func() {
+		if err := StopReportBatcher(ctx); err != nil {
+			t.Errorf("stop report batcher: %v", err)
+		}
+	})
+
+	base := time.Now().UTC().Truncate(time.Second)
+	first := v1.Report{
+		UUID:      "batched-node",
+		UpdatedAt: base,
+		CPU:       v1.CPUReport{Usage: 10},
+		Network:   v1.NetworkReport{TotalUp: 100, TotalDown: 200},
+	}
+	second := first
+	second.UpdatedAt = base.Add(3 * time.Second)
+	second.CPU.Usage = 20
+	second.Network.TotalUp = 150
+	second.Network.TotalDown = 260
+
+	if _, err := WriteReport(ctx, first); err != nil {
+		t.Fatalf("queue first report: %v", err)
+	}
+	if _, err := WriteReport(ctx, second); err != nil {
+		t.Fatalf("queue second report: %v", err)
+	}
+	points, err := s.Query(ctx, metric.Query{
+		MetricName: MetricCPU,
+		EntityID:   first.UUID,
+		Start:      base.Add(-time.Second),
+		End:        base.Add(time.Minute),
+		Order:      metric.OrderAsc,
+	})
+	if err != nil {
+		t.Fatalf("query before flush: %v", err)
+	}
+	if len(points) != 0 {
+		t.Fatalf("queued reports were written before flush: %#v", points)
+	}
+
+	if err := FlushReportBatch(ctx); err != nil {
+		t.Fatalf("flush report batch: %v", err)
+	}
+	assertMetricValues(t, s, MetricCPU, first.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{10, 20})
+	assertMetricValues(t, s, MetricTrafficUp, first.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 50})
+	assertMetricValues(t, s, MetricTrafficDown, first.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 60})
+}
+
 func TestRecordReconstructionUsesMetricSpecificAggregation(t *testing.T) {
 	ctx := context.Background()
 	s := useReportTestStore(t, nil)

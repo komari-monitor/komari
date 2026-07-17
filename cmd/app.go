@@ -151,6 +151,10 @@ func (a *App) InitStores() error {
 
 		return fmt.Errorf("metrics startup migration failed: %w", err)
 	}
+	metricstore.StartReportBatcher()
+	a.addCleanup("metric-report-batcher", func(ctx context.Context) error {
+		return metricstore.StopReportBatcher(ctx)
+	})
 	return nil
 }
 

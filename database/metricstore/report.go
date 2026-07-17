@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"sync"
 	"time"
@@ -16,6 +17,10 @@ import (
 type reportTrafficState struct {
 	mu sync.Mutex
 
+	reportTrafficValues
+}
+
+type reportTrafficValues struct {
 	initialized bool
 	timestamp   time.Time
 	hasUp       bool
@@ -26,63 +31,301 @@ type reportTrafficState struct {
 
 var reportTrafficStates sync.Map
 
+const (
+	reportBatchInterval     = 3 * time.Second
+	reportBatchQueueSize    = 4096
+	reportBatchMaxReports   = 256 * 21
+	reportBatchWriteTimeout = 10 * time.Second
+)
+
+var (
+	reportBatcherMu sync.Mutex
+	reportBatcher   *reportBatchWorker
+)
+
+var (
+	ErrReportBatchQueueFull = errors.New("metric report batch queue is full")
+	ErrReportBatchStopped   = errors.New("metric report batcher is stopped")
+)
+
+type reportBatchRequest struct {
+	ctx  context.Context
+	done chan error
+	stop bool
+}
+
+type reportBatchWorker struct {
+	mu       sync.Mutex
+	queue    chan v1.Report
+	requests chan reportBatchRequest
+	done     chan struct{}
+	stopping bool
+}
+
+// StartReportBatcher starts the shared report writer. Reports are collected for
+// a short window so many agents can be persisted in one database transaction.
+func StartReportBatcher() {
+	reportBatcherMu.Lock()
+	defer reportBatcherMu.Unlock()
+	if reportBatcher != nil {
+		return
+	}
+	worker := &reportBatchWorker{
+		queue:    make(chan v1.Report, reportBatchQueueSize),
+		requests: make(chan reportBatchRequest, 1),
+		done:     make(chan struct{}),
+	}
+	reportBatcher = worker
+	go worker.run()
+}
+
+// StopReportBatcher stops the report writer after flushing all queued reports.
+func StopReportBatcher(ctx context.Context) error {
+	reportBatcherMu.Lock()
+	worker := reportBatcher
+	if worker == nil {
+		reportBatcherMu.Unlock()
+		return nil
+	}
+	worker.mu.Lock()
+	worker.stopping = true
+	worker.mu.Unlock()
+	reportBatcherMu.Unlock()
+
+	request := reportBatchRequest{ctx: ctx, done: make(chan error, 1), stop: true}
+	select {
+	case worker.requests <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-request.done:
+		<-worker.done
+		reportBatcherMu.Lock()
+		if reportBatcher == worker {
+			reportBatcher = nil
+		}
+		reportBatcherMu.Unlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// FlushReportBatch synchronously flushes the current queue. It is useful for
+// controlled handoff points and deterministic tests; normal operation relies
+// on the three-second ticker.
+func FlushReportBatch(ctx context.Context) error {
+	reportBatcherMu.Lock()
+	worker := reportBatcher
+	reportBatcherMu.Unlock()
+	if worker == nil {
+		return nil
+	}
+	request := reportBatchRequest{ctx: ctx, done: make(chan error, 1)}
+	worker.mu.Lock()
+	stopping := worker.stopping
+	worker.mu.Unlock()
+	if stopping {
+		return ErrReportBatchStopped
+	}
+	select {
+	case worker.requests <- request:
+	case <-worker.done:
+		return ErrReportBatchStopped
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-request.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // WriteReport persists one agent report as raw metric points sharing the same
 // server receive time. Traffic deltas are derived from the previous counters
 // and stored alongside the raw counters so they remain summable after rollup.
 func WriteReport(ctx context.Context, report v1.Report) (v1.Report, error) {
-	s := GetStore()
-	if s == nil {
-		return v1.Report{}, fmt.Errorf("metric store not enabled")
-	}
 	if report.UUID == "" {
 		return v1.Report{}, fmt.Errorf("report UUID is required")
 	}
 	if report.UpdatedAt.IsZero() {
 		return v1.Report{}, fmt.Errorf("report receive time is required")
 	}
-
-	stateValue, _ := reportTrafficStates.LoadOrStore(report.UUID, &reportTrafficState{})
-	state := stateValue.(*reportTrafficState)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	report.UpdatedAt = report.UpdatedAt.UTC()
-	if !state.timestamp.IsZero() && !report.UpdatedAt.After(state.timestamp) {
-		report.UpdatedAt = state.timestamp.Add(time.Nanosecond)
+	if GetStore() == nil {
+		return v1.Report{}, fmt.Errorf("metric store not enabled")
 	}
-	if !state.initialized {
-		var err error
-		state.totalUp, state.hasUp, err = latestReportCounter(ctx, s, MetricNetTotalUp, report.UUID, report.UpdatedAt)
-		if err != nil {
-			return v1.Report{}, fmt.Errorf("load previous upload counter: %w", err)
+
+	reportBatcherMu.Lock()
+	worker := reportBatcher
+	reportBatcherMu.Unlock()
+	if worker != nil {
+		if err := worker.enqueue(ctx, report); err != nil {
+			return v1.Report{}, err
 		}
-		state.totalDown, state.hasDown, err = latestReportCounter(ctx, s, MetricNetTotalDown, report.UUID, report.UpdatedAt)
-		if err != nil {
-			return v1.Report{}, fmt.Errorf("load previous download counter: %w", err)
-		}
-		state.initialized = true
+		return report, nil
 	}
 
-	trafficUp := int64(0)
-	if state.hasUp {
-		trafficUp = TrafficCounterDelta(report.Network.TotalUp, state.totalUp)
-	}
-	trafficDown := int64(0)
-	if state.hasDown {
-		trafficDown = TrafficCounterDelta(report.Network.TotalDown, state.totalDown)
-	}
-
-	points := reportMetricPoints(report, trafficUp, trafficDown)
-	if err := s.WriteBatch(ctx, points); err != nil {
+	saved, err := writeReportBatch(ctx, []v1.Report{report})
+	if err != nil {
 		return v1.Report{}, err
 	}
+	return saved[0], nil
+}
 
-	state.timestamp = report.UpdatedAt
-	state.hasUp = true
-	state.totalUp = report.Network.TotalUp
-	state.hasDown = true
-	state.totalDown = report.Network.TotalDown
-	return report, nil
+func (w *reportBatchWorker) enqueue(ctx context.Context, report v1.Report) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopping {
+		return ErrReportBatchStopped
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case w.queue <- report:
+		return nil
+	default:
+		return ErrReportBatchQueueFull
+	}
+}
+
+func (w *reportBatchWorker) run() {
+	ticker := time.NewTicker(reportBatchInterval)
+	defer ticker.Stop()
+
+	var pending []v1.Report
+	for {
+		select {
+		case report := <-w.queue:
+			pending = append(pending, report)
+		case request := <-w.requests:
+			pending = append(pending, drainReportQueue(w.queue, reportBatchMaxReports-len(pending))...)
+			err := writePendingReports(request.ctx, &pending)
+			if request.stop {
+				if err != nil {
+					log.Printf("failed to flush metric report batch during shutdown: %v", err)
+				}
+				close(w.done)
+				request.done <- err
+				return
+			}
+			request.done <- err
+		case <-ticker.C:
+			pending = append(pending, drainReportQueue(w.queue, reportBatchMaxReports-len(pending))...)
+			if err := writePendingReports(context.Background(), &pending); err != nil {
+				log.Printf("failed to flush metric report batch: %v", err)
+			}
+		}
+	}
+}
+
+func drainReportQueue(queue <-chan v1.Report, limit int) []v1.Report {
+	if limit <= 0 {
+		return nil
+	}
+	reports := make([]v1.Report, 0, limit)
+	for len(reports) < limit {
+		select {
+		case report := <-queue:
+			reports = append(reports, report)
+		default:
+			return reports
+		}
+	}
+	return reports
+}
+
+func writePendingReports(ctx context.Context, pending *[]v1.Report) error {
+	if len(*pending) == 0 {
+		return nil
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, reportBatchWriteTimeout)
+	defer cancel()
+	if err := func() error {
+		reports := *pending
+		_, err := writeReportBatch(writeCtx, reports)
+		return err
+	}(); err != nil {
+		return err
+	}
+	*pending = (*pending)[:0]
+	return nil
+}
+
+func writeReportBatch(ctx context.Context, reports []v1.Report) ([]v1.Report, error) {
+	if len(reports) == 0 {
+		return nil, nil
+	}
+	if err := storeOperations.Acquire(ctx); err != nil {
+		return nil, fmt.Errorf("wait for metric store operation before writing reports: %w", err)
+	}
+	defer storeOperations.Release()
+
+	s := GetStore()
+	if s == nil {
+		return nil, fmt.Errorf("metric store not enabled")
+	}
+
+	prepared := make([]v1.Report, len(reports))
+	copy(prepared, reports)
+	points := make([]metric.Point, 0, len(reports)*20)
+	pendingStates := make(map[*reportTrafficState]reportTrafficValues)
+	for i, report := range prepared {
+		stateValue, _ := reportTrafficStates.LoadOrStore(report.UUID, &reportTrafficState{})
+		state := stateValue.(*reportTrafficState)
+		values, ok := pendingStates[state]
+		if !ok {
+			state.mu.Lock()
+			values = state.reportTrafficValues
+			state.mu.Unlock()
+		}
+		if !values.initialized {
+			var err error
+			values.totalUp, values.hasUp, err = latestReportCounter(ctx, s, MetricNetTotalUp, report.UUID, report.UpdatedAt)
+			if err != nil {
+				return nil, fmt.Errorf("load previous upload counter: %w", err)
+			}
+			values.totalDown, values.hasDown, err = latestReportCounter(ctx, s, MetricNetTotalDown, report.UUID, report.UpdatedAt)
+			if err != nil {
+				return nil, fmt.Errorf("load previous download counter: %w", err)
+			}
+			values.initialized = true
+		}
+
+		report.UpdatedAt = report.UpdatedAt.UTC()
+		if !values.timestamp.IsZero() && !report.UpdatedAt.After(values.timestamp) {
+			report.UpdatedAt = values.timestamp.Add(time.Nanosecond)
+		}
+		trafficUp := int64(0)
+		if values.hasUp {
+			trafficUp = TrafficCounterDelta(report.Network.TotalUp, values.totalUp)
+		}
+		trafficDown := int64(0)
+		if values.hasDown {
+			trafficDown = TrafficCounterDelta(report.Network.TotalDown, values.totalDown)
+		}
+		points = append(points, reportMetricPoints(report, trafficUp, trafficDown)...)
+		values.timestamp = report.UpdatedAt
+		values.hasUp = true
+		values.totalUp = report.Network.TotalUp
+		values.hasDown = true
+		values.totalDown = report.Network.TotalDown
+		pendingStates[state] = values
+		prepared[i] = report
+	}
+
+	if err := s.WriteBatch(ctx, points); err != nil {
+		return nil, err
+	}
+	for state, values := range pendingStates {
+		state.mu.Lock()
+		state.reportTrafficValues = values
+		state.mu.Unlock()
+	}
+	return prepared, nil
 }
 
 func reportMetricPoints(report v1.Report, trafficUp, trafficDown int64) []metric.Point {
