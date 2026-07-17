@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/komari-monitor/komari/cmd/flags"
@@ -61,6 +62,8 @@ func init() {
 	// the result now describes both databases and their driver-specific actions.
 	reg("getDatabaseSize", adminGetDatabaseSize, "Get main and monitoring database storage usage")
 	reg("vacuumDatabase", adminVacuumDatabase, "Reclaim space in the main and monitoring databases")
+	reg("getDatabaseCompression", adminGetDatabaseCompression, "Get remote monitoring database compression capabilities")
+	reg("setDatabaseCompression", adminSetDatabaseCompression, "Configure remote monitoring database compression")
 }
 
 func adminGetDatabaseSize(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -100,6 +103,38 @@ func adminVacuumDatabase(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.
 	auditlog.Log(ip, actor, message, level)
 
 	return response, nil
+}
+
+func adminGetDatabaseCompression(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	status, err := metricstore.InspectCompression(ctx)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "failed to inspect database compression: "+err.Error(), nil)
+	}
+	return status, nil
+}
+
+func adminSetDatabaseCompression(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var cfg metric.CompressionConfig
+	if err := req.BindParams(&cfg); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "invalid database compression settings: "+err.Error(), nil)
+	}
+	if !databaseMaintenanceMu.TryLock() {
+		return nil, rpc.MakeError(rpc.InternalError, "database maintenance is already in progress", nil)
+	}
+	defer databaseMaintenanceMu.Unlock()
+
+	status, err := metricstore.ConfigureCompression(ctx, cfg)
+	if err != nil {
+		code := rpc.InternalError
+		if errors.Is(err, metric.ErrInvalidArgument) {
+			code = rpc.InvalidParams
+		}
+		return nil, rpc.MakeError(code, "failed to configure database compression: "+err.Error(), nil)
+	}
+
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, "updated monitoring database compression settings", "warn")
+	return status, nil
 }
 
 func newDatabaseMaintenanceResponse(main, monitoring databaseMaintenanceResult) databaseMaintenanceResponse {
