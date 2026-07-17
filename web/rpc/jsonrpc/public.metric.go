@@ -84,7 +84,6 @@ type publicMetricPoint struct {
 	Time   string            `json:"time"`
 	Value  *float64          `json:"value"`
 	Count  int               `json:"count,omitempty"`
-	Tag    map[string]string `json:"tag,omitempty"`
 	Tags   map[string]string `json:"tags,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -95,7 +94,6 @@ type publicMetricSeries struct {
 	Type                string              `json:"type,omitempty"`
 	Unit                string              `json:"unit,omitempty"`
 	RetentionDays       int                 `json:"retention_days,omitempty"`
-	Tag                 map[string]string   `json:"tag,omitempty"`
 	Tags                map[string]string   `json:"tags,omitempty"`
 	Downsampled         bool                `json:"downsampled"`
 	DownsampleAlgorithm string              `json:"downsample_algorithm,omitempty"`
@@ -258,7 +256,6 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				Unit:          def.Unit,
 				RetentionDays: def.RetentionDays,
 				Tags:          params.Tags,
-				Tag:           params.Tags,
 				Downsampled:   metricDownsample,
 				FillEmpty:     metricFillEmpty,
 				MaxPoints:     maxPoints,
@@ -285,7 +282,6 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 						Time:  point.Bucket.Format(time.RFC3339Nano),
 						Value: publicRawMetricValue(point.MetricName, point.Value, metricFillEmpty),
 						Count: point.Count,
-						Tag:   point.Tags,
 						Tags:  point.Tags,
 					})
 				}
@@ -299,7 +295,6 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 					item.Points = append(item.Points, publicMetricPoint{
 						Time:   point.Timestamp.Format(time.RFC3339Nano),
 						Value:  publicRawMetricValue(metricKey, point.Value, metricFillEmpty),
-						Tag:    point.Tags,
 						Tags:   point.Tags,
 						Labels: point.Labels,
 					})
@@ -427,10 +422,6 @@ func splitPublicMetricSeries(base publicMetricSeries) []publicMetricSeries {
 	for _, point := range base.Points {
 		entityID := base.EntityID
 		tags := point.Tags
-		if len(tags) == 0 {
-			tags = point.Tag
-		}
-		point.Tag = tags
 		point.Tags = tags
 		tagsKey := publicMetricTagsKey(tags)
 		key := entityID + "\x00" + tagsKey
@@ -461,7 +452,6 @@ func splitPublicMetricSeries(base publicMetricSeries) []publicMetricSeries {
 		group := groups[key]
 		item := base
 		item.EntityID = group.entityID
-		item.Tag = group.tags
 		item.Tags = group.tags
 		item.Points = group.points
 		item.Count = len(group.points)
@@ -510,7 +500,6 @@ func adaptiveFillPublicMetricSeries(series publicMetricSeries, start, end time.T
 		return publicMetricPoint{
 			Time:  at.UTC().Format(time.RFC3339Nano),
 			Value: nil,
-			Tag:   series.Tag,
 			Tags:  series.Tags,
 		}
 	}
