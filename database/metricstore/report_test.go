@@ -118,6 +118,40 @@ func TestWriteReportStoresRawMetricsAndResetAwareTraffic(t *testing.T) {
 	assertMetricValues(t, s, MetricTrafficDown, report.UUID, now.Add(-time.Second), now.Add(time.Second), []float64{20})
 }
 
+func TestLatestReportCounterUsesLatestRawPointBeforeBoundary(t *testing.T) {
+	ctx := context.Background()
+	s := useReportTestStore(t, nil)
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	const pointCount = 4096
+	points := make([]metric.Point, 0, pointCount*2)
+	for i := range pointCount {
+		timestamp := base.Add(time.Duration(i) * time.Second)
+		points = append(points,
+			metric.Point{MetricName: MetricNetTotalUp, EntityID: "historic-node", Timestamp: timestamp, Value: float64(i)},
+			metric.Point{MetricName: MetricNetTotalDown, EntityID: "historic-node", Timestamp: timestamp, Value: float64(i * 2)},
+		)
+	}
+	if err := s.WriteBatch(ctx, points); err != nil {
+		t.Fatalf("write historical counter points: %v", err)
+	}
+
+	before := base.Add(2048 * time.Second)
+	up, hasUp, err := latestReportCounter(ctx, s, MetricNetTotalUp, "historic-node", before)
+	if err != nil {
+		t.Fatalf("load latest upload counter: %v", err)
+	}
+	if !hasUp || up != 2047 {
+		t.Fatalf("upload counter = (%d, %t), want (2047, true)", up, hasUp)
+	}
+	down, hasDown, err := latestReportCounter(ctx, s, MetricNetTotalDown, "historic-node", before)
+	if err != nil {
+		t.Fatalf("load latest download counter: %v", err)
+	}
+	if !hasDown || down != 4094 {
+		t.Fatalf("download counter = (%d, %t), want (4094, true)", down, hasDown)
+	}
+}
+
 func TestReportBatcherFlushesQueuedReports(t *testing.T) {
 	ctx := context.Background()
 	s := useReportTestStore(t, nil)

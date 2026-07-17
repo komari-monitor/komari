@@ -388,8 +388,28 @@ func latestReportCounter(ctx context.Context, s *metric.Store, metricName, entit
 
 	end := before.UTC().Add(-time.Nanosecond)
 	start := end.Add(-time.Duration(def.RetentionDays) * 24 * time.Hour)
+	// Query one point directly so the (metric_name, entity_id, ts_nano) index
+	// can satisfy both the filter and descending time order. Series with AggLast
+	// materializes the full retained range before selecting its final value.
+	points, err := s.Query(ctx, metric.Query{
+		MetricName: metricName,
+		EntityID:   entityID,
+		Start:      start,
+		End:        end,
+		Limit:      1,
+		Order:      metric.OrderDesc,
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	if len(points) > 0 {
+		return int64(points[0].Value), true, nil
+	}
+
+	// Compaction may have moved all retained raw points into rollups. In that
+	// case, fall back to Series so restoring a report baseline remains correct.
 	interval := s.CompatibleSeriesInterval(start, before, 24*time.Hour)
-	points, err := s.Series(ctx, metric.AggregateQuery{
+	series, err := s.Series(ctx, metric.AggregateQuery{
 		Query: metric.Query{
 			MetricName: metricName,
 			EntityID:   entityID,
@@ -404,10 +424,10 @@ func latestReportCounter(ctx context.Context, s *metric.Store, metricName, entit
 	if err != nil {
 		return 0, false, err
 	}
-	if len(points) == 0 {
+	if len(series) == 0 {
 		return 0, false, nil
 	}
-	return int64(points[len(points)-1].Value), true, nil
+	return int64(series[len(series)-1].Value), true, nil
 }
 
 // GetLatestTrafficBefore returns the latest retained upload/download counters
