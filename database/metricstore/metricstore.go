@@ -282,6 +282,10 @@ func stripSharedCache(dsn string) string {
 
 // openStore 按配置打开 metric store 并创建指标定义。
 func openStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, error) {
+	return openStoreWithDefaultRetention(ctx, cfg, defaultBuiltinMetricRetentionDays)
+}
+
+func openStoreWithDefaultRetention(ctx context.Context, cfg *MetricStoreConfig, defaultRetentionDays int) (*metric.Store, error) {
 	metricCfg, err := buildMetricConfig(cfg, true)
 	if err != nil {
 		return nil, err
@@ -292,12 +296,29 @@ func openStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, erro
 		return nil, fmt.Errorf("failed to open metric store: %w", err)
 	}
 
-	if err := createMetricDefinitions(ctx, s); err != nil {
+	if err := createMetricDefinitionsWithDefaultRetention(ctx, s, defaultRetentionDays); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("failed to create metric definitions: %w", err)
 	}
 
 	return s, nil
+}
+
+// OpenStore opens an isolated metric store using the supplied configuration.
+// It is used by the pre-start upgrade flow before the process-wide store is
+// initialized. The caller owns the returned store and must close it.
+func OpenStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, error) {
+	return openStore(ctx, cfg)
+}
+
+// OpenStoreForMigration opens an isolated target and uses the legacy data span
+// as the initial retention for definitions that do not exist yet. Existing
+// definitions keep their configured retention, including an explicit zero.
+func OpenStoreForMigration(ctx context.Context, cfg *MetricStoreConfig, legacyRetentionDays int) (*metric.Store, error) {
+	if legacyRetentionDays < defaultBuiltinMetricRetentionDays {
+		legacyRetentionDays = defaultBuiltinMetricRetentionDays
+	}
+	return openStoreWithDefaultRetention(ctx, cfg, legacyRetentionDays)
 }
 
 // TestConnection 使用给定配置尝试连接 metrics 数据库（不影响当前运行的 store）。
@@ -528,32 +549,39 @@ var pingQueryIntervals = []time.Duration{
 
 // createMetricDefinitions creates built-in definitions with explicit policies.
 func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
+	return createMetricDefinitionsWithDefaultRetention(ctx, s, defaultBuiltinMetricRetentionDays)
+}
+
+func createMetricDefinitionsWithDefaultRetention(ctx context.Context, s *metric.Store, defaultRetentionDays int) error {
+	if defaultRetentionDays < defaultBuiltinMetricRetentionDays {
+		defaultRetentionDays = defaultBuiltinMetricRetentionDays
+	}
 	definitions := []metric.Definition{
-		{Name: MetricCPU, Type: metric.TypeGauge, Unit: "%", Description: "CPU usage percentage", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricGPU, Type: metric.TypeGauge, Unit: "%", Description: "GPU usage percentage", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricGPUDeviceUsage, Type: metric.TypeGauge, Unit: "%", Description: "Per-device GPU utilization", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricGPUMem, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory used", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricGPUMemTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory total", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricGPUTemp, Type: metric.TypeGauge, Unit: "°C", Description: "GPU temperature", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricRAM, Type: metric.TypeGauge, Unit: "bytes", Description: "RAM used", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricRAMTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "RAM total", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricSwap, Type: metric.TypeGauge, Unit: "bytes", Description: "Swap used", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricSwapTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "Swap total", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricLoad, Type: metric.TypeGauge, Unit: "", Description: "System load average", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricTemp, Type: metric.TypeGauge, Unit: "°C", Description: "System temperature", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricDisk, Type: metric.TypeGauge, Unit: "bytes", Description: "Disk used", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricDiskTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "Disk total", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricNetIn, Type: metric.TypeGauge, Unit: "bytes/s", Description: "Network in rate", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricNetOut, Type: metric.TypeGauge, Unit: "bytes/s", Description: "Network out rate", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricNetTotalUp, Type: metric.TypeCounter, Unit: "bytes", Description: "Network total upload", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricNetTotalDown, Type: metric.TypeCounter, Unit: "bytes", Description: "Network total download", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricTrafficUp, Type: metric.TypeGauge, Unit: "bytes", Description: "Traffic upload delta", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricTrafficDown, Type: metric.TypeGauge, Unit: "bytes", Description: "Traffic download delta", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricProcess, Type: metric.TypeGauge, Unit: "count", Description: "Process count", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricConnections, Type: metric.TypeGauge, Unit: "count", Description: "TCP connections", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricConnectionsUDP, Type: metric.TypeGauge, Unit: "count", Description: "UDP connections", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricPingLatency, Type: metric.TypeGauge, Unit: "ms", Description: "Ping latency", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricPingLoss, Type: metric.TypeGauge, Unit: "ratio", Description: "Ping packet loss indicator", RetentionDays: defaultBuiltinMetricRetentionDays},
+		{Name: MetricCPU, Type: metric.TypeGauge, Unit: "%", Description: "CPU usage percentage", RetentionDays: defaultRetentionDays},
+		{Name: MetricGPU, Type: metric.TypeGauge, Unit: "%", Description: "GPU usage percentage", RetentionDays: defaultRetentionDays},
+		{Name: MetricGPUDeviceUsage, Type: metric.TypeGauge, Unit: "%", Description: "Per-device GPU utilization", RetentionDays: defaultRetentionDays},
+		{Name: MetricGPUMem, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory used", RetentionDays: defaultRetentionDays},
+		{Name: MetricGPUMemTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory total", RetentionDays: defaultRetentionDays},
+		{Name: MetricGPUTemp, Type: metric.TypeGauge, Unit: "°C", Description: "GPU temperature", RetentionDays: defaultRetentionDays},
+		{Name: MetricRAM, Type: metric.TypeGauge, Unit: "bytes", Description: "RAM used", RetentionDays: defaultRetentionDays},
+		{Name: MetricRAMTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "RAM total", RetentionDays: defaultRetentionDays},
+		{Name: MetricSwap, Type: metric.TypeGauge, Unit: "bytes", Description: "Swap used", RetentionDays: defaultRetentionDays},
+		{Name: MetricSwapTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "Swap total", RetentionDays: defaultRetentionDays},
+		{Name: MetricLoad, Type: metric.TypeGauge, Unit: "", Description: "System load average", RetentionDays: defaultRetentionDays},
+		{Name: MetricTemp, Type: metric.TypeGauge, Unit: "°C", Description: "System temperature", RetentionDays: defaultRetentionDays},
+		{Name: MetricDisk, Type: metric.TypeGauge, Unit: "bytes", Description: "Disk used", RetentionDays: defaultRetentionDays},
+		{Name: MetricDiskTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "Disk total", RetentionDays: defaultRetentionDays},
+		{Name: MetricNetIn, Type: metric.TypeGauge, Unit: "bytes/s", Description: "Network in rate", RetentionDays: defaultRetentionDays},
+		{Name: MetricNetOut, Type: metric.TypeGauge, Unit: "bytes/s", Description: "Network out rate", RetentionDays: defaultRetentionDays},
+		{Name: MetricNetTotalUp, Type: metric.TypeCounter, Unit: "bytes", Description: "Network total upload", RetentionDays: defaultRetentionDays},
+		{Name: MetricNetTotalDown, Type: metric.TypeCounter, Unit: "bytes", Description: "Network total download", RetentionDays: defaultRetentionDays},
+		{Name: MetricTrafficUp, Type: metric.TypeGauge, Unit: "bytes", Description: "Traffic upload delta", RetentionDays: defaultRetentionDays},
+		{Name: MetricTrafficDown, Type: metric.TypeGauge, Unit: "bytes", Description: "Traffic download delta", RetentionDays: defaultRetentionDays},
+		{Name: MetricProcess, Type: metric.TypeGauge, Unit: "count", Description: "Process count", RetentionDays: defaultRetentionDays},
+		{Name: MetricConnections, Type: metric.TypeGauge, Unit: "count", Description: "TCP connections", RetentionDays: defaultRetentionDays},
+		{Name: MetricConnectionsUDP, Type: metric.TypeGauge, Unit: "count", Description: "UDP connections", RetentionDays: defaultRetentionDays},
+		{Name: MetricPingLatency, Type: metric.TypeGauge, Unit: "ms", Description: "Ping latency", RetentionDays: defaultRetentionDays},
+		{Name: MetricPingLoss, Type: metric.TypeGauge, Unit: "ratio", Description: "Ping packet loss indicator", RetentionDays: defaultRetentionDays},
 	}
 
 	for _, def := range definitions {

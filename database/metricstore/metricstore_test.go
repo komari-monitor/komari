@@ -194,6 +194,47 @@ func TestCreateMetricDefinitionsUsesExplicitRetentionAndPreservesOverrides(t *te
 	}
 }
 
+func TestCreateMetricDefinitionsUsesLegacySpanOnlyForNewDefinitions(t *testing.T) {
+	ctx := context.Background()
+	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1)))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	defer s.Close()
+
+	if err := createMetricDefinitionsWithDefaultRetention(ctx, s, 10); err != nil {
+		t.Fatalf("create migration definitions: %v", err)
+	}
+	defs, err := s.ListMetrics(ctx)
+	if err != nil {
+		t.Fatalf("list migration definitions: %v", err)
+	}
+	for _, def := range defs {
+		if def.RetentionDays != 10 {
+			t.Fatalf("%s retention = %d, want legacy span 10", def.Name, def.RetentionDays)
+		}
+	}
+
+	cpu, err := s.GetMetric(ctx, MetricCPU)
+	if err != nil {
+		t.Fatalf("get CPU definition: %v", err)
+	}
+	cpu.RetentionDays = 3
+	if err := s.UpsertMetric(ctx, cpu); err != nil {
+		t.Fatalf("override CPU retention: %v", err)
+	}
+	if err := createMetricDefinitionsWithDefaultRetention(ctx, s, 20); err != nil {
+		t.Fatalf("refresh migration definitions: %v", err)
+	}
+	cpu, err = s.GetMetric(ctx, MetricCPU)
+	if err != nil {
+		t.Fatalf("reload CPU definition: %v", err)
+	}
+	if cpu.RetentionDays != 3 {
+		t.Fatalf("existing CPU retention = %d, want preserved 3", cpu.RetentionDays)
+	}
+}
+
 func TestGetRetentionSummaryUsesAllMetricDefinitions(t *testing.T) {
 	ctx := context.Background()
 	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1)))
