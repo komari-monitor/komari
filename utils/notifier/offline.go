@@ -71,7 +71,7 @@ func OfflineNotification(clientID string, endedConnectionID int64) {
 		gracePeriod = 5 * time.Minute // 默认宽限期
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	state := getOrInitState(clientID)
 
 	state.mu.Lock()
@@ -111,7 +111,7 @@ func OfflineNotification(clientID string, endedConnectionID int64) {
 			if err := messageSender.SendEvent(models.EventMessage{
 				Event:   messageevent.Offline,
 				Clients: []models.Client{client},
-				Time:    time.Now(),
+				Time:    time.Now().UTC(),
 				//Message: msg,
 				Emoji: "🔴",
 			}); err != nil {
@@ -121,7 +121,7 @@ func OfflineNotification(clientID string, endedConnectionID int64) {
 
 		// 更新数据库中的最后通知时间
 		db := dbcore.GetDBInstance()
-		if err := db.Model(&models.OfflineNotification{}).Where("client = ?", clientID).Update("last_notified", now).Error; err != nil {
+		if err := db.Model(&models.OfflineNotification{}).Where("client = ?", clientID).Update("last_notified", now.UTC()).Error; err != nil {
 			log.Printf("Failed to update last_notified for client %s: %v", clientID, err)
 		}
 	}(now, endedConnectionID)
@@ -180,7 +180,7 @@ func OnlineNotification(clientID string, connectionID int64) {
 		if err := messageSender.SendEvent(models.EventMessage{
 			Event:   messageevent.Online,
 			Clients: []models.Client{client},
-			Time:    time.Now(),
+			Time:    time.Now().UTC(),
 			//Message: msg,
 			Emoji: "🟢",
 		}); err != nil {

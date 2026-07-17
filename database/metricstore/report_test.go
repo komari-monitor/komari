@@ -221,6 +221,39 @@ func TestTrafficCounterDelta(t *testing.T) {
 	}
 }
 
+func TestWriteReportNormalizesReceiveTimeToUTC(t *testing.T) {
+	ctx := context.Background()
+	s := useReportTestStore(t, nil)
+	local := time.FixedZone("UTC+8", 8*60*60)
+	receiveTime := time.Date(2026, 7, 17, 9, 30, 0, 123456789, local)
+	report := v1.Report{
+		UUID:      "utc-report",
+		UpdatedAt: receiveTime,
+		CPU:       v1.CPUReport{Usage: 10},
+		Network:   v1.NetworkReport{TotalUp: 1, TotalDown: 2},
+	}
+
+	saved, err := WriteReport(ctx, report)
+	if err != nil {
+		t.Fatalf("write report: %v", err)
+	}
+	if !saved.UpdatedAt.Equal(receiveTime) || saved.UpdatedAt.Location() != time.UTC {
+		t.Fatalf("saved receive time = %s (%s), want UTC", saved.UpdatedAt, saved.UpdatedAt.Location())
+	}
+	points, err := s.Query(ctx, metric.Query{
+		MetricName: MetricCPU,
+		EntityID:   report.UUID,
+		Start:      receiveTime.Add(-time.Nanosecond),
+		End:        receiveTime.Add(time.Nanosecond),
+	})
+	if err != nil {
+		t.Fatalf("query stored point: %v", err)
+	}
+	if len(points) != 1 || points[0].Timestamp.Location() != time.UTC || points[0].Timestamp.Nanosecond() != 123456789 {
+		t.Fatalf("stored points = %#v, want one UTC nanosecond point", points)
+	}
+}
+
 func assertMetricValues(t *testing.T, s *metric.Store, metricName, entityID string, start, end time.Time, want []float64) {
 	t.Helper()
 	points, err := s.Query(context.Background(), metric.Query{

@@ -143,6 +143,8 @@ func RecordReport(report v1.Report) {
 	}
 	if report.UpdatedAt.IsZero() {
 		report.UpdatedAt = time.Now().UTC()
+	} else {
+		report.UpdatedAt = report.UpdatedAt.UTC()
 	}
 	mu.Lock()
 	defer mu.Unlock()

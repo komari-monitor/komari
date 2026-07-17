@@ -53,7 +53,7 @@ type Controller struct {
 }
 
 type cleanupRequest struct {
-	Before string `json:"before"`
+	Before time.Time `json:"before"`
 }
 
 type startRequest struct {
@@ -138,12 +138,12 @@ func (c *Controller) cleanup(ctx *gin.Context) {
 		api.RespondError(ctx, http.StatusBadRequest, err.Error())
 		return
 	}
-	cutoff, err := time.Parse(time.RFC3339, request.Before)
-	if err != nil {
-		api.RespondError(ctx, http.StatusBadRequest, "before must be an RFC3339 timestamp")
+	if request.Before.IsZero() {
+		api.RespondError(ctx, http.StatusBadRequest, "before is required and must be an RFC3339 timestamp with a timezone")
 		return
 	}
-	if cutoff.After(time.Now()) {
+	cutoff := request.Before.UTC()
+	if cutoff.After(time.Now().UTC()) {
 		api.RespondError(ctx, http.StatusBadRequest, "cleanup cutoff cannot be in the future")
 		return
 	}

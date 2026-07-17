@@ -245,17 +245,18 @@ func processMessage(conn *connection.SafeConn, message []byte, uuid string) {
 		}
 	case "ping_result":
 		var reqBody struct {
-			PingTaskID uint      `json:"task_id"`
-			PingResult int       `json:"value"`
-			PingType   string    `json:"ping_type"`
-			FinishedAt time.Time `json:"finished_at"`
+			PingTaskID uint   `json:"task_id"`
+			PingResult int    `json:"value"`
+			PingType   string `json:"ping_type"`
 		}
 		err = json.Unmarshal(message, &reqBody)
 		if err != nil {
 			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid ping result format"})
 			return
 		}
-		ingestPingResult(uuid, reqBody.PingTaskID, reqBody.PingResult, reqBody.FinishedAt)
+		if err := ingestPingResult(uuid, reqBody.PingTaskID, reqBody.PingResult); err != nil {
+			conn.WriteJSON(gin.H{"status": "error", "error": "Failed to save ping result"})
+		}
 	default:
 		log.Printf("Unknown message type: %s", msgType.Type)
 		conn.WriteJSON(gin.H{"status": "error", "error": "Unknown message type"})

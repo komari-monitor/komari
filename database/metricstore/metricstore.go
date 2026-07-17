@@ -564,7 +564,7 @@ func WritePingRecord(ctx context.Context, rec models.PingRecord) error {
 		return fmt.Errorf("metric store not enabled")
 	}
 
-	ts := rec.Time.ToTime()
+	ts := rec.Time
 	entityID := rec.Client
 	tags := map[string]string{
 		"task_id": fmt.Sprintf("%d", rec.TaskId),
@@ -611,7 +611,7 @@ func GetRecordsByTime(ctx context.Context, start, end time.Time) ([]models.Recor
 		return nil, fmt.Errorf("metric store not enabled")
 	}
 
-	interval := recordSeriesInterval(s, start, end, time.Now())
+	interval := recordSeriesInterval(s, start, end, time.Now().UTC())
 	entityIDs, err := listRecordEntityIDs(ctx, s, start, end, interval)
 	if err != nil {
 		return nil, err
@@ -634,7 +634,7 @@ type recordSeriesKey struct {
 }
 
 func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, clientUUID string, start, end time.Time) ([]models.Record, error) {
-	now := time.Now()
+	now := time.Now().UTC()
 	interval := recordSeriesInterval(s, start, end, now)
 	recordMap := make(map[recordSeriesKey]*models.Record)
 
@@ -662,7 +662,7 @@ func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, c
 			if recordMap[key] == nil {
 				recordMap[key] = &models.Record{
 					Client: entityID,
-					Time:   models.FromTime(point.Bucket),
+					Time:   point.Bucket.UTC(),
 				}
 			}
 			applyRecordMetricValue(recordMap[key], metricName, point.Value)
@@ -779,7 +779,7 @@ func sortRecords(records []models.Record) {
 		if records[i].Client != records[j].Client {
 			return records[i].Client < records[j].Client
 		}
-		return records[i].Time.ToTime().Before(records[j].Time.ToTime())
+		return records[i].Time.Before(records[j].Time)
 	})
 }
 
@@ -826,7 +826,7 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 			if recordMap[key] == nil {
 				recordMap[key] = &models.GPURecord{
 					Client:      clientUUID,
-					Time:        models.FromTime(p.Timestamp),
+					Time:        p.Timestamp.UTC(),
 					DeviceIndex: deviceIndex,
 					DeviceName:  deviceName,
 				}
@@ -882,13 +882,13 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 	}
 
 	interval := pingQueryInterval(end.Sub(start), 4000)
-	interval = s.CompatibleSeriesInterval(start, time.Now(), interval)
+	interval = s.CompatibleSeriesInterval(start, time.Now().UTC(), interval)
 	points, err := s.Series(ctx, metric.AggregateQuery{
 		Query:          query,
 		Aggregation:    metric.AggLast,
 		Interval:       interval,
 		PreserveSeries: true,
-	}, time.Now())
+	}, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -905,12 +905,12 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 		records = append(records, models.PingRecord{
 			Client: p.EntityID,
 			TaskId: taskIDVal,
-			Time:   models.FromTime(p.Bucket),
+			Time:   p.Bucket.UTC(),
 			Value:  int(p.Value),
 		})
 	}
 	sort.Slice(records, func(i, j int) bool {
-		return records[i].Time.ToTime().After(records[j].Time.ToTime())
+		return records[i].Time.After(records[j].Time)
 	})
 
 	return records, nil
@@ -932,7 +932,7 @@ func pingQueryInterval(rangeDuration time.Duration, maxPoints int) time.Duration
 
 // farFuture 返回一个足够远的未来时间，用于以 DeleteBefore 语义清空某指标的全部数据。
 func farFuture() time.Time {
-	return time.Now().Add(24 * 365 * time.Hour)
+	return time.Now().UTC().Add(24 * 365 * time.Hour)
 }
 
 // DeleteAllRecords 删除所有负载/系统类记录（保留指标定义，不含 ping）。

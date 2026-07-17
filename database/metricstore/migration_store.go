@@ -182,7 +182,7 @@ func metricTimeBounds(ctx context.Context, src *metric.Store, name string) (time
 	wide := metric.Query{
 		MetricName: name,
 		Start:      time.Unix(0, 0),
-		End:        time.Now().Add(24 * time.Hour),
+		End:        time.Now().UTC().Add(24 * time.Hour),
 	}
 
 	asc := wide

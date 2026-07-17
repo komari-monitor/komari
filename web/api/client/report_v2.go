@@ -72,13 +72,9 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		if err := bindV2Params(req.Params, &params); err != nil {
 			return v2.Error(req.ID, -32602, "invalid ping result params", err.Error())
 		}
-		finishedAt := time.Now()
-		if params.FinishedAt != "" {
-			if t, err := time.Parse(time.RFC3339Nano, params.FinishedAt); err == nil {
-				finishedAt = t
-			}
+		if err := ingestPingResult(uuid, params.TaskID, params.Value); err != nil {
+			return v2.Error(req.ID, -32000, "failed to save ping result", err.Error())
 		}
-		ingestPingResult(uuid, params.TaskID, params.Value, finishedAt)
 		return v2.Success(req.ID, gin.H{"status": "success"})
 	case v2.MethodAgentPull:
 		var params v2.PullParams

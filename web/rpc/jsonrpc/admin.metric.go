@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/metricstore"
@@ -42,8 +43,8 @@ type metricDefinitionResponse struct {
 	Unit          string            `json:"unit,omitempty"`
 	RetentionDays int               `json:"retention_days"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
-	CreatedAt     any               `json:"created_at,omitempty"`
-	UpdatedAt     any               `json:"updated_at,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
 }
 
 func metricDescriptionValue(raw string) any {

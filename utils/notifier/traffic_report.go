@@ -53,44 +53,27 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 	}
 
 	db := dbcore.GetDBInstance()
-	now := time.Now()
+	now := time.Now().UTC()
 
-	// 计算时间范围
-	var start, end time.Time
 	var eventType, label, suffix string
 
 	switch {
 	case daily:
-		yesterday := now.AddDate(0, 0, -1)
-		start = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, yesterday.Location())
-		end = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 0, yesterday.Location())
 		eventType = messageevent.DReport
 		label = "daily"
 		suffix = "昨日流量"
 	case weekly:
-		weekday := int(now.Weekday())
-		if weekday == 0 {
-			weekday = 7
-		}
-		lastMonday := now.AddDate(0, 0, -(weekday-1)-7)
-		lastSunday := lastMonday.AddDate(0, 0, 6)
-		start = time.Date(lastMonday.Year(), lastMonday.Month(), lastMonday.Day(), 0, 0, 0, 0, lastMonday.Location())
-		end = time.Date(lastSunday.Year(), lastSunday.Month(), lastSunday.Day(), 23, 59, 59, 0, lastSunday.Location())
 		eventType = messageevent.WReport
 		label = "weekly"
 		suffix = "上周流量"
 	case monthly:
-		firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-		firstOfLastMonth := firstOfThisMonth.AddDate(0, -1, 0)
-		lastDayOfLastMonth := firstOfThisMonth.Add(-time.Second)
-		start = firstOfLastMonth
-		end = lastDayOfLastMonth
 		eventType = messageevent.MReport
 		label = "monthly"
 		suffix = "上个月流量"
 	default:
 		return
 	}
+	start, end := previousTrafficReportRange(now, label)
 
 	// 查询所有启用该类型报告的服务器配置
 	var notifications []models.TrafficReportNotification
@@ -170,6 +153,33 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 	}
 }
 
+func previousTrafficReportRange(now time.Time, period string) (time.Time, time.Time) {
+	localNow := now.In(time.Local)
+	var startLocal, endLocal time.Time
+
+	switch period {
+	case "daily":
+		yesterday := localNow.AddDate(0, 0, -1)
+		startLocal = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, time.Local)
+		endLocal = startLocal.AddDate(0, 0, 1)
+	case "weekly":
+		weekday := int(localNow.Weekday())
+		if weekday == 0 {
+			weekday = 7
+		}
+		lastMonday := localNow.AddDate(0, 0, -(weekday-1)-7)
+		startLocal = time.Date(lastMonday.Year(), lastMonday.Month(), lastMonday.Day(), 0, 0, 0, 0, time.Local)
+		endLocal = startLocal.AddDate(0, 0, 7)
+	case "monthly":
+		endLocal = time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, time.Local)
+		startLocal = endLocal.AddDate(0, -1, 0)
+	default:
+		return time.Time{}, time.Time{}
+	}
+
+	return startLocal.UTC(), endLocal.Add(-time.Nanosecond).UTC()
+}
+
 // getClientTrafficInRange 查询某客户端在指定时间段内的流量增量。
 //
 // 历史监控数据已完全迁移到 metric store，这里从 metric store 读取区间内记录并
@@ -192,7 +202,7 @@ func getClientTrafficInRange(clientUUID string, trafficType string, start, end t
 		})
 	}
 	sort.Slice(records, func(i, j int) bool {
-		return records[i].Time.ToTime().Before(records[j].Time.ToTime())
+		return records[i].Time.Before(records[j].Time)
 	})
 
 	// 计算增量基线（区间开始前最后一条累计流量）
@@ -214,7 +224,7 @@ func getClientTrafficInRange(clientUUID string, trafficType string, start, end t
 }
 
 type trafficDeltaRecord struct {
-	Time         models.LocalTime
+	Time         time.Time
 	NetTotalUp   int64
 	NetTotalDown int64
 	TrafficUp    int64

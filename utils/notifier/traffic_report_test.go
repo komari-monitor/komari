@@ -2,9 +2,67 @@ package notifier
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestPreviousTrafficReportRangesUseSystemTimezone(t *testing.T) {
+	originalLocal := time.Local
+	time.Local = time.FixedZone("UTC+8", 8*60*60)
+	t.Cleanup(func() { time.Local = originalLocal })
+
+	now := time.Date(2026, 6, 30, 16, 0, 0, 0, time.UTC) // 2026-07-01 00:00 local
+	tests := []struct {
+		period    string
+		wantStart time.Time
+		wantEnd   time.Time
+	}{
+		{
+			period:    "daily",
+			wantStart: time.Date(2026, 6, 29, 16, 0, 0, 0, time.UTC),
+			wantEnd:   time.Date(2026, 6, 30, 16, 0, 0, 0, time.UTC).Add(-time.Nanosecond),
+		},
+		{
+			period:    "weekly",
+			wantStart: time.Date(2026, 6, 21, 16, 0, 0, 0, time.UTC),
+			wantEnd:   time.Date(2026, 6, 28, 16, 0, 0, 0, time.UTC).Add(-time.Nanosecond),
+		},
+		{
+			period:    "monthly",
+			wantStart: time.Date(2026, 5, 31, 16, 0, 0, 0, time.UTC),
+			wantEnd:   time.Date(2026, 6, 30, 16, 0, 0, 0, time.UTC).Add(-time.Nanosecond),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.period, func(t *testing.T) {
+			start, end := previousTrafficReportRange(now, test.period)
+			if !start.Equal(test.wantStart) || !end.Equal(test.wantEnd) {
+				t.Fatalf("range = [%s, %s], want [%s, %s]", start, end, test.wantStart, test.wantEnd)
+			}
+			if start.Location() != time.UTC || end.Location() != time.UTC {
+				t.Fatalf("range locations = [%s, %s], want UTC", start.Location(), end.Location())
+			}
+		})
+	}
+}
+
+func TestPreviousDailyTrafficReportRangeHandlesDST(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("timezone database unavailable: %v", err)
+	}
+	originalLocal := time.Local
+	time.Local = location
+	t.Cleanup(func() { time.Local = originalLocal })
+
+	now := time.Date(2026, 3, 9, 4, 0, 0, 0, time.UTC) // 2026-03-09 00:00 EDT
+	start, end := previousTrafficReportRange(now, "daily")
+	if got := end.Add(time.Nanosecond).Sub(start); got != 23*time.Hour {
+		t.Fatalf("DST day duration = %s, want 23h", got)
+	}
+}
 
 func TestSumTrafficDeltasUsesStoredDeltas(t *testing.T) {
 	records := []trafficDeltaRecord{

@@ -45,10 +45,9 @@ func clientUploadPingResult(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 		return nil, rpc.MakeError(rpc.InvalidParams, "client_uuid not found", nil)
 	}
 	var params struct {
-		TaskID     uint      `json:"task_id"`
-		Value      int       `json:"value"`
-		PingType   string    `json:"ping_type"`
-		FinishedAt time.Time `json:"finished_at"`
+		TaskID   uint   `json:"task_id"`
+		Value    int    `json:"value"`
+		PingType string `json:"ping_type"`
 	}
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request: "+err.Error(), nil)
@@ -57,7 +56,7 @@ func clientUploadPingResult(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 		Client: uuid,
 		TaskId: params.TaskID,
 		Value:  params.Value,
-		Time:   models.FromTime(params.FinishedAt),
+		Time:   time.Now().UTC(),
 	}
 	if err := tasks.SavePingRecord(record); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to save ping result: "+err.Error(), nil)
@@ -71,15 +70,14 @@ func clientTaskResult(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.J
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing token", nil)
 	}
 	var params struct {
-		TaskId     string    `json:"task_id"`
-		Result     string    `json:"result"`
-		ExitCode   int       `json:"exit_code"`
-		FinishedAt time.Time `json:"finished_at"`
+		TaskId   string `json:"task_id"`
+		Result   string `json:"result"`
+		ExitCode int    `json:"exit_code"`
 	}
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request", nil)
 	}
-	if err := tasks.SaveTaskResult(params.TaskId, uuid, params.Result, params.ExitCode, models.FromTime(params.FinishedAt)); err != nil {
+	if err := tasks.SaveTaskResult(params.TaskId, uuid, params.Result, params.ExitCode, time.Now().UTC()); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to update task result: "+err.Error(), nil)
 	}
 	return map[string]any{"status": "success", "message": "Task result updated successfully"}, nil

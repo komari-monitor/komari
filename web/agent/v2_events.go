@@ -75,7 +75,7 @@ func IsAgentOnline(uuid string) bool {
 }
 
 func EnqueueV2Event(uuid, method string, params any) v2.Event {
-	now := time.Now()
+	now := time.Now().UTC()
 	ttl := v2EventTTL
 	if method == v2.MethodAgentPing {
 		ttl = v2PingEventTTL
@@ -84,8 +84,8 @@ func EnqueueV2Event(uuid, method string, params any) v2.Event {
 		ID:        newV2EventID(),
 		Method:    method,
 		Params:    params,
-		CreatedAt: now.Format(time.RFC3339Nano),
-		ExpiresAt: now.Add(ttl).Format(time.RFC3339Nano),
+		CreatedAt: now,
+		ExpiresAt: now.Add(ttl),
 	}
 
 	v2EventMu.Lock()
@@ -165,15 +165,14 @@ func pruneExpiredV2EventsLocked(q *v2EventQueue) {
 	if len(q.events) == 0 {
 		return
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	filtered := q.events[:0]
 	for _, event := range q.events {
-		if event.ExpiresAt == "" {
+		if event.ExpiresAt.IsZero() {
 			filtered = append(filtered, event)
 			continue
 		}
-		expiresAt, err := time.Parse(time.RFC3339Nano, event.ExpiresAt)
-		if err != nil || expiresAt.After(now) {
+		if event.ExpiresAt.After(now) {
 			filtered = append(filtered, event)
 		}
 	}

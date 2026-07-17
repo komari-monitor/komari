@@ -64,7 +64,7 @@ func executeLoadNotificationTask(task models.LoadNotification) {
 		return
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	windowStart := now.Add(-time.Duration(task.Interval) * time.Minute)
 	overloadClients := make([]string, 0)
 	for _, clientUUID := range task.Clients {
@@ -86,13 +86,13 @@ func executeLoadNotificationTask(task models.LoadNotification) {
 
 // shouldSkipNotification 检查是否应该跳过通知（冷却期检查）
 func shouldSkipNotification(task models.LoadNotification) bool {
-	if task.LastNotified.ToTime().IsZero() {
+	if task.LastNotified == nil || task.LastNotified.IsZero() {
 		return false
 	}
 
 	// 计算冷却期（使用 interval 作为冷却期）
 	cooldownPeriod := time.Duration(task.Interval) * time.Minute
-	timeSinceLastNotified := time.Since(task.LastNotified.ToTime())
+	timeSinceLastNotified := time.Since(*task.LastNotified)
 
 	return timeSinceLastNotified < cooldownPeriod
 }
@@ -214,7 +214,7 @@ func sendLoadNotification(clientUUIDs []string, task models.LoadNotification) {
 		messageSender.SendEvent(models.EventMessage{
 			Event:   messageevent.Alert,
 			Clients: ex_clients,
-			Time:    time.Now(),
+			Time:    time.Now().UTC(),
 			Emoji:   "⚠️",
 			Message: task.Name,
 		})
@@ -224,7 +224,7 @@ func sendLoadNotification(clientUUIDs []string, task models.LoadNotification) {
 // updateLastNotified 更新最后通知时间
 func updateLastNotified(taskId uint, notifyTime time.Time) {
 	db := dbcore.GetDBInstance()
-	if err := db.Model(&models.LoadNotification{}).Where("id = ?", taskId).Update("last_notified", notifyTime).Error; err != nil {
+	if err := db.Model(&models.LoadNotification{}).Where("id = ?", taskId).Update("last_notified", notifyTime.UTC()).Error; err != nil {
 		log.Printf("Failed to update last_notified for task %d: %v", taskId, err)
 	}
 }

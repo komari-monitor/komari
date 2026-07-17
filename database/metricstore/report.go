@@ -154,6 +154,7 @@ func WriteReport(ctx context.Context, report v1.Report) (v1.Report, error) {
 	if report.UpdatedAt.IsZero() {
 		return v1.Report{}, fmt.Errorf("report receive time is required")
 	}
+	report.UpdatedAt = report.UpdatedAt.UTC()
 	if GetStore() == nil {
 		return v1.Report{}, fmt.Errorf("metric store not enabled")
 	}
@@ -295,7 +296,6 @@ func writeReportBatch(ctx context.Context, reports []v1.Report) ([]v1.Report, er
 			values.initialized = true
 		}
 
-		report.UpdatedAt = report.UpdatedAt.UTC()
 		if !values.timestamp.IsZero() && !report.UpdatedAt.After(values.timestamp) {
 			report.UpdatedAt = values.timestamp.Add(time.Nanosecond)
 		}
@@ -435,7 +435,7 @@ func GetLatestTrafficBefore(ctx context.Context, entityIDs []string, before time
 		}
 		result[entityID] = models.Record{
 			Client:       entityID,
-			Time:         models.FromTime(before.UTC().Add(-time.Nanosecond)),
+			Time:         before.UTC().Add(-time.Nanosecond),
 			NetTotalUp:   up,
 			NetTotalDown: down,
 		}

@@ -39,8 +39,8 @@ type legacyModelConfig struct {
 	ExpireNotificationLeadDays int     `json:"expire_notification_lead_days" gorm:"default:7"`
 	LoginNotification          bool    `json:"login_notification" gorm:"default:false"`
 	TrafficLimitPercentage     float64 `json:"traffic_limit_percentage" gorm:"default:80.00"`
-	CreatedAt                  models.LocalTime
-	UpdatedAt                  models.LocalTime
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
 }
 
 func (legacyModelConfig) TableName() string {
@@ -97,6 +97,9 @@ func Run(ctx Context) error {
 	}
 
 	legacyConfigTable := hasLegacyConfigTable(db)
+	if err := migrateLegacyTimestampColumns(db); err != nil {
+		return err
+	}
 
 	if legacyConfigTable {
 		if err := migrateLegacyOidcConfig(db); err != nil {
@@ -106,7 +109,6 @@ func Run(ctx Context) error {
 			return err
 		}
 	}
-
 	if err := migrateLegacyClientInfo(db); err != nil {
 		return err
 	}
@@ -126,6 +128,9 @@ func Run(ctx Context) error {
 	}
 	if err := migrateRemovedCompatibilityConfig(db); err != nil {
 		return err
+	}
+	if err := markTimestampMigrationDone(db); err != nil {
+		return fmt.Errorf("mark UTC timestamp migration done: %w", err)
 	}
 
 	return nil
@@ -402,7 +407,7 @@ func migrateLegacyClientInfo(db *gorm.DB) error {
 		client.Weight = info.Weight
 		client.Price = info.Price
 		client.BillingCycle = info.BillingCycle
-		client.ExpiredAt = models.FromTime(info.ExpiredAt)
+		client.ExpiredAt = info.ExpiredAt
 		if err := db.Save(&client).Error; err != nil {
 			return fmt.Errorf("update Client record %s: %w", info.UUID, err)
 		}

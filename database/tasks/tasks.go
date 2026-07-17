@@ -26,7 +26,7 @@ func CreateTask(taskId string, clients []string, command string) error {
 			Result:     "",
 			ExitCode:   nil,
 			FinishedAt: nil,
-			CreatedAt:  models.FromTime(time.Now()),
+			CreatedAt:  time.Now().UTC(),
 		})
 	}
 	if len(taskResults) > 0 {
@@ -72,17 +72,17 @@ func GetTaskResultsByTaskId(taskId string) ([]models.TaskResult, error) {
 	}
 	return results, nil
 }
-func SaveTaskResult(taskId, clientId, result string, exitCode int, timestamp models.LocalTime) error {
+func SaveTaskResult(taskId, clientId, result string, exitCode int, timestamp time.Time) error {
 	return dbcore.GetDBInstance().
 		Model(&models.TaskResult{}).
 		Where("task_id = ? AND client = ?", taskId, clientId).
 		Updates(map[string]interface{}{
 			"result":      result,
 			"exit_code":   exitCode,
-			"finished_at": timestamp,
+			"finished_at": timestamp.UTC(),
 		}).Error
 }
 
 func ClearTaskResultsByTimeBefore(before time.Time) error {
-	return dbcore.GetDBInstance().Where("created_at < ?", before.Format(time.RFC3339)).Delete(&models.TaskResult{}).Error
+	return dbcore.GetDBInstance().Where("created_at < ?", before.UTC()).Delete(&models.TaskResult{}).Error
 }

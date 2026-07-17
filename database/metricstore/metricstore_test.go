@@ -419,7 +419,7 @@ func TestGetRecordsByClientAndTimeReadsRollupsAfterRawCompaction(t *testing.T) {
 	ts := now.Add(-time.Hour)
 	rec := models.Record{
 		Client:         "node-a",
-		Time:           models.FromTime(ts),
+		Time:           ts,
 		Cpu:            42.5,
 		Ram:            123456,
 		RamTotal:       999999,

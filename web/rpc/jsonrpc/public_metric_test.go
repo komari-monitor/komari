@@ -10,16 +10,46 @@ import (
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/metric"
+	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
+func TestMetricQueryParamsRequireRFC3339Time(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		wantErr bool
+	}{
+		{name: "RFC3339", value: "2026-07-17T09:30:00.123456789+08:00"},
+		{name: "offset free", value: "2026-07-17 09:30:00.123456789", wantErr: true},
+		{name: "Unix number", value: float64(1_752_720_600), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := &rpc.JsonRpcRequest{Params: map[string]any{"start": test.value}}
+			var params publicMetricQueryParams
+			err := req.BindParams(&params)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("BindParams() error = %v, wantErr %v", err, test.wantErr)
+			}
+			if err == nil {
+				want := time.Date(2026, 7, 17, 1, 30, 0, 123456789, time.UTC)
+				if params.Start == nil || !params.Start.Equal(want) {
+					t.Fatalf("start = %v, want %s", params.Start, want)
+				}
+			}
+		})
+	}
+}
+
 func TestSplitPublicMetricSeriesKeepsTagSeries(t *testing.T) {
+	baseTime := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
 	base := publicMetricSeries{
 		MetricKey: "gpu.device.usage",
 		EntityID:  "node-a",
 		Points: []publicMetricPoint{
-			{Time: "2026-06-18T00:00:00Z", Value: publicMetricValue(10), Count: 2, Tags: map[string]string{"device_index": "0"}},
-			{Time: "2026-06-18T00:00:00Z", Value: publicMetricValue(80), Count: 2, Tags: map[string]string{"device_index": "1"}},
-			{Time: "2026-06-18T00:01:00Z", Value: publicMetricValue(20), Count: 2, Tags: map[string]string{"device_index": "0"}},
+			{Time: baseTime, Value: publicMetricValue(10), Count: 2, Tags: map[string]string{"device_index": "0"}},
+			{Time: baseTime, Value: publicMetricValue(80), Count: 2, Tags: map[string]string{"device_index": "1"}},
+			{Time: baseTime.Add(time.Minute), Value: publicMetricValue(20), Count: 2, Tags: map[string]string{"device_index": "0"}},
 		},
 	}
 
@@ -39,12 +69,13 @@ func TestSplitPublicMetricSeriesKeepsTagSeries(t *testing.T) {
 }
 
 func TestPublicMetricJSONIncludesOnlyTags(t *testing.T) {
+	pointTime := time.Date(2026, 6, 18, 0, 0, 0, 123456789, time.UTC)
 	payload, err := json.Marshal(publicMetricSeries{
 		MetricKey: "ping.loss",
 		EntityID:  "node-a",
 		Tags:      map[string]string{"task_id": "7"},
 		Points: []publicMetricPoint{{
-			Time:  "2026-06-18T00:00:00Z",
+			Time:  pointTime,
 			Value: publicMetricValue(0),
 			Tags:  map[string]string{"task_id": "7"},
 		}},
@@ -59,6 +90,9 @@ func TestPublicMetricJSONIncludesOnlyTags(t *testing.T) {
 	if strings.Contains(text, `"tag":`) {
 		t.Fatalf("legacy tag field should not be serialized: %s", text)
 	}
+	if !strings.Contains(text, `"time":"2026-06-18T00:00:00.123456789Z"`) {
+		t.Fatalf("metric time is not UTC RFC3339Nano: %s", text)
+	}
 }
 
 func TestAdaptiveFillPublicMetricSeriesUsesObservedInterval(t *testing.T) {
@@ -72,7 +106,7 @@ func TestAdaptiveFillPublicMetricSeriesUsesObservedInterval(t *testing.T) {
 	}
 	for i := 0; i < 10; i++ {
 		series.Points = append(series.Points, publicMetricPoint{
-			Time:  base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339Nano),
+			Time:  base.Add(time.Duration(i) * time.Minute),
 			Value: publicMetricValue(float64(i)),
 		})
 	}
@@ -100,10 +134,10 @@ func TestAdaptiveFillPublicMetricSeriesAddsCompactGapsAndBounds(t *testing.T) {
 		IntervalSeconds: 1,
 		Tags:            tags,
 		Points: []publicMetricPoint{
-			{Time: base.Format(time.RFC3339Nano), Value: publicMetricValue(10)},
-			{Time: base.Add(time.Minute).Format(time.RFC3339Nano), Value: publicMetricValue(20)},
-			{Time: base.Add(2 * time.Minute).Format(time.RFC3339Nano), Value: publicMetricValue(30)},
-			{Time: base.Add(4 * time.Minute).Format(time.RFC3339Nano), Value: publicMetricValue(40)},
+			{Time: base, Value: publicMetricValue(10)},
+			{Time: base.Add(time.Minute), Value: publicMetricValue(20)},
+			{Time: base.Add(2 * time.Minute), Value: publicMetricValue(30)},
+			{Time: base.Add(4 * time.Minute), Value: publicMetricValue(40)},
 		},
 	}
 	start := base.Add(-30 * time.Second)
@@ -115,10 +149,10 @@ func TestAdaptiveFillPublicMetricSeriesAddsCompactGapsAndBounds(t *testing.T) {
 	if len(got.Points) != 7 {
 		t.Fatalf("expected four values, one gap and two bounds, got %#v", got.Points)
 	}
-	wantNullTimes := map[string]bool{
-		start.Format(time.RFC3339Nano):                     true,
-		base.Add(3 * time.Minute).Format(time.RFC3339Nano): true,
-		end.Format(time.RFC3339Nano):                       true,
+	wantNullTimes := map[time.Time]bool{
+		start:                     true,
+		base.Add(3 * time.Minute): true,
+		end:                       true,
 	}
 	for _, point := range got.Points {
 		if point.Value != nil {

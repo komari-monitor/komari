@@ -262,7 +262,7 @@ func (j *JavaScriptSender) fallbackToTextMessage(event models.EventMessage) erro
 		event.Emoji, event.Emoji, event.Emoji,
 		event.Event,
 		event.Message,
-		event.Time.Format(time.RFC3339))
+		event.Time.UTC().Format(time.RFC3339Nano))
 
 	// 添加客户端信息
 	if len(event.Clients) > 0 {
@@ -279,7 +279,7 @@ func (j *JavaScriptSender) fallbackToTextMessage(event models.EventMessage) erro
 			event.Event,
 			clientNames,
 			event.Message,
-			event.Time.Format(time.RFC3339))
+			event.Time.UTC().Format(time.RFC3339Nano))
 	}
 
 	return j.SendTextMessage(message, event.Event)

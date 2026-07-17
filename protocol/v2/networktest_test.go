@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNetworkTestMethodConstants(t *testing.T) {
@@ -63,6 +64,7 @@ func TestNextTraceParamsJSON(t *testing.T) {
 }
 
 func TestNextTraceResultJSON(t *testing.T) {
+	startedAt := time.Date(2026, 6, 5, 10, 0, 0, 0, time.UTC)
 	result := NextTraceResult{
 		TaskID:     "trace-1",
 		SourceID:   "agent-a",
@@ -70,8 +72,8 @@ func TestNextTraceResultJSON(t *testing.T) {
 		TargetHost: "203.0.113.10",
 		IPFamily:   IPFamilyIPv4,
 		Protocol:   TraceProtocolICMP,
-		StartedAt:  "2026-06-05T10:00:00Z",
-		FinishedAt: "2026-06-05T10:00:01Z",
+		StartedAt:  startedAt,
+		FinishedAt: startedAt.Add(time.Second),
 		DurationMs: 1000,
 		OK:         true,
 		Error:      "",
@@ -169,6 +171,7 @@ func TestMeshTraceParamsJSON(t *testing.T) {
 }
 
 func TestMeshTraceJobSnapshotJSON(t *testing.T) {
+	startedAt := time.Date(2026, 6, 5, 10, 0, 0, 0, time.UTC)
 	snapshot := MeshTraceJobSnapshot{
 		JobID:   "mesh-1",
 		Status:  "running",
@@ -184,8 +187,8 @@ func TestMeshTraceJobSnapshotJSON(t *testing.T) {
 				TargetHost: "203.0.113.10",
 				IPFamily:   IPFamilyIPv4,
 				Protocol:   TraceProtocolUDP,
-				StartedAt:  "2026-06-05T10:00:00Z",
-				FinishedAt: "2026-06-05T10:00:01Z",
+				StartedAt:  startedAt,
+				FinishedAt: startedAt.Add(time.Second),
 				DurationMs: 1000,
 				OK:         false,
 				Error:      "timeout",
@@ -197,9 +200,9 @@ func TestMeshTraceJobSnapshotJSON(t *testing.T) {
 				Truncated:  false,
 			},
 		},
-		StartedAt:  "2026-06-05T10:00:00Z",
-		UpdatedAt:  "2026-06-05T10:00:01Z",
-		FinishedAt: "",
+		StartedAt:  startedAt,
+		UpdatedAt:  startedAt.Add(time.Second),
+		FinishedAt: nil,
 		Error:      "",
 	}
 

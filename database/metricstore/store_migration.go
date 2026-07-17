@@ -149,7 +149,7 @@ func StartStoreMigration(sourceDriver, sourceDSN string) error {
 		SourceDSN:    maskDSN(srcCfg.DSN),
 		TargetDriver: string(ResolveDriverFromConfig(cfg.Driver, cfg.DSN)),
 		TargetDSN:    maskDSN(cfg.DSN),
-		StartTime:    time.Now(),
+		StartTime:    time.Now().UTC(),
 	}
 	storeMigMu.Unlock()
 
@@ -211,7 +211,7 @@ func finishStoreMigration(status string, err error) {
 	storeMigMu.Lock()
 	defer storeMigMu.Unlock()
 	storeMigProgress.Status = status
-	storeMigProgress.EndTime = time.Now()
+	storeMigProgress.EndTime = time.Now().UTC()
 	if err != nil {
 		storeMigProgress.Error = err.Error()
 	}

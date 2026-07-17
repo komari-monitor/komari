@@ -143,7 +143,7 @@ func TestRunPreservesVersion120RuntimeShape(t *testing.T) {
 	); err != nil {
 		t.Fatalf("migrate 1.2.0 runtime shape: %v", err)
 	}
-	now := models.FromTime(time.Now())
+	now := time.Now().UTC()
 	if err := db.Create(&models.Client{UUID: "client-a", Token: "token-a", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
 		t.Fatalf("seed client: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestRunExpandsLegacyPingAllClientsTasks(t *testing.T) {
 	`).Error; err != nil {
 		t.Fatalf("create legacy ping_tasks: %v", err)
 	}
-	now := models.FromTime(time.Now())
+	now := time.Now().UTC()
 	clients := []models.Client{
 		{UUID: "client-a", Token: "token-a", CreatedAt: now, UpdatedAt: now},
 		{UUID: "client-b", Token: "token-b", CreatedAt: now, UpdatedAt: now},

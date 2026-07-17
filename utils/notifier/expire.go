@@ -2,13 +2,13 @@ package notifier
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/timeutil"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/renewal"
 )
@@ -31,7 +31,7 @@ func CheckExpire() {
 		return
 	}
 
-	checkTime := time.Now()
+	checkTime := time.Now().UTC()
 
 	// 过期提醒检查（仅当启用过期通知时）
 	if cfg[config.ExpireNotificationEnabledKey].(bool) {
@@ -45,17 +45,19 @@ func CheckExpire() {
 		var clientLeadToExpire []clientToExpireInfo
 
 		for _, client := range clients_all {
-			clientExpireTime := client.ExpiredAt.ToTime()
+			if client.ExpiredAt == nil {
+				continue
+			}
+			clientExpireTime := client.ExpiredAt.UTC()
 
 			if clientExpireTime.Before(checkTime) {
 				continue
 			}
 
-			notificationThreshold := checkTime.Add(time.Duration(notificationLeadDays) * 24 * time.Hour)
+			notificationThreshold := checkTime.In(time.Local).AddDate(0, 0, notificationLeadDays).UTC()
 
 			if clientExpireTime.Before(notificationThreshold) || clientExpireTime.Equal(notificationThreshold) {
-				remainingDuration := clientExpireTime.Sub(checkTime)
-				daysLeft := int(math.Ceil(remainingDuration.Hours() / 24))
+				daysLeft := timeutil.SystemDateDistance(checkTime, clientExpireTime)
 
 				clientLeadToExpire = append(clientLeadToExpire, clientToExpireInfo{
 					Name:     client.Name,
@@ -71,7 +73,7 @@ func CheckExpire() {
 			}
 			messageSender.SendEvent(models.EventMessage{
 				Event:   messageevent.Expire,
-				Time:    time.Now(),
+				Time:    time.Now().UTC(),
 				Message: message,
 				Emoji:   "⏳",
 			})

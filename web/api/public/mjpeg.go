@@ -298,7 +298,7 @@ func downloadFont() {
 		return
 	}
 	downloading = true
-	downloadProgress = &DownloadProgress{StartTime: time.Now()}
+	downloadProgress = &DownloadProgress{StartTime: time.Now().UTC()}
 	downloadMutex.Unlock()
 
 	defer func() {
@@ -780,7 +780,7 @@ func renderStatusTable(ctx context.Context, lang string, tzOffset *int, fontErr 
 
 	// 页脚
 	y += 10
-	now := formatTimeWithOffset(time.Now(), tzOffset)
+	now := formatTimeWithOffset(time.Now().UTC(), tzOffset)
 	drawCenteredString(img, lp.LastUpdate+now, imageWidth/2, y+footerFontSize, color.Gray{100}, normalFace)
 
 	y += 25
@@ -944,7 +944,7 @@ func renderStatusTableWithBasicFont(ctx context.Context, lang string, tzOffset *
 
 	// 页脚
 	y += 10
-	now := formatTimeWithOffset(time.Now(), tzOffset)
+	now := formatTimeWithOffset(time.Now().UTC(), tzOffset)
 	drawCenteredStringBasic(img, lp.LastUpdate+now, imageWidth/2, y+footerFontSize, color.Gray{100})
 
 	y += 25
@@ -1059,6 +1059,10 @@ func fetchNodeData(ctx context.Context) ([]NodeInfo, map[string]NodeStatus, erro
 }
 
 func nodeInfoFromClient(client models.Client) NodeInfo {
+	var expiredAt time.Time
+	if client.ExpiredAt != nil {
+		expiredAt = client.ExpiredAt.UTC()
+	}
 	return NodeInfo{
 		UUID:           client.UUID,
 		Name:           client.Name,
@@ -1069,7 +1073,7 @@ func nodeInfoFromClient(client models.Client) NodeInfo {
 		Price:          client.Price,
 		BillingCycle:   client.BillingCycle,
 		Currency:       client.Currency,
-		ExpiredAt:      client.ExpiredAt.ToTime(),
+		ExpiredAt:      expiredAt,
 		AutoRenewal:    client.AutoRenewal,
 		Hidden:         client.Hidden,
 		Weight:         client.Weight,
@@ -1122,11 +1126,12 @@ func parseNodeInfo(data map[string]interface{}) NodeInfo {
 	if v, ok := data["disk_total"].(float64); ok {
 		node.DiskTotal = int64(v)
 	}
-	// 解析 expired_at
 	if v, ok := data["expired_at"].(string); ok {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
 			node.ExpiredAt = t
 		}
+	} else if v, ok := data["expired_at"].(time.Time); ok {
+		node.ExpiredAt = v.UTC()
 	}
 	return node
 }
@@ -1395,7 +1400,7 @@ func formatPriceL(price float64, cycle int, currency string, lp langPack) string
 }
 
 func formatRemainingL(expiredAt time.Time, autoRenewal bool, lp langPack) string {
-	now := time.Now()
+	now := time.Now().UTC()
 	if expiredAt.IsZero() || expiredAt.Year() > 2200 {
 		return lp.LongTerm
 	}

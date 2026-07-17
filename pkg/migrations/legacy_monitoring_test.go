@@ -35,19 +35,19 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	}
 
 	base := time.Date(2026, 7, 8, 23, 42, 0, 0, time.UTC)
-	if err := mainDB.Create(&models.Record{Client: "client-a", Time: models.FromTime(base), Cpu: 12.5, Ram: 2048}).Error; err != nil {
+	if err := mainDB.Create(&models.Record{Client: "client-a", Time: base, Cpu: 12.5, Ram: 2048}).Error; err != nil {
 		t.Fatalf("seed records: %v", err)
 	}
-	if err := mainDB.Table("records_long_term").Create(&models.Record{Client: "client-a", Time: models.FromTime(base.Add(time.Minute)), Cpu: 22.5, Ram: 4096}).Error; err != nil {
+	if err := mainDB.Table("records_long_term").Create(&models.Record{Client: "client-a", Time: base.Add(time.Minute), Cpu: 22.5, Ram: 4096}).Error; err != nil {
 		t.Fatalf("seed records_long_term: %v", err)
 	}
-	if err := mainDB.Create(&models.GPURecord{Client: "client-a", Time: models.FromTime(base), DeviceIndex: 0, DeviceName: "GPU 0", MemUsed: 1024, MemTotal: 2048, Utilization: 67, Temperature: 55}).Error; err != nil {
+	if err := mainDB.Create(&models.GPURecord{Client: "client-a", Time: base, DeviceIndex: 0, DeviceName: "GPU 0", MemUsed: 1024, MemTotal: 2048, Utilization: 67, Temperature: 55}).Error; err != nil {
 		t.Fatalf("seed gpu_records: %v", err)
 	}
-	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: models.FromTime(base), Value: 36}).Error; err != nil {
+	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: base, Value: 36}).Error; err != nil {
 		t.Fatalf("seed ping_records: %v", err)
 	}
-	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: models.FromTime(base.Add(30 * time.Second)), Value: -1}).Error; err != nil {
+	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: base.Add(30 * time.Second), Value: -1}).Error; err != nil {
 		t.Fatalf("seed loss ping_records: %v", err)
 	}
 	summary, err := InspectLegacyMonitoring(mainDB)
@@ -173,8 +173,8 @@ func TestDeleteLegacyMonitoringBeforeOnlyRemovesOldHistory(t *testing.T) {
 	}
 
 	cutoff := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
-	oldTime := models.FromTime(cutoff.Add(-time.Hour))
-	newTime := models.FromTime(cutoff.Add(time.Hour))
+	oldTime := cutoff.Add(-time.Hour)
+	newTime := cutoff.Add(time.Hour)
 	for _, record := range []models.Record{{Client: "client-a", Time: oldTime}, {Client: "client-a", Time: newTime}} {
 		if err := db.Create(&record).Error; err != nil {
 			t.Fatalf("seed load record: %v", err)

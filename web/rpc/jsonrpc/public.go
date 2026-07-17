@@ -161,7 +161,8 @@ func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 	if !validLoadTypes[params.LoadType] {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid load_type parameter", nil)
 	}
-	clientRecords, err := records.GetRecordsByClientAndTime(params.UUID, time.Now().Add(-time.Duration(hoursInt)*time.Hour), time.Now())
+	now := time.Now().UTC()
+	clientRecords, err := records.GetRecordsByClientAndTime(params.UUID, now.Add(-time.Duration(hoursInt)*time.Hour), now)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch records: "+err.Error(), nil)
 	}
@@ -178,7 +179,7 @@ func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 		}
 	}
 	if params.LoadType == "" || params.LoadType == "all" || params.LoadType == "gpu" {
-		gpuRecords, err := records.GetGPURecordsByClientAndTime(params.UUID, time.Now().Add(-time.Duration(hoursInt)*time.Hour), time.Now())
+		gpuRecords, err := records.GetGPURecordsByClientAndTime(params.UUID, now.Add(-time.Duration(hoursInt)*time.Hour), now)
 		if err == nil && len(gpuRecords) > 0 {
 			gpuDevices := make(map[string]any)
 			for _, record := range gpuRecords {
@@ -295,10 +296,10 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	isLogin := isLoginFromCtx(ctx)
 
 	type recordsResp struct {
-		TaskId uint   `json:"task_id,omitempty"`
-		Time   string `json:"time"`
-		Value  int    `json:"value"`
-		Client string `json:"client,omitempty"`
+		TaskId uint      `json:"task_id,omitempty"`
+		Time   time.Time `json:"time"`
+		Value  int       `json:"value"`
+		Client string    `json:"client,omitempty"`
 	}
 	type clientBasicInfo struct {
 		Client string  `json:"client"`
@@ -336,7 +337,7 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	if err != nil {
 		hoursInt = 4
 	}
-	endTime := time.Now()
+	endTime := time.Now().UTC()
 	startTime := endTime.Add(-time.Duration(hoursInt) * time.Hour)
 
 	taskId := -1
@@ -359,7 +360,7 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		if r.Client != "" && !isLogin && hiddenMap[r.Client] {
 			continue
 		}
-		rec := recordsResp{Time: r.Time.ToTime().Format(time.RFC3339), Value: r.Value, Client: r.Client, TaskId: r.TaskId}
+		rec := recordsResp{Time: r.Time.UTC(), Value: r.Value, Client: r.Client, TaskId: r.TaskId}
 		stats := clientStats[r.Client]
 		stats.total++
 		if r.Value < 0 {

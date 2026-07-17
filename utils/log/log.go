@@ -63,7 +63,7 @@ func (h *LogHandler) Handle(_ context.Context, r slog.Record) error {
 		line = f.Line
 	}
 
-	timeStr := r.Time.Format("2006/01/02 15:04:05")
+	timeStr := r.Time.UTC().Format("2006/01/02 15:04:05")
 
 	// 检查是否有分组信息（从 attributes 中获取）
 	group := h.group
@@ -169,7 +169,7 @@ func (w *writerAdapter) Write(p []byte) (n int, err error) {
 	var pcs [1]uintptr
 	runtime.Callers(4, pcs[:]) // skip [Callers, Write, log.Output, log.Printf/etc]
 
-	r := slog.NewRecord(time.Now(), w.level, msg, pcs[0])
+	r := slog.NewRecord(time.Now().UTC(), w.level, msg, pcs[0])
 	return len(p), w.handler.Handle(context.Background(), r)
 }
 

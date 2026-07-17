@@ -46,11 +46,11 @@ func ingestBasicInfo(uuid string, info map[string]interface{}, fallbackIP string
 }
 
 // ingestPingResult 保存一条 ping 探测结果。
-func ingestPingResult(uuid string, taskID uint, value int, finishedAt time.Time) {
-	tasks.SavePingRecord(models.PingRecord{
+func ingestPingResult(uuid string, taskID uint, value int) error {
+	return tasks.SavePingRecord(models.PingRecord{
 		Client: uuid,
 		TaskId: taskID,
 		Value:  value,
-		Time:   models.FromTime(finishedAt),
+		Time:   time.Now().UTC(),
 	})
 }

@@ -63,8 +63,8 @@ type LegacyMonitoringDeleted struct {
 }
 
 type legacyMonitoringBounds struct {
-	Oldest models.LocalTime `gorm:"column:oldest"`
-	Newest models.LocalTime `gorm:"column:newest"`
+	Oldest string `gorm:"column:oldest"`
+	Newest string `gorm:"column:newest"`
 }
 
 type legacyBatchProgress func(table string, rows, points int64)
@@ -154,8 +154,14 @@ func InspectLegacyMonitoring(db *gorm.DB) (LegacyMonitoringSummary, error) {
 		if err := db.Table(table).Select("MIN(time) AS oldest, MAX(time) AS newest").Scan(&bounds).Error; err != nil {
 			return summary, fmt.Errorf("inspect legacy %s time range: %w", table, err)
 		}
-		tableOldest := bounds.Oldest.ToTime()
-		tableNewest := bounds.Newest.ToTime()
+		tableOldest, err := parseLegacyTimestamp(bounds.Oldest, time.UTC)
+		if err != nil {
+			return summary, fmt.Errorf("parse legacy %s oldest time: %w", table, err)
+		}
+		tableNewest, err := parseLegacyTimestamp(bounds.Newest, time.UTC)
+		if err != nil {
+			return summary, fmt.Errorf("parse legacy %s newest time: %w", table, err)
+		}
 		if oldest.IsZero() || (!tableOldest.IsZero() && tableOldest.Before(oldest)) {
 			oldest = tableOldest
 		}
@@ -175,7 +181,7 @@ func InspectLegacyMonitoring(db *gorm.DB) (LegacyMonitoringSummary, error) {
 		summary.NewestAt = &newestCopy
 	}
 	if !oldest.IsZero() && !newest.IsZero() {
-		retentionEnd := time.Now()
+		retentionEnd := time.Now().UTC()
 		if newest.After(retentionEnd) {
 			retentionEnd = newest
 		}
@@ -203,7 +209,7 @@ func DeleteLegacyMonitoringBefore(db *gorm.DB, cutoff time.Time) (LegacyMonitori
 			if !tx.Migrator().HasTable(table) {
 				continue
 			}
-			result := tx.Exec("DELETE FROM "+table+" WHERE time < ?", models.FromTime(cutoff))
+			result := tx.Exec("DELETE FROM "+table+" WHERE time < ?", cutoff.UTC())
 			if result.Error != nil {
 				return fmt.Errorf("delete legacy %s before cutoff: %w", table, result.Error)
 			}
@@ -478,7 +484,7 @@ func migrateLegacyPingRecordTable(ctx context.Context, s *metric.Store, db *gorm
 }
 
 func recordToPoints(rec models.Record) []metric.Point {
-	ts := rec.Time.ToTime()
+	ts := rec.Time
 	entityID := rec.Client
 	return []metric.Point{
 		{MetricName: metricstore.MetricCPU, EntityID: entityID, Timestamp: ts, Value: float64(rec.Cpu)},
@@ -504,7 +510,7 @@ func recordToPoints(rec models.Record) []metric.Point {
 }
 
 func gpuRecordToPoints(rec models.GPURecord) []metric.Point {
-	ts := rec.Time.ToTime()
+	ts := rec.Time
 	tags := map[string]string{
 		"device_index": fmt.Sprintf("%d", rec.DeviceIndex),
 		"device_name":  rec.DeviceName,
@@ -518,7 +524,7 @@ func gpuRecordToPoints(rec models.GPURecord) []metric.Point {
 }
 
 func pingRecordToPoints(rec models.PingRecord) []metric.Point {
-	ts := rec.Time.ToTime()
+	ts := rec.Time
 	tags := map[string]string{"task_id": fmt.Sprintf("%d", rec.TaskId)}
 	loss := 0.0
 	if rec.Value < 0 {

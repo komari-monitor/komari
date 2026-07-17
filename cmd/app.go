@@ -471,7 +471,7 @@ func registerScheduledWork() {
 const taskResultRetentionDays = 30
 
 func cleanupScheduledData() {
-	before := time.Now().Add(-24 * time.Hour * taskResultRetentionDays)
+	before := time.Now().UTC().Add(-24 * time.Hour * taskResultRetentionDays)
 	if err := tasks.ClearTaskResultsByTimeBefore(before); err != nil {
 		log.Printf("Failed to clean expired task results: %v", err)
 	}
@@ -484,7 +484,7 @@ func compactMetricStore(ctx context.Context) {
 	compactCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 
-	written, err := metricstore.Compact(compactCtx, time.Now())
+	written, err := metricstore.Compact(compactCtx, time.Now().UTC())
 	if errors.Is(err, metricstore.ErrCompactInProgress) {
 		return
 	}

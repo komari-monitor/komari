@@ -74,19 +74,19 @@ func (l *GormLogger) Trace(ctx context.Context, begin time.Time, fc func() (stri
 	case err != nil && l.LogLevel >= gormlogger.Error && (!errors.Is(err, gorm.ErrRecordNotFound) || !l.IgnoreRecordNotFoundError):
 		msg := fmt.Sprintf("[%.3fms] [rows:%d] %s | ERROR: %v %s",
 			float64(elapsed.Nanoseconds())/1e6, rows, sql, err, Gray("(%s)", fileWithLineNum))
-		r := slog.NewRecord(time.Now(), slog.LevelError, msg, 0)
+		r := slog.NewRecord(time.Now().UTC(), slog.LevelError, msg, 0)
 		r.AddAttrs(slog.String("_group", "GORM"))
 		handler.Handle(ctx, r)
 	case elapsed > l.SlowThreshold && l.SlowThreshold != 0 && l.LogLevel >= gormlogger.Warn:
 		msg := fmt.Sprintf("[%.3fms] [rows:%d] %s | SLOW QUERY %s",
 			float64(elapsed.Nanoseconds())/1e6, rows, sql, Gray("(%s)", fileWithLineNum))
-		r := slog.NewRecord(time.Now(), slog.LevelWarn, msg, 0)
+		r := slog.NewRecord(time.Now().UTC(), slog.LevelWarn, msg, 0)
 		r.AddAttrs(slog.String("_group", "GORM"))
 		handler.Handle(ctx, r)
 	case l.LogLevel >= gormlogger.Info:
 		msg := fmt.Sprintf("[%.3fms] [rows:%d] %s %s",
 			float64(elapsed.Nanoseconds())/1e6, rows, sql, Gray("(%s)", fileWithLineNum))
-		r := slog.NewRecord(time.Now(), slog.LevelDebug, msg, 0)
+		r := slog.NewRecord(time.Now().UTC(), slog.LevelDebug, msg, 0)
 		r.AddAttrs(slog.String("_group", "GORM"))
 		handler.Handle(ctx, r)
 	}
