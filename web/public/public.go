@@ -106,6 +106,57 @@ func isSafePath(basePath, targetPath string) bool {
 	return !strings.HasPrefix(rel, "..") && rel != ".."
 }
 
+func readLocalThemeFile(themeID, relativePath string) ([]byte, string, bool) {
+	if !isValidThemeID(themeID) {
+		return nil, "", false
+	}
+	if themeID == DefaultTheme && !DefaultThemeOverlayAvailable() {
+		return nil, "", false
+	}
+
+	cleanPath := filepath.Clean(strings.TrimPrefix(relativePath, "/"))
+	themeBasePath := filepath.Join(DataDir, ThemesDir, themeID)
+	if !isSafePath(themeBasePath, cleanPath) {
+		return nil, "", false
+	}
+
+	localPath := filepath.Join(themeBasePath, cleanPath)
+	if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
+		content, err := os.ReadFile(localPath)
+		if err == nil {
+			return content, mime.TypeByExtension(filepath.Ext(localPath)), true
+		}
+	}
+
+	return nil, "", false
+}
+
+func isValidThemeID(themeID string) bool {
+	if themeID == DefaultTheme {
+		return true
+	}
+	if themeID == "" {
+		return false
+	}
+	for _, r := range themeID {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// DefaultThemeOverlayAvailable reports whether the writable default-theme
+// overlay is complete enough to serve. Otherwise callers fall back to the
+// read-only theme embedded in the binary.
+func DefaultThemeOverlayAvailable() bool {
+	indexPath := filepath.Join(DataDir, ThemesDir, DefaultTheme, DistDir, IndexFile)
+	info, err := os.Stat(indexPath)
+	return err == nil && info.Mode().IsRegular()
+}
+
 // Static 注册静态资源和 SPA 路由处理
 func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	// 初始化嵌入式文件系统，指向 defaultTheme 根目录
@@ -134,26 +185,10 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 
 		cleanPath = filepath.Clean(cleanPath)
 
-		if themeID != DefaultTheme {
-			if strings.Contains(themeID, "..") || strings.Contains(themeID, "/") || strings.Contains(themeID, "\\") {
-				return nil, "", false
-			}
-
-			themeBasePath := filepath.Join(DataDir, ThemesDir, themeID)
-
-			if !isSafePath(themeBasePath, cleanPath) {
-				return nil, "", false
-			}
-
-			localPath := filepath.Join(themeBasePath, cleanPath)
-			// 检查文件是否存在且不是目录
-			if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
-				content, err := os.ReadFile(localPath)
-				if err == nil {
-					return content, mime.TypeByExtension(filepath.Ext(localPath)), true
-				}
-			}
-			// 本地文件不存在，或读取失败 -> 继续向下回退
+		// Installed themes, including an updated default theme overlay, take
+		// precedence over the read-only assets embedded in the binary.
+		if content, contentType, exists := readLocalThemeFile(themeID, cleanPath); exists {
+			return content, contentType, true
 		}
 
 		// 2. 尝试从嵌入式 defaultTheme/{cleanPath} 读取
