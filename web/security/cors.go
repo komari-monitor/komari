@@ -109,16 +109,6 @@ func (ctrl *CorsController) Middleware() gin.HandlerFunc {
 	}
 }
 
-// CorsMiddleware 保留原有签名：内部自建 controller 并自行订阅配置事件。
-// 供测试以及不接入集中式 reload 管理器的场景使用。
-func CorsMiddleware(initialEnabled bool, initialAllowedOrigins string) gin.HandlerFunc {
-	ctrl := NewCorsController(initialEnabled, initialAllowedOrigins)
-	config.Subscribe(func(event config.ConfigEvent) {
-		ctrl.Update(event)
-	})
-	return ctrl.Middleware()
-}
-
 func isAPIRequestPath(path string) bool {
 	return path == "/api" || strings.HasPrefix(path, "/api/")
 }

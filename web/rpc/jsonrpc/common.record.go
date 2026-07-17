@@ -2,7 +2,6 @@ package jsonrpc
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -120,27 +119,21 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			}
 			// sort and count
 			total := 0
-			groupsMeta := make([]struct {
-				name   string
-				length int
-			}, 0, len(grouped))
+			groupsMeta := make([]allocationGroup[string], 0, len(grouped))
 			for name := range grouped {
 				arr := grouped[name]
 				sort.Slice(arr, func(i, j int) bool { return arr[i].Time.ToTime().Before(arr[j].Time.ToTime()) })
 				grouped[name] = arr
 				l := len(arr)
 				total += l
-				groupsMeta = append(groupsMeta, struct {
-					name   string
-					length int
-				}{name: name, length: l})
+				groupsMeta = append(groupsMeta, allocationGroup[string]{key: name, length: l})
 			}
 			// downsample across all clients proportionally
 			if maxCount != -1 && total > maxCount {
 				targets := allocateTargets(groupsMeta, maxCount)
 				total = 0
 				for name, k := range targets {
-					grouped[name] = downsampleFlatRecords(grouped[name], k)
+					grouped[name] = sampleEvenly(grouped[name], k)
 					total += len(grouped[name])
 				}
 			}
@@ -158,26 +151,20 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			grouped[r.Client] = append(grouped[r.Client], r)
 		}
 		total := 0
-		groupsMeta := make([]struct {
-			name   string
-			length int
-		}, 0, len(grouped))
+		groupsMeta := make([]allocationGroup[string], 0, len(grouped))
 		for name := range grouped {
 			arr := grouped[name]
 			sort.Slice(arr, func(i, j int) bool { return arr[i].Time.ToTime().Before(arr[j].Time.ToTime()) })
 			grouped[name] = arr
 			l := len(arr)
 			total += l
-			groupsMeta = append(groupsMeta, struct {
-				name   string
-				length int
-			}{name: name, length: l})
+			groupsMeta = append(groupsMeta, allocationGroup[string]{key: name, length: l})
 		}
 		if maxCount != -1 && total > maxCount {
 			targets := allocateTargets(groupsMeta, maxCount)
 			total = 0
 			for name, k := range targets {
-				grouped[name] = downsampleModelRecords(grouped[name], k)
+				grouped[name] = sampleEvenly(grouped[name], k)
 				total += len(grouped[name])
 			}
 		}
@@ -419,71 +406,20 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 				})
 			}
 
-			// calculate proportional allocation for each task
-			type taskMeta struct {
-				taskId uint
-				length int
-			}
-			groupsMeta := make([]taskMeta, 0, len(taskGroups))
+			groupsMeta := make([]allocationGroup[uint], 0, len(taskGroups))
 			for taskId, records := range taskGroups {
-				groupsMeta = append(groupsMeta, taskMeta{
-					taskId: taskId,
+				groupsMeta = append(groupsMeta, allocationGroup[uint]{
+					key:    taskId,
 					length: len(records),
 				})
 			}
-
-			// use existing allocateTargets function (create compatible struct)
-			strTargets := allocateTargets(
-				func() []struct {
-					name   string
-					length int
-				} {
-					result := make([]struct {
-						name   string
-						length int
-					}, len(groupsMeta))
-					for i, meta := range groupsMeta {
-						result[i] = struct {
-							name   string
-							length int
-						}{name: fmt.Sprintf("%d", meta.taskId), length: meta.length}
-					}
-					return result
-				}(),
-				maxCount,
-			)
+			targets := allocateTargets(groupsMeta, maxCount)
 
 			// downsample each task group
 			downsampledRecords := make([]RecordsResp, 0, maxCount)
-			samplePingRecords := func(in []RecordsResp, k int) []RecordsResp {
-				n := len(in)
-				if k <= 0 || n == 0 {
-					return []RecordsResp{}
-				}
-				if k >= n {
-					return in
-				}
-				out := make([]RecordsResp, 0, k)
-				if k == 1 {
-					out = append(out, in[n-1])
-					return out
-				}
-				for i := 0; i < k; i++ {
-					idx := int(math.Round(float64(i) * float64(n-1) / float64(k-1)))
-					if idx < 0 {
-						idx = 0
-					} else if idx >= n {
-						idx = n - 1
-					}
-					out = append(out, in[idx])
-				}
-				return out
-			}
-
 			for taskId, records := range taskGroups {
-				targetKey := fmt.Sprintf("%d", taskId)
-				targetCount := strTargets[targetKey]
-				sampled := samplePingRecords(records, targetCount)
+				targetCount := targets[taskId]
+				sampled := sampleEvenly(records, targetCount)
 				downsampledRecords = append(downsampledRecords, sampled...)
 			}
 
@@ -513,18 +449,19 @@ func getLoadRecordsCombined(uuid string, start, end time.Time) ([]models.Record,
 	return recordsdb.GetRecordsByTime(start, end)
 }
 
-
 // ---------- downsampling helpers ----------
 
-// allocateTargets splits maxTotal across groups proportionally to their lengths.
-func allocateTargets(groups []struct {
-	name   string
+type allocationGroup[K comparable] struct {
+	key    K
 	length int
-}, maxTotal int) map[string]int {
-	result := make(map[string]int, len(groups))
+}
+
+// allocateTargets splits maxTotal across groups proportionally to their lengths.
+func allocateTargets[K comparable](groups []allocationGroup[K], maxTotal int) map[K]int {
+	result := make(map[K]int, len(groups))
 	if maxTotal < 0 {
 		for _, g := range groups {
-			result[g.name] = g.length
+			result[g.key] = g.length
 		}
 		return result
 	}
@@ -534,7 +471,7 @@ func allocateTargets(groups []struct {
 	}
 	if total <= maxTotal {
 		for _, g := range groups {
-			result[g.name] = g.length
+			result[g.key] = g.length
 		}
 		return result
 	}
@@ -547,7 +484,7 @@ func allocateTargets(groups []struct {
 	sumTargets := 0
 	for i, g := range groups {
 		if g.length <= 0 {
-			result[g.name] = 0
+			result[g.key] = 0
 			continue
 		}
 		raw := float64(g.length) * float64(maxTotal) / float64(total)
@@ -555,7 +492,7 @@ func allocateTargets(groups []struct {
 		if t > g.length {
 			t = g.length
 		}
-		result[groups[i].name] = t
+		result[groups[i].key] = t
 		sumTargets += t
 		remainders = append(remainders, rem{i, raw - float64(t)})
 	}
@@ -568,9 +505,9 @@ func allocateTargets(groups []struct {
 				break
 			}
 			g := groups[r.idx]
-			cur := result[g.name]
+			cur := result[g.key]
 			if cur < g.length {
-				result[g.name] = cur + 1
+				result[g.key] = cur + 1
 				need--
 			}
 		}
@@ -581,8 +518,8 @@ func allocateTargets(groups []struct {
 					if need == 0 {
 						break
 					}
-					if result[g.name] < g.length {
-						result[g.name]++
+					if result[g.key] < g.length {
+						result[g.key]++
 						need--
 					}
 				}
@@ -599,8 +536,8 @@ func allocateTargets(groups []struct {
 				break
 			}
 			g := groups[r.idx]
-			if result[g.name] > 0 {
-				result[g.name]--
+			if result[g.key] > 0 {
+				result[g.key]--
 				over--
 			}
 		}
@@ -610,8 +547,8 @@ func allocateTargets(groups []struct {
 					if over == 0 {
 						break
 					}
-					if result[g.name] > 0 {
-						result[g.name]--
+					if result[g.key] > 0 {
+						result[g.key]--
 						over--
 					}
 				}
@@ -624,40 +561,15 @@ func allocateTargets(groups []struct {
 	return result
 }
 
-func downsampleModelRecords(in []models.Record, k int) []models.Record {
+func sampleEvenly[T any](in []T, k int) []T {
 	n := len(in)
 	if k <= 0 || n == 0 {
-		return []models.Record{}
+		return []T{}
 	}
 	if k >= n {
 		return in
 	}
-	out := make([]models.Record, 0, k)
-	if k == 1 {
-		out = append(out, in[n-1])
-		return out
-	}
-	for i := 0; i < k; i++ {
-		idx := int(math.Round(float64(i) * float64(n-1) / float64(k-1)))
-		if idx < 0 {
-			idx = 0
-		} else if idx >= n {
-			idx = n - 1
-		}
-		out = append(out, in[idx])
-	}
-	return out
-}
-
-func downsampleFlatRecords(in []flatRecord, k int) []flatRecord {
-	n := len(in)
-	if k <= 0 || n == 0 {
-		return []flatRecord{}
-	}
-	if k >= n {
-		return in
-	}
-	out := make([]flatRecord, 0, k)
+	out := make([]T, 0, k)
 	if k == 1 {
 		out = append(out, in[n-1])
 		return out
@@ -702,11 +614,6 @@ func filterRecordsByLoadType(recs []models.Record, loadType string) []flatRecord
 	out := make([]flatRecord, 0, len(recs))
 	for _, r := range recs {
 		fr := flatRecord{Client: r.Client, Time: r.Time}
-		// always include uptime when present
-		//if r.Uptime != 0 {
-		//	v := r.Uptime
-		//	fr.Uptime = &v
-		//}
 		switch loadType {
 		case "cpu":
 			v := r.Cpu

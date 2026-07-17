@@ -19,26 +19,6 @@ import (
 
 const defaultMetricQueryPoints = 500
 
-var metricDownsampleStandardIntervals = []time.Duration{
-	time.Second,
-	5 * time.Second,
-	10 * time.Second,
-	15 * time.Second,
-	30 * time.Second,
-	time.Minute,
-	2 * time.Minute,
-	5 * time.Minute,
-	10 * time.Minute,
-	15 * time.Minute,
-	30 * time.Minute,
-	time.Hour,
-	2 * time.Hour,
-	3 * time.Hour,
-	6 * time.Hour,
-	12 * time.Hour,
-	24 * time.Hour,
-}
-
 func init() {
 	regPublic("listMetricDefinitions", publicListMetricDefinitions, "List public metric definitions")
 	regPublic("queryMetrics", publicQueryMetrics, "Query metric points")
@@ -1112,17 +1092,7 @@ func metricDownsampleInterval(rangeDuration time.Duration, maxPoints int) time.D
 	if interval < time.Second {
 		return time.Second
 	}
-	return ceilMetricDownsampleInterval(interval)
-}
-
-func ceilMetricDownsampleInterval(interval time.Duration) time.Duration {
-	for _, candidate := range metricDownsampleStandardIntervals {
-		if candidate >= interval {
-			return candidate
-		}
-	}
-	day := metricDownsampleStandardIntervals[len(metricDownsampleStandardIntervals)-1]
-	return ((interval-1)/day + 1) * day
+	return metric.CeilStandardInterval(interval)
 }
 
 func maxInt(a, b int) int {

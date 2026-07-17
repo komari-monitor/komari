@@ -15,35 +15,6 @@ import (
 	"github.com/komari-monitor/komari/pkg/metric"
 )
 
-// 指标名称常量
-const (
-	MetricCPU            = "cpu.usage"
-	MetricGPU            = "gpu.usage"        // 实体级平均 GPU 使用率（对应 Record.Gpu）
-	MetricGPUDeviceUsage = "gpu.device.usage" // 每设备 GPU 利用率（带 device_index 标签）
-	MetricGPUMem         = "gpu.memory.used"
-	MetricGPUMemTotal    = "gpu.memory.total"
-	MetricGPUTemp        = "gpu.temperature"
-	MetricRAM            = "memory.used"
-	MetricRAMTotal       = "memory.total"
-	MetricSwap           = "swap.used"
-	MetricSwapTotal      = "swap.total"
-	MetricLoad           = "load.average"
-	MetricTemp           = "temperature"
-	MetricDisk           = "disk.used"
-	MetricDiskTotal      = "disk.total"
-	MetricNetIn          = "net.in.rate"
-	MetricNetOut         = "net.out.rate"
-	MetricNetTotalUp     = "net.total.up"
-	MetricNetTotalDown   = "net.total.down"
-	MetricTrafficUp      = "traffic.up"
-	MetricTrafficDown    = "traffic.down"
-	MetricProcess        = "process.count"
-	MetricConnections    = "connections.tcp"
-	MetricConnectionsUDP = "connections.udp"
-	MetricPingLatency    = "ping.latency_ms"
-	MetricPingLoss       = "ping.loss"
-)
-
 var (
 	store            *metric.Store
 	storeFingerprint string
@@ -527,26 +498,6 @@ func CloseStoreContext(ctx context.Context) error {
 
 const defaultBuiltinMetricRetentionDays = 1
 
-var pingQueryIntervals = []time.Duration{
-	time.Second,
-	5 * time.Second,
-	10 * time.Second,
-	15 * time.Second,
-	30 * time.Second,
-	time.Minute,
-	2 * time.Minute,
-	5 * time.Minute,
-	10 * time.Minute,
-	15 * time.Minute,
-	30 * time.Minute,
-	time.Hour,
-	2 * time.Hour,
-	3 * time.Hour,
-	6 * time.Hour,
-	12 * time.Hour,
-	24 * time.Hour,
-}
-
 // createMetricDefinitions creates built-in definitions with explicit policies.
 func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
 	return createMetricDefinitionsWithDefaultRetention(ctx, s, defaultBuiltinMetricRetentionDays)
@@ -677,33 +628,6 @@ func GetRecordsByTime(ctx context.Context, start, end time.Time) ([]models.Recor
 	return records, nil
 }
 
-var loadRecordMetricNames = []string{
-	MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
-	MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
-	MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
-	MetricProcess, MetricConnections, MetricConnectionsUDP,
-}
-
-var recordDownsampleStandardIntervals = []time.Duration{
-	time.Second,
-	5 * time.Second,
-	10 * time.Second,
-	15 * time.Second,
-	30 * time.Second,
-	time.Minute,
-	2 * time.Minute,
-	5 * time.Minute,
-	10 * time.Minute,
-	15 * time.Minute,
-	30 * time.Minute,
-	time.Hour,
-	2 * time.Hour,
-	3 * time.Hour,
-	6 * time.Hour,
-	12 * time.Hour,
-	24 * time.Hour,
-}
-
 type recordSeriesKey struct {
 	client string
 	ts     int64
@@ -781,18 +705,7 @@ func recordDownsampleInterval(rangeDuration time.Duration, maxPoints int) time.D
 	if interval < time.Second {
 		return time.Second
 	}
-	return floorRecordDownsampleInterval(interval)
-}
-
-func floorRecordDownsampleInterval(interval time.Duration) time.Duration {
-	out := time.Second
-	for _, candidate := range recordDownsampleStandardIntervals {
-		if candidate > interval {
-			break
-		}
-		out = candidate
-	}
-	return out
+	return metric.FloorStandardInterval(interval)
 }
 
 func listRecordEntityIDs(ctx context.Context, s *metric.Store, start, end time.Time, interval time.Duration) ([]string, error) {
@@ -1014,24 +927,7 @@ func pingQueryInterval(rangeDuration time.Duration, maxPoints int) time.Duration
 	if interval < time.Second {
 		return time.Second
 	}
-	result := time.Second
-	for _, candidate := range pingQueryIntervals {
-		if candidate > interval {
-			break
-		}
-		result = candidate
-	}
-	return result
-}
-
-// recordMetricNames 是负载/系统类指标（不含 ping）。ping 使用独立的保留策略，
-// 因此负载记录的批量删除与保留清理都不应波及 ping.latency_ms。
-var recordMetricNames = []string{
-	MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
-	MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
-	MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
-	MetricProcess, MetricConnections, MetricConnectionsUDP,
-	MetricGPUDeviceUsage, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp,
+	return metric.FloorStandardInterval(interval)
 }
 
 // farFuture 返回一个足够远的未来时间，用于以 DeleteBefore 语义清空某指标的全部数据。
@@ -1062,7 +958,7 @@ func DeleteAllPingRecords(ctx context.Context) error {
 	if s == nil {
 		return fmt.Errorf("metric store not enabled")
 	}
-	for _, metricName := range []string{MetricPingLatency, MetricPingLoss} {
+	for _, metricName := range pingMetricNames {
 		if _, err := s.DeleteBefore(ctx, metricName, farFuture()); err != nil {
 			return fmt.Errorf("failed to delete ping records: %w", err)
 		}
@@ -1077,7 +973,7 @@ func DeletePingRecordsByTask(ctx context.Context, taskIDs []uint) error {
 		return fmt.Errorf("metric store not enabled")
 	}
 	for _, id := range taskIDs {
-		for _, metricName := range []string{MetricPingLatency, MetricPingLoss} {
+		for _, metricName := range pingMetricNames {
 			if _, err := s.DeleteSeries(ctx, metric.Query{
 				MetricName: metricName,
 				Tags:       map[string]string{"task_id": fmt.Sprintf("%d", id)},
