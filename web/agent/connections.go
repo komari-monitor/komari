@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -12,7 +13,8 @@ var (
 	connectedClients  = make(map[string]*connection.SafeConn)
 	connectedClientV2 = make(map[string]bool)
 	latestReport      = make(map[string]*v1.Report)
-	// presenceOnly stores online state for non-WebSocket agents (e.g., Nezha gRPC)
+	recentReports     = make(map[string][]v1.Report)
+	// presenceOnly stores online state for non-WebSocket agents.
 	// value keeps connectionID and a soft expiration to avoid flicker
 	presenceOnly = make(map[string]struct {
 		id     int64
@@ -20,6 +22,8 @@ var (
 	})
 	mu = sync.RWMutex{}
 )
+
+const recentReportRetention = time.Minute
 
 func GetConnectedClients() map[string]*connection.SafeConn {
 	mu.RLock()
@@ -122,17 +126,72 @@ func GetLatestReport() map[string]*v1.Report {
 	defer mu.RUnlock()
 	reportCopy := make(map[string]*v1.Report)
 	for k, v := range latestReport {
-		reportCopy[k] = v
+		if v == nil {
+			continue
+		}
+		item := *v
+		reportCopy[k] = &item
 	}
 	return reportCopy
 }
-func SetLatestReport(uuid string, report *v1.Report) {
+
+// RecordReport updates the latest runtime state and keeps only the short raw
+// window used by recent-status compatibility endpoints.
+func RecordReport(report v1.Report) {
+	if report.UUID == "" {
+		return
+	}
+	if report.UpdatedAt.IsZero() {
+		report.UpdatedAt = time.Now().UTC()
+	} else {
+		report.UpdatedAt = report.UpdatedAt.UTC()
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	latestReport[uuid] = report
+	if latest := latestReport[report.UUID]; latest == nil || !report.UpdatedAt.Before(latest.UpdatedAt) {
+		item := report
+		latestReport[report.UUID] = &item
+	}
+	cutoff := time.Now().UTC().Add(-recentReportRetention)
+	reports := reportsAfter(recentReports[report.UUID], cutoff)
+	if report.UpdatedAt.Before(cutoff) {
+		recentReports[report.UUID] = reports
+		return
+	}
+	insertAt := sort.Search(len(reports), func(i int) bool {
+		return reports[i].UpdatedAt.After(report.UpdatedAt)
+	})
+	reports = append(reports, v1.Report{})
+	copy(reports[insertAt+1:], reports[insertAt:])
+	reports[insertAt] = report
+	recentReports[report.UUID] = reports
 }
+
+func GetRecentReports(uuid string) []v1.Report {
+	mu.Lock()
+	defer mu.Unlock()
+	reports := reportsAfter(recentReports[uuid], time.Now().UTC().Add(-recentReportRetention))
+	if len(reports) == 0 {
+		delete(recentReports, uuid)
+		return []v1.Report{}
+	}
+	recentReports[uuid] = reports
+	return append([]v1.Report(nil), reports...)
+}
+
+func reportsAfter(reports []v1.Report, cutoff time.Time) []v1.Report {
+	first := 0
+	for first < len(reports) && reports[first].UpdatedAt.Before(cutoff) {
+		first++
+	}
+	out := make([]v1.Report, len(reports)-first)
+	copy(out, reports[first:])
+	return out
+}
+
 func DeleteLatestReport(uuid string) {
 	mu.Lock()
 	defer mu.Unlock()
 	delete(latestReport, uuid)
+	delete(recentReports, uuid)
 }

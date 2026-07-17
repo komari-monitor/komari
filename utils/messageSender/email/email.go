@@ -178,6 +178,7 @@ func (e *EmailSender) SendTextMessage(message, title string) error {
 	}
 
 	// Compose headers
+	now := time.Now().UTC()
 	headers := []string{
 		"To: " + strings.Join(rcptHeaderParts, ", "),
 		"From: " + senderHeader,
@@ -185,8 +186,8 @@ func (e *EmailSender) SendTextMessage(message, title string) error {
 		"MIME-Version: 1.0",
 		"Content-Type: " + contentType,
 		"Content-Transfer-Encoding: quoted-printable",
-		"Date: " + time.Now().Format(time.RFC1123Z),
-		fmt.Sprintf("Message-ID: <%d@%s>", time.Now().UnixNano(), e.Addition.Host),
+		"Date: " + now.Format(time.RFC1123Z),
+		fmt.Sprintf("Message-ID: <%d@%s>", now.UnixNano(), e.Addition.Host),
 	}
 
 	fullMsg := []byte(strings.Join(headers, "\r\n") + "\r\n\r\n" + bodyBuf.String())

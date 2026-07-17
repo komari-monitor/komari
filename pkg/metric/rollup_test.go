@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -700,6 +701,117 @@ func TestRollupPolicyValidate(t *testing.T) {
 	for i, p := range bad {
 		if err := p.Validate(); !errors.Is(err, ErrInvalidArgument) {
 			t.Fatalf("bad policy %d should be invalid, got %v", i, err)
+		}
+	}
+}
+
+func TestRollupPolicyWithMetricRetentionPrunesRedundantTiers(t *testing.T) {
+	policy := RollupPolicy{
+		RawRetention: 15 * time.Minute,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 48 * time.Hour},
+			{Interval: 5 * time.Minute, Retention: 14 * 24 * time.Hour},
+			{Interval: time.Hour, Retention: 14 * 24 * time.Hour},
+		},
+		Compression: 100,
+	}
+	tests := []struct {
+		name      string
+		retention time.Duration
+		want      []RollupTier
+	}{
+		{
+			name:      "one day keeps finest tier",
+			retention: 24 * time.Hour,
+			want: []RollupTier{
+				{Interval: time.Minute, Retention: 24 * time.Hour},
+			},
+		},
+		{
+			name:      "seven days keeps minute and five minute tiers",
+			retention: 7 * 24 * time.Hour,
+			want: []RollupTier{
+				{Interval: time.Minute, Retention: 48 * time.Hour},
+				{Interval: 5 * time.Minute, Retention: 7 * 24 * time.Hour},
+			},
+		},
+		{
+			name:      "thirty days keeps all tiers",
+			retention: 30 * 24 * time.Hour,
+			want: []RollupTier{
+				{Interval: time.Minute, Retention: 48 * time.Hour},
+				{Interval: 5 * time.Minute, Retention: 14 * 24 * time.Hour},
+				{Interval: time.Hour, Retention: 30 * 24 * time.Hour},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := policy.withMetricRetention(test.retention)
+			if !reflect.DeepEqual(got.Tiers, test.want) {
+				t.Fatalf("tiers = %#v, want %#v", got.Tiers, test.want)
+			}
+			if got.Compression != 100 {
+				t.Fatalf("compression = %v, want 100", got.Compression)
+			}
+		})
+	}
+	if len(policy.Tiers) != 3 || policy.Tiers[2].Retention != 14*24*time.Hour {
+		t.Fatalf("withMetricRetention mutated source policy: %#v", policy.Tiers)
+	}
+}
+
+func TestCompactRemovesRollupsFromRedundantTiers(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 15 * time.Minute,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 48 * time.Hour},
+			{Interval: 5 * time.Minute, Retention: 14 * 24 * time.Hour},
+			{Interval: time.Hour, Retention: 14 * 24 * time.Hour},
+		},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "daily", Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	bucketTime := now.Add(-2 * time.Hour)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin seed transaction: %v", err)
+	}
+	for _, interval := range []time.Duration{time.Minute, 5 * time.Minute, time.Hour} {
+		bucket := newRollupBucket(policy.compression())
+		bucket.addPoint(42, bucketTime.UnixNano())
+		key := rollupKey{entityID: "node", bucket: bucketTime.UnixNano()}
+		if _, err := s.writeRollupBucketsTx(ctx, "daily", interval, map[rollupKey]*rollupBucket{key: bucket}, tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("seed %s rollup: %v", interval, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seed transaction: %v", err)
+	}
+
+	if _, err := s.CompactMetric(ctx, "daily", now); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	for _, test := range []struct {
+		interval time.Duration
+		want     int
+	}{
+		{interval: time.Minute, want: 1},
+		{interval: 5 * time.Minute, want: 0},
+		{interval: time.Hour, want: 0},
+	} {
+		rows, err := s.scanRollupRows(ctx, s.reader(), "daily", test.interval)
+		if err != nil {
+			t.Fatalf("scan %s rollups: %v", test.interval, err)
+		}
+		if len(rows) != test.want {
+			t.Fatalf("%s rollup rows = %d, want %d", test.interval, len(rows), test.want)
 		}
 	}
 }

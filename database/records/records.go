@@ -24,10 +24,6 @@ func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.G
 	return metricstore.GetGPURecordsByClientAndTime(context.Background(), uuid, start, end)
 }
 
-func DeleteRecordBefore(before time.Time) error {
-	return metricstore.DeleteRecordsBefore(context.Background(), before)
-}
-
 func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Record, error) {
 	return metricstore.GetRecordsByClientAndTime(context.Background(), uuid, start, end)
 }

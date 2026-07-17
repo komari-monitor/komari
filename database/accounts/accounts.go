@@ -100,8 +100,8 @@ func CreateDefaultAdminAccount() (username, passwd string, err error) {
 		Username:  username,
 		Passwd:    hashedPassword,
 		SSOID:     "",
-		CreatedAt: models.FromTime(time.Now()),
-		UpdatedAt: models.FromTime(time.Now()),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 	}
 
 	err = db.Create(&user).Error
@@ -171,7 +171,7 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 	if sso_type != nil {
 		updates["sso_type"] = *sso_type
 	}
-	updates["updated_at"] = time.Now()
+	updates["updated_at"] = time.Now().UTC()
 	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Updates(updates).Error
 	if err != nil {
 		return err

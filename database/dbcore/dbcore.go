@@ -244,7 +244,7 @@ func backupOnVersionUpgrade() {
 		log.Printf("[upgrade-backup] failed to create backup dir: %v", err)
 		return
 	}
-	tsName := time.Now().Format("20060102-150405")
+	tsName := time.Now().UTC().Format("20060102-150405")
 	bakPath := filepath.Join("./backup", fmt.Sprintf("upgrade-%s.zip", tsName))
 	backupZipPath := filepath.Join(".", "data", "backup.zip")
 	if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
@@ -328,7 +328,7 @@ func doInitialize() error {
 			if err := os.MkdirAll("./backup", 0755); err != nil {
 				log.Printf("[restore] failed to create backup dir: %v", err)
 			} else {
-				tsName := time.Now().Format("20060102-150405")
+				tsName := time.Now().UTC().Format("20060102-150405")
 				bakPath := filepath.Join("./backup", fmt.Sprintf("%s.zip", tsName))
 				if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
 					log.Printf("[restore] failed to zip current data: %v", zipErr)
@@ -372,7 +372,8 @@ func doInitialize() error {
 	}
 
 	logConfig := &gorm.Config{
-		Logger: logutil.NewGormLogger(),
+		Logger:  logutil.NewGormLogger(),
+		NowFunc: func() time.Time { return time.Now().UTC() },
 	}
 
 	// 根据数据库类型选择不同的连接方式

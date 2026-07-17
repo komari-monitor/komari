@@ -155,7 +155,7 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 	auditlog.Log(ip, actor, "REC, task id: "+taskId, "warn")
 	if len(offlineClients) > 0 {
 		for _, uuid := range offlineClients {
-			tasks.SaveTaskResult(taskId, uuid, "Client offline!", -1, models.FromTime(time.Now()))
+			tasks.SaveTaskResult(taskId, uuid, "Client offline!", -1, time.Now().UTC())
 		}
 	}
 	return map[string]any{
@@ -168,6 +168,7 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 func adminTestSendMessage(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	err := messageSender.SendEvent(models.EventMessage{
 		Event:   "Test",
+		Time:    time.Now().UTC(),
 		Message: "This is a test message from Komari.",
 	})
 	if err != nil {

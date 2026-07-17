@@ -2,7 +2,6 @@ package jsonrpc
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -21,16 +20,18 @@ func init() {
 func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	meta := rpc.MetaFromContext(ctx)
 	var params struct {
-		Type     string `json:"type"`      // "load" | "ping"; default "load"
-		UUID     string `json:"uuid"`      // client uuid; empty = all clients
-		Hours    int    `json:"hours"`     // time window in hours; default 1 if start/end not provided
-		Start    string `json:"start"`     // RFC3339 start time (optional)
-		End      string `json:"end"`       // RFC3339 end time (optional)
-		LoadType string `json:"load_type"` // for type=load: cpu|gpu|ram|swap|load|temp|disk|network|process|connections|all
-		TaskID   int    `json:"task_id"`   // for type=ping: optional task id; -1 or omitted means all
-		MaxCount int    `json:"maxCount"`  // max number of points; -1 unlimited; default 4000
+		Type     string     `json:"type"`      // "load" | "ping"; default "load"
+		UUID     string     `json:"uuid"`      // client uuid; empty = all clients
+		Hours    int        `json:"hours"`     // time window in hours; default 1 if start/end not provided
+		Start    *time.Time `json:"start"`     // RFC3339 with an explicit timezone (optional)
+		End      *time.Time `json:"end"`       // RFC3339 with an explicit timezone (optional)
+		LoadType string     `json:"load_type"` // for type=load: cpu|gpu|ram|swap|load|temp|disk|network|process|connections|all
+		TaskID   int        `json:"task_id"`   // for type=ping: optional task id; -1 or omitted means all
+		MaxCount int        `json:"maxCount"`  // max number of points; -1 unlimited; default 4000
 	}
-	req.BindParams(&params)
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
+	}
 
 	// defaults
 	if params.Type == "" {
@@ -38,33 +39,25 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	}
 	// parse time window
 	var startTime, endTime time.Time
-	if params.Start != "" || params.End != "" {
+	if params.Start != nil || params.End != nil {
 		// allow partial: missing end means now
-		var err error
-		if params.End == "" {
-			endTime = time.Now()
+		if params.End == nil {
+			endTime = time.Now().UTC()
 		} else {
-			endTime, err = time.Parse(time.RFC3339, params.End)
-			if err != nil {
-				return nil, rpc.MakeError(rpc.InvalidParams, "Invalid end time", params.End)
-			}
+			endTime = params.End.UTC()
 		}
-		if params.Start == "" {
+		if params.Start == nil {
 			// default to 1 hour before end
 			startTime = endTime.Add(-1 * time.Hour)
 		} else {
-			start, err := time.Parse(time.RFC3339, params.Start)
-			if err != nil {
-				return nil, rpc.MakeError(rpc.InvalidParams, "Invalid start time", params.Start)
-			}
-			startTime = start
+			startTime = params.Start.UTC()
 		}
 	} else {
 		hours := params.Hours
 		if hours <= 0 {
 			hours = 1 // default 1 hour
 		}
-		endTime = time.Now()
+		endTime = time.Now().UTC()
 		startTime = endTime.Add(-time.Duration(hours) * time.Hour)
 	}
 
@@ -120,27 +113,21 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			}
 			// sort and count
 			total := 0
-			groupsMeta := make([]struct {
-				name   string
-				length int
-			}, 0, len(grouped))
+			groupsMeta := make([]allocationGroup[string], 0, len(grouped))
 			for name := range grouped {
 				arr := grouped[name]
-				sort.Slice(arr, func(i, j int) bool { return arr[i].Time.ToTime().Before(arr[j].Time.ToTime()) })
+				sort.Slice(arr, func(i, j int) bool { return arr[i].Time.Before(arr[j].Time) })
 				grouped[name] = arr
 				l := len(arr)
 				total += l
-				groupsMeta = append(groupsMeta, struct {
-					name   string
-					length int
-				}{name: name, length: l})
+				groupsMeta = append(groupsMeta, allocationGroup[string]{key: name, length: l})
 			}
 			// downsample across all clients proportionally
 			if maxCount != -1 && total > maxCount {
 				targets := allocateTargets(groupsMeta, maxCount)
 				total = 0
 				for name, k := range targets {
-					grouped[name] = downsampleFlatRecords(grouped[name], k)
+					grouped[name] = sampleEvenly(grouped[name], k)
 					total += len(grouped[name])
 				}
 			}
@@ -148,9 +135,9 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 				Count    int                     `json:"count"`
 				Records  map[string][]flatRecord `json:"records"`
 				LoadType string                  `json:"load_type"`
-				From     models.LocalTime        `json:"from"`
-				To       models.LocalTime        `json:"to"`
-			}{Count: total, Records: grouped, LoadType: params.LoadType, From: models.FromTime(startTime), To: models.FromTime(endTime)}, nil
+				From     time.Time               `json:"from"`
+				To       time.Time               `json:"to"`
+			}{Count: total, Records: grouped, LoadType: params.LoadType, From: startTime.UTC(), To: endTime.UTC()}, nil
 		}
 		// default: return full records, grouped by client
 		grouped := make(map[string][]models.Record)
@@ -158,35 +145,29 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			grouped[r.Client] = append(grouped[r.Client], r)
 		}
 		total := 0
-		groupsMeta := make([]struct {
-			name   string
-			length int
-		}, 0, len(grouped))
+		groupsMeta := make([]allocationGroup[string], 0, len(grouped))
 		for name := range grouped {
 			arr := grouped[name]
-			sort.Slice(arr, func(i, j int) bool { return arr[i].Time.ToTime().Before(arr[j].Time.ToTime()) })
+			sort.Slice(arr, func(i, j int) bool { return arr[i].Time.Before(arr[j].Time) })
 			grouped[name] = arr
 			l := len(arr)
 			total += l
-			groupsMeta = append(groupsMeta, struct {
-				name   string
-				length int
-			}{name: name, length: l})
+			groupsMeta = append(groupsMeta, allocationGroup[string]{key: name, length: l})
 		}
 		if maxCount != -1 && total > maxCount {
 			targets := allocateTargets(groupsMeta, maxCount)
 			total = 0
 			for name, k := range targets {
-				grouped[name] = downsampleModelRecords(grouped[name], k)
+				grouped[name] = sampleEvenly(grouped[name], k)
 				total += len(grouped[name])
 			}
 		}
 		return struct {
 			Count   int                        `json:"count"`
 			Records map[string][]models.Record `json:"records"`
-			From    models.LocalTime           `json:"from"`
-			To      models.LocalTime           `json:"to"`
-		}{Count: total, Records: grouped, From: models.FromTime(startTime), To: models.FromTime(endTime)}, nil
+			From    time.Time                  `json:"from"`
+			To      time.Time                  `json:"to"`
+		}{Count: total, Records: grouped, From: startTime.UTC(), To: endTime.UTC()}, nil
 
 	case "ping":
 		taskId := params.TaskID
@@ -210,10 +191,10 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		}
 
 		type RecordsResp struct {
-			TaskId uint             `json:"task_id,omitempty"`
-			Time   models.LocalTime `json:"time"`
-			Value  int              `json:"value"`
-			Client string           `json:"client,omitempty"`
+			TaskId uint      `json:"task_id,omitempty"`
+			Time   time.Time `json:"time"`
+			Value  int       `json:"value"`
+			Client string    `json:"client,omitempty"`
 		}
 		type ClientBasicInfo struct {
 			Client string  `json:"client"`
@@ -226,11 +207,11 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			BasicInfo []ClientBasicInfo `json:"basic_info,omitempty"`
 			Records   []RecordsResp     `json:"records"`
 			Tasks     []map[string]any  `json:"tasks"`
-			From      models.LocalTime  `json:"from"`
-			To        models.LocalTime  `json:"to"`
+			From      time.Time         `json:"from"`
+			To        time.Time         `json:"to"`
 		}
 
-		response := &Resp{Count: 0, Records: []RecordsResp{}, From: models.FromTime(startTime), To: models.FromTime(endTime)}
+		response := &Resp{Count: 0, Records: []RecordsResp{}, From: startTime.UTC(), To: endTime.UTC()}
 
 		// stats per client
 		clientStats := make(map[string]struct {
@@ -329,7 +310,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 					maxLat = r.Value
 				}
 				// track latest non-negative value
-				ts := r.Time.ToTime()
+				ts := r.Time
 				if latestTs.IsZero() || ts.After(latestTs) {
 					latestTs = ts
 					latestVal = r.Value
@@ -415,75 +396,24 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			// sort each group by time
 			for taskId := range taskGroups {
 				sort.Slice(taskGroups[taskId], func(i, j int) bool {
-					return taskGroups[taskId][i].Time.ToTime().Before(taskGroups[taskId][j].Time.ToTime())
+					return taskGroups[taskId][i].Time.Before(taskGroups[taskId][j].Time)
 				})
 			}
 
-			// calculate proportional allocation for each task
-			type taskMeta struct {
-				taskId uint
-				length int
-			}
-			groupsMeta := make([]taskMeta, 0, len(taskGroups))
+			groupsMeta := make([]allocationGroup[uint], 0, len(taskGroups))
 			for taskId, records := range taskGroups {
-				groupsMeta = append(groupsMeta, taskMeta{
-					taskId: taskId,
+				groupsMeta = append(groupsMeta, allocationGroup[uint]{
+					key:    taskId,
 					length: len(records),
 				})
 			}
-
-			// use existing allocateTargets function (create compatible struct)
-			strTargets := allocateTargets(
-				func() []struct {
-					name   string
-					length int
-				} {
-					result := make([]struct {
-						name   string
-						length int
-					}, len(groupsMeta))
-					for i, meta := range groupsMeta {
-						result[i] = struct {
-							name   string
-							length int
-						}{name: fmt.Sprintf("%d", meta.taskId), length: meta.length}
-					}
-					return result
-				}(),
-				maxCount,
-			)
+			targets := allocateTargets(groupsMeta, maxCount)
 
 			// downsample each task group
 			downsampledRecords := make([]RecordsResp, 0, maxCount)
-			samplePingRecords := func(in []RecordsResp, k int) []RecordsResp {
-				n := len(in)
-				if k <= 0 || n == 0 {
-					return []RecordsResp{}
-				}
-				if k >= n {
-					return in
-				}
-				out := make([]RecordsResp, 0, k)
-				if k == 1 {
-					out = append(out, in[n-1])
-					return out
-				}
-				for i := 0; i < k; i++ {
-					idx := int(math.Round(float64(i) * float64(n-1) / float64(k-1)))
-					if idx < 0 {
-						idx = 0
-					} else if idx >= n {
-						idx = n - 1
-					}
-					out = append(out, in[idx])
-				}
-				return out
-			}
-
 			for taskId, records := range taskGroups {
-				targetKey := fmt.Sprintf("%d", taskId)
-				targetCount := strTargets[targetKey]
-				sampled := samplePingRecords(records, targetCount)
+				targetCount := targets[taskId]
+				sampled := sampleEvenly(records, targetCount)
 				downsampledRecords = append(downsampledRecords, sampled...)
 			}
 
@@ -492,7 +422,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		response.Count = len(response.Records)
 		// sort by time asc
 		sort.Slice(response.Records, func(i, j int) bool {
-			return response.Records[i].Time.ToTime().Before(response.Records[j].Time.ToTime())
+			return response.Records[i].Time.Before(response.Records[j].Time)
 		})
 		return response, nil
 	default:
@@ -513,18 +443,19 @@ func getLoadRecordsCombined(uuid string, start, end time.Time) ([]models.Record,
 	return recordsdb.GetRecordsByTime(start, end)
 }
 
-
 // ---------- downsampling helpers ----------
 
-// allocateTargets splits maxTotal across groups proportionally to their lengths.
-func allocateTargets(groups []struct {
-	name   string
+type allocationGroup[K comparable] struct {
+	key    K
 	length int
-}, maxTotal int) map[string]int {
-	result := make(map[string]int, len(groups))
+}
+
+// allocateTargets splits maxTotal across groups proportionally to their lengths.
+func allocateTargets[K comparable](groups []allocationGroup[K], maxTotal int) map[K]int {
+	result := make(map[K]int, len(groups))
 	if maxTotal < 0 {
 		for _, g := range groups {
-			result[g.name] = g.length
+			result[g.key] = g.length
 		}
 		return result
 	}
@@ -534,7 +465,7 @@ func allocateTargets(groups []struct {
 	}
 	if total <= maxTotal {
 		for _, g := range groups {
-			result[g.name] = g.length
+			result[g.key] = g.length
 		}
 		return result
 	}
@@ -547,7 +478,7 @@ func allocateTargets(groups []struct {
 	sumTargets := 0
 	for i, g := range groups {
 		if g.length <= 0 {
-			result[g.name] = 0
+			result[g.key] = 0
 			continue
 		}
 		raw := float64(g.length) * float64(maxTotal) / float64(total)
@@ -555,7 +486,7 @@ func allocateTargets(groups []struct {
 		if t > g.length {
 			t = g.length
 		}
-		result[groups[i].name] = t
+		result[groups[i].key] = t
 		sumTargets += t
 		remainders = append(remainders, rem{i, raw - float64(t)})
 	}
@@ -568,9 +499,9 @@ func allocateTargets(groups []struct {
 				break
 			}
 			g := groups[r.idx]
-			cur := result[g.name]
+			cur := result[g.key]
 			if cur < g.length {
-				result[g.name] = cur + 1
+				result[g.key] = cur + 1
 				need--
 			}
 		}
@@ -581,8 +512,8 @@ func allocateTargets(groups []struct {
 					if need == 0 {
 						break
 					}
-					if result[g.name] < g.length {
-						result[g.name]++
+					if result[g.key] < g.length {
+						result[g.key]++
 						need--
 					}
 				}
@@ -599,8 +530,8 @@ func allocateTargets(groups []struct {
 				break
 			}
 			g := groups[r.idx]
-			if result[g.name] > 0 {
-				result[g.name]--
+			if result[g.key] > 0 {
+				result[g.key]--
 				over--
 			}
 		}
@@ -610,8 +541,8 @@ func allocateTargets(groups []struct {
 					if over == 0 {
 						break
 					}
-					if result[g.name] > 0 {
-						result[g.name]--
+					if result[g.key] > 0 {
+						result[g.key]--
 						over--
 					}
 				}
@@ -624,40 +555,15 @@ func allocateTargets(groups []struct {
 	return result
 }
 
-func downsampleModelRecords(in []models.Record, k int) []models.Record {
+func sampleEvenly[T any](in []T, k int) []T {
 	n := len(in)
 	if k <= 0 || n == 0 {
-		return []models.Record{}
+		return []T{}
 	}
 	if k >= n {
 		return in
 	}
-	out := make([]models.Record, 0, k)
-	if k == 1 {
-		out = append(out, in[n-1])
-		return out
-	}
-	for i := 0; i < k; i++ {
-		idx := int(math.Round(float64(i) * float64(n-1) / float64(k-1)))
-		if idx < 0 {
-			idx = 0
-		} else if idx >= n {
-			idx = n - 1
-		}
-		out = append(out, in[idx])
-	}
-	return out
-}
-
-func downsampleFlatRecords(in []flatRecord, k int) []flatRecord {
-	n := len(in)
-	if k <= 0 || n == 0 {
-		return []flatRecord{}
-	}
-	if k >= n {
-		return in
-	}
-	out := make([]flatRecord, 0, k)
+	out := make([]T, 0, k)
 	if k == 1 {
 		out = append(out, in[n-1])
 		return out
@@ -676,37 +582,32 @@ func downsampleFlatRecords(in []flatRecord, k int) []flatRecord {
 
 // flatRecord is a projection used when load_type is specified.
 type flatRecord struct {
-	Client         string           `json:"client"`
-	Time           models.LocalTime `json:"time"`
-	Cpu            *float32         `json:"cpu,omitempty"`
-	Gpu            *float32         `json:"gpu,omitempty"`
-	Ram            *int64           `json:"ram,omitempty"`
-	RamTotal       *int64           `json:"ram_total,omitempty"`
-	Swap           *int64           `json:"swap,omitempty"`
-	SwapTotal      *int64           `json:"swap_total,omitempty"`
-	Load           *float32         `json:"load,omitempty"`
-	Temp           *float32         `json:"temp,omitempty"`
-	Disk           *int64           `json:"disk,omitempty"`
-	DiskTotal      *int64           `json:"disk_total,omitempty"`
-	NetIn          *int64           `json:"net_in,omitempty"`
-	NetOut         *int64           `json:"net_out,omitempty"`
-	NetTotalUp     *int64           `json:"net_total_up,omitempty"`
-	NetTotalDown   *int64           `json:"net_total_down,omitempty"`
-	Process        *int             `json:"process,omitempty"`
-	Connections    *int             `json:"connections,omitempty"`
-	ConnectionsUdp *int             `json:"connections_udp,omitempty"`
-	Uptime         *int64           `json:"uptime,omitempty"`
+	Client         string    `json:"client"`
+	Time           time.Time `json:"time"`
+	Cpu            *float32  `json:"cpu,omitempty"`
+	Gpu            *float32  `json:"gpu,omitempty"`
+	Ram            *int64    `json:"ram,omitempty"`
+	RamTotal       *int64    `json:"ram_total,omitempty"`
+	Swap           *int64    `json:"swap,omitempty"`
+	SwapTotal      *int64    `json:"swap_total,omitempty"`
+	Load           *float32  `json:"load,omitempty"`
+	Temp           *float32  `json:"temp,omitempty"`
+	Disk           *int64    `json:"disk,omitempty"`
+	DiskTotal      *int64    `json:"disk_total,omitempty"`
+	NetIn          *int64    `json:"net_in,omitempty"`
+	NetOut         *int64    `json:"net_out,omitempty"`
+	NetTotalUp     *int64    `json:"net_total_up,omitempty"`
+	NetTotalDown   *int64    `json:"net_total_down,omitempty"`
+	Process        *int      `json:"process,omitempty"`
+	Connections    *int      `json:"connections,omitempty"`
+	ConnectionsUdp *int      `json:"connections_udp,omitempty"`
+	Uptime         *int64    `json:"uptime,omitempty"`
 }
 
 func filterRecordsByLoadType(recs []models.Record, loadType string) []flatRecord {
 	out := make([]flatRecord, 0, len(recs))
 	for _, r := range recs {
 		fr := flatRecord{Client: r.Client, Time: r.Time}
-		// always include uptime when present
-		//if r.Uptime != 0 {
-		//	v := r.Uptime
-		//	fr.Uptime = &v
-		//}
 		switch loadType {
 		case "cpu":
 			v := r.Cpu

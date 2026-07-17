@@ -7,6 +7,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/metric"
+	v1 "github.com/komari-monitor/komari/protocol/v1"
 )
 
 func TestDefaultRollupPolicy(t *testing.T) {
@@ -190,6 +191,47 @@ func TestCreateMetricDefinitionsUsesExplicitRetentionAndPreservesOverrides(t *te
 	}
 	if cpu.RetentionDays != 0 {
 		t.Fatalf("cpu retention = %d, want preserved disabled state", cpu.RetentionDays)
+	}
+}
+
+func TestCreateMetricDefinitionsUsesLegacySpanOnlyForNewDefinitions(t *testing.T) {
+	ctx := context.Background()
+	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1)))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	defer s.Close()
+
+	if err := createMetricDefinitionsWithDefaultRetention(ctx, s, 10); err != nil {
+		t.Fatalf("create migration definitions: %v", err)
+	}
+	defs, err := s.ListMetrics(ctx)
+	if err != nil {
+		t.Fatalf("list migration definitions: %v", err)
+	}
+	for _, def := range defs {
+		if def.RetentionDays != 10 {
+			t.Fatalf("%s retention = %d, want legacy span 10", def.Name, def.RetentionDays)
+		}
+	}
+
+	cpu, err := s.GetMetric(ctx, MetricCPU)
+	if err != nil {
+		t.Fatalf("get CPU definition: %v", err)
+	}
+	cpu.RetentionDays = 3
+	if err := s.UpsertMetric(ctx, cpu); err != nil {
+		t.Fatalf("override CPU retention: %v", err)
+	}
+	if err := createMetricDefinitionsWithDefaultRetention(ctx, s, 20); err != nil {
+		t.Fatalf("refresh migration definitions: %v", err)
+	}
+	cpu, err = s.GetMetric(ctx, MetricCPU)
+	if err != nil {
+		t.Fatalf("reload CPU definition: %v", err)
+	}
+	if cpu.RetentionDays != 3 {
+		t.Fatalf("existing CPU retention = %d, want preserved 3", cpu.RetentionDays)
 	}
 }
 
@@ -377,7 +419,7 @@ func TestGetRecordsByClientAndTimeReadsRollupsAfterRawCompaction(t *testing.T) {
 	ts := now.Add(-time.Hour)
 	rec := models.Record{
 		Client:         "node-a",
-		Time:           models.FromTime(ts),
+		Time:           ts,
 		Cpu:            42.5,
 		Ram:            123456,
 		RamTotal:       999999,
@@ -387,7 +429,19 @@ func TestGetRecordsByClientAndTimeReadsRollupsAfterRawCompaction(t *testing.T) {
 		Connections:    321,
 		ConnectionsUdp: 12,
 	}
-	if err := WriteRecord(ctx, rec); err != nil {
+	if _, err := WriteReport(ctx, v1.Report{
+		UUID:      rec.Client,
+		UpdatedAt: ts,
+		CPU:       v1.CPUReport{Usage: float64(rec.Cpu)},
+		Ram:       v1.RamReport{Used: rec.Ram, Total: rec.RamTotal},
+		Load:      v1.LoadReport{Load1: float64(rec.Load)},
+		Disk:      v1.DiskReport{Used: rec.Disk, Total: rec.DiskTotal},
+		Process:   rec.Process,
+		Connections: v1.ConnectionsReport{
+			TCP: rec.Connections,
+			UDP: rec.ConnectionsUdp,
+		},
+	}); err != nil {
 		t.Fatalf("write record: %v", err)
 	}
 	if _, err := s.Compact(ctx, now); err != nil {

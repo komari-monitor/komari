@@ -13,7 +13,6 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils"
-	"gorm.io/gorm"
 
 	"github.com/google/uuid"
 )
@@ -44,7 +43,7 @@ func SaveClientInfo(update map[string]interface{}) error {
 		return fmt.Errorf("no fields to update")
 	}
 
-	update["updated_at"] = time.Now()
+	update["updated_at"] = time.Now().UTC()
 
 	toFloat64 := func(value interface{}) (float64, bool) {
 		switch typed := value.(type) {
@@ -129,24 +128,6 @@ func SaveClientInfo(update map[string]interface{}) error {
 	return nil
 }
 
-func EditClientName(clientUUID, clientName string) error {
-	db := dbcore.GetDBInstance()
-	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Update("name", clientName).Error
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func EditClientToken(clientUUID, token string) error {
-	db := dbcore.GetDBInstance()
-	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Update("token", token).Error
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 // CreateClient 创建新客户端
 func CreateClient() (clientUUID, token string, err error) {
 	db := dbcore.GetDBInstance()
@@ -157,8 +138,8 @@ func CreateClient() (clientUUID, token string, err error) {
 		UUID:      clientUUID,
 		Token:     token,
 		Name:      "client_" + clientUUID[0:8],
-		CreatedAt: models.FromTime(time.Now()),
-		UpdatedAt: models.FromTime(time.Now()),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 	}
 
 	err = db.Create(&client).Error
@@ -182,8 +163,8 @@ func CreateClientWithName(name string) (clientUUID, token string, err error) {
 		UUID:      clientUUID,
 		Token:     token,
 		Name:      name,
-		CreatedAt: models.FromTime(time.Now()),
-		UpdatedAt: models.FromTime(time.Now()),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 	}
 
 	err = db.Create(&client).Error
@@ -212,19 +193,6 @@ func GetClientByUUID(uuid string) (client models.Client, err error) {
 	db := dbcore.GetDBInstance()
 	err = db.Where("uuid = ?", uuid).First(&client).Error
 	if err != nil {
-		return models.Client{}, err
-	}
-	return client, nil
-}
-
-// GetClientBasicInfo 获取指定 UUID 的客户端基本信息
-func GetClientBasicInfo(uuid string) (client models.Client, err error) {
-	db := dbcore.GetDBInstance()
-	err = db.Where("uuid = ?", uuid).First(&client).Error
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return models.Client{}, fmt.Errorf("客户端不存在: %s", uuid)
-		}
 		return models.Client{}, err
 	}
 	return client, nil
@@ -268,8 +236,30 @@ func SaveClient(updates map[string]interface{}) error {
 			}
 		}
 	}
+	if value, exists := updates["expired_at"]; exists {
+		switch typed := value.(type) {
+		case nil:
+			updates["expired_at"] = nil
+		case time.Time:
+			updates["expired_at"] = typed.UTC()
+		case *time.Time:
+			if typed == nil {
+				updates["expired_at"] = nil
+			} else {
+				updates["expired_at"] = typed.UTC()
+			}
+		case string:
+			stamp, err := time.Parse(time.RFC3339Nano, typed)
+			if err != nil {
+				return fmt.Errorf("expired_at must be an RFC3339 timestamp with a timezone: %w", err)
+			}
+			updates["expired_at"] = stamp.UTC()
+		default:
+			return fmt.Errorf("expired_at must be an RFC3339 timestamp with a timezone")
+		}
+	}
 
-	updates["updated_at"] = time.Now()
+	updates["updated_at"] = time.Now().UTC()
 
 	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
 	if err != nil {

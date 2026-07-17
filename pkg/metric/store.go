@@ -96,6 +96,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 			definitions: tableName(cfg.TablePrefix, "definitions"),
 			points:      tableName(cfg.TablePrefix, "points"),
 			rollups:     tableName(cfg.TablePrefix, "rollups"),
+			watermarks:  tableName(cfg.TablePrefix, "compaction_watermarks"),
 		},
 	}
 
@@ -532,6 +533,9 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.points, s.dialect.placeholder(1)), name); err != nil {
 		return err
 	}
+	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.watermarks, s.dialect.placeholder(1)), name); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE name = %s`, s.tables.definitions, s.dialect.placeholder(1)), name); err != nil {
 		return err
 	}
@@ -585,6 +589,11 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 			); err != nil {
 				return Definition{}, err
 			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.watermarks, s.dialect.placeholder(1)), name,
+		); err != nil {
+			return Definition{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -668,6 +677,14 @@ func (s *Store) DeleteSeries(ctx context.Context, filter Query) (int64, error) {
 			return total, err
 		}
 		total += n
+	}
+	if strings.TrimSpace(filter.EntityID) == "" && len(filter.Tags) == 0 {
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.watermarks, s.dialect.placeholder(1)),
+			filter.MetricName,
+		); err != nil {
+			return total, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return total, err
@@ -980,9 +997,9 @@ func (s *Store) Aggregate(ctx context.Context, query AggregateQuery) ([]Aggregat
 	}
 	// Push simple reductions (avg/min/max/sum/count) down to SQL via GROUP BY on
 	// a time bucket so large ranges don't pull every raw point into memory.
-	// Percentiles, first/last, rate and empty-bucket filling need the ordered
-	// raw series, so those fall back to the in-memory aggregator.
-	if valueExpr, ok := sqlAggValueExpr(s.cfg.Driver, query.Aggregation); ok && !query.FillEmpty {
+	// Percentiles, first/last and rate need the ordered raw series, so those fall
+	// back to the in-memory aggregator.
+	if valueExpr, ok := sqlAggValueExpr(s.cfg.Driver, query.Aggregation); ok {
 		return s.aggregateInSQL(ctx, query, valueExpr)
 	}
 	// In-memory fallback. Strip the embedded raw-point Limit/Offset so the full

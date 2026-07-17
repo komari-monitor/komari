@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,11 +33,11 @@ import (
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/api"
-	"github.com/komari-monitor/komari/web/nezha"
 	"github.com/komari-monitor/komari/web/oauth"
-	report_cache "github.com/komari-monitor/komari/web/report"
+	frontendpublic "github.com/komari-monitor/komari/web/public"
 	"github.com/komari-monitor/komari/web/router"
 	"github.com/komari-monitor/komari/web/security"
+	upgradeweb "github.com/komari-monitor/komari/web/update"
 )
 
 // cleanupFunc 是一个关闭阶段执行的清理函数。
@@ -47,14 +49,14 @@ type cleanupFunc struct {
 // App 显式建模服务端的启动生命周期。
 //
 // 过去 RunServer 把目录创建、数据库、metric store、GeoIP、定时任务、通知、OAuth、
-// Nezha、Gin 中间件、路由、HTTP 启动与 shutdown 全部混在一个函数里，
+// Gin 中间件、路由、HTTP 启动与 shutdown 全部混在一个函数里，
 // 启动顺序只能靠通读整段代码推断，异步初始化过早且吞掉错误，关闭也不完整。
 //
 // App 把这些拆成有序阶段：
 //
 //	Bootstrap    基础设施：目录、数据库、默认管理员、配置快照
 //	InitStores   存储：metric store
-//	InitProviders 外部 provider：OAuth（同步，路由依赖）、GeoIP、消息发送、Nezha 兼容
+//	InitProviders 外部 provider：OAuth（同步，路由依赖）、GeoIP、消息发送
 //	StartBackground 后台：定时任务
 //	BuildRouter  构建 Gin 引擎与路由
 //	Run          启动 HTTP 服务并阻塞直到收到信号
@@ -63,11 +65,12 @@ type cleanupFunc struct {
 // 每个阶段返回错误即可让上层决定是否中止启动；各资源在创建时把对应清理登记到
 // cleanup 栈，关闭时按后进先出（LIFO）顺序释放。
 type App struct {
-	settings *config.Settings
-	engine   *gin.Engine
-	server   *http.Server
-	reload   *ReloadManager
-	dbReady  bool
+	settings   *config.Settings
+	engine     *gin.Engine
+	server     *http.Server
+	reload     *ReloadManager
+	dbReady    bool
+	oauthReady bool
 
 	cleanups []cleanupFunc
 }
@@ -153,23 +156,19 @@ func (a *App) InitStores() error {
 
 		return fmt.Errorf("metrics startup migration failed: %w", err)
 	}
+	metricstore.StartReportBatcher()
+	a.addCleanup("metric-report-batcher", func(ctx context.Context) error {
+		return metricstore.StopReportBatcher(ctx)
+	})
 	return nil
 }
 
 // InitProviders 初始化外部 provider。
 //
 // OAuth 必须在 HTTP 服务开始接收请求之前同步完成，否则 oauth.CurrentProvider()
-// 存在空指针风险；GeoIP 与消息发送允许后台初始化；Nezha 兼容按配置决定是否启动。
+// 存在空指针风险；GeoIP 与消息发送允许后台初始化。
 func (a *App) InitProviders() error {
-	// OAuth：同步初始化并处理错误，保证路由可用前 provider 已就绪。
-	if err := oauth.Initialize(); err != nil {
-		// 记录但不致命：Initialize 内部在失败时已回退到 github provider。
-		log.Printf("Failed to initialize OAuth provider: %v", err)
-		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize OAuth provider: %v", err))
-	}
-	a.addCleanup("oauth", func(context.Context) error {
-		return oauth.Shutdown()
-	})
+	a.initOAuth()
 
 	// GeoIP：可能涉及下载/加载 mmdb，放后台执行避免拖慢启动。
 	go geoip.InitGeoIp()
@@ -183,24 +182,103 @@ func (a *App) InitProviders() error {
 		return messageSender.Shutdown()
 	})
 
-	// Nezha 兼容 gRPC 服务：按配置启动，且无论初始是否启动都登记清理，
-	// 以覆盖运行期通过热重载开启的情况。
-	if a.settings.NezhaCompatEnabled {
-		listen := a.settings.NezhaCompatListen
-		go func() {
-			if err := nezha.StartNezhaCompat(listen); err != nil {
-				log.Printf("Nezha compat server error: %v", err)
-				auditlog.EventLog("error", fmt.Sprintf("Nezha compat server error: %v", err))
-			}
-		}()
+	return nil
+}
+
+// initOAuth initializes the provider once. The restricted upgrade server also
+// needs OAuth login, so provider setup may happen before the normal provider
+// stage without registering duplicate cleanup work.
+func (a *App) initOAuth() {
+	if a.oauthReady {
+		return
 	}
-	a.addCleanup("nezha-compat", func(context.Context) error {
-		// 未运行时 StopNezhaCompat 返回错误，属正常情况，忽略即可。
-		_ = nezha.StopNezhaCompat()
-		return nil
+	if err := oauth.Initialize(); err != nil {
+		// Keep password login available when an OAuth provider is misconfigured.
+		log.Printf("Failed to initialize OAuth provider: %v", err)
+		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize OAuth provider: %v", err))
+	}
+	a.oauthReady = true
+	a.addCleanup("oauth", func(context.Context) error {
+		return oauth.Shutdown()
+	})
+}
+
+func (a *App) LegacyUpgradeRequired() (bool, migrations.LegacyMonitoringSummary, error) {
+	return migrations.LegacyMonitoringMigrationRequired(dbcore.GetDBInstance())
+}
+
+// RunLegacyUpgrade starts a restricted HTTP server on the normal listen
+// address. It returns only after the migration finishes and the restricted
+// listener has released the port, or after shutdown/interruption.
+func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool, error) {
+	a.initOAuth()
+	controller := upgradeweb.NewController(dbcore.GetDBInstance(), summary)
+	controller.Activate()
+	defer controller.Deactivate()
+
+	r := gin.New()
+	r.Use(logutil.GinLogger())
+	r.Use(logutil.GinRecovery())
+	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
+	r.Use(cors.Middleware())
+	r.Use(api.IdentityMiddleware())
+	r.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api") {
+			c.Header("Cache-Control", "no-store")
+		}
+		c.Next()
 	})
 
-	return nil
+	controller.Register(r)
+	frontendpublic.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
+		r.NoRoute(func(c *gin.Context) {
+			requestPath := c.Request.URL.Path
+			if strings.HasPrefix(requestPath, "/api") {
+				api.RespondError(c, http.StatusNotFound, "Not found in upgrade mode")
+				return
+			}
+			if c.Request.Method == http.MethodGet && requestPath != upgradeweb.PagePath && filepath.Ext(requestPath) == "" {
+				c.Redirect(http.StatusTemporaryRedirect, upgradeweb.PagePath)
+				return
+			}
+			for _, handler := range handlers {
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		})
+	})
+
+	a.engine = r
+	a.server = &http.Server{Addr: flags.Listen, Handler: r}
+	serverErr := make(chan error, 1)
+	log.Printf("Legacy monitoring data requires the 1.2.7 upgrade wizard on %s", flags.Listen)
+	go func() {
+		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(quit)
+
+	select {
+	case err := <-serverErr:
+		return false, fmt.Errorf("listen in upgrade mode: %w", err)
+	case <-quit:
+		return false, a.Shutdown()
+	case <-controller.Done():
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := a.server.Shutdown(ctx); err != nil {
+			return false, fmt.Errorf("stop upgrade server: %w", err)
+		}
+		a.server = nil
+		a.engine = nil
+		return true, nil
+	}
 }
 
 // StartBackground 启动后台工作：定时任务。
@@ -229,24 +307,6 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 			log.Printf("Using %s as OIDC provider", oidcProvider.Name)
 			if err := oauth.LoadProvider(oidcProvider.Name, oidcProvider.Addition); err != nil {
 				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
-			}
-		}
-	})
-
-	// Nezha 兼容服务开关。
-	a.reload.Register("nezha-compat", func(event config.ConfigEvent) {
-		if ok, t := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey); ok {
-			if t {
-				l, _ := config.GetAs[string](config.NezhaCompatListenKey)
-				if err := nezha.StartNezhaCompat(l); err != nil {
-					log.Printf("start Nezha compat server error: %v", err)
-					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
-				}
-			} else {
-				if err := nezha.StopNezhaCompat(); err != nil {
-					log.Printf("stop Nezha compat server error: %v", err)
-					auditlog.EventLog("error", fmt.Sprintf("stop Nezha compat server error: %v", err))
-				}
 			}
 		}
 	})
@@ -398,8 +458,8 @@ func registerScheduledWork() {
 	if err := corn.AddContextFunc("metrics:compact", "@every 5m", true, compactMetricStore); err != nil {
 		log.Println("Failed to add metric compact scheduled task:", err)
 	}
-	if err := corn.AddFunc("records:minute", "@every 1m", minuteScheduledWork); err != nil {
-		log.Println("Failed to add minute scheduled task:", err)
+	if err := corn.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
+		log.Println("Failed to add traffic notification task:", err)
 	}
 	if err := corn.AddFunc("notifier:expire", "0 0 9 * * *", notifier.CheckExpireScheduledWork); err != nil {
 		log.Println("Failed to add expire notification scheduled task:", err)
@@ -411,7 +471,7 @@ func registerScheduledWork() {
 const taskResultRetentionDays = 30
 
 func cleanupScheduledData() {
-	before := time.Now().Add(-24 * time.Hour * taskResultRetentionDays)
+	before := time.Now().UTC().Add(-24 * time.Hour * taskResultRetentionDays)
 	if err := tasks.ClearTaskResultsByTimeBefore(before); err != nil {
 		log.Printf("Failed to clean expired task results: %v", err)
 	}
@@ -424,7 +484,7 @@ func compactMetricStore(ctx context.Context) {
 	compactCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 
-	written, err := metricstore.Compact(compactCtx, time.Now())
+	written, err := metricstore.Compact(compactCtx, time.Now().UTC())
 	if errors.Is(err, metricstore.ErrCompactInProgress) {
 		return
 	}
@@ -435,10 +495,4 @@ func compactMetricStore(ctx context.Context) {
 	if written > 0 {
 		log.Printf("Metric store compacted %d rollup buckets", written)
 	}
-}
-
-func minuteScheduledWork() {
-	report_cache.SaveClientReportToDB()
-	// 每分钟检查一次流量提醒
-	notifier.CheckTraffic()
 }

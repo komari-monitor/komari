@@ -104,63 +104,6 @@ func TestRollupKeepsTagSeriesSeparate(t *testing.T) {
 	}
 }
 
-func TestSeriesRollupFillEmptyPreservesTags(t *testing.T) {
-	ctx := context.Background()
-	policy := RollupPolicy{
-		RawRetention: time.Hour,
-		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 30 * 24 * time.Hour}},
-	}
-	s := newRollupStore(t, policy)
-	if err := s.CreateMetric(ctx, Definition{Name: "ping.loss", Type: TypeGauge, RetentionDays: 30}); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
-	old := now.Add(-48 * time.Hour)
-	if err := s.WriteBatch(ctx, []Point{
-		{MetricName: "ping.loss", EntityID: "n1", Timestamp: old, Value: 0, Tags: map[string]string{"task_id": "7"}},
-		{MetricName: "ping.loss", EntityID: "n1", Timestamp: old, Value: 1, Tags: map[string]string{"task_id": "8"}},
-	}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if _, err := s.Compact(ctx, now); err != nil {
-		t.Fatalf("compact: %v", err)
-	}
-
-	got, err := s.Series(ctx, AggregateQuery{
-		Query: Query{
-			MetricName: "ping.loss",
-			EntityID:   "n1",
-			Start:      old,
-			End:        old.Add(2 * time.Minute),
-		},
-		Aggregation:    AggAvg,
-		Interval:       time.Minute,
-		FillEmpty:      true,
-		PreserveSeries: true,
-	}, now)
-	if err != nil {
-		t.Fatalf("series: %v", err)
-	}
-	countByTask := map[string]int{}
-	emptyByTask := map[string]int{}
-	for _, point := range got {
-		taskID := point.Tags["task_id"]
-		if taskID == "" {
-			t.Fatalf("rollup fill-empty point lost task_id tag: %#v", point)
-		}
-		countByTask[taskID]++
-		if point.Count == 0 {
-			emptyByTask[taskID]++
-		}
-	}
-	if countByTask["7"] != 3 || countByTask["8"] != 3 {
-		t.Fatalf("expected 3 buckets per task, got counts=%#v points=%#v", countByTask, got)
-	}
-	if emptyByTask["7"] != 2 || emptyByTask["8"] != 2 {
-		t.Fatalf("expected empty buckets to retain tags, got empty=%#v points=%#v", emptyByTask, got)
-	}
-}
-
 // TestRollupTagPercentileSurvivesRetention proves the headline TSDB property
 // still holds per tag: after raw is deleted, a tag-filtered percentile is still
 // answerable from that tag's surviving rollup series (and not contaminated by

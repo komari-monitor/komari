@@ -107,6 +107,11 @@ func SendEvent(event models.EventMessage) error {
 	if CurrentProvider() == nil {
 		return fmt.Errorf("message sender provider is not initialized")
 	}
+	if event.Time.IsZero() {
+		event.Time = time.Now().UTC()
+	} else {
+		event.Time = event.Time.UTC()
+	}
 	var err error
 	cfg, err := config.GetMany(map[string]any{
 		config.NotificationEnabledKey:  false,
@@ -165,7 +170,7 @@ func parseTemplate(messageTemplate string, event models.EventMessage) string {
 	replaceMap := map[string]string{
 		"{{event}}":   event.Event,
 		"{{client}}":  joinedClients,
-		"{{time}}":    event.Time.Format(time.RFC3339),
+		"{{time}}":    event.Time.UTC().Format(time.RFC3339Nano),
 		"{{message}}": event.Message,
 		"{{emoji}}":   event.Emoji,
 	}

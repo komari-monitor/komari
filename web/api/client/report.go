@@ -19,7 +19,6 @@ import (
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/connection"
-	report_cache "github.com/komari-monitor/komari/web/report"
 )
 
 const (
@@ -246,26 +245,20 @@ func processMessage(conn *connection.SafeConn, message []byte, uuid string) {
 		}
 	case "ping_result":
 		var reqBody struct {
-			PingTaskID uint      `json:"task_id"`
-			PingResult int       `json:"value"`
-			PingType   string    `json:"ping_type"`
-			FinishedAt time.Time `json:"finished_at"`
+			PingTaskID uint   `json:"task_id"`
+			PingResult int    `json:"value"`
+			PingType   string `json:"ping_type"`
 		}
 		err = json.Unmarshal(message, &reqBody)
 		if err != nil {
 			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid ping result format"})
 			return
 		}
-		ingestPingResult(uuid, reqBody.PingTaskID, reqBody.PingResult, reqBody.FinishedAt)
+		if err := ingestPingResult(uuid, reqBody.PingTaskID, reqBody.PingResult); err != nil {
+			conn.WriteJSON(gin.H{"status": "error", "error": "Failed to save ping result"})
+		}
 	default:
 		log.Printf("Unknown message type: %s", msgType.Type)
 		conn.WriteJSON(gin.H{"status": "error", "error": "Unknown message type"})
 	}
-}
-
-func SaveClientReport(uuid string, report v1.Report) (v1.Report, error) {
-	if report.CPU.Usage < 0.01 {
-		report.CPU.Usage = 0.01
-	}
-	return report_cache.AppendClientReport(uuid, report)
 }

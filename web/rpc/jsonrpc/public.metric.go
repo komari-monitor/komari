@@ -19,26 +19,6 @@ import (
 
 const defaultMetricQueryPoints = 500
 
-var metricDownsampleStandardIntervals = []time.Duration{
-	time.Second,
-	5 * time.Second,
-	10 * time.Second,
-	15 * time.Second,
-	30 * time.Second,
-	time.Minute,
-	2 * time.Minute,
-	5 * time.Minute,
-	10 * time.Minute,
-	15 * time.Minute,
-	30 * time.Minute,
-	time.Hour,
-	2 * time.Hour,
-	3 * time.Hour,
-	6 * time.Hour,
-	12 * time.Hour,
-	24 * time.Hour,
-}
-
 func init() {
 	regPublic("listMetricDefinitions", publicListMetricDefinitions, "List public metric definitions")
 	regPublic("queryMetrics", publicQueryMetrics, "Query metric points")
@@ -53,11 +33,11 @@ type publicMetricQueryParams struct {
 	EntityID  string   `json:"entity_id"`
 	EntityIDs []string `json:"entity_ids"`
 
-	Start     any `json:"start"`
-	StartTime any `json:"start_time"`
-	End       any `json:"end"`
-	EndTime   any `json:"end_time"`
-	Hours     any `json:"hours"`
+	Start     *time.Time `json:"start"`
+	StartTime *time.Time `json:"start_time"`
+	End       *time.Time `json:"end"`
+	EndTime   *time.Time `json:"end_time"`
+	Hours     float64    `json:"hours"`
 
 	Tags map[string]string `json:"tags"`
 
@@ -81,10 +61,9 @@ type publicMetricQueryParams struct {
 }
 
 type publicMetricPoint struct {
-	Time   string            `json:"time"`
+	Time   time.Time         `json:"time"`
 	Value  *float64          `json:"value"`
 	Count  int               `json:"count,omitempty"`
-	Tag    map[string]string `json:"tag,omitempty"`
 	Tags   map[string]string `json:"tags,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -95,7 +74,6 @@ type publicMetricSeries struct {
 	Type                string              `json:"type,omitempty"`
 	Unit                string              `json:"unit,omitempty"`
 	RetentionDays       int                 `json:"retention_days,omitempty"`
-	Tag                 map[string]string   `json:"tag,omitempty"`
 	Tags                map[string]string   `json:"tags,omitempty"`
 	Downsampled         bool                `json:"downsampled"`
 	DownsampleAlgorithm string              `json:"downsample_algorithm,omitempty"`
@@ -114,11 +92,11 @@ type publicPingMetricStatsParams struct {
 	TaskID  any   `json:"task_id"`
 	TaskIDs []any `json:"task_ids"`
 
-	Start     any `json:"start"`
-	StartTime any `json:"start_time"`
-	End       any `json:"end"`
-	EndTime   any `json:"end_time"`
-	Hours     any `json:"hours"`
+	Start     *time.Time `json:"start"`
+	StartTime *time.Time `json:"start_time"`
+	End       *time.Time `json:"end"`
+	EndTime   *time.Time `json:"end_time"`
+	Hours     float64    `json:"hours"`
 
 	MaxPoints        int `json:"max_points"`
 	DownsamplePoints int `json:"downsample_points"`
@@ -146,8 +124,8 @@ type publicPingMetricTaskStats struct {
 }
 
 type publicPingMetricStatsResponse struct {
-	Start           string                      `json:"start"`
-	End             string                      `json:"end"`
+	Start           time.Time                   `json:"start"`
+	End             time.Time                   `json:"end"`
 	IntervalSeconds float64                     `json:"interval_seconds,omitempty"`
 	Stats           []publicPingMetricTaskStats `json:"stats"`
 	Count           int                         `json:"count"`
@@ -189,15 +167,9 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		return nil, rpc.MakeError(rpc.InvalidParams, "metric_keys is required", nil)
 	}
 
-	end, err := parseMetricQueryTimeOrDefault(firstNonNil(params.End, params.EndTime), time.Now().UTC())
-	if err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid end time: "+err.Error(), nil)
-	}
+	end := metricQueryTimeOrDefault(firstMetricQueryTime(params.End, params.EndTime), time.Now().UTC())
 	startFallback := end.Add(-metricQueryHours(params.Hours))
-	start, err := parseMetricQueryTimeOrDefault(firstNonNil(params.Start, params.StartTime), startFallback)
-	if err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid start time: "+err.Error(), nil)
-	}
+	start := metricQueryTimeOrDefault(firstMetricQueryTime(params.Start, params.StartTime), startFallback)
 	if !end.After(start) {
 		return nil, rpc.MakeError(rpc.InvalidParams, "end must be after start", nil)
 	}
@@ -258,7 +230,6 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				Unit:          def.Unit,
 				RetentionDays: def.RetentionDays,
 				Tags:          params.Tags,
-				Tag:           params.Tags,
 				Downsampled:   metricDownsample,
 				FillEmpty:     metricFillEmpty,
 				MaxPoints:     maxPoints,
@@ -266,7 +237,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 
 			if metricDownsample {
 				item.DownsampleAlgorithm = string(algorithm)
-				now := time.Now()
+				now := time.Now().UTC()
 				interval := metricDownsampleInterval(end.Sub(start), maxPoints)
 				interval = store.CompatibleSeriesInterval(start, now, interval)
 				item.IntervalSeconds = interval.Seconds()
@@ -274,7 +245,6 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 					Query:          query,
 					Aggregation:    algorithm,
 					Interval:       interval,
-					FillEmpty:      metricFillEmpty,
 					PreserveSeries: true,
 				}, now)
 				if err != nil {
@@ -283,10 +253,9 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				item.Points = make([]publicMetricPoint, 0, len(points))
 				for _, point := range points {
 					item.Points = append(item.Points, publicMetricPoint{
-						Time:  point.Bucket.Format(time.RFC3339Nano),
-						Value: publicAggregateMetricValue(point, metricFillEmpty),
+						Time:  point.Bucket.UTC(),
+						Value: publicRawMetricValue(point.MetricName, point.Value, metricFillEmpty),
 						Count: point.Count,
-						Tag:   point.Tags,
 						Tags:  point.Tags,
 					})
 				}
@@ -298,21 +267,25 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				item.Points = make([]publicMetricPoint, 0, len(points))
 				for _, point := range points {
 					item.Points = append(item.Points, publicMetricPoint{
-						Time:   point.Timestamp.Format(time.RFC3339Nano),
+						Time:   point.Timestamp.UTC(),
 						Value:  publicRawMetricValue(metricKey, point.Value, metricFillEmpty),
-						Tag:    point.Tags,
 						Tags:   point.Tags,
 						Labels: point.Labels,
 					})
 				}
 			}
-			series = append(series, splitPublicMetricSeries(item)...)
+			for _, split := range splitPublicMetricSeries(item) {
+				if metricFillEmpty {
+					split = adaptiveFillPublicMetricSeries(split, start, end)
+				}
+				series = append(series, split)
+			}
 		}
 	}
 
 	return map[string]any{
-		"start":                     start.Format(time.RFC3339Nano),
-		"end":                       end.Format(time.RFC3339Nano),
+		"start":                     start.UTC(),
+		"end":                       end.UTC(),
 		"server_downsample_default": downsample,
 		"default_points":            defaultMetricQueryPoints,
 		"series":                    series,
@@ -326,15 +299,9 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
 	}
 
-	end, err := parseMetricQueryTimeOrDefault(firstNonNil(params.End, params.EndTime), time.Now().UTC())
-	if err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid end time: "+err.Error(), nil)
-	}
+	end := metricQueryTimeOrDefault(firstMetricQueryTime(params.End, params.EndTime), time.Now().UTC())
 	startFallback := end.Add(-metricQueryHours(params.Hours))
-	start, err := parseMetricQueryTimeOrDefault(firstNonNil(params.Start, params.StartTime), startFallback)
-	if err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid start time: "+err.Error(), nil)
-	}
+	start := metricQueryTimeOrDefault(firstMetricQueryTime(params.Start, params.StartTime), startFallback)
 	if !end.After(start) {
 		return nil, rpc.MakeError(rpc.InvalidParams, "end must be after start", nil)
 	}
@@ -346,8 +313,8 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	}
 	if len(entityIDs) == 0 {
 		return publicPingMetricStatsResponse{
-			Start: start.Format(time.RFC3339Nano),
-			End:   end.Format(time.RFC3339Nano),
+			Start: start.UTC(),
+			End:   end.UTC(),
 			Stats: []publicPingMetricTaskStats{},
 			Count: 0,
 		}, nil
@@ -375,7 +342,7 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	if maxPoints <= 0 {
 		maxPoints = defaultMetricQueryPoints
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	interval := metricDownsampleInterval(end.Sub(start), maxPoints)
 	interval = store.CompatibleSeriesInterval(start, now, interval)
 
@@ -397,8 +364,8 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	})
 
 	return publicPingMetricStatsResponse{
-		Start:           start.Format(time.RFC3339Nano),
-		End:             end.Format(time.RFC3339Nano),
+		Start:           start.UTC(),
+		End:             end.UTC(),
 		IntervalSeconds: interval.Seconds(),
 		Stats:           stats,
 		Count:           len(stats),
@@ -423,10 +390,6 @@ func splitPublicMetricSeries(base publicMetricSeries) []publicMetricSeries {
 	for _, point := range base.Points {
 		entityID := base.EntityID
 		tags := point.Tags
-		if len(tags) == 0 {
-			tags = point.Tag
-		}
-		point.Tag = tags
 		point.Tags = tags
 		tagsKey := publicMetricTagsKey(tags)
 		key := entityID + "\x00" + tagsKey
@@ -457,13 +420,72 @@ func splitPublicMetricSeries(base publicMetricSeries) []publicMetricSeries {
 		group := groups[key]
 		item := base
 		item.EntityID = group.entityID
-		item.Tag = group.tags
 		item.Tags = group.tags
 		item.Points = group.points
 		item.Count = len(group.points)
 		out = append(out, item)
 	}
 	return out
+}
+
+// adaptiveFillPublicMetricSeries inserts only the null points needed to mark
+// chart boundaries and real collection gaps. The typical collection interval
+// is inferred per metric/entity/tag series, so sparse periodic data does not
+// expand into hundreds of artificial empty buckets.
+func adaptiveFillPublicMetricSeries(series publicMetricSeries, start, end time.Time) publicMetricSeries {
+	pointTimes := make([]time.Time, len(series.Points))
+	deltas := make([]time.Duration, 0, len(series.Points))
+	for i, point := range series.Points {
+		pointTimes[i] = point.Time
+		if i > 0 {
+			delta := point.Time.Sub(pointTimes[i-1])
+			if delta > 0 {
+				deltas = append(deltas, delta)
+			}
+		}
+	}
+
+	expectedInterval := time.Duration(series.IntervalSeconds * float64(time.Second))
+	// Two deltas are the minimum needed to distinguish a regular cadence from
+	// one isolated long gap. A lower quartile keeps outages from inflating the
+	// inferred cadence when the rest of the series is regular.
+	if len(deltas) >= 2 {
+		sort.Slice(deltas, func(i, j int) bool { return deltas[i] < deltas[j] })
+		observedInterval := deltas[(len(deltas)-1)/4]
+		if observedInterval > expectedInterval {
+			expectedInterval = observedInterval
+		}
+	}
+	if expectedInterval > 0 {
+		series.IntervalSeconds = expectedInterval.Seconds()
+	}
+
+	nullPoint := func(at time.Time) publicMetricPoint {
+		return publicMetricPoint{
+			Time:  at.UTC(),
+			Value: nil,
+			Tags:  series.Tags,
+		}
+	}
+	filled := make([]publicMetricPoint, 0, len(series.Points)+2)
+	if len(pointTimes) == 0 || start.Before(pointTimes[0]) {
+		filled = append(filled, nullPoint(start))
+	}
+	for i, point := range series.Points {
+		if i > 0 && expectedInterval > 0 && series.Points[i-1].Value != nil && point.Value != nil {
+			delta := pointTimes[i].Sub(pointTimes[i-1])
+			if delta > expectedInterval+expectedInterval/2 {
+				filled = append(filled, nullPoint(pointTimes[i-1].Add(expectedInterval)))
+			}
+		}
+		filled = append(filled, point)
+	}
+	if len(pointTimes) == 0 || pointTimes[len(pointTimes)-1].Before(end) {
+		filled = append(filled, nullPoint(end))
+	}
+	series.Points = filled
+	series.Count = len(filled)
+	return series
 }
 
 func publicMetricTagsKey(tags map[string]string) string {
@@ -549,7 +571,7 @@ func normalizeStringList(groups ...[]string) []string {
 	return out
 }
 
-func firstNonNil(values ...any) any {
+func firstMetricQueryTime(values ...*time.Time) *time.Time {
 	for _, value := range values {
 		if value != nil {
 			return value
@@ -558,82 +580,14 @@ func firstNonNil(values ...any) any {
 	return nil
 }
 
-func parseMetricQueryTimeOrDefault(value any, fallback time.Time) (time.Time, error) {
+func metricQueryTimeOrDefault(value *time.Time, fallback time.Time) time.Time {
 	if value == nil {
-		return fallback.UTC(), nil
+		return fallback.UTC()
 	}
-	switch v := value.(type) {
-	case string:
-		raw := strings.TrimSpace(v)
-		if raw == "" {
-			return fallback.UTC(), nil
-		}
-		if ts, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-			return ts.UTC(), nil
-		}
-		if ts, err := time.Parse("2006-01-02 15:04:05", raw); err == nil {
-			return ts.UTC(), nil
-		}
-		n, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("unsupported time format %q", raw)
-		}
-		return metricUnixNumberToTime(n), nil
-	case float64:
-		return metricUnixNumberToTime(v), nil
-	case float32:
-		return metricUnixNumberToTime(float64(v)), nil
-	case int:
-		return metricUnixNumberToTime(float64(v)), nil
-	case int64:
-		return metricUnixNumberToTime(float64(v)), nil
-	case jsonNumber:
-		n, err := strconv.ParseFloat(v.String(), 64)
-		if err != nil {
-			return time.Time{}, err
-		}
-		return metricUnixNumberToTime(n), nil
-	default:
-		return time.Time{}, fmt.Errorf("unsupported time value type %T", value)
-	}
+	return value.UTC()
 }
 
-type jsonNumber interface {
-	String() string
-}
-
-func metricUnixNumberToTime(value float64) time.Time {
-	if math.Abs(value) >= 1e17 {
-		return time.Unix(0, int64(value)).UTC()
-	}
-	if math.Abs(value) >= 1e14 {
-		return time.Unix(0, int64(value)*int64(time.Microsecond)).UTC()
-	}
-	if math.Abs(value) >= 1e11 {
-		return time.UnixMilli(int64(value)).UTC()
-	}
-	return time.Unix(int64(value), 0).UTC()
-}
-
-func metricQueryHours(value any) time.Duration {
-	if value == nil {
-		return 4 * time.Hour
-	}
-	var hours float64
-	switch v := value.(type) {
-	case string:
-		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		if err != nil {
-			return 4 * time.Hour
-		}
-		hours = parsed
-	case float64:
-		hours = v
-	case int:
-		hours = float64(v)
-	default:
-		return 4 * time.Hour
-	}
+func metricQueryHours(hours float64) time.Duration {
 	if hours <= 0 {
 		return 4 * time.Hour
 	}
@@ -693,11 +647,7 @@ func resolveMetricDownsample(metricKey string, params publicMetricQueryParams) b
 }
 
 func resolveMetricFillEmpty(params publicMetricQueryParams) bool {
-	fillEmpty := false
-	if params.FillEmpty != nil {
-		fillEmpty = *params.FillEmpty
-	}
-	return fillEmpty
+	return params.FillEmpty != nil && *params.FillEmpty
 }
 
 func publicMetricValue(value float64) *float64 {
@@ -709,13 +659,6 @@ func publicRawMetricValue(metricName string, value float64, fillEmpty bool) *flo
 		return nil
 	}
 	return publicMetricValue(value)
-}
-
-func publicAggregateMetricValue(point metric.AggregatePoint, fillEmpty bool) *float64 {
-	if fillEmpty && point.Count == 0 {
-		return nil
-	}
-	return publicRawMetricValue(point.MetricName, point.Value, fillEmpty)
 }
 
 func isNullPingMetricValue(metricName string, value float64, fillEmpty bool) bool {
@@ -927,6 +870,10 @@ func normalizePingMetricTaskIDs(taskID any, taskIDs []any) map[string]bool {
 	return out
 }
 
+type jsonNumber interface {
+	String() string
+}
+
 func aggregatePointCount(points []metric.AggregatePoint) int {
 	total := 0
 	for _, point := range points {
@@ -1065,18 +1012,7 @@ func metricDownsampleInterval(rangeDuration time.Duration, maxPoints int) time.D
 	if interval < time.Second {
 		return time.Second
 	}
-	return floorMetricDownsampleInterval(interval)
-}
-
-func floorMetricDownsampleInterval(interval time.Duration) time.Duration {
-	out := time.Second
-	for _, candidate := range metricDownsampleStandardIntervals {
-		if candidate > interval {
-			break
-		}
-		out = candidate
-	}
-	return out
+	return metric.CeilStandardInterval(interval)
 }
 
 func maxInt(a, b int) int {

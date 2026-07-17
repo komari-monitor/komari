@@ -15,35 +15,6 @@ import (
 	"github.com/komari-monitor/komari/pkg/metric"
 )
 
-// 指标名称常量
-const (
-	MetricCPU            = "cpu.usage"
-	MetricGPU            = "gpu.usage"        // 实体级平均 GPU 使用率（对应 Record.Gpu）
-	MetricGPUDeviceUsage = "gpu.device.usage" // 每设备 GPU 利用率（带 device_index 标签）
-	MetricGPUMem         = "gpu.memory.used"
-	MetricGPUMemTotal    = "gpu.memory.total"
-	MetricGPUTemp        = "gpu.temperature"
-	MetricRAM            = "memory.used"
-	MetricRAMTotal       = "memory.total"
-	MetricSwap           = "swap.used"
-	MetricSwapTotal      = "swap.total"
-	MetricLoad           = "load.average"
-	MetricTemp           = "temperature"
-	MetricDisk           = "disk.used"
-	MetricDiskTotal      = "disk.total"
-	MetricNetIn          = "net.in.rate"
-	MetricNetOut         = "net.out.rate"
-	MetricNetTotalUp     = "net.total.up"
-	MetricNetTotalDown   = "net.total.down"
-	MetricTrafficUp      = "traffic.up"
-	MetricTrafficDown    = "traffic.down"
-	MetricProcess        = "process.count"
-	MetricConnections    = "connections.tcp"
-	MetricConnectionsUDP = "connections.udp"
-	MetricPingLatency    = "ping.latency_ms"
-	MetricPingLoss       = "ping.loss"
-)
-
 var (
 	store            *metric.Store
 	storeFingerprint string
@@ -282,6 +253,10 @@ func stripSharedCache(dsn string) string {
 
 // openStore 按配置打开 metric store 并创建指标定义。
 func openStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, error) {
+	return openStoreWithDefaultRetention(ctx, cfg, defaultBuiltinMetricRetentionDays)
+}
+
+func openStoreWithDefaultRetention(ctx context.Context, cfg *MetricStoreConfig, defaultRetentionDays int) (*metric.Store, error) {
 	metricCfg, err := buildMetricConfig(cfg, true)
 	if err != nil {
 		return nil, err
@@ -292,12 +267,29 @@ func openStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, erro
 		return nil, fmt.Errorf("failed to open metric store: %w", err)
 	}
 
-	if err := createMetricDefinitions(ctx, s); err != nil {
+	if err := createMetricDefinitionsWithDefaultRetention(ctx, s, defaultRetentionDays); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("failed to create metric definitions: %w", err)
 	}
 
 	return s, nil
+}
+
+// OpenStore opens an isolated metric store using the supplied configuration.
+// It is used by the pre-start upgrade flow before the process-wide store is
+// initialized. The caller owns the returned store and must close it.
+func OpenStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, error) {
+	return openStore(ctx, cfg)
+}
+
+// OpenStoreForMigration opens an isolated target and uses the legacy data span
+// as the initial retention for definitions that do not exist yet. Existing
+// definitions keep their configured retention, including an explicit zero.
+func OpenStoreForMigration(ctx context.Context, cfg *MetricStoreConfig, legacyRetentionDays int) (*metric.Store, error) {
+	if legacyRetentionDays < defaultBuiltinMetricRetentionDays {
+		legacyRetentionDays = defaultBuiltinMetricRetentionDays
+	}
+	return openStoreWithDefaultRetention(ctx, cfg, legacyRetentionDays)
 }
 
 // TestConnection 使用给定配置尝试连接 metrics 数据库（不影响当前运行的 store）。
@@ -399,11 +391,6 @@ func GetStore() *metric.Store {
 	return store
 }
 
-// IsEnabled 检查 metric store 是否已启用
-func IsEnabled() bool {
-	return GetStore() != nil
-}
-
 // RetentionSummary is the compatibility view of all persisted metric policies.
 type RetentionSummary struct {
 	AllPositive bool
@@ -483,11 +470,6 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 	return total, nil
 }
 
-// CloseStore closes the metric store after stopping any API-triggered migration.
-func CloseStore() error {
-	return CloseStoreContext(context.Background())
-}
-
 // CloseStoreContext stops the asynchronous store migration before taking the
 // store write lock, so shutdown cannot wait forever on the migration's lease.
 func CloseStoreContext(ctx context.Context) error {
@@ -516,54 +498,41 @@ func CloseStoreContext(ctx context.Context) error {
 
 const defaultBuiltinMetricRetentionDays = 1
 
-var pingQueryIntervals = []time.Duration{
-	time.Second,
-	5 * time.Second,
-	10 * time.Second,
-	15 * time.Second,
-	30 * time.Second,
-	time.Minute,
-	2 * time.Minute,
-	5 * time.Minute,
-	10 * time.Minute,
-	15 * time.Minute,
-	30 * time.Minute,
-	time.Hour,
-	2 * time.Hour,
-	3 * time.Hour,
-	6 * time.Hour,
-	12 * time.Hour,
-	24 * time.Hour,
-}
-
 // createMetricDefinitions creates built-in definitions with explicit policies.
 func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
+	return createMetricDefinitionsWithDefaultRetention(ctx, s, defaultBuiltinMetricRetentionDays)
+}
+
+func createMetricDefinitionsWithDefaultRetention(ctx context.Context, s *metric.Store, defaultRetentionDays int) error {
+	if defaultRetentionDays < defaultBuiltinMetricRetentionDays {
+		defaultRetentionDays = defaultBuiltinMetricRetentionDays
+	}
 	definitions := []metric.Definition{
-		{Name: MetricCPU, Type: metric.TypeGauge, Unit: "%", Description: "CPU usage percentage", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricGPU, Type: metric.TypeGauge, Unit: "%", Description: "GPU usage percentage", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricGPUDeviceUsage, Type: metric.TypeGauge, Unit: "%", Description: "Per-device GPU utilization", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricGPUMem, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory used", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricGPUMemTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory total", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricGPUTemp, Type: metric.TypeGauge, Unit: "°C", Description: "GPU temperature", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricRAM, Type: metric.TypeGauge, Unit: "bytes", Description: "RAM used", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricRAMTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "RAM total", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricSwap, Type: metric.TypeGauge, Unit: "bytes", Description: "Swap used", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricSwapTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "Swap total", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricLoad, Type: metric.TypeGauge, Unit: "", Description: "System load average", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricTemp, Type: metric.TypeGauge, Unit: "°C", Description: "System temperature", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricDisk, Type: metric.TypeGauge, Unit: "bytes", Description: "Disk used", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricDiskTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "Disk total", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricNetIn, Type: metric.TypeGauge, Unit: "bytes/s", Description: "Network in rate", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricNetOut, Type: metric.TypeGauge, Unit: "bytes/s", Description: "Network out rate", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricNetTotalUp, Type: metric.TypeCounter, Unit: "bytes", Description: "Network total upload", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricNetTotalDown, Type: metric.TypeCounter, Unit: "bytes", Description: "Network total download", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricTrafficUp, Type: metric.TypeGauge, Unit: "bytes", Description: "Traffic upload delta", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricTrafficDown, Type: metric.TypeGauge, Unit: "bytes", Description: "Traffic download delta", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricProcess, Type: metric.TypeGauge, Unit: "count", Description: "Process count", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricConnections, Type: metric.TypeGauge, Unit: "count", Description: "TCP connections", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricConnectionsUDP, Type: metric.TypeGauge, Unit: "count", Description: "UDP connections", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricPingLatency, Type: metric.TypeGauge, Unit: "ms", Description: "Ping latency", RetentionDays: defaultBuiltinMetricRetentionDays},
-		{Name: MetricPingLoss, Type: metric.TypeGauge, Unit: "ratio", Description: "Ping packet loss indicator", RetentionDays: defaultBuiltinMetricRetentionDays},
+		{Name: MetricCPU, Type: metric.TypeGauge, Unit: "%", Description: "CPU usage percentage", RetentionDays: defaultRetentionDays},
+		{Name: MetricGPU, Type: metric.TypeGauge, Unit: "%", Description: "GPU usage percentage", RetentionDays: defaultRetentionDays},
+		{Name: MetricGPUDeviceUsage, Type: metric.TypeGauge, Unit: "%", Description: "Per-device GPU utilization", RetentionDays: defaultRetentionDays},
+		{Name: MetricGPUMem, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory used", RetentionDays: defaultRetentionDays},
+		{Name: MetricGPUMemTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory total", RetentionDays: defaultRetentionDays},
+		{Name: MetricGPUTemp, Type: metric.TypeGauge, Unit: "°C", Description: "GPU temperature", RetentionDays: defaultRetentionDays},
+		{Name: MetricRAM, Type: metric.TypeGauge, Unit: "bytes", Description: "RAM used", RetentionDays: defaultRetentionDays},
+		{Name: MetricRAMTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "RAM total", RetentionDays: defaultRetentionDays},
+		{Name: MetricSwap, Type: metric.TypeGauge, Unit: "bytes", Description: "Swap used", RetentionDays: defaultRetentionDays},
+		{Name: MetricSwapTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "Swap total", RetentionDays: defaultRetentionDays},
+		{Name: MetricLoad, Type: metric.TypeGauge, Unit: "", Description: "System load average", RetentionDays: defaultRetentionDays},
+		{Name: MetricTemp, Type: metric.TypeGauge, Unit: "°C", Description: "System temperature", RetentionDays: defaultRetentionDays},
+		{Name: MetricDisk, Type: metric.TypeGauge, Unit: "bytes", Description: "Disk used", RetentionDays: defaultRetentionDays},
+		{Name: MetricDiskTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "Disk total", RetentionDays: defaultRetentionDays},
+		{Name: MetricNetIn, Type: metric.TypeGauge, Unit: "bytes/s", Description: "Network in rate", RetentionDays: defaultRetentionDays},
+		{Name: MetricNetOut, Type: metric.TypeGauge, Unit: "bytes/s", Description: "Network out rate", RetentionDays: defaultRetentionDays},
+		{Name: MetricNetTotalUp, Type: metric.TypeCounter, Unit: "bytes", Description: "Network total upload", RetentionDays: defaultRetentionDays},
+		{Name: MetricNetTotalDown, Type: metric.TypeCounter, Unit: "bytes", Description: "Network total download", RetentionDays: defaultRetentionDays},
+		{Name: MetricTrafficUp, Type: metric.TypeGauge, Unit: "bytes", Description: "Traffic upload delta", RetentionDays: defaultRetentionDays},
+		{Name: MetricTrafficDown, Type: metric.TypeGauge, Unit: "bytes", Description: "Traffic download delta", RetentionDays: defaultRetentionDays},
+		{Name: MetricProcess, Type: metric.TypeGauge, Unit: "count", Description: "Process count", RetentionDays: defaultRetentionDays},
+		{Name: MetricConnections, Type: metric.TypeGauge, Unit: "count", Description: "TCP connections", RetentionDays: defaultRetentionDays},
+		{Name: MetricConnectionsUDP, Type: metric.TypeGauge, Unit: "count", Description: "UDP connections", RetentionDays: defaultRetentionDays},
+		{Name: MetricPingLatency, Type: metric.TypeGauge, Unit: "ms", Description: "Ping latency", RetentionDays: defaultRetentionDays},
+		{Name: MetricPingLoss, Type: metric.TypeGauge, Unit: "ratio", Description: "Ping packet loss indicator", RetentionDays: defaultRetentionDays},
 	}
 
 	for _, def := range definitions {
@@ -588,65 +557,6 @@ func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
 	return nil
 }
 
-// WriteRecord 将 models.Record 写入 metric store
-func WriteRecord(ctx context.Context, rec models.Record) error {
-	s := GetStore()
-	if s == nil {
-		return fmt.Errorf("metric store not enabled")
-	}
-
-	ts := rec.Time.ToTime()
-	entityID := rec.Client
-
-	points := []metric.Point{
-		{MetricName: MetricCPU, EntityID: entityID, Timestamp: ts, Value: float64(rec.Cpu)},
-		{MetricName: MetricGPU, EntityID: entityID, Timestamp: ts, Value: float64(rec.Gpu)},
-		{MetricName: MetricRAM, EntityID: entityID, Timestamp: ts, Value: float64(rec.Ram)},
-		{MetricName: MetricRAMTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.RamTotal)},
-		{MetricName: MetricSwap, EntityID: entityID, Timestamp: ts, Value: float64(rec.Swap)},
-		{MetricName: MetricSwapTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.SwapTotal)},
-		{MetricName: MetricLoad, EntityID: entityID, Timestamp: ts, Value: float64(rec.Load)},
-		{MetricName: MetricTemp, EntityID: entityID, Timestamp: ts, Value: float64(rec.Temp)},
-		{MetricName: MetricDisk, EntityID: entityID, Timestamp: ts, Value: float64(rec.Disk)},
-		{MetricName: MetricDiskTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.DiskTotal)},
-		{MetricName: MetricNetIn, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetIn)},
-		{MetricName: MetricNetOut, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetOut)},
-		{MetricName: MetricNetTotalUp, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetTotalUp)},
-		{MetricName: MetricNetTotalDown, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetTotalDown)},
-		{MetricName: MetricTrafficUp, EntityID: entityID, Timestamp: ts, Value: float64(rec.TrafficUp)},
-		{MetricName: MetricTrafficDown, EntityID: entityID, Timestamp: ts, Value: float64(rec.TrafficDown)},
-		{MetricName: MetricProcess, EntityID: entityID, Timestamp: ts, Value: float64(rec.Process)},
-		{MetricName: MetricConnections, EntityID: entityID, Timestamp: ts, Value: float64(rec.Connections)},
-		{MetricName: MetricConnectionsUDP, EntityID: entityID, Timestamp: ts, Value: float64(rec.ConnectionsUdp)},
-	}
-
-	return s.WriteBatch(ctx, points)
-}
-
-// WriteGPURecord 将 models.GPURecord 写入 metric store
-func WriteGPURecord(ctx context.Context, rec models.GPURecord) error {
-	s := GetStore()
-	if s == nil {
-		return fmt.Errorf("metric store not enabled")
-	}
-
-	ts := rec.Time.ToTime()
-	entityID := rec.Client
-	tags := map[string]string{
-		"device_index": fmt.Sprintf("%d", rec.DeviceIndex),
-		"device_name":  rec.DeviceName,
-	}
-
-	points := []metric.Point{
-		{MetricName: MetricGPUMem, EntityID: entityID, Timestamp: ts, Value: float64(rec.MemUsed), Tags: tags},
-		{MetricName: MetricGPUMemTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.MemTotal), Tags: tags},
-		{MetricName: MetricGPUDeviceUsage, EntityID: entityID, Timestamp: ts, Value: float64(rec.Utilization), Tags: tags},
-		{MetricName: MetricGPUTemp, EntityID: entityID, Timestamp: ts, Value: float64(rec.Temperature), Tags: tags},
-	}
-
-	return s.WriteBatch(ctx, points)
-}
-
 // WritePingRecord 将 ping 记录写入 metric store
 func WritePingRecord(ctx context.Context, rec models.PingRecord) error {
 	s := GetStore()
@@ -654,7 +564,7 @@ func WritePingRecord(ctx context.Context, rec models.PingRecord) error {
 		return fmt.Errorf("metric store not enabled")
 	}
 
-	ts := rec.Time.ToTime()
+	ts := rec.Time
 	entityID := rec.Client
 	tags := map[string]string{
 		"task_id": fmt.Sprintf("%d", rec.TaskId),
@@ -701,7 +611,7 @@ func GetRecordsByTime(ctx context.Context, start, end time.Time) ([]models.Recor
 		return nil, fmt.Errorf("metric store not enabled")
 	}
 
-	interval := recordSeriesInterval(s, start, end, time.Now())
+	interval := recordSeriesInterval(s, start, end, time.Now().UTC())
 	entityIDs, err := listRecordEntityIDs(ctx, s, start, end, interval)
 	if err != nil {
 		return nil, err
@@ -718,40 +628,13 @@ func GetRecordsByTime(ctx context.Context, start, end time.Time) ([]models.Recor
 	return records, nil
 }
 
-var loadRecordMetricNames = []string{
-	MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
-	MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
-	MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
-	MetricProcess, MetricConnections, MetricConnectionsUDP,
-}
-
-var recordDownsampleStandardIntervals = []time.Duration{
-	time.Second,
-	5 * time.Second,
-	10 * time.Second,
-	15 * time.Second,
-	30 * time.Second,
-	time.Minute,
-	2 * time.Minute,
-	5 * time.Minute,
-	10 * time.Minute,
-	15 * time.Minute,
-	30 * time.Minute,
-	time.Hour,
-	2 * time.Hour,
-	3 * time.Hour,
-	6 * time.Hour,
-	12 * time.Hour,
-	24 * time.Hour,
-}
-
 type recordSeriesKey struct {
 	client string
 	ts     int64
 }
 
 func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, clientUUID string, start, end time.Time) ([]models.Record, error) {
-	now := time.Now()
+	now := time.Now().UTC()
 	interval := recordSeriesInterval(s, start, end, now)
 	recordMap := make(map[recordSeriesKey]*models.Record)
 
@@ -764,7 +647,7 @@ func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, c
 				End:        end,
 				Order:      metric.OrderAsc,
 			},
-			Aggregation: metric.AggAvg,
+			Aggregation: recordMetricAggregation(metricName),
 			Interval:    interval,
 		}, now)
 		if err != nil {
@@ -779,7 +662,7 @@ func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, c
 			if recordMap[key] == nil {
 				recordMap[key] = &models.Record{
 					Client: entityID,
-					Time:   models.FromTime(point.Bucket),
+					Time:   point.Bucket.UTC(),
 				}
 			}
 			applyRecordMetricValue(recordMap[key], metricName, point.Value)
@@ -792,6 +675,17 @@ func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, c
 	}
 	sortRecords(records)
 	return records, nil
+}
+
+func recordMetricAggregation(metricName string) metric.Aggregation {
+	switch metricName {
+	case MetricTrafficUp, MetricTrafficDown:
+		return metric.AggSum
+	case MetricNetTotalUp, MetricNetTotalDown:
+		return metric.AggLast
+	default:
+		return metric.AggAvg
+	}
 }
 
 func recordSeriesInterval(s *metric.Store, start, end, now time.Time) time.Duration {
@@ -811,18 +705,7 @@ func recordDownsampleInterval(rangeDuration time.Duration, maxPoints int) time.D
 	if interval < time.Second {
 		return time.Second
 	}
-	return floorRecordDownsampleInterval(interval)
-}
-
-func floorRecordDownsampleInterval(interval time.Duration) time.Duration {
-	out := time.Second
-	for _, candidate := range recordDownsampleStandardIntervals {
-		if candidate > interval {
-			break
-		}
-		out = candidate
-	}
-	return out
+	return metric.FloorStandardInterval(interval)
 }
 
 func listRecordEntityIDs(ctx context.Context, s *metric.Store, start, end time.Time, interval time.Duration) ([]string, error) {
@@ -896,59 +779,8 @@ func sortRecords(records []models.Record) {
 		if records[i].Client != records[j].Client {
 			return records[i].Client < records[j].Client
 		}
-		return records[i].Time.ToTime().Before(records[j].Time.ToTime())
+		return records[i].Time.Before(records[j].Time)
 	})
-}
-
-// GetLatestTrafficBefore 查询每个客户端在指定时间之前最新的累计流量（用于计算增量基线）
-func GetLatestTrafficBefore(ctx context.Context, clientUUIDs []string, before time.Time) (map[string]models.Record, error) {
-	s := GetStore()
-	if s == nil {
-		return nil, fmt.Errorf("metric store not enabled")
-	}
-
-	result := make(map[string]models.Record, len(clientUUIDs))
-	end := before.Add(-time.Nanosecond)
-	for _, uuid := range clientUUIDs {
-		if uuid == "" {
-			continue
-		}
-		upPts, err := s.Query(ctx, metric.Query{
-			MetricName: MetricNetTotalUp,
-			EntityID:   uuid,
-			Start:      time.Unix(0, 0),
-			End:        end,
-			Order:      metric.OrderDesc,
-			Limit:      1,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(upPts) == 0 {
-			continue
-		}
-		rec := models.Record{
-			Client:     uuid,
-			Time:       models.FromTime(upPts[0].Timestamp),
-			NetTotalUp: int64(upPts[0].Value),
-		}
-		downPts, err := s.Query(ctx, metric.Query{
-			MetricName: MetricNetTotalDown,
-			EntityID:   uuid,
-			Start:      time.Unix(0, 0),
-			End:        end,
-			Order:      metric.OrderDesc,
-			Limit:      1,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(downPts) > 0 {
-			rec.NetTotalDown = int64(downPts[0].Value)
-		}
-		result[uuid] = rec
-	}
-	return result, nil
 }
 
 // GetGPURecordsByClientAndTime 从 metric store 查询 GPU 记录
@@ -994,7 +826,7 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 			if recordMap[key] == nil {
 				recordMap[key] = &models.GPURecord{
 					Client:      clientUUID,
-					Time:        models.FromTime(p.Timestamp),
+					Time:        p.Timestamp.UTC(),
 					DeviceIndex: deviceIndex,
 					DeviceName:  deviceName,
 				}
@@ -1050,13 +882,13 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 	}
 
 	interval := pingQueryInterval(end.Sub(start), 4000)
-	interval = s.CompatibleSeriesInterval(start, time.Now(), interval)
+	interval = s.CompatibleSeriesInterval(start, time.Now().UTC(), interval)
 	points, err := s.Series(ctx, metric.AggregateQuery{
 		Query:          query,
 		Aggregation:    metric.AggLast,
 		Interval:       interval,
 		PreserveSeries: true,
-	}, time.Now())
+	}, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -1073,12 +905,12 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 		records = append(records, models.PingRecord{
 			Client: p.EntityID,
 			TaskId: taskIDVal,
-			Time:   models.FromTime(p.Bucket),
+			Time:   p.Bucket.UTC(),
 			Value:  int(p.Value),
 		})
 	}
 	sort.Slice(records, func(i, j int) bool {
-		return records[i].Time.ToTime().After(records[j].Time.ToTime())
+		return records[i].Time.After(records[j].Time)
 	})
 
 	return records, nil
@@ -1095,29 +927,12 @@ func pingQueryInterval(rangeDuration time.Duration, maxPoints int) time.Duration
 	if interval < time.Second {
 		return time.Second
 	}
-	result := time.Second
-	for _, candidate := range pingQueryIntervals {
-		if candidate > interval {
-			break
-		}
-		result = candidate
-	}
-	return result
-}
-
-// recordMetricNames 是负载/系统类指标（不含 ping）。ping 使用独立的保留策略，
-// 因此负载记录的批量删除与保留清理都不应波及 ping.latency_ms。
-var recordMetricNames = []string{
-	MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
-	MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
-	MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
-	MetricProcess, MetricConnections, MetricConnectionsUDP,
-	MetricGPUDeviceUsage, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp,
+	return metric.FloorStandardInterval(interval)
 }
 
 // farFuture 返回一个足够远的未来时间，用于以 DeleteBefore 语义清空某指标的全部数据。
 func farFuture() time.Time {
-	return time.Now().Add(24 * 365 * time.Hour)
+	return time.Now().UTC().Add(24 * 365 * time.Hour)
 }
 
 // DeleteAllRecords 删除所有负载/系统类记录（保留指标定义，不含 ping）。
@@ -1132,22 +947,7 @@ func DeleteAllRecords(ctx context.Context) error {
 			log.Printf("Failed to delete metric %s: %v", metricName, err)
 		}
 	}
-
-	return nil
-}
-
-// DeleteRecordsBefore 删除指定时间之前的负载/系统类记录（不含 ping）。
-func DeleteRecordsBefore(ctx context.Context, before time.Time) error {
-	s := GetStore()
-	if s == nil {
-		return fmt.Errorf("metric store not enabled")
-	}
-
-	for _, metricName := range recordMetricNames {
-		if _, err := s.DeleteBefore(ctx, metricName, before); err != nil {
-			log.Printf("Failed to delete old metric %s: %v", metricName, err)
-		}
-	}
+	clearReportTrafficStates()
 
 	return nil
 }
@@ -1158,23 +958,9 @@ func DeleteAllPingRecords(ctx context.Context) error {
 	if s == nil {
 		return fmt.Errorf("metric store not enabled")
 	}
-	for _, metricName := range []string{MetricPingLatency, MetricPingLoss} {
+	for _, metricName := range pingMetricNames {
 		if _, err := s.DeleteBefore(ctx, metricName, farFuture()); err != nil {
 			return fmt.Errorf("failed to delete ping records: %w", err)
-		}
-	}
-	return nil
-}
-
-// DeletePingRecordsBefore 删除指定时间之前的 ping 记录。
-func DeletePingRecordsBefore(ctx context.Context, before time.Time) error {
-	s := GetStore()
-	if s == nil {
-		return fmt.Errorf("metric store not enabled")
-	}
-	for _, metricName := range []string{MetricPingLatency, MetricPingLoss} {
-		if _, err := s.DeleteBefore(ctx, metricName, before); err != nil {
-			return fmt.Errorf("failed to delete ping records before %s: %w", before, err)
 		}
 	}
 	return nil
@@ -1187,7 +973,7 @@ func DeletePingRecordsByTask(ctx context.Context, taskIDs []uint) error {
 		return fmt.Errorf("metric store not enabled")
 	}
 	for _, id := range taskIDs {
-		for _, metricName := range []string{MetricPingLatency, MetricPingLoss} {
+		for _, metricName := range pingMetricNames {
 			if _, err := s.DeleteSeries(ctx, metric.Query{
 				MetricName: metricName,
 				Tags:       map[string]string{"task_id": fmt.Sprintf("%d", id)},
@@ -1208,5 +994,6 @@ func DeleteEntity(ctx context.Context, entityID string) error {
 	if _, err := s.DeleteEntity(ctx, entityID); err != nil {
 		return fmt.Errorf("failed to delete metric records for entity %s: %w", entityID, err)
 	}
+	deleteReportTrafficState(entityID)
 	return nil
 }

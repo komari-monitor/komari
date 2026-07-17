@@ -343,10 +343,6 @@ type AggregateQuery struct {
 	//
 	// Interval 是每个聚合桶的宽度。
 	Interval time.Duration `json:"interval"`
-	// FillEmpty emits zero-count buckets for empty intervals.
-	//
-	// FillEmpty 会为空时间段输出零计数桶。
-	FillEmpty bool `json:"fill_empty,omitempty"`
 	// PreserveSeries keeps entity/tag identities as separate aggregate series on
 	// rollup-backed reads. The default preserves the historical rollup behavior
 	// of merging all matched series into each output bucket.

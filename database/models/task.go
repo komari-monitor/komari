@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 type Task struct {
 	TaskId  string       `json:"task_id" gorm:"type:varchar(36);primaryKey;unique"`
 	Clients StringArray  `json:"clients" gorm:"type:longtext"`
@@ -13,6 +15,6 @@ type TaskResult struct {
 	ClientInfo Client     `json:"client_info" gorm:"foreignKey:Client;references:UUID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
 	Result     string     `json:"result" gorm:"type:longtext"`
 	ExitCode   *int       `json:"exit_code" gorm:"type:int"`
-	FinishedAt *LocalTime `json:"finished_at" gorm:"type:timestamp"`
-	CreatedAt  LocalTime  `json:"created_at" gorm:"type:timestamp"`
+	FinishedAt *time.Time `json:"finished_at" gorm:"type:timestamp"`
+	CreatedAt  time.Time  `json:"created_at" gorm:"type:timestamp"`
 }

@@ -10,16 +10,46 @@ import (
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/metric"
+	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
+func TestMetricQueryParamsRequireRFC3339Time(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		wantErr bool
+	}{
+		{name: "RFC3339", value: "2026-07-17T09:30:00.123456789+08:00"},
+		{name: "offset free", value: "2026-07-17 09:30:00.123456789", wantErr: true},
+		{name: "Unix number", value: float64(1_752_720_600), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := &rpc.JsonRpcRequest{Params: map[string]any{"start": test.value}}
+			var params publicMetricQueryParams
+			err := req.BindParams(&params)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("BindParams() error = %v, wantErr %v", err, test.wantErr)
+			}
+			if err == nil {
+				want := time.Date(2026, 7, 17, 1, 30, 0, 123456789, time.UTC)
+				if params.Start == nil || !params.Start.Equal(want) {
+					t.Fatalf("start = %v, want %s", params.Start, want)
+				}
+			}
+		})
+	}
+}
+
 func TestSplitPublicMetricSeriesKeepsTagSeries(t *testing.T) {
+	baseTime := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
 	base := publicMetricSeries{
 		MetricKey: "gpu.device.usage",
 		EntityID:  "node-a",
 		Points: []publicMetricPoint{
-			{Time: "2026-06-18T00:00:00Z", Value: publicMetricValue(10), Count: 2, Tags: map[string]string{"device_index": "0"}},
-			{Time: "2026-06-18T00:00:00Z", Value: publicMetricValue(80), Count: 2, Tags: map[string]string{"device_index": "1"}},
-			{Time: "2026-06-18T00:01:00Z", Value: publicMetricValue(20), Count: 2, Tags: map[string]string{"device_index": "0"}},
+			{Time: baseTime, Value: publicMetricValue(10), Count: 2, Tags: map[string]string{"device_index": "0"}},
+			{Time: baseTime, Value: publicMetricValue(80), Count: 2, Tags: map[string]string{"device_index": "1"}},
+			{Time: baseTime.Add(time.Minute), Value: publicMetricValue(20), Count: 2, Tags: map[string]string{"device_index": "0"}},
 		},
 	}
 
@@ -30,30 +60,23 @@ func TestSplitPublicMetricSeriesKeepsTagSeries(t *testing.T) {
 	if got[0].Tags["device_index"] != "0" || got[0].Count != 2 {
 		t.Fatalf("unexpected first series: %#v", got[0])
 	}
-	if got[0].Tag["device_index"] != "0" {
-		t.Fatalf("tag alias was not set on first series: %#v", got[0])
-	}
 	if got[1].Tags["device_index"] != "1" || got[1].Count != 1 {
 		t.Fatalf("unexpected second series: %#v", got[1])
 	}
 	if got[0].Points[0].Tags["device_index"] != "0" || got[1].Points[0].Tags["device_index"] != "1" {
 		t.Fatalf("point tags were not preserved: %#v", got)
 	}
-	if got[0].Points[0].Tag["device_index"] != "0" || got[1].Points[0].Tag["device_index"] != "1" {
-		t.Fatalf("point tag aliases were not preserved: %#v", got)
-	}
 }
 
-func TestPublicMetricJSONIncludesTagAlias(t *testing.T) {
+func TestPublicMetricJSONIncludesOnlyTags(t *testing.T) {
+	pointTime := time.Date(2026, 6, 18, 0, 0, 0, 123456789, time.UTC)
 	payload, err := json.Marshal(publicMetricSeries{
 		MetricKey: "ping.loss",
 		EntityID:  "node-a",
-		Tag:       map[string]string{"task_id": "7"},
 		Tags:      map[string]string{"task_id": "7"},
 		Points: []publicMetricPoint{{
-			Time:  "2026-06-18T00:00:00Z",
+			Time:  pointTime,
 			Value: publicMetricValue(0),
-			Tag:   map[string]string{"task_id": "7"},
 			Tags:  map[string]string{"task_id": "7"},
 		}},
 	})
@@ -61,78 +84,90 @@ func TestPublicMetricJSONIncludesTagAlias(t *testing.T) {
 		t.Fatalf("marshal series: %v", err)
 	}
 	text := string(payload)
-	if !strings.Contains(text, `"tag":{"task_id":"7"}`) {
-		t.Fatalf("series tag alias missing: %s", text)
-	}
 	if !strings.Contains(text, `"tags":{"task_id":"7"}`) {
 		t.Fatalf("series tags missing: %s", text)
 	}
-}
-
-func TestPublicMetricFillEmptyEmitsNullForEmptyBuckets(t *testing.T) {
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
-	points, err := metric.AggregatePoints([]metric.Point{
-		{MetricName: "cpu.usage", EntityID: "node-a", Timestamp: base, Value: 10},
-		{MetricName: "cpu.usage", EntityID: "node-a", Timestamp: base.Add(2 * time.Minute), Value: 30},
-	}, metric.AggregateQuery{
-		Query: metric.Query{
-			MetricName: "cpu.usage",
-			EntityID:   "node-a",
-			Start:      base,
-			End:        base.Add(2 * time.Minute),
-		},
-		Aggregation: metric.AggAvg,
-		Interval:    time.Minute,
-		FillEmpty:   true,
-	})
-	if err != nil {
-		t.Fatalf("aggregate points: %v", err)
+	if strings.Contains(text, `"tag":`) {
+		t.Fatalf("legacy tag field should not be serialized: %s", text)
 	}
-	if len(points) != 3 {
-		t.Fatalf("expected 3 buckets with fill enabled, got %d: %#v", len(points), points)
-	}
-	if points[1].Count != 0 {
-		t.Fatalf("middle bucket should be empty, got %#v", points[1])
-	}
-
-	payload, err := json.Marshal(publicMetricPoint{
-		Time:  points[1].Bucket.Format(time.RFC3339Nano),
-		Value: publicAggregateMetricValue(points[1], true),
-		Count: points[1].Count,
-	})
-	if err != nil {
-		t.Fatalf("marshal point: %v", err)
-	}
-	if !strings.Contains(string(payload), `"value":null`) {
-		t.Fatalf("empty bucket should serialize as null, got %s", payload)
+	if !strings.Contains(text, `"time":"2026-06-18T00:00:00.123456789Z"`) {
+		t.Fatalf("metric time is not UTC RFC3339Nano: %s", text)
 	}
 }
 
-func TestPublicMetricFillEmptyDisabledKeepsOnlyExistingBuckets(t *testing.T) {
+func TestAdaptiveFillPublicMetricSeriesUsesObservedInterval(t *testing.T) {
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
-	points, err := metric.AggregatePoints([]metric.Point{
-		{MetricName: "cpu.usage", EntityID: "node-a", Timestamp: base, Value: 10},
-		{MetricName: "cpu.usage", EntityID: "node-a", Timestamp: base.Add(2 * time.Minute), Value: 30},
-	}, metric.AggregateQuery{
-		Query: metric.Query{
-			MetricName: "cpu.usage",
-			EntityID:   "node-a",
-			Start:      base,
-			End:        base.Add(2 * time.Minute),
-		},
-		Aggregation: metric.AggAvg,
-		Interval:    time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("aggregate points: %v", err)
+	series := publicMetricSeries{
+		MetricKey:       "cpu.usage",
+		EntityID:        "node-a",
+		FillEmpty:       true,
+		IntervalSeconds: 1,
+		Tags:            map[string]string{"core": "0"},
 	}
-	if len(points) != 2 {
-		t.Fatalf("expected only existing buckets by default, got %d: %#v", len(points), points)
+	for i := 0; i < 10; i++ {
+		series.Points = append(series.Points, publicMetricPoint{
+			Time:  base.Add(time.Duration(i) * time.Minute),
+			Value: publicMetricValue(float64(i)),
+		})
 	}
-	for _, point := range points {
-		if publicAggregateMetricValue(point, false) == nil {
-			t.Fatalf("non-fill query should keep numeric values: %#v", point)
+
+	got := adaptiveFillPublicMetricSeries(series, base, base.Add(9*time.Minute))
+	if got.IntervalSeconds != 60 {
+		t.Fatalf("expected observed 60s interval, got %v", got.IntervalSeconds)
+	}
+	if len(got.Points) != 10 {
+		t.Fatalf("regular sparse series should not gain null buckets, got %#v", got.Points)
+	}
+	for _, point := range got.Points {
+		if point.Value == nil {
+			t.Fatalf("regular sparse series gained a null point: %#v", got.Points)
 		}
+	}
+}
+
+func TestAdaptiveFillPublicMetricSeriesAddsCompactGapsAndBounds(t *testing.T) {
+	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	tags := map[string]string{"device_index": "0"}
+	series := publicMetricSeries{
+		MetricKey:       "gpu.device.usage",
+		EntityID:        "node-a",
+		IntervalSeconds: 1,
+		Tags:            tags,
+		Points: []publicMetricPoint{
+			{Time: base, Value: publicMetricValue(10)},
+			{Time: base.Add(time.Minute), Value: publicMetricValue(20)},
+			{Time: base.Add(2 * time.Minute), Value: publicMetricValue(30)},
+			{Time: base.Add(4 * time.Minute), Value: publicMetricValue(40)},
+		},
+	}
+	start := base.Add(-30 * time.Second)
+	end := base.Add(4*time.Minute + 30*time.Second)
+	got := adaptiveFillPublicMetricSeries(series, start, end)
+	if got.IntervalSeconds != 60 {
+		t.Fatalf("expected observed 60s interval, got %v", got.IntervalSeconds)
+	}
+	if len(got.Points) != 7 {
+		t.Fatalf("expected four values, one gap and two bounds, got %#v", got.Points)
+	}
+	wantNullTimes := map[time.Time]bool{
+		start:                     true,
+		base.Add(3 * time.Minute): true,
+		end:                       true,
+	}
+	for _, point := range got.Points {
+		if point.Value != nil {
+			continue
+		}
+		if !wantNullTimes[point.Time] {
+			t.Fatalf("unexpected null point at %s: %#v", point.Time, got.Points)
+		}
+		if point.Tags["device_index"] != "0" {
+			t.Fatalf("adaptive null point lost tags: %#v", point)
+		}
+		delete(wantNullTimes, point.Time)
+	}
+	if len(wantNullTimes) != 0 {
+		t.Fatalf("missing expected null points: %#v", wantNullTimes)
 	}
 }
 
@@ -142,11 +177,7 @@ func TestPublicPingMetricFillEmptyMapsMinusOneToNull(t *testing.T) {
 			t.Fatalf("raw %s -1 should become null when fill_empty is enabled, got %v", metricName, *value)
 		}
 	}
-	if value := publicAggregateMetricValue(metric.AggregatePoint{
-		MetricName: metricstore.MetricPingLatency,
-		Value:      -1,
-		Count:      1,
-	}, true); value != nil {
+	if value := publicRawMetricValue(metricstore.MetricPingLatency, -1, true); value != nil {
 		t.Fatalf("downsampled ping -1 should become null when fill_empty is enabled, got %v", *value)
 	}
 }
@@ -242,14 +273,19 @@ func TestPublicPingMetricStatsIncludesZeroVolatility(t *testing.T) {
 	}
 }
 
-func TestMetricDownsampleIntervalFloorsToStandardInterval(t *testing.T) {
+func TestMetricDownsampleIntervalCeilsToStandardInterval(t *testing.T) {
 	got := metricDownsampleInterval(30*24*time.Hour, 500)
-	if got != time.Hour {
-		t.Fatalf("30d/500 should floor to 1h, got %s", got)
+	if got != 2*time.Hour {
+		t.Fatalf("30d/500 should ceil to 2h, got %s", got)
 	}
 
 	got = metricDownsampleInterval(time.Hour, 500)
-	if got != 5*time.Second {
-		t.Fatalf("1h/500 should floor to 5s, got %s", got)
+	if got != 10*time.Second {
+		t.Fatalf("1h/500 should ceil to 10s, got %s", got)
+	}
+
+	got = metricDownsampleInterval(1000*24*time.Hour, 10)
+	if got != 100*24*time.Hour {
+		t.Fatalf("ranges beyond the standard table should ceil to whole days, got %s", got)
 	}
 }

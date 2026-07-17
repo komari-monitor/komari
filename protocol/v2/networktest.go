@@ -1,6 +1,9 @@
 package v2
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 const (
 	MethodNetworkTestNextTrace       = "networkTest.nextTrace"
@@ -59,8 +62,8 @@ type NextTraceResult struct {
 	TargetHost string          `json:"target_host"`
 	IPFamily   IPFamily        `json:"ip_family"`
 	Protocol   TraceProtocol   `json:"protocol"`
-	StartedAt  string          `json:"started_at"`
-	FinishedAt string          `json:"finished_at"`
+	StartedAt  time.Time       `json:"started_at"`
+	FinishedAt time.Time       `json:"finished_at"`
 	DurationMs int             `json:"duration_ms"`
 	OK         bool            `json:"ok"`
 	Error      string          `json:"error"`
@@ -102,11 +105,11 @@ type MeshTraceParams struct {
 }
 
 type MeshTraceAccepted struct {
-	JobID          string `json:"job_id"`
-	Status         string `json:"status"`
-	TotalPairs     int    `json:"total_pairs"`
-	AcceptedAt     string `json:"accepted_at"`
-	PollIntervalMs int    `json:"poll_interval_ms"`
+	JobID          string    `json:"job_id"`
+	Status         string    `json:"status"`
+	TotalPairs     int       `json:"total_pairs"`
+	AcceptedAt     time.Time `json:"accepted_at"`
+	PollIntervalMs int       `json:"poll_interval_ms"`
 }
 
 type MeshTraceJobSnapshot struct {
@@ -117,8 +120,8 @@ type MeshTraceJobSnapshot struct {
 	Failed     int               `json:"failed"`
 	Running    int               `json:"running"`
 	Results    []NextTraceResult `json:"results"`
-	StartedAt  string            `json:"started_at"`
-	UpdatedAt  string            `json:"updated_at"`
-	FinishedAt string            `json:"finished_at"`
+	StartedAt  time.Time         `json:"started_at"`
+	UpdatedAt  time.Time         `json:"updated_at"`
+	FinishedAt *time.Time        `json:"finished_at"`
 	Error      string            `json:"error"`
 }

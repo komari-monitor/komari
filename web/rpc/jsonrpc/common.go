@@ -18,7 +18,6 @@ import (
 	"github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/utils"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
-	report_cache "github.com/komari-monitor/komari/web/report"
 
 	cache "github.com/patrickmn/go-cache"
 )
@@ -59,7 +58,7 @@ func getPingStatsForNode(uuid string, pingTasks []models.PingTask) map[string]pi
 		pingStatsCache.Set(key, empty, cache.DefaultExpiration)
 		return empty
 	}
-	end := time.Now()
+	end := time.Now().UTC()
 	start := end.Add(-1 * time.Hour)
 	recs, err := tasks.GetPingRecords(uuid, -1, start, end)
 	if err != nil || len(recs) == 0 {
@@ -106,7 +105,7 @@ func getPingStatsForNode(uuid string, pingTasks []models.PingTask) map[string]pi
 			if r.Value > maxLat {
 				maxLat = r.Value
 			}
-			ts := r.Time.ToTime()
+			ts := r.Time
 			if latestTs.IsZero() || ts.After(latestTs) {
 				latestTs = ts
 				latest = r.Value
@@ -270,7 +269,6 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 	return nodeMap, nil
 }
 
-
 func getPublicInfo(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	info, err := database.GetPublicInfo()
 	if err != nil {
@@ -322,7 +320,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 
 	type recordLike struct {
 		Client         string              `json:"client"`
-		Time           models.LocalTime    `json:"time"`
+		Time           time.Time           `json:"time"`
 		Cpu            float32             `json:"cpu"`
 		Gpu            float32             `json:"gpu"`
 		Ram            int64               `json:"ram"`
@@ -359,7 +357,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		stats := getPingStatsForNode(uuid, pingTasks)
 		rl := recordLike{
 			Client:         uuid,
-			Time:           models.FromTime(rep.UpdatedAt),
+			Time:           rep.UpdatedAt,
 			Cpu:            float32(rep.CPU.Usage),
 			Gpu:            0,
 			Ram:            rep.Ram.Used,
@@ -495,30 +493,29 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 		}
 	}
 
-	raw, _ := report_cache.Records.Get(params.UUID)
-	reports, _ := raw.([]v1.Report)
+	reports := agent_runtime.GetRecentReports(params.UUID)
 
 	// 扁平化为 { count, records: [] }
 	type flatRecord struct {
-		Client         string           `json:"client"`
-		Time           models.LocalTime `json:"time"`
-		Cpu            float32          `json:"cpu"`
-		Gpu            float32          `json:"gpu"`
-		Ram            int64            `json:"ram"`
-		RamTotal       int64            `json:"ram_total"`
-		Swap           int64            `json:"swap"`
-		SwapTotal      int64            `json:"swap_total"`
-		Load           float32          `json:"load"`
-		Temp           float32          `json:"temp"`
-		Disk           int64            `json:"disk"`
-		DiskTotal      int64            `json:"disk_total"`
-		NetIn          int64            `json:"net_in"`
-		NetOut         int64            `json:"net_out"`
-		NetTotalUp     int64            `json:"net_total_up"`
-		NetTotalDown   int64            `json:"net_total_down"`
-		Process        int              `json:"process"`
-		Connections    int              `json:"connections"`
-		ConnectionsUdp int              `json:"connections_udp"`
+		Client         string    `json:"client"`
+		Time           time.Time `json:"time"`
+		Cpu            float32   `json:"cpu"`
+		Gpu            float32   `json:"gpu"`
+		Ram            int64     `json:"ram"`
+		RamTotal       int64     `json:"ram_total"`
+		Swap           int64     `json:"swap"`
+		SwapTotal      int64     `json:"swap_total"`
+		Load           float32   `json:"load"`
+		Temp           float32   `json:"temp"`
+		Disk           int64     `json:"disk"`
+		DiskTotal      int64     `json:"disk_total"`
+		NetIn          int64     `json:"net_in"`
+		NetOut         int64     `json:"net_out"`
+		NetTotalUp     int64     `json:"net_total_up"`
+		NetTotalDown   int64     `json:"net_total_down"`
+		Process        int       `json:"process"`
+		Connections    int       `json:"connections"`
+		ConnectionsUdp int       `json:"connections_udp"`
 	}
 
 	resp := struct {
@@ -537,7 +534,7 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	for _, r := range reports {
 		fr := flatRecord{
 			Client:         params.UUID,
-			Time:           models.FromTime(r.UpdatedAt),
+			Time:           r.UpdatedAt,
 			Cpu:            float32(r.CPU.Usage),
 			Gpu:            0,
 			Ram:            r.Ram.Used,

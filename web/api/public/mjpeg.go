@@ -9,7 +9,6 @@ import (
 	"image/color"
 	"image/jpeg"
 	"io"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -299,7 +298,7 @@ func downloadFont() {
 		return
 	}
 	downloading = true
-	downloadProgress = &DownloadProgress{StartTime: time.Now()}
+	downloadProgress = &DownloadProgress{StartTime: time.Now().UTC()}
 	downloadMutex.Unlock()
 
 	defer func() {
@@ -781,7 +780,7 @@ func renderStatusTable(ctx context.Context, lang string, tzOffset *int, fontErr 
 
 	// 页脚
 	y += 10
-	now := formatTimeWithOffset(time.Now(), tzOffset)
+	now := formatTimeWithOffset(time.Now().UTC(), tzOffset)
 	drawCenteredString(img, lp.LastUpdate+now, imageWidth/2, y+footerFontSize, color.Gray{100}, normalFace)
 
 	y += 25
@@ -945,7 +944,7 @@ func renderStatusTableWithBasicFont(ctx context.Context, lang string, tzOffset *
 
 	// 页脚
 	y += 10
-	now := formatTimeWithOffset(time.Now(), tzOffset)
+	now := formatTimeWithOffset(time.Now().UTC(), tzOffset)
 	drawCenteredStringBasic(img, lp.LastUpdate+now, imageWidth/2, y+footerFontSize, color.Gray{100})
 
 	y += 25
@@ -1060,6 +1059,10 @@ func fetchNodeData(ctx context.Context) ([]NodeInfo, map[string]NodeStatus, erro
 }
 
 func nodeInfoFromClient(client models.Client) NodeInfo {
+	var expiredAt time.Time
+	if client.ExpiredAt != nil {
+		expiredAt = client.ExpiredAt.UTC()
+	}
 	return NodeInfo{
 		UUID:           client.UUID,
 		Name:           client.Name,
@@ -1070,7 +1073,7 @@ func nodeInfoFromClient(client models.Client) NodeInfo {
 		Price:          client.Price,
 		BillingCycle:   client.BillingCycle,
 		Currency:       client.Currency,
-		ExpiredAt:      client.ExpiredAt.ToTime(),
+		ExpiredAt:      expiredAt,
 		AutoRenewal:    client.AutoRenewal,
 		Hidden:         client.Hidden,
 		Weight:         client.Weight,
@@ -1123,11 +1126,12 @@ func parseNodeInfo(data map[string]interface{}) NodeInfo {
 	if v, ok := data["disk_total"].(float64); ok {
 		node.DiskTotal = int64(v)
 	}
-	// 解析 expired_at
 	if v, ok := data["expired_at"].(string); ok {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
 			node.ExpiredAt = t
 		}
+	} else if v, ok := data["expired_at"].(time.Time); ok {
+		node.ExpiredAt = v.UTC()
 	}
 	return node
 }
@@ -1323,11 +1327,6 @@ func drawCenteredStringBasic(img *image.RGBA, s string, centerX, y int, c color.
 	d.DrawString(s)
 }
 
-// drawBasicString 简单的字符串渲染（无字体时使用）- 保留用于兼容
-func drawBasicString(img *image.RGBA, s string, x, y int, c color.Color) {
-	drawStringBasic(img, s, x, y, c)
-}
-
 // 格式化辅助函数
 
 func formatBytes(b int64) string {
@@ -1353,19 +1352,6 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.2f%s", val, units[exp])
 }
 
-func formatUptime(seconds int64) string {
-	days := seconds / 86400
-	if days > 0 {
-		return fmt.Sprintf("%d天", days)
-	}
-	hours := seconds / 3600
-	if hours > 0 {
-		return fmt.Sprintf("%d时", hours)
-	}
-	minutes := seconds / 60
-	return fmt.Sprintf("%d分", minutes)
-}
-
 func formatUptimeL(seconds int64, lp langPack) string {
 	days := seconds / 86400
 	if days > 0 {
@@ -1377,45 +1363,6 @@ func formatUptimeL(seconds int64, lp langPack) string {
 	}
 	minutes := seconds / 60
 	return fmt.Sprintf("%d%s", minutes, lp.Minutes)
-}
-
-func formatPrice(price float64, cycle int, currency string) string {
-	if price < 0 {
-		return "免费/一次性"
-	}
-	if price == 0 {
-		return "免费"
-	}
-
-	if currency == "" {
-		currency = "$"
-	}
-
-	var cycleStr string
-	switch cycle {
-	case 30:
-		cycleStr = "月"
-	case 90:
-		cycleStr = "季"
-	case 180:
-		cycleStr = "半年"
-	case 360, 365:
-		cycleStr = "年"
-	case -1:
-		cycleStr = "年"
-	default:
-		if cycle > 0 {
-			cycleStr = fmt.Sprintf("%d天", cycle)
-		} else {
-			cycleStr = "年"
-		}
-	}
-
-	// 如果是整数，不显示小数点
-	if price == float64(int(price)) {
-		return fmt.Sprintf("%s%d/%s", currency, int(price), cycleStr)
-	}
-	return fmt.Sprintf("%s%.2f/%s", currency, price, cycleStr)
 }
 
 func formatPriceL(price float64, cycle int, currency string, lp langPack) string {
@@ -1452,31 +1399,8 @@ func formatPriceL(price float64, cycle int, currency string, lp langPack) string
 	return fmt.Sprintf("%s%.2f/%s", currency, price, cycleStr)
 }
 
-func formatRemaining(expiredAt time.Time, autoRenewal bool) string {
-	if autoRenewal {
-		return "长期"
-	}
-
-	now := time.Now()
-	if expiredAt.IsZero() || expiredAt.Year() > 2200 {
-		return "长期"
-	}
-
-	diff := expiredAt.Sub(now)
-	if diff <= 0 {
-		return "已过期"
-	}
-
-	days := int(diff.Hours() / 24)
-	if days > 365 {
-		years := days / 365
-		return fmt.Sprintf("%d年+", years)
-	}
-	return fmt.Sprintf("%d天", days)
-}
-
 func formatRemainingL(expiredAt time.Time, autoRenewal bool, lp langPack) string {
-	now := time.Now()
+	now := time.Now().UTC()
 	if expiredAt.IsZero() || expiredAt.Year() > 2200 {
 		return lp.LongTerm
 	}
@@ -1492,20 +1416,6 @@ func formatRemainingL(expiredAt time.Time, autoRenewal bool, lp langPack) string
 		return fmt.Sprintf("%d%s", years, lp.YearPlus)
 	}
 	return fmt.Sprintf("%d%s", days, lp.Days)
-}
-
-func getNetworkType(ipv4, ipv6 string) string {
-	hasV4 := ipv4 != ""
-	hasV6 := ipv6 != ""
-
-	if hasV4 && hasV6 {
-		return "双栈"
-	} else if hasV4 {
-		return "IPv4"
-	} else if hasV6 {
-		return "IPv6"
-	}
-	return "-"
 }
 
 func getNetworkTypeL(ipv4, ipv6 string, lp langPack) string {
@@ -1593,29 +1503,4 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen-1]) + "…"
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func absInt(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
-func clamp(v, lo, hi float64) float64 {
-	return math.Max(lo, math.Min(hi, v))
 }

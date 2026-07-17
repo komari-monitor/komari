@@ -40,7 +40,7 @@ type cronSchedule struct {
 }
 
 func (s cronSchedule) Next(t time.Time) time.Time {
-	next := t.Truncate(time.Second).Add(time.Second)
+	next := t.UTC().Truncate(time.Second).Add(time.Second)
 	limit := next.Add(366 * 24 * time.Hour)
 	for next.Before(limit) {
 		if s.match(next) {
@@ -52,6 +52,7 @@ func (s cronSchedule) Next(t time.Time) time.Time {
 }
 
 func (s cronSchedule) match(t time.Time) bool {
+	t = t.In(time.Local)
 	_, okSecond := s.seconds[t.Second()]
 	_, okMinute := s.minutes[t.Minute()]
 	_, okHour := s.hours[t.Hour()]

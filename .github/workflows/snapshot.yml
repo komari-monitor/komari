@@ -112,6 +112,10 @@ jobs:
             goarch: riscv64
             zig_target_triple: riscv64-linux-musl
             binary_extension: ""
+          - goos: linux
+            goarch: loong64
+            zig_target_triple: loongarch64-linux-musl
+            binary_extension: ""
 
         exclude:
           - goos: windows

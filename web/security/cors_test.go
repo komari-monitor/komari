@@ -147,7 +147,7 @@ func TestCorsMiddlewareSkipsNonAPIPaths(t *testing.T) {
 func setupCORSRouter(enabled bool, allowlist string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.Use(CorsMiddleware(enabled, allowlist))
+	router.Use(NewCorsController(enabled, allowlist).Middleware())
 	router.GET("/api/ping", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})

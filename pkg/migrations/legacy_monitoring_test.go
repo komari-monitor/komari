@@ -3,12 +3,14 @@ package migrations
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
+	appconfig "github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/metric"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -33,20 +35,30 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	}
 
 	base := time.Date(2026, 7, 8, 23, 42, 0, 0, time.UTC)
-	if err := mainDB.Create(&models.Record{Client: "client-a", Time: models.FromTime(base), Cpu: 12.5, Ram: 2048}).Error; err != nil {
+	if err := mainDB.Create(&models.Record{Client: "client-a", Time: base, Cpu: 12.5, Ram: 2048}).Error; err != nil {
 		t.Fatalf("seed records: %v", err)
 	}
-	if err := mainDB.Table("records_long_term").Create(&models.Record{Client: "client-a", Time: models.FromTime(base.Add(time.Minute)), Cpu: 22.5, Ram: 4096}).Error; err != nil {
+	if err := mainDB.Table("records_long_term").Create(&models.Record{Client: "client-a", Time: base.Add(time.Minute), Cpu: 22.5, Ram: 4096}).Error; err != nil {
 		t.Fatalf("seed records_long_term: %v", err)
 	}
-	if err := mainDB.Create(&models.GPURecord{Client: "client-a", Time: models.FromTime(base), DeviceIndex: 0, DeviceName: "GPU 0", MemUsed: 1024, MemTotal: 2048, Utilization: 67, Temperature: 55}).Error; err != nil {
+	if err := mainDB.Create(&models.GPURecord{Client: "client-a", Time: base, DeviceIndex: 0, DeviceName: "GPU 0", MemUsed: 1024, MemTotal: 2048, Utilization: 67, Temperature: 55}).Error; err != nil {
 		t.Fatalf("seed gpu_records: %v", err)
 	}
-	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: models.FromTime(base), Value: 36}).Error; err != nil {
+	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: base, Value: 36}).Error; err != nil {
 		t.Fatalf("seed ping_records: %v", err)
 	}
-	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: models.FromTime(base.Add(30 * time.Second)), Value: -1}).Error; err != nil {
+	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: base.Add(30 * time.Second), Value: -1}).Error; err != nil {
 		t.Fatalf("seed loss ping_records: %v", err)
+	}
+	summary, err := InspectLegacyMonitoring(mainDB)
+	if err != nil {
+		t.Fatalf("inspect legacy monitoring summary: %v", err)
+	}
+	if summary.LoadRows != 2 || summary.GPURows != 1 || summary.LatencyRows != 2 || summary.MonitoringRows != 5 {
+		t.Fatalf("unexpected legacy monitoring summary: %#v", summary)
+	}
+	if summary.EstimatedPoints != 46 || summary.RetentionDays < 1 {
+		t.Fatalf("unexpected legacy point estimate or retention: %#v", summary)
 	}
 
 	metricDB, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "metrics.db"))+"?mode=rwc")
@@ -63,6 +75,16 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	})
 
 	markDoneCalls := 0
+	var lastProgress LegacyMonitoringProgress
+	if _, err := MigrateLegacyMonitoring(ctx, mainDB, metricStore, func(progress LegacyMonitoringProgress) {
+		lastProgress = progress
+	}); err != nil {
+		t.Fatalf("migrate legacy monitoring with progress: %v", err)
+	}
+	if lastProgress.SourceRowsDone != 5 || lastProgress.SourceRowsTotal != 5 || lastProgress.WrittenPoints != 46 {
+		t.Fatalf("unexpected final migration progress: %#v", lastProgress)
+	}
+
 	stats, err := runLegacyMonitoringMigration(ctx, mainDB, metricStore, false, func() error {
 		markDoneCalls++
 		return nil
@@ -122,10 +144,134 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rerun completed legacy monitoring migration: %v", err)
 	}
-	if stats != (legacyMonitoringStats{}) {
+	if stats != (LegacyMonitoringStats{}) {
 		t.Fatalf("completed migration should not scan legacy tables, got %#v", stats)
 	}
 	if markDoneCalls != 1 {
 		t.Fatalf("completed migration rewrote marker, calls=%d", markDoneCalls)
+	}
+}
+
+func TestDeleteLegacyMonitoringBeforeOnlyRemovesOldHistory(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "cleanup.db"))+"?mode=rwc"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open cleanup db: %v", err)
+	}
+	if sqlDB, err := db.DB(); err == nil {
+		t.Cleanup(func() { _ = sqlDB.Close() })
+	} else {
+		t.Fatalf("cleanup sql db: %v", err)
+	}
+	if err := db.AutoMigrate(&models.Client{}, &models.Record{}, &models.GPURecord{}, &models.PingRecord{}); err != nil {
+		t.Fatalf("migrate cleanup tables: %v", err)
+	}
+	if err := db.Table("records_long_term").AutoMigrate(&models.Record{}); err != nil {
+		t.Fatalf("migrate cleanup long-term table: %v", err)
+	}
+	if err := db.Create(&models.Client{UUID: "client-a", Token: "token-a", Name: "A"}).Error; err != nil {
+		t.Fatalf("seed client: %v", err)
+	}
+
+	cutoff := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	oldTime := cutoff.Add(-time.Hour)
+	newTime := cutoff.Add(time.Hour)
+	for _, record := range []models.Record{{Client: "client-a", Time: oldTime}, {Client: "client-a", Time: newTime}} {
+		if err := db.Create(&record).Error; err != nil {
+			t.Fatalf("seed load record: %v", err)
+		}
+	}
+	for _, record := range []models.GPURecord{{Client: "client-a", Time: oldTime}, {Client: "client-a", Time: newTime}} {
+		if err := db.Create(&record).Error; err != nil {
+			t.Fatalf("seed GPU record: %v", err)
+		}
+	}
+	for _, record := range []models.PingRecord{{Client: "client-a", TaskId: 1, Time: oldTime}, {Client: "client-a", TaskId: 1, Time: newTime}} {
+		if err := db.Create(&record).Error; err != nil {
+			t.Fatalf("seed ping record: %v", err)
+		}
+	}
+
+	deleted, err := DeleteLegacyMonitoringBefore(db, cutoff)
+	if err != nil {
+		t.Fatalf("delete legacy monitoring before cutoff: %v", err)
+	}
+	if deleted.LoadRows != 1 || deleted.GPURows != 1 || deleted.LatencyRows != 1 {
+		t.Fatalf("unexpected deleted rows: %#v", deleted)
+	}
+	summary, err := InspectLegacyMonitoring(db)
+	if err != nil {
+		t.Fatalf("inspect remaining legacy monitoring: %v", err)
+	}
+	if summary.LoadRows != 1 || summary.GPURows != 1 || summary.LatencyRows != 1 || summary.ServerCount != 1 {
+		t.Fatalf("unexpected remaining legacy rows: %#v", summary)
+	}
+	var clients int64
+	if err := db.Model(&models.Client{}).Count(&clients).Error; err != nil || clients != 1 {
+		t.Fatalf("cleanup changed clients: count=%d err=%v", clients, err)
+	}
+}
+
+func TestCompleteLegacyMonitoringMigrationFinalizesBeforeMarkingDone(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "finalize.db"))+"?mode=rwc"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open finalization database: %v", err)
+	}
+	if sqlDB, err := db.DB(); err == nil {
+		t.Cleanup(func() { _ = sqlDB.Close() })
+	} else {
+		t.Fatalf("finalization sql db: %v", err)
+	}
+	appconfig.SetDb(db)
+	if err := db.AutoMigrate(&models.Record{}); err != nil {
+		t.Fatalf("migrate legacy table: %v", err)
+	}
+	if err := appconfig.Set(legacyMonitoringMigrationDoneKey, false); err != nil {
+		t.Fatalf("reset completion marker: %v", err)
+	}
+
+	finalized := false
+	if err := CompleteLegacyMonitoringMigration(db, func() error {
+		finalized = true
+		if db.Migrator().HasTable(&models.Record{}) {
+			t.Fatal("legacy table still exists during finalization")
+		}
+		done, err := appconfig.GetAs[bool](legacyMonitoringMigrationDoneKey, false)
+		if err != nil {
+			return err
+		}
+		if done {
+			t.Fatal("completion marker was written before finalization")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("complete legacy migration: %v", err)
+	}
+	if !finalized {
+		t.Fatal("finalizer was not called")
+	}
+	done, err := appconfig.GetAs[bool](legacyMonitoringMigrationDoneKey, false)
+	if err != nil {
+		t.Fatalf("read completion marker: %v", err)
+	}
+	if !done {
+		t.Fatal("completion marker was not written after finalization")
+	}
+
+	if err := db.AutoMigrate(&models.Record{}); err != nil {
+		t.Fatalf("restore legacy table: %v", err)
+	}
+	if err := appconfig.Set(legacyMonitoringMigrationDoneKey, false); err != nil {
+		t.Fatalf("reset completion marker after success: %v", err)
+	}
+	finalizeErr := errors.New("vacuum failed")
+	if err := CompleteLegacyMonitoringMigration(db, func() error { return finalizeErr }); !errors.Is(err, finalizeErr) {
+		t.Fatalf("finalization error = %v, want %v", err, finalizeErr)
+	}
+	done, err = appconfig.GetAs[bool](legacyMonitoringMigrationDoneKey, false)
+	if err != nil {
+		t.Fatalf("read completion marker after failure: %v", err)
+	}
+	if done {
+		t.Fatal("failed finalization wrote the completion marker")
 	}
 }

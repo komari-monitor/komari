@@ -81,66 +81,24 @@ func (s *Store) AggregateRollup(ctx context.Context, query AggregateQuery, resol
 
 // rollupGroupsToPoints turns the merged output buckets into ordered
 // AggregatePoints, computing the requested aggregation from each bucket's
-// summaries/digest. FillEmpty emits zero-count buckets for gaps, mirroring the
-// raw AggregatePoints behavior.
+// summaries/digest.
 //
 // rollupGroupsToPoints 将合并后的输出桶转换为有序 AggregatePoint，并根据
-// 每个桶的摘要或 digest 计算请求的聚合。FillEmpty 会为空洞输出零计数桶，
-// 与原始 AggregatePoints 行为一致。
+// 每个桶的摘要或 digest 计算请求的聚合。
 func rollupGroupsToPoints(groups map[rollupKey]*rollupBucket, query AggregateQuery) ([]AggregatePoint, error) {
 	if !query.PreserveSeries {
 		return mergedRollupGroupsToPoints(groups, query)
 	}
 
-	var keys []rollupKey
-	seriesTags := make(map[rollupSeriesKey]string)
-	if query.FillEmpty {
-		series := rollupSeriesKeys(groups)
-		if len(series) == 0 {
-			tagsHash, tagsJSON, err := tagsFingerprint(query.Tags)
-			if err != nil {
-				return nil, err
-			}
-			series = append(series, rollupSeriesKey{entityID: query.EntityID, tagsHash: tagsHash})
-			seriesTags[series[0]] = tagsJSON
-		} else {
-			for _, key := range series {
-				seriesTags[key] = rollupSeriesTagsJSON(groups, key)
-			}
-		}
-		for t := alignTime(query.Start, query.Interval); !t.After(query.End); t = t.Add(query.Interval) {
-			bucket := t.UnixNano()
-			for _, seriesKey := range series {
-				keys = append(keys, rollupKey{
-					entityID: seriesKey.entityID,
-					tagsHash: seriesKey.tagsHash,
-					bucket:   bucket,
-				})
-			}
-		}
-	} else {
-		for key := range groups {
-			keys = append(keys, key)
-		}
-		sortRollupKeys(keys)
+	keys := make([]rollupKey, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
 	}
+	sortRollupKeys(keys)
 
 	out := make([]AggregatePoint, 0, len(keys))
 	for _, key := range keys {
 		b := groups[key]
-		if b == nil {
-			tags, err := rollupTagsFromJSON(seriesTags[rollupSeriesKey{entityID: key.entityID, tagsHash: key.tagsHash}])
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, AggregatePoint{
-				MetricName: query.MetricName,
-				EntityID:   key.entityID,
-				Bucket:     time.Unix(0, key.bucket).UTC(),
-				Tags:       tags,
-			})
-			continue
-		}
 		v, ok := b.value(query.Aggregation)
 		if !ok {
 			return nil, fmt.Errorf("%w: aggregation %q not supported over rollups", ErrInvalidArgument, query.Aggregation)
@@ -162,31 +120,16 @@ func rollupGroupsToPoints(groups map[rollupKey]*rollupBucket, query AggregateQue
 }
 
 func mergedRollupGroupsToPoints(groups map[rollupKey]*rollupBucket, query AggregateQuery) ([]AggregatePoint, error) {
-	var keys []rollupKey
-	if query.FillEmpty {
-		for t := alignTime(query.Start, query.Interval); !t.After(query.End); t = t.Add(query.Interval) {
-			keys = append(keys, rollupKey{bucket: t.UnixNano()})
-		}
-	} else {
-		for key := range groups {
-			keys = append(keys, key)
-		}
-		sortRollupKeys(keys)
+	keys := make([]rollupKey, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
 	}
+	sortRollupKeys(keys)
 
 	tags := cloneStringMap(query.Tags)
 	out := make([]AggregatePoint, 0, len(keys))
 	for _, key := range keys {
 		b := groups[key]
-		if b == nil {
-			out = append(out, AggregatePoint{
-				MetricName: query.MetricName,
-				EntityID:   query.EntityID,
-				Bucket:     time.Unix(0, key.bucket).UTC(),
-				Tags:       cloneStringMap(tags),
-			})
-			continue
-		}
 		v, ok := b.value(query.Aggregation)
 		if !ok {
 			return nil, fmt.Errorf("%w: aggregation %q not supported over rollups", ErrInvalidArgument, query.Aggregation)
@@ -349,40 +292,6 @@ func foldedRollupKey(entityID, tagsHash string, bucket int64, preserveSeries boo
 		return rollupKey{bucket: bucket}
 	}
 	return rollupKey{entityID: entityID, tagsHash: tagsHash, bucket: bucket}
-}
-
-type rollupSeriesKey struct {
-	entityID string
-	tagsHash string
-}
-
-func rollupSeriesKeys(groups map[rollupKey]*rollupBucket) []rollupSeriesKey {
-	seen := make(map[rollupSeriesKey]struct{})
-	keys := make([]rollupSeriesKey, 0)
-	for key := range groups {
-		series := rollupSeriesKey{entityID: key.entityID, tagsHash: key.tagsHash}
-		if _, ok := seen[series]; ok {
-			continue
-		}
-		seen[series] = struct{}{}
-		keys = append(keys, series)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].entityID != keys[j].entityID {
-			return keys[i].entityID < keys[j].entityID
-		}
-		return keys[i].tagsHash < keys[j].tagsHash
-	})
-	return keys
-}
-
-func rollupSeriesTagsJSON(groups map[rollupKey]*rollupBucket, series rollupSeriesKey) string {
-	for key, bucket := range groups {
-		if key.entityID == series.entityID && key.tagsHash == series.tagsHash && bucket != nil {
-			return bucket.tagsJSON
-		}
-	}
-	return "{}"
 }
 
 func sortRollupKeys(keys []rollupKey) {
@@ -593,6 +502,10 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 	now = now.UTC()
 
 	rawCutoff := policy.rawCutoff(now)
+	watermark, hasWatermark, err := s.compactionWatermark(ctx, q.MetricName)
+	if err != nil {
+		return nil, err
+	}
 
 	// Whole window inside raw retention (or raw kept forever) -> raw.
 	if rawCutoff.IsZero() || !q.Start.Before(rawCutoff) {
@@ -606,7 +519,23 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 
 	servicingTier := bestRollupTier(policy, query.Interval, q.Start, now)
 	if q.Start.Before(rawCutoff) && !q.End.Before(rawCutoff) && servicingTier != nil {
-		return s.seriesHybrid(ctx, query, rawCutoff, servicingTier)
+		if hasWatermark {
+			boundary := rawCutoff
+			if watermark.Before(boundary) {
+				boundary = watermark
+			}
+			if !q.Start.Before(boundary) {
+				return s.Aggregate(ctx, query)
+			}
+			return s.seriesHybrid(ctx, query, boundary, servicingTier)
+		}
+
+		// Existing stores may have rollups but no watermark yet. Read all raw
+		// data from the requested start and use the dynamic cutoff only as the
+		// rollup scan's upper bound. Compaction's raw/rollup invariant makes
+		// these two ranges disjoint; the next successful compact persists the
+		// precise boundary for subsequent queries.
+		return s.seriesHybridWithRollupEnd(ctx, query, q.Start, rawCutoff, servicingTier)
 	}
 
 	if servicingTier == nil {
@@ -646,6 +575,10 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 // 包含 raw 截止点的 rollup 桶可能尚未完整；它只包含截止点之前已压缩的数据。读取
 // 该桶，再合入截止点及之后的 raw 点，可以在粗粒度层级上避免重叠和缺口。
 func (s *Store) seriesHybrid(ctx context.Context, query AggregateQuery, boundary time.Time, tier *RollupTier) ([]AggregatePoint, error) {
+	return s.seriesHybridWithRollupEnd(ctx, query, boundary, boundary, tier)
+}
+
+func (s *Store) seriesHybridWithRollupEnd(ctx context.Context, query AggregateQuery, boundary, rollupEnd time.Time, tier *RollupTier) ([]AggregatePoint, error) {
 	q := query.Query.normalized()
 	comp := s.cfg.RollupPolicy.compression()
 	resNano := tier.Interval.Nanoseconds()
@@ -657,7 +590,7 @@ func (s *Store) seriesHybrid(ctx context.Context, query AggregateQuery, boundary
 
 	// Old half: include the rollup bucket containing splitAt. That bucket only
 	// contains compacted points before splitAt; the raw half starts at splitAt.
-	upperBucket := floorDivNano(splitAt, resNano)
+	upperBucket := floorDivNano(rollupEnd.UTC().UnixNano(), resNano)
 	if upperBucket >= startNano {
 		rows, err := s.scanRollupRowsBetween(ctx, q.MetricName, q.EntityID, q.Tags, resNano, startNano, upperBucket)
 		if err != nil {

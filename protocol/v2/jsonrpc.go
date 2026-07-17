@@ -1,6 +1,10 @@
 package v2
 
-import v1 "github.com/komari-monitor/komari/protocol/v1"
+import (
+	"time"
+
+	v1 "github.com/komari-monitor/komari/protocol/v1"
+)
 
 const (
 	Version               = "2.0"
@@ -31,11 +35,11 @@ type Response struct {
 }
 
 type Event struct {
-	ID        string `json:"id"`
-	Method    string `json:"method"`
-	Params    any    `json:"params,omitempty"`
-	CreatedAt string `json:"created_at,omitempty"`
-	ExpiresAt string `json:"expires_at,omitempty"`
+	ID        string    `json:"id"`
+	Method    string    `json:"method"`
+	Params    any       `json:"params,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type RPCError struct {
@@ -54,10 +58,10 @@ type BasicInfoParams struct {
 }
 
 type PingResultParams struct {
-	TaskID     uint   `json:"task_id"`
-	PingType   string `json:"ping_type"`
-	Value      int    `json:"value"`
-	FinishedAt string `json:"finished_at"`
+	TaskID     uint      `json:"task_id"`
+	PingType   string    `json:"ping_type"`
+	Value      int       `json:"value"`
+	FinishedAt time.Time `json:"finished_at"`
 }
 
 type PullParams struct {

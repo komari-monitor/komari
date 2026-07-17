@@ -98,7 +98,7 @@ func CheckTraffic() {
 			_ = messageSender.SendEvent(models.EventMessage{
 				Event:   "Traffic",
 				Clients: []models.Client{c},
-				Time:    time.Now(),
+				Time:    time.Now().UTC(),
 				Emoji:   "⚠️",
 				Message: msg,
 			})

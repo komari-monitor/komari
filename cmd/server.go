@@ -29,6 +29,26 @@ func init() {
 // 任一初始化阶段失败即中止启动，避免在半初始化状态下对外提供服务。
 func RunServer() {
 	app := NewApp()
+	if err := app.Bootstrap(); err != nil {
+		_ = app.Shutdown()
+		log.Fatalf("server startup failed at %q: %v", "bootstrap", err)
+	}
+
+	required, summary, err := app.LegacyUpgradeRequired()
+	if err != nil {
+		_ = app.Shutdown()
+		log.Fatalf("server startup failed at %q: %v", "detect-1.2.7-upgrade", err)
+	}
+	if required {
+		completed, err := app.RunLegacyUpgrade(summary)
+		if err != nil {
+			_ = app.Shutdown()
+			log.Fatalf("server startup failed at %q: %v", "run-1.2.7-upgrade", err)
+		}
+		if !completed {
+			return
+		}
+	}
 
 	// 初始化阶段：任一步失败都不应继续对外服务。
 	type stage struct {
@@ -36,7 +56,6 @@ func RunServer() {
 		fn   func() error
 	}
 	stages := []stage{
-		{"bootstrap", app.Bootstrap},
 		{"init-stores", app.InitStores},
 		{"init-providers", app.InitProviders},
 		{"start-background", app.StartBackground},

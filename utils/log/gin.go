@@ -54,7 +54,7 @@ func GinLogger() gin.HandlerFunc {
 			level = slog.LevelInfo
 		}
 
-		r := slog.NewRecord(time.Now(), level, msg, 0)
+		r := slog.NewRecord(time.Now().UTC(), level, msg, 0)
 		r.AddAttrs(slog.String("_group", "GIN")) // 添加分组标识
 		handler.Handle(c.Request.Context(), r)
 	}
@@ -67,7 +67,7 @@ func GinRecovery() gin.HandlerFunc {
 			if err := recover(); err != nil {
 				msg := fmt.Sprintf("panic recovered: %v | %s %s", err, c.Request.Method, c.Request.URL.Path)
 				handler := slog.Default().Handler()
-				r := slog.NewRecord(time.Now(), slog.LevelError, msg, 0)
+				r := slog.NewRecord(time.Now().UTC(), slog.LevelError, msg, 0)
 				r.AddAttrs(slog.String("_group", "GIN"))
 				handler.Handle(c.Request.Context(), r)
 				c.AbortWithStatus(500)

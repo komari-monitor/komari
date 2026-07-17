@@ -26,9 +26,6 @@ func AggregatePoints(points []Point, query AggregateQuery) ([]AggregatePoint, er
 		return nil, err
 	}
 	if len(points) == 0 {
-		if query.FillEmpty {
-			return emptyBuckets(query), nil
-		}
 		return []AggregatePoint{}, nil
 	}
 
@@ -60,34 +57,11 @@ func AggregatePoints(points []Point, query AggregateQuery) ([]AggregatePoint, er
 		}
 	}
 
-	var keys []aggregateGroupKey
-	if query.FillEmpty {
-		seriesKeys := sortedAggregateSeriesKeys(seriesTags)
-		if len(seriesKeys) == 0 {
-			tagsHash, _, err := tagsFingerprint(query.Tags)
-			if err != nil {
-				return nil, err
-			}
-			series := aggregateSeriesKey{
-				metricName: query.MetricName,
-				entityID:   query.EntityID,
-				tagsHash:   tagsHash,
-			}
-			seriesKeys = append(seriesKeys, series)
-			seriesTags[series] = cloneStringMap(query.Tags)
-		}
-		for t := alignTime(query.Start, query.Interval); !t.After(query.End); t = t.Add(query.Interval) {
-			bucket := t.UnixNano()
-			for _, series := range seriesKeys {
-				keys = append(keys, aggregateGroupKey{aggregateSeriesKey: series, bucket: bucket})
-			}
-		}
-	} else {
-		for key := range groups {
-			keys = append(keys, key)
-		}
-		sortAggregateGroupKeys(keys)
+	keys := make([]aggregateGroupKey, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
 	}
+	sortAggregateGroupKeys(keys)
 
 	out := make([]AggregatePoint, 0, len(keys))
 	for _, key := range keys {
@@ -106,23 +80,6 @@ func AggregatePoints(points []Point, query AggregateQuery) ([]AggregatePoint, er
 		})
 	}
 	return out, nil
-}
-
-func sortedAggregateSeriesKeys(tags map[aggregateSeriesKey]map[string]string) []aggregateSeriesKey {
-	keys := make([]aggregateSeriesKey, 0, len(tags))
-	for key := range tags {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].metricName != keys[j].metricName {
-			return keys[i].metricName < keys[j].metricName
-		}
-		if keys[i].entityID != keys[j].entityID {
-			return keys[i].entityID < keys[j].entityID
-		}
-		return keys[i].tagsHash < keys[j].tagsHash
-	})
-	return keys
 }
 
 func sortAggregateGroupKeys(keys []aggregateGroupKey) {
@@ -345,20 +302,4 @@ func alignTime(t time.Time, interval time.Duration) time.Time {
 	// Go's % returns a remainder with the dividend's sign, so normalize it.
 	rem := ((nano % size) + size) % size
 	return time.Unix(0, nano-rem).UTC()
-}
-
-// emptyBuckets builds zero-count aggregate buckets for an empty range.
-//
-// emptyBuckets 根据查询范围生成空聚合桶，用于 FillEmpty 场景。
-func emptyBuckets(query AggregateQuery) []AggregatePoint {
-	var out []AggregatePoint
-	for t := alignTime(query.Start, query.Interval); !t.After(query.End); t = t.Add(query.Interval) {
-		out = append(out, AggregatePoint{
-			MetricName: query.MetricName,
-			EntityID:   query.EntityID,
-			Bucket:     t,
-			Tags:       cloneStringMap(query.Tags),
-		})
-	}
-	return out
 }

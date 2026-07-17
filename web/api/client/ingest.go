@@ -1,8 +1,11 @@
 package client
 
 import (
+	"context"
 	"time"
 
+	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
@@ -18,11 +21,15 @@ import (
 // markPresence 为 true 时按 POST 上报会话刷新在线状态（WS 连接自行管理在线状态，应传 false）。
 func ingestReport(uuid string, report v1.Report, protocolVersion int, markPresence bool) error {
 	report.UUID = uuid
-	savedReport, err := SaveClientReport(uuid, report)
+	report.UpdatedAt = time.Now().UTC()
+	if err := clients.ReportVerify(report); err != nil {
+		return err
+	}
+	savedReport, err := metricstore.WriteReport(context.Background(), report)
 	if err != nil {
 		return err
 	}
-	agent_runtime.SetLatestReport(uuid, &savedReport)
+	agent_runtime.RecordReport(savedReport)
 	agent_runtime.SetClientProtocolVersion(uuid, protocolVersion)
 	if markPresence {
 		refreshPostPresence(uuid)
@@ -39,11 +46,11 @@ func ingestBasicInfo(uuid string, info map[string]interface{}, fallbackIP string
 }
 
 // ingestPingResult 保存一条 ping 探测结果。
-func ingestPingResult(uuid string, taskID uint, value int, finishedAt time.Time) {
-	tasks.SavePingRecord(models.PingRecord{
+func ingestPingResult(uuid string, taskID uint, value int) error {
+	return tasks.SavePingRecord(models.PingRecord{
 		Client: uuid,
 		TaskId: taskID,
 		Value:  value,
-		Time:   models.FromTime(finishedAt),
+		Time:   time.Now().UTC(),
 	})
 }
