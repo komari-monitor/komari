@@ -150,8 +150,6 @@ func registerAdminRoutes(r *gin.Engine) {
 	{
 		databaseGroup.GET("/size", jsonRpc.Bind("admin:getDatabaseSize"))
 		databaseGroup.POST("/vacuum", jsonRpc.Bind("admin:vacuumDatabase"))
-		databaseGroup.GET("/compression", jsonRpc.Bind("admin:getDatabaseCompression"))
-		databaseGroup.POST("/compression", jsonRpc.Bind("admin:setDatabaseCompression"))
 	}
 
 	// clients
