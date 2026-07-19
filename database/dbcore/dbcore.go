@@ -20,8 +20,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// zipDirectoryExcluding 将 srcDir 打包为 dstZip，exclude 是绝对路径集合需要排除
-func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) error {
+// ZipDirectoryExcluding 将 srcDir 打包为 dstZip，exclude 是绝对路径集合需要排除。
+// 目录项被排除时使用 SkipDir 跳过整个子树。
+func ZipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) error {
 	// 规范化排除路径为绝对路径
 	normExclude := make(map[string]struct{}, len(exclude))
 	for p := range exclude {
@@ -200,7 +201,7 @@ func resolveDatabaseFile() string {
 }
 
 // backupOnVersionUpgrade 在检测到版本升级时，把当前 ./data 打包到
-// ./backup/upgrade-{time}.zip，便于升级（含 metrics 迁移）异常时回滚。
+// ./data/backup/upgrade-{time}.zip，便于升级（含 metrics 迁移）异常时回滚。
 //
 // 版本标识存放于配置库（configs 表，键 system_version），因此本函数必须在
 // config.SetDb 之后、一次性 metrics 迁移（InitStores）之前调用。
@@ -240,14 +241,19 @@ func backupOnVersionUpgrade() {
 		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
 
-	if err := os.MkdirAll("./backup", 0755); err != nil {
+	backupDir := filepath.Join(".", "data", "backup")
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
 		log.Printf("[upgrade-backup] failed to create backup dir: %v", err)
 		return
 	}
 	tsName := time.Now().UTC().Format("20060102-150405")
-	bakPath := filepath.Join("./backup", fmt.Sprintf("upgrade-%s.zip", tsName))
-	backupZipPath := filepath.Join(".", "data", "backup.zip")
-	if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
+	bakPath := filepath.Join(backupDir, fmt.Sprintf("upgrade-%s.zip", tsName))
+	backupZipPath := filepath.Join(".", "data", "backup", "upload", "backup.zip")
+	exclude := map[string]struct{}{
+		backupZipPath: {}, // 已由 backupDir 的 SkipDir 覆盖，保留以显式声明意图
+		backupDir:     {}, // 避免把历史归档打包进升级备份
+	}
+	if zipErr := ZipDirectoryExcluding("./data", bakPath, exclude); zipErr != nil {
 		log.Printf("[upgrade-backup] failed to backup ./data before upgrade (from %q to %q): %v", prevVersion, versionID, zipErr)
 		return
 	}
@@ -320,47 +326,67 @@ func Close() error {
 func doInitialize() error {
 	var err error
 
-	// 在数据库初始化前执行：如果存在 ./data/backup.zip，则进行恢复逻辑
+	// 在数据库初始化前执行：如果存在 ./data/backup/upload/backup.zip，则进行恢复。
+	// 恢复标记由上传接口写入，恢复后自动删除，不会在每次启动时误触发。
+	//
+	// 流程：
+	//   1. 检测 ./data/backup/upload/backup.zip
+	//   2. 创建 pre-restore 备份（当前数据 → ./data/backup/pre-restore-{time}.zip）
+	//   3. 确认 pre-restore 创建成功
+	//   4. 清空 data/ 并解压 backup.zip
+	//   5. 删除 backup.zip 和标记文件
 	func() {
-		backupZipPath := filepath.Join(".", "data", "backup.zip")
-		if _, statErr := os.Stat(backupZipPath); statErr == nil {
-			// 4. 把除了 ./data/backup.zip 之外的所有文件压缩到 ./backup/{time}.zip
-			if err := os.MkdirAll("./backup", 0755); err != nil {
-				log.Printf("[restore] failed to create backup dir: %v", err)
-			} else {
-				tsName := time.Now().UTC().Format("20060102-150405")
-				bakPath := filepath.Join("./backup", fmt.Sprintf("%s.zip", tsName))
-				if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
-					log.Printf("[restore] failed to zip current data: %v", zipErr)
-				} else {
-					log.Printf("[restore] current data zipped to %s", bakPath)
-				}
-			}
+		backupZipPath := filepath.Join(".", "data", "backup", "upload", "backup.zip")
+		backupDir := filepath.Join(".", "data", "backup")
 
-			// 5. 删除除了 ./data/backup.zip 之外的所有文件
-			if delErr := removeAllInDirExcept("./data", map[string]struct{}{backupZipPath: {}}); delErr != nil {
-				log.Printf("[restore] failed to cleanup data dir: %v", delErr)
-			}
+		if _, statErr := os.Stat(backupZipPath); statErr != nil {
+			return
+		}
 
-			// 6. 解压 ./data/backup.zip 到 ./data
-			if unzipErr := unzipToDir(backupZipPath, "./data"); unzipErr != nil {
-				log.Printf("[restore] failed to unzip backup into data: %v", unzipErr)
-			} else {
-				log.Printf("[restore] backup.zip extracted to ./data")
-			}
+		// 1) 创建恢复前备份
+		if err := os.MkdirAll(backupDir, 0755); err != nil {
+			log.Printf("[restore] failed to create backup dir: %v", err)
+			return
+		}
 
-			// 7. 删除 ./data/backup.zip
-			if rmErr := os.Remove(backupZipPath); rmErr != nil {
-				log.Printf("[restore] failed to remove backup.zip: %v", rmErr)
-			} else {
-				log.Printf("[restore] backup.zip removed")
-			}
-			// 8. 删除标记
-			if rmErr := os.Remove("./data/komari-backup-markup"); rmErr != nil {
-				log.Printf("[restore] failed to remove komari-backup-markup: %v", rmErr)
-			} else {
-				log.Printf("[restore] komari-backup-markup removed")
-			}
+		tsName := time.Now().UTC().Format("20060102-150405")
+		bakPath := filepath.Join(backupDir, fmt.Sprintf("pre-restore-%s.zip", tsName))
+		if zipErr := ZipDirectoryExcluding("./data", bakPath, map[string]struct{}{
+			backupDir: {}, // 避免把整个 backup/ 归档打包进 pre-restore
+		}); zipErr != nil {
+			log.Printf("[restore] failed to create pre-restore backup: %v", zipErr)
+			return
+		}
+
+		// 确认 pre-restore 文件存在且非空
+		info, statErr := os.Stat(bakPath)
+		if statErr != nil || info.Size() == 0 {
+			log.Printf("[restore] pre-restore backup verification failed: stat=%v", statErr)
+			return
+		}
+		log.Printf("[restore] pre-restore backup created: %s (%d bytes)", bakPath, info.Size())
+
+		// 2) 清空 data/（排除 backup/ 归档目录）
+		if delErr := removeAllInDirExcept("./data", map[string]struct{}{
+			backupDir: {},
+		}); delErr != nil {
+			log.Printf("[restore] failed to cleanup data dir: %v", delErr)
+			return
+		}
+
+		// 3) 解压 backup.zip 到 ./data
+		if unzipErr := unzipToDir(backupZipPath, "./data"); unzipErr != nil {
+			log.Printf("[restore] failed to unzip backup zip: %v", unzipErr)
+			return
+		}
+		log.Printf("[restore] backup extracted to ./data")
+
+		// 4) 清理
+		if rmErr := os.Remove(backupZipPath); rmErr != nil {
+			log.Printf("[restore] failed to remove backup.zip: %v", rmErr)
+		}
+		if rmErr := os.Remove("./data/komari-backup-markup"); rmErr != nil {
+			log.Printf("[restore] failed to remove markup: %v", rmErr)
 		}
 	}()
 
