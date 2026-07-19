@@ -85,36 +85,23 @@ func UploadBackup(c *gin.Context) {
 		return
 	}
 
-	// 将校验通过的临时文件移动到固定路径 ./data/backup.zip
-	finalPath := filepath.Join(".", "data", "backup.zip")
-	// 如存在旧文件，先删除
+	// 将校验通过的临时文件移动到 ./data/backup/upload/backup.zip
+	finalPath := filepath.Join(".", "data", "backup", "upload", "backup.zip")
+	_ = os.MkdirAll(filepath.Dir(finalPath), 0755)
 	_ = os.Remove(finalPath)
+
 	if err := os.Rename(tempFilePath, finalPath); err != nil {
-		// fallback：拷贝
-		in, err2 := os.Open(tempFilePath)
-		if err2 != nil {
-			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error preparing backup file: %v", err))
+		if cpErr := copyFile(tempFilePath, finalPath); cpErr != nil {
+			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error preparing backup file: %v", cpErr))
 			return
 		}
-		defer in.Close()
-		out, err2 := os.Create(finalPath)
-		if err2 != nil {
-			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error creating target backup file: %v", err2))
-			return
-		}
-		if _, err2 = io.Copy(out, in); err2 != nil {
-			out.Close()
-			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error writing target backup file: %v", err2))
-			return
-		}
-		out.Close()
 	}
 
 	// 返回：已保存备份，重启后将自动恢复
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
 		"message": "Backup uploaded successfully. The service will restart and apply the backup.",
-		"path":    "./data/backup.zip",
+		"path":    "./data/backup/upload/backup.zip",
 	})
 
 	go func() {
