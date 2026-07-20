@@ -4,9 +4,11 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -207,5 +209,39 @@ func DownloadBackup(c *gin.Context) {
 	if _, err = markupWriter.Write([]byte(markupContent)); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error writing backup markup file: %v", err))
 		return
+	}
+}
+
+// pruneOldZipByPrefix 裁剪旧备份文件，仅保留最近 keep 份。
+// 文件名格式 {prefix}YYYYMMDD-HHmmSS.zip，按名称字典序即时间序。
+func pruneOldZipByPrefix(backupDir, prefix string, keep int) {
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		return
+	}
+
+	lowerPrefix := strings.ToLower(prefix)
+	var files []os.DirEntry
+	for _, e := range entries {
+		name := strings.ToLower(e.Name())
+		if e.IsDir() || !strings.HasPrefix(name, lowerPrefix) || !strings.HasSuffix(name, ".zip") {
+			continue
+		}
+		files = append(files, e)
+	}
+
+	if len(files) <= keep {
+		return
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Name() < files[j].Name()
+	})
+
+	for i := 0; i < len(files)-keep; i++ {
+		path := filepath.Join(backupDir, files[i].Name())
+		if err := os.Remove(path); err != nil {
+			log.Printf("[prune] failed to remove old %s %s: %v", prefix, path, err)
+		}
 	}
 }
