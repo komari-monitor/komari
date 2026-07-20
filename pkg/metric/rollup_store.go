@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -109,6 +110,9 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		written, err := s.compactMetricOnce(ctx, metricName, now, policy, obsoleteIntervals)
 		if err == nil {
+			if err := s.incrementalSQLiteVacuum(ctx, 256); err != nil {
+				log.Printf("metric: incremental SQLite vacuum skipped: %v", err)
+			}
 			return written, nil
 		}
 		if !isRetryableSerializationError(err) {
@@ -141,6 +145,9 @@ func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now ti
 		return written, err
 	}
 	if err := s.persistCompactionWatermarkTx(ctx, metricName, policy.rawCutoff(now), tx); err != nil {
+		return written, err
+	}
+	if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
 		return written, err
 	}
 
@@ -556,7 +563,7 @@ func (s *Store) mergeRollupBucketsTx(ctx context.Context, metricName string, int
 		return keys[i].bucket < keys[j].bucket
 	})
 
-	stmt := s.dialect.upsertRollupSQL(s.tables)
+	stmt := s.rollupUpsertSQL()
 	resolution := interval.Nanoseconds()
 	createdAt := time.Now().UTC().UnixNano()
 	for _, key := range keys {
@@ -613,7 +620,7 @@ func (s *Store) writeRollupBucketsWithMergePointTx(ctx context.Context, metricNa
 		return keys[i].bucket < keys[j].bucket
 	})
 
-	stmt := s.dialect.upsertRollupSQL(s.tables)
+	stmt := s.rollupUpsertSQL()
 	resNano := interval.Nanoseconds()
 	now := time.Now().UTC().UnixNano()
 	mergeCutoffNano := mergeCutoff.UnixNano()
@@ -686,15 +693,8 @@ func (s *Store) deleteRollupsBeforeTx(ctx context.Context, metricName string, in
 
 // DeleteBeforeTx deletes raw points before a cutoff within a transaction.
 func (s *Store) DeleteBeforeTx(ctx context.Context, metricName string, before time.Time, tx *sql.Tx) (int64, error) {
-	sqlText := fmt.Sprintf(
-		`DELETE FROM %s WHERE metric_name = %s AND ts_nano < %s`,
-		s.tables.points, s.dialect.placeholder(1), s.dialect.placeholder(2),
-	)
-	result, err := tx.ExecContext(ctx, sqlText, metricName, before.UTC().UnixNano())
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+	where := fmt.Sprintf(`metric_name = %s AND ts_nano < %s`, s.dialect.placeholder(1), s.dialect.placeholder(2))
+	return s.deleteRows(ctx, tx, s.tables.points, where, metricName, before.UTC().UnixNano())
 }
 
 // floorDivNano floors ts to the start of its size-wide bucket, handling

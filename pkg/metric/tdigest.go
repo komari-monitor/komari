@@ -1,8 +1,11 @@
 package metric
 
 import (
+	"bytes"
+	"compress/flate"
 	"encoding/binary"
 	"errors"
+	"io"
 	"math"
 	"sort"
 )
@@ -86,6 +89,10 @@ const (
 	//
 	// tdigestMagic1 是二进制格式的第二个 magic 字节。
 	tdigestMagic1 = 'D'
+	// tdigestCompressedMagic1 identifies a losslessly DEFLATE-compressed V1
+	// digest. The compressed payload is the complete legacy TD blob, so decoding
+	// preserves every floating-point bit and remains backward compatible.
+	tdigestCompressedMagic1 = 'Z'
 	// tdigestVersion is the current binary encoding version.
 	//
 	// tdigestVersion 是当前二进制编码版本。
@@ -265,6 +272,10 @@ func (t *TDigest) Quantile(q float64) float64 {
 // magic[2] version[1] compression[8] min[8] max[8] count[8] nCentroids[4]，
 // 后接 nCentroids * (mean[8] weight[8])。
 func (t *TDigest) Encode() []byte {
+	return compressTDigestBlob(t.encodeRaw())
+}
+
+func (t *TDigest) encodeRaw() []byte {
 	t.process()
 	n := len(t.centroids)
 	buf := make([]byte, 0, 3+8*4+4+n*16)
@@ -288,6 +299,30 @@ func (t *TDigest) Encode() []byte {
 	return buf
 }
 
+func compressTDigestBlob(raw []byte) []byte {
+	if len(raw) < 96 || (len(raw) >= 3 && raw[0] == tdigestMagic0 && raw[1] == tdigestCompressedMagic1) {
+		return raw
+	}
+	var payload bytes.Buffer
+	writer, err := flate.NewWriter(&payload, flate.BestSpeed)
+	if err != nil {
+		return raw
+	}
+	if _, err := writer.Write(raw); err != nil {
+		_ = writer.Close()
+		return raw
+	}
+	if err := writer.Close(); err != nil {
+		return raw
+	}
+	if payload.Len()+3 >= len(raw) {
+		return raw
+	}
+	out := make([]byte, 0, payload.Len()+3)
+	out = append(out, tdigestMagic0, tdigestCompressedMagic1, tdigestVersion)
+	return append(out, payload.Bytes()...)
+}
+
 // DecodeTDigest reconstructs a digest produced by Encode. A nil/empty blob
 // yields an empty digest so callers can treat "no sketch stored" uniformly.
 //
@@ -296,6 +331,24 @@ func (t *TDigest) Encode() []byte {
 func DecodeTDigest(b []byte) (*TDigest, error) {
 	if len(b) == 0 {
 		return NewTDigest(defaultTDigestCompression), nil
+	}
+	if len(b) >= 3 && b[0] == tdigestMagic0 && b[1] == tdigestCompressedMagic1 {
+		if b[2] != tdigestVersion {
+			return nil, errors.New("metric: unsupported compressed t-digest version")
+		}
+		reader := flate.NewReader(bytes.NewReader(b[3:]))
+		decompressed, err := io.ReadAll(io.LimitReader(reader, (64<<20)+1))
+		closeErr := reader.Close()
+		if err != nil {
+			return nil, errors.New("metric: invalid compressed t-digest blob")
+		}
+		if closeErr != nil {
+			return nil, errors.New("metric: invalid compressed t-digest blob")
+		}
+		if len(decompressed) > 64<<20 {
+			return nil, errors.New("metric: compressed t-digest blob is too large")
+		}
+		b = decompressed
 	}
 	if len(b) < 3+8*4+4 || b[0] != tdigestMagic0 || b[1] != tdigestMagic1 {
 		return nil, errors.New("metric: invalid t-digest blob")

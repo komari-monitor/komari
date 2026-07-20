@@ -12,6 +12,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
+	if s.cfg.Driver == DriverSQLite {
+		return s.migrateSQLiteStorageV3(ctx)
+	}
 	d := s.dialect
 	jsonType := d.jsonType()
 	pk := d.autoIncrementPrimaryKey()

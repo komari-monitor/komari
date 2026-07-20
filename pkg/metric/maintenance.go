@@ -136,18 +136,16 @@ func (s *Store) cleanupOrphanedMetricData(ctx context.Context) (int64, error) {
 		if table == "" {
 			continue
 		}
-		result, err := s.db.ExecContext(ctx, fmt.Sprintf(
-			`DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s WHERE %s.name = %s.metric_name)`,
-			table, s.tables.definitions, s.tables.definitions, table,
-		))
+		where := fmt.Sprintf(`NOT EXISTS (SELECT 1 FROM %s WHERE %s.name = %s.metric_name)`,
+			s.tables.definitions, s.tables.definitions, table)
+		count, err := s.deleteRows(ctx, s.db, table, where)
 		if err != nil {
 			return deleted, fmt.Errorf("metric: delete orphaned rows from %s: %w", table, err)
 		}
-		count, err := result.RowsAffected()
-		if err != nil {
-			return deleted, err
-		}
 		deleted += count
+	}
+	if err := s.pruneUnusedSQLiteSeries(ctx, s.db); err != nil {
+		return deleted, fmt.Errorf("metric: delete orphaned SQLite series: %w", err)
 	}
 	return deleted, nil
 }

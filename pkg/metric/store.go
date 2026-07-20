@@ -66,6 +66,9 @@ type Store struct {
 	//
 	// closed 表示 Close 是否已经被调用。
 	closed bool
+	// sqliteStorageV3 reports that points/rollups are compatibility views over
+	// the normalized SQLite series/value tables.
+	sqliteStorageV3 bool
 }
 
 // Open initializes a Store from a Config.
@@ -93,10 +96,13 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		cfg:     cfg,
 		dialect: newDialect(cfg.Driver),
 		tables: tables{
-			definitions: tableName(cfg.TablePrefix, "definitions"),
-			points:      tableName(cfg.TablePrefix, "points"),
-			rollups:     tableName(cfg.TablePrefix, "rollups"),
-			watermarks:  tableName(cfg.TablePrefix, "compaction_watermarks"),
+			definitions:  tableName(cfg.TablePrefix, "definitions"),
+			points:       tableName(cfg.TablePrefix, "points"),
+			rollups:      tableName(cfg.TablePrefix, "rollups"),
+			watermarks:   tableName(cfg.TablePrefix, "compaction_watermarks"),
+			series:       tableName(cfg.TablePrefix, "series"),
+			pointValues:  tableName(cfg.TablePrefix, "point_values"),
+			rollupValues: tableName(cfg.TablePrefix, "rollup_values"),
 		},
 	}
 
@@ -139,11 +145,28 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		}
 	}
 
-	// Optional dedicated SQLite read pool. WAL lets readers run concurrently
-	// while writes stay serialized on the primary connection. Only meaningful
-	// for a file-backed database we own: a shared in-memory database cannot be
-	// reopened as a second pool (each connection is a separate memory db), and a
-	// caller-supplied *sql.DB owns its own pooling.
+	if cfg.AutoMigrate {
+		if err := s.Migrate(ctx); err != nil {
+			s.closeDBs()
+			return nil, err
+		}
+	} else if cfg.Driver == DriverSQLite {
+		pointType, err := sqliteObjectType(ctx, s.db, s.tables.points)
+		if err != nil {
+			s.closeDBs()
+			return nil, err
+		}
+		rollupType, err := sqliteObjectType(ctx, s.db, s.tables.rollups)
+		if err != nil {
+			s.closeDBs()
+			return nil, err
+		}
+		s.sqliteStorageV3 = pointType == "view" && rollupType == "view"
+	}
+
+	// Open the optional read pool only after migrations finish. This keeps a
+	// second SQLite connection from holding stale schema state or read locks
+	// while an existing database is upgraded atomically.
 	if cfg.Driver == DriverSQLite && cfg.SQLite.ReadPoolSize > 1 && cfg.DB == nil && !isMemoryDSN(cfg.DSN) {
 		readDB, err := sql.Open(cfg.driverName(), cfg.DSN)
 		if err != nil {
@@ -173,13 +196,6 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		}
 		s.readDB = readDB
 		s.ownedReadDB = true
-	}
-
-	if cfg.AutoMigrate {
-		if err := s.Migrate(ctx); err != nil {
-			s.closeDBs()
-			return nil, err
-		}
 	}
 
 	return s, nil
@@ -287,6 +303,7 @@ func (s *Store) configureSQLite(ctx context.Context, db *sql.DB) error {
 
 	pragmas := []string{
 		"PRAGMA journal_mode = WAL",
+		"PRAGMA foreign_keys = ON",
 		sqliteSynchronousPragma(s.cfg.SQLite.PerformanceProfile),
 		fmt.Sprintf("PRAGMA busy_timeout = %d", durationMillis(s.cfg.SQLite.BusyTimeout)),
 		fmt.Sprintf("PRAGMA cache_size = -%d", s.cfg.SQLite.CacheSizeKB),
@@ -541,6 +558,9 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE name = %s`, s.tables.definitions, s.dialect.placeholder(1)), name); err != nil {
 		return err
 	}
+	if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -638,6 +658,9 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 				return Definition{}, err
 			}
 		}
+		if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+			return Definition{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Definition{}, err
@@ -669,6 +692,9 @@ func (s *Store) DeleteMetricData(ctx context.Context, name string) error {
 		); err != nil {
 			return err
 		}
+	}
+	if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -714,6 +740,9 @@ func (s *Store) DeleteMetricDataIfDisabled(ctx context.Context, name string) (bo
 			return false, err
 		}
 	}
+	if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+		return false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
@@ -738,15 +767,15 @@ func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error
 
 	var total int64
 	for _, table := range []string{s.tables.points, s.tables.rollups} {
-		res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE entity_id = %s`, table, s.dialect.placeholder(1)), entityID)
-		if err != nil {
-			return total, err
-		}
-		n, err := res.RowsAffected()
+		where := "entity_id = " + s.dialect.placeholder(1)
+		n, err := s.deleteRows(ctx, tx, table, where, entityID)
 		if err != nil {
 			return total, err
 		}
 		total += n
+	}
+	if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+		return total, err
 	}
 	if err := tx.Commit(); err != nil {
 		return total, err
@@ -786,11 +815,7 @@ func (s *Store) DeleteSeries(ctx context.Context, filter Query) (int64, error) {
 			args = append(args, filter.Tags[k])
 			parts = append(parts, s.dialect.jsonExtractEquals("tags", k, s.dialect.placeholder(len(args))))
 		}
-		res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE %s`, table, strings.Join(parts, " AND ")), args...)
-		if err != nil {
-			return total, err
-		}
-		n, err := res.RowsAffected()
+		n, err := s.deleteRows(ctx, tx, table, strings.Join(parts, " AND "), args...)
 		if err != nil {
 			return total, err
 		}
@@ -803,6 +828,9 @@ func (s *Store) DeleteSeries(ctx context.Context, filter Query) (int64, error) {
 		); err != nil {
 			return total, err
 		}
+	}
+	if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+		return total, err
 	}
 	if err := tx.Commit(); err != nil {
 		return total, err
@@ -910,6 +938,46 @@ type querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
+type queryExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// deleteRows preserves RowsAffected semantics for SQLite V3 compatibility
+// views. SQLite excludes INSTEAD OF trigger changes from RowsAffected, so count
+// the exact same predicate inside the owning transaction before deleting.
+func (s *Store) deleteRows(ctx context.Context, q queryExecer, table, where string, args ...any) (int64, error) {
+	var count int64
+	countedView := s.cfg.Driver == DriverSQLite && s.sqliteStorageV3 &&
+		(table == s.tables.points || table == s.tables.rollups)
+	if countedView {
+		if err := q.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s`, table, where), args...).Scan(&count); err != nil {
+			return 0, err
+		}
+	}
+	result, err := q.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE %s`, table, where), args...)
+	if err != nil {
+		return 0, err
+	}
+	if countedView {
+		return count, nil
+	}
+	return result.RowsAffected()
+}
+
+func (s *Store) pruneUnusedSQLiteSeries(ctx context.Context, q queryExecer) error {
+	if s.cfg.Driver != DriverSQLite || !s.sqliteStorageV3 {
+		return nil
+	}
+	_, err := q.ExecContext(ctx, fmt.Sprintf(
+		`DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s WHERE %s.series_id = %s.id)
+		 AND NOT EXISTS (SELECT 1 FROM %s WHERE %s.series_id = %s.id)`,
+		s.tables.series, s.tables.pointValues, s.tables.pointValues, s.tables.series,
+		s.tables.rollupValues, s.tables.rollupValues, s.tables.series,
+	))
+	return err
+}
+
 // writeBatch writes one chunk of metric points through an executor.
 //
 // writeBatch 使用给定执行器写入一批采样点。
@@ -933,8 +1001,22 @@ func (s *Store) writeBatch(ctx context.Context, ex execer, points []Point) error
 		}
 		args = append(args, point.MetricName, point.EntityID, tagsHash, point.Timestamp.UnixNano(), point.Value, tags, labels, now)
 	}
-	_, err := ex.ExecContext(ctx, s.dialect.upsertPointSQL(s.tables, len(points)), args...)
+	_, err := ex.ExecContext(ctx, s.pointUpsertSQL(len(points)), args...)
 	return err
+}
+
+func (s *Store) pointUpsertSQL(rowCount int) string {
+	if s.cfg.Driver == DriverSQLite && s.sqliteStorageV3 {
+		return buildInsertPointsSQL(s.tables.points, sqliteDialect{}, rowCount, "")
+	}
+	return s.dialect.upsertPointSQL(s.tables, rowCount)
+}
+
+func (s *Store) rollupUpsertSQL() string {
+	if s.cfg.Driver == DriverSQLite && s.sqliteStorageV3 {
+		return buildUpsertRollupSQL(s.tables.rollups, sqliteDialect{}, "")
+	}
+	return s.dialect.upsertRollupSQL(s.tables)
 }
 
 // Query loads raw metric points matching a query.
@@ -1352,11 +1434,14 @@ func (s *Store) DeleteBefore(ctx context.Context, metricName string, before time
 		args = append(args, metricName)
 		where += " AND metric_name = " + s.dialect.placeholder(2)
 	}
-	res, err := s.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE %s`, s.tables.points, where), args...)
+	deleted, err := s.deleteRows(ctx, s.db, s.tables.points, where, args...)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	if err := s.pruneUnusedSQLiteSeries(ctx, s.db); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
 }
 
 // CleanupExpired deletes expired raw points for every metric.

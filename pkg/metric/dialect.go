@@ -78,6 +78,11 @@ type tables struct {
 	//
 	// watermarks 保存每个指标最近一次成功压缩到的 raw 边界。
 	watermarks string
+	// SQLite V3 stores repeated series identity once and keeps point/rollup
+	// values in narrow tables. Other backends leave these names unused.
+	series       string
+	pointValues  string
+	rollupValues string
 }
 
 // newDialect returns the SQL dialect implementation for a backend.

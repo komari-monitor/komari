@@ -1,6 +1,9 @@
 package metric
 
 import (
+	"bytes"
+	"compress/flate"
+	"io"
 	"math"
 	"math/rand"
 	"sort"
@@ -97,5 +100,43 @@ func TestTDigestEncodeRoundTrip(t *testing.T) {
 	// Empty blob -> empty digest, no error.
 	if _, err := DecodeTDigest(nil); err != nil {
 		t.Fatalf("decode nil: %v", err)
+	}
+}
+
+func TestTDigestCompressionIsLosslessAndReadsLegacyFormat(t *testing.T) {
+	td := NewTDigest(100)
+	for i := 0; i < 600; i++ {
+		td.Add(float64(i%20), 1)
+	}
+	legacy := td.encodeRaw()
+	compressed := td.Encode()
+	if len(compressed) >= len(legacy) {
+		t.Fatalf("compressed digest size = %d, want less than legacy %d", len(compressed), len(legacy))
+	}
+	if len(compressed) < 3 || compressed[0] != tdigestMagic0 || compressed[1] != tdigestCompressedMagic1 {
+		t.Fatalf("unexpected compressed digest header: %v", compressed[:min(3, len(compressed))])
+	}
+	for name, blob := range map[string][]byte{"legacy": legacy, "compressed": compressed} {
+		decoded, err := DecodeTDigest(blob)
+		if err != nil {
+			t.Fatalf("decode %s digest: %v", name, err)
+		}
+		if decoded.Count() != td.Count() {
+			t.Fatalf("%s digest count = %v, want %v", name, decoded.Count(), td.Count())
+		}
+		for _, q := range []float64{0.5, 0.7, 0.95, 0.99} {
+			if got, want := decoded.Quantile(q), td.Quantile(q); math.Float64bits(got) != math.Float64bits(want) {
+				t.Fatalf("%s digest q=%v = %v, want bit-identical %v", name, q, got, want)
+			}
+		}
+	}
+	reader := flate.NewReader(bytes.NewReader(compressed[3:]))
+	decompressed, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("decompress digest payload: %v", err)
+	}
+	_ = reader.Close()
+	if !bytes.Equal(decompressed, legacy) {
+		t.Fatal("compressed digest payload does not reproduce the legacy bytes")
 	}
 }
