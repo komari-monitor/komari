@@ -2,9 +2,13 @@ package migrations
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/database/metricstore"
@@ -17,6 +21,7 @@ import (
 const (
 	legacyMonitoringMigrationDoneKey = "migration_legacy_monitoring_to_metric_store_done"
 	legacyMonitoringBatchSize        = 500
+	legacyMonitoringInterval         = time.Hour
 )
 
 var legacyMonitoringTables = []string{"records", "records_long_term", "gpu_records", "ping_records"}
@@ -34,8 +39,8 @@ type LegacyMonitoringStats struct {
 
 // LegacyMonitoringSummary describes the legacy source data shown by the
 // pre-start upgrade wizard. Row counts deliberately stay separate from the
-// estimated metric point count because one legacy row expands into multiple
-// metric points.
+// estimated metric point count because many source rows collapse into one
+// hourly P95 point per metric, entity, and tag set.
 type LegacyMonitoringSummary struct {
 	LoadRows        int64      `json:"load_rows"`
 	GPURows         int64      `json:"gpu_rows"`
@@ -69,19 +74,18 @@ type legacyMonitoringBounds struct {
 
 type legacyBatchProgress func(table string, rows, points int64)
 
-type legacyRecordRow struct {
-	RowID int64 `gorm:"column:row_id"`
-	models.Record
+type legacyP95Group struct {
+	metricName string
+	entityID   string
+	tags       map[string]string
+	values     []float64
 }
 
-type legacyGPURecordRow struct {
-	RowID int64 `gorm:"column:row_id"`
-	models.GPURecord
-}
-
-type legacyPingRecordRow struct {
-	RowID int64 `gorm:"column:row_id"`
-	models.PingRecord
+type legacyHourlyP95Aggregator struct {
+	store        *metric.Store
+	partitionKey string
+	bucket       time.Time
+	groups       map[string]*legacyP95Group
 }
 
 // RunMetricStoreMigrations executes one-shot migrations that need the metric store
@@ -171,7 +175,6 @@ func InspectLegacyMonitoring(db *gorm.DB) (LegacyMonitoringSummary, error) {
 	}
 
 	summary.MonitoringRows = summary.LoadRows + summary.GPURows + summary.LatencyRows
-	summary.EstimatedPoints = summary.LoadRows*15 + summary.GPURows*4 + summary.LatencyRows*2
 	if !oldest.IsZero() {
 		oldestCopy := oldest
 		summary.OldestAt = &oldestCopy
@@ -181,6 +184,11 @@ func InspectLegacyMonitoring(db *gorm.DB) (LegacyMonitoringSummary, error) {
 		summary.NewestAt = &newestCopy
 	}
 	if !oldest.IsZero() && !newest.IsZero() {
+		estimatedPoints, err := estimateLegacyHourlyP95Points(db, summary, oldest, newest)
+		if err != nil {
+			return summary, err
+		}
+		summary.EstimatedPoints = estimatedPoints
 		retentionEnd := time.Now().UTC()
 		if newest.After(retentionEnd) {
 			retentionEnd = newest
@@ -304,15 +312,13 @@ func migrateLegacyMonitoringTables(ctx context.Context, db *gorm.DB, s *metric.S
 	if progress != nil {
 		emit("", 0, 0)
 	}
-	for _, table := range []string{"records", "records_long_term"} {
-		n, err := migrateLegacyRecordTable(ctx, s, db, table, emit)
-		if err != nil {
-			return stats, err
-		}
-		stats.Records += n
+	n, err := migrateLegacyRecordTables(ctx, s, db, []string{"records", "records_long_term"}, emit)
+	if err != nil {
+		return stats, err
 	}
+	stats.Records += n
 
-	n, err := migrateLegacyGPURecordTable(ctx, s, db, "gpu_records", emit)
+	n, err = migrateLegacyGPURecordTable(ctx, s, db, "gpu_records", emit)
 	if err != nil {
 		return stats, err
 	}
@@ -327,56 +333,49 @@ func migrateLegacyMonitoringTables(ctx context.Context, db *gorm.DB, s *metric.S
 	return stats, nil
 }
 
-func migrateLegacyRecordTable(ctx context.Context, s *metric.Store, db *gorm.DB, table string, progress legacyBatchProgress) (int64, error) {
-	if !db.Migrator().HasTable(table) {
-		return 0, nil
-	}
-
+func migrateLegacyRecordTables(ctx context.Context, s *metric.Store, db *gorm.DB, tables []string, progress legacyBatchProgress) (int64, error) {
+	var existing []string
 	var total int64
-	if err := db.Table(table).Count(&total).Error; err != nil {
-		return 0, fmt.Errorf("count legacy %s: %w", table, err)
+	for _, table := range tables {
+		if !db.Migrator().HasTable(table) {
+			continue
+		}
+		var count int64
+		if err := db.Table(table).Count(&count).Error; err != nil {
+			return 0, fmt.Errorf("count legacy %s: %w", table, err)
+		}
+		if count > 0 {
+			existing = append(existing, table)
+			total += count
+		}
 	}
-	if total == 0 {
+	if len(existing) == 0 {
 		return 0, nil
 	}
 
-	log.Printf("[legacy-migration] importing %d rows from %s", total, table)
-	var migrated int64
-	var lastRowID int64
-
-	for {
-		select {
-		case <-ctx.Done():
-			return migrated, ctx.Err()
-		default:
+	parts := make([]string, 0, len(existing))
+	for _, table := range existing {
+		projection, err := legacyRecordProjection(db, table)
+		if err != nil {
+			return 0, err
 		}
-
-		var rows []legacyRecordRow
-		q := db.Table(table).Select("rowid AS row_id, *").Where("rowid > ?", lastRowID).Order("rowid ASC").Limit(legacyMonitoringBatchSize)
-		if err := q.Find(&rows).Error; err != nil {
-			return migrated, fmt.Errorf("read legacy %s: %w", table, err)
-		}
-		if len(rows) == 0 {
-			break
-		}
-
-		points := make([]metric.Point, 0, len(rows)*15)
-		for i := range rows {
-			points = append(points, recordToPoints(rows[i].Record)...)
-		}
-		if err := s.WriteBatch(ctx, points); err != nil {
-			return migrated, fmt.Errorf("write legacy %s to metric store: %w", table, err)
-		}
-
-		last := rows[len(rows)-1]
-		lastRowID = last.RowID
-		migrated += int64(len(rows))
-		if progress != nil {
-			progress(table, int64(len(rows)), int64(len(points)))
-		}
+		parts = append(parts, projection)
 	}
+	query := strings.Join(parts, " UNION ALL ") + " ORDER BY client ASC, time ASC"
+	rows, err := db.Raw(query).Rows()
+	if err != nil {
+		return 0, fmt.Errorf("stream legacy record tables: %w", err)
+	}
+	defer rows.Close()
 
-	log.Printf("[legacy-migration] imported %d rows from %s", migrated, table)
+	log.Printf("[legacy-migration] aggregating %d rows from %s into 1h P95 points", total, strings.Join(existing, ","))
+	migrated, err := migrateLegacyStream(ctx, db, s, rows, "records", func() *models.Record { return &models.Record{} }, func(value models.Record) []metric.Point {
+		return recordToPoints(value)
+	}, progress)
+	if err != nil {
+		return migrated, fmt.Errorf("aggregate legacy record tables: %w", err)
+	}
+	log.Printf("[legacy-migration] aggregated %d rows from %s", migrated, strings.Join(existing, ","))
 	return migrated, nil
 }
 
@@ -393,43 +392,19 @@ func migrateLegacyGPURecordTable(ctx context.Context, s *metric.Store, db *gorm.
 		return 0, nil
 	}
 
-	log.Printf("[legacy-migration] importing %d rows from %s", total, table)
-	var migrated int64
-	var lastRowID int64
-
-	for {
-		select {
-		case <-ctx.Done():
-			return migrated, ctx.Err()
-		default:
-		}
-
-		var rows []legacyGPURecordRow
-		q := db.Table(table).Select("rowid AS row_id, *").Where("rowid > ?", lastRowID).Order("rowid ASC").Limit(legacyMonitoringBatchSize)
-		if err := q.Find(&rows).Error; err != nil {
-			return migrated, fmt.Errorf("read legacy %s: %w", table, err)
-		}
-		if len(rows) == 0 {
-			break
-		}
-
-		points := make([]metric.Point, 0, len(rows)*4)
-		for i := range rows {
-			points = append(points, gpuRecordToPoints(rows[i].GPURecord)...)
-		}
-		if err := s.WriteBatch(ctx, points); err != nil {
-			return migrated, fmt.Errorf("write legacy %s to metric store: %w", table, err)
-		}
-
-		last := rows[len(rows)-1]
-		lastRowID = last.RowID
-		migrated += int64(len(rows))
-		if progress != nil {
-			progress(table, int64(len(rows)), int64(len(points)))
-		}
+	rows, err := db.Table(table).Select("*").Order("client ASC, device_index ASC, device_name ASC, time ASC").Rows()
+	if err != nil {
+		return 0, fmt.Errorf("stream legacy %s: %w", table, err)
 	}
-
-	log.Printf("[legacy-migration] imported %d rows from %s", migrated, table)
+	defer rows.Close()
+	log.Printf("[legacy-migration] aggregating %d rows from %s into 1h P95 points", total, table)
+	migrated, err := migrateLegacyStream(ctx, db, s, rows, table, func() *models.GPURecord { return &models.GPURecord{} }, func(value models.GPURecord) []metric.Point {
+		return gpuRecordToPoints(value)
+	}, progress)
+	if err != nil {
+		return migrated, fmt.Errorf("aggregate legacy %s: %w", table, err)
+	}
+	log.Printf("[legacy-migration] aggregated %d rows from %s", migrated, table)
 	return migrated, nil
 }
 
@@ -446,44 +421,252 @@ func migrateLegacyPingRecordTable(ctx context.Context, s *metric.Store, db *gorm
 		return 0, nil
 	}
 
-	log.Printf("[legacy-migration] importing %d rows from %s", total, table)
-	var migrated int64
-	var lastRowID int64
+	rows, err := db.Table(table).Select("*").Order("client ASC, task_id ASC, time ASC").Rows()
+	if err != nil {
+		return 0, fmt.Errorf("stream legacy %s: %w", table, err)
+	}
+	defer rows.Close()
+	log.Printf("[legacy-migration] aggregating %d rows from %s into 1h P95 points", total, table)
+	migrated, err := migrateLegacyStream(ctx, db, s, rows, table, func() *models.PingRecord { return &models.PingRecord{} }, func(value models.PingRecord) []metric.Point {
+		return pingRecordToPoints(value)
+	}, progress)
+	if err != nil {
+		return migrated, fmt.Errorf("aggregate legacy %s: %w", table, err)
+	}
+	log.Printf("[legacy-migration] aggregated %d rows from %s", migrated, table)
+	return migrated, nil
+}
 
-	for {
+func migrateLegacyStream[T any](ctx context.Context, db *gorm.DB, s *metric.Store, rows *sql.Rows, table string, newValue func() *T, toPoints func(T) []metric.Point, progress legacyBatchProgress) (int64, error) {
+	aggregator := &legacyHourlyP95Aggregator{store: s}
+	var migrated, batchRows, batchPoints int64
+	emit := func(force bool) {
+		if progress != nil && (batchRows > 0 || force && batchPoints > 0) {
+			progress(table, batchRows, batchPoints)
+		}
+		batchRows = 0
+		batchPoints = 0
+	}
+	for rows.Next() {
 		select {
 		case <-ctx.Done():
 			return migrated, ctx.Err()
 		default:
 		}
-
-		var rows []legacyPingRecordRow
-		q := db.Table(table).Select("rowid AS row_id, *").Where("rowid > ?", lastRowID).Order("rowid ASC").Limit(legacyMonitoringBatchSize)
-		if err := q.Find(&rows).Error; err != nil {
-			return migrated, fmt.Errorf("read legacy %s: %w", table, err)
+		value := newValue()
+		if err := db.ScanRows(rows, value); err != nil {
+			return migrated, err
 		}
-		if len(rows) == 0 {
-			break
+		written, err := aggregator.Add(ctx, toPoints(*value))
+		if err != nil {
+			return migrated, err
 		}
-
-		points := make([]metric.Point, 0, len(rows)*2)
-		for i := range rows {
-			points = append(points, pingRecordToPoints(rows[i].PingRecord)...)
-		}
-		if err := s.WriteBatch(ctx, points); err != nil {
-			return migrated, fmt.Errorf("write legacy %s to metric store: %w", table, err)
-		}
-
-		last := rows[len(rows)-1]
-		lastRowID = last.RowID
-		migrated += int64(len(rows))
-		if progress != nil {
-			progress(table, int64(len(rows)), int64(len(points)))
+		migrated++
+		batchRows++
+		batchPoints += written
+		if batchRows >= legacyMonitoringBatchSize {
+			emit(false)
 		}
 	}
-
-	log.Printf("[legacy-migration] imported %d rows from %s", migrated, table)
+	if err := rows.Err(); err != nil {
+		return migrated, err
+	}
+	written, err := aggregator.Flush(ctx)
+	if err != nil {
+		return migrated, err
+	}
+	batchPoints += written
+	emit(true)
 	return migrated, nil
+}
+
+func legacyRecordProjection(db *gorm.DB, table string) (string, error) {
+	columnTypes, err := db.Migrator().ColumnTypes(table)
+	if err != nil {
+		return "", fmt.Errorf("inspect legacy %s columns: %w", table, err)
+	}
+	available := make(map[string]struct{}, len(columnTypes))
+	for _, column := range columnTypes {
+		available[strings.ToLower(column.Name())] = struct{}{}
+	}
+	for _, required := range []string{"client", "time"} {
+		if _, ok := available[required]; !ok {
+			return "", fmt.Errorf("legacy %s is missing required column %s", table, required)
+		}
+	}
+	columns := []string{
+		"client", "time", "cpu", "gpu", "ram", "swap", "load", "disk",
+		"net_in", "net_out", "net_total_up", "net_total_down", "traffic_up",
+		"traffic_down", "process", "connections", "connections_udp",
+	}
+	projection := make([]string, 0, len(columns))
+	for _, column := range columns {
+		if _, ok := available[column]; ok {
+			projection = append(projection, column)
+		} else {
+			projection = append(projection, "0 AS "+column)
+		}
+	}
+	return "SELECT " + strings.Join(projection, ", ") + " FROM " + table, nil
+}
+
+func (a *legacyHourlyP95Aggregator) Add(ctx context.Context, points []metric.Point) (int64, error) {
+	var written int64
+	for _, point := range points {
+		bucket := point.Timestamp.UTC().Truncate(legacyMonitoringInterval)
+		partition, err := legacyPointPartition(point)
+		if err != nil {
+			return written, err
+		}
+		if a.groups != nil && (partition != a.partitionKey || !bucket.Equal(a.bucket)) {
+			if partition == a.partitionKey && bucket.Before(a.bucket) {
+				return written, fmt.Errorf("legacy points are not ordered within series: %s before %s", bucket, a.bucket)
+			}
+			n, err := a.Flush(ctx)
+			written += n
+			if err != nil {
+				return written, err
+			}
+		}
+		if a.groups == nil {
+			a.partitionKey = partition
+			a.bucket = bucket
+			a.groups = make(map[string]*legacyP95Group)
+		}
+		group := a.groups[point.MetricName]
+		if group == nil {
+			group = &legacyP95Group{
+				metricName: point.MetricName,
+				entityID:   point.EntityID,
+				tags:       cloneLegacyTags(point.Tags),
+			}
+			a.groups[point.MetricName] = group
+		}
+		group.values = append(group.values, point.Value)
+	}
+	return written, nil
+}
+
+func (a *legacyHourlyP95Aggregator) Flush(ctx context.Context) (int64, error) {
+	if len(a.groups) == 0 {
+		return 0, nil
+	}
+	names := make([]string, 0, len(a.groups))
+	for name := range a.groups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	points := make([]metric.Point, 0, len(names))
+	for _, name := range names {
+		group := a.groups[name]
+		points = append(points, metric.Point{
+			MetricName: group.metricName,
+			EntityID:   group.entityID,
+			Timestamp:  a.bucket,
+			Value:      legacyP95(group.values),
+			Tags:       group.tags,
+		})
+	}
+	if err := a.store.WriteBatch(ctx, points); err != nil {
+		return 0, err
+	}
+	a.partitionKey = ""
+	a.bucket = time.Time{}
+	a.groups = nil
+	return int64(len(points)), nil
+}
+
+func legacyP95(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sort.Float64s(values)
+	if len(values) == 1 {
+		return values[0]
+	}
+	position := 0.95 * float64(len(values)-1)
+	lower := int(math.Floor(position))
+	upper := int(math.Ceil(position))
+	if lower == upper {
+		return values[lower]
+	}
+	weight := position - float64(lower)
+	return values[lower]*(1-weight) + values[upper]*weight
+}
+
+func legacyPointPartition(point metric.Point) (string, error) {
+	tags, err := json.Marshal(point.Tags)
+	if err != nil {
+		return "", fmt.Errorf("encode legacy point tags: %w", err)
+	}
+	return point.EntityID + "\x00" + string(tags), nil
+}
+
+func cloneLegacyTags(tags map[string]string) map[string]string {
+	if len(tags) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(tags))
+	for key, value := range tags {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func estimateLegacyHourlyP95Points(db *gorm.DB, summary LegacyMonitoringSummary, oldest, newest time.Time) (int64, error) {
+	type estimate struct {
+		Count int64 `gorm:"column:count"`
+	}
+	countSeries := func(query string) (int64, error) {
+		var result estimate
+		if err := db.Raw("SELECT COUNT(*) AS count FROM (" + query + ")").Scan(&result).Error; err != nil {
+			return 0, err
+		}
+		return result.Count, nil
+	}
+	firstHour := oldest.UTC().Truncate(legacyMonitoringInterval)
+	lastHour := newest.UTC().Truncate(legacyMonitoringInterval)
+	hours := int64(lastHour.Sub(firstHour)/legacyMonitoringInterval) + 1
+	if hours < 1 {
+		hours = 1
+	}
+
+	var recordParts []string
+	for _, table := range []string{"records", "records_long_term"} {
+		if db.Migrator().HasTable(table) {
+			recordParts = append(recordParts, "SELECT client FROM "+table)
+		}
+	}
+	var total int64
+	if len(recordParts) > 0 {
+		series, err := countSeries(strings.Join(recordParts, " UNION "))
+		if err != nil {
+			return 0, fmt.Errorf("estimate load series: %w", err)
+		}
+		total += minLegacyBuckets(summary.LoadRows, series*hours) * 15
+	}
+	if db.Migrator().HasTable("gpu_records") {
+		series, err := countSeries("SELECT client, device_index, device_name FROM gpu_records GROUP BY client, device_index, device_name")
+		if err != nil {
+			return 0, fmt.Errorf("estimate GPU series: %w", err)
+		}
+		total += minLegacyBuckets(summary.GPURows, series*hours) * 4
+	}
+	if db.Migrator().HasTable("ping_records") {
+		series, err := countSeries("SELECT client, task_id FROM ping_records GROUP BY client, task_id")
+		if err != nil {
+			return 0, fmt.Errorf("estimate ping series: %w", err)
+		}
+		total += minLegacyBuckets(summary.LatencyRows, series*hours) * 2
+	}
+	return total, nil
+}
+
+func minLegacyBuckets(sourceRows, estimatedBuckets int64) int64 {
+	if sourceRows < estimatedBuckets {
+		return sourceRows
+	}
+	return estimatedBuckets
 }
 
 func recordToPoints(rec models.Record) []metric.Point {

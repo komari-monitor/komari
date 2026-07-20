@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -57,7 +58,7 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	if summary.LoadRows != 2 || summary.GPURows != 1 || summary.LatencyRows != 2 || summary.MonitoringRows != 5 {
 		t.Fatalf("unexpected legacy monitoring summary: %#v", summary)
 	}
-	if summary.EstimatedPoints != 38 || summary.RetentionDays < 1 {
+	if summary.EstimatedPoints != 21 || summary.RetentionDays < 1 {
 		t.Fatalf("unexpected legacy point estimate or retention: %#v", summary)
 	}
 
@@ -81,7 +82,7 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("migrate legacy monitoring with progress: %v", err)
 	}
-	if lastProgress.SourceRowsDone != 5 || lastProgress.SourceRowsTotal != 5 || lastProgress.WrittenPoints != 38 {
+	if lastProgress.SourceRowsDone != 5 || lastProgress.SourceRowsTotal != 5 || lastProgress.WrittenPoints != 21 {
 		t.Fatalf("unexpected final migration progress: %#v", lastProgress)
 	}
 
@@ -99,15 +100,16 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 		t.Fatalf("unexpected stats: %#v", stats)
 	}
 
-	cpuPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricCPU, EntityID: "client-a", Start: base.Add(-time.Second), End: base.Add(2 * time.Minute)})
+	hour := base.Truncate(time.Hour)
+	cpuPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricCPU, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour)})
 	if err != nil {
 		t.Fatalf("query cpu points: %v", err)
 	}
-	if len(cpuPoints) != 2 || cpuPoints[0].Value != 12.5 || cpuPoints[1].Value != 22.5 {
+	if len(cpuPoints) != 1 || math.Abs(cpuPoints[0].Value-22) > 1e-9 || !cpuPoints[0].Timestamp.Equal(hour) {
 		t.Fatalf("unexpected cpu points: %#v", cpuPoints)
 	}
 
-	gpuPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricGPUDeviceUsage, EntityID: "client-a", Start: base.Add(-time.Second), End: base.Add(time.Second), Tags: map[string]string{"device_index": "0"}})
+	gpuPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricGPUDeviceUsage, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour), Tags: map[string]string{"device_index": "0"}})
 	if err != nil {
 		t.Fatalf("query gpu points: %v", err)
 	}
@@ -115,19 +117,19 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 		t.Fatalf("unexpected gpu points: %#v", gpuPoints)
 	}
 
-	pingPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricPingLatency, EntityID: "client-a", Start: base.Add(-time.Second), End: base.Add(time.Minute), Tags: map[string]string{"task_id": "7"}})
+	pingPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricPingLatency, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour), Tags: map[string]string{"task_id": "7"}})
 	if err != nil {
 		t.Fatalf("query ping points: %v", err)
 	}
-	if len(pingPoints) != 2 || pingPoints[0].Value != 36 || pingPoints[1].Value != -1 {
+	if len(pingPoints) != 1 || math.Abs(pingPoints[0].Value-34.15) > 1e-9 || !pingPoints[0].Timestamp.Equal(hour) {
 		t.Fatalf("unexpected ping points: %#v", pingPoints)
 	}
 
-	pingLossPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricPingLoss, EntityID: "client-a", Start: base.Add(-time.Second), End: base.Add(time.Minute), Tags: map[string]string{"task_id": "7"}})
+	pingLossPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricPingLoss, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour), Tags: map[string]string{"task_id": "7"}})
 	if err != nil {
 		t.Fatalf("query ping loss points: %v", err)
 	}
-	if len(pingLossPoints) != 2 || pingLossPoints[0].Value != 0 || pingLossPoints[1].Value != 1 {
+	if len(pingLossPoints) != 1 || math.Abs(pingLossPoints[0].Value-0.95) > 1e-9 || !pingLossPoints[0].Timestamp.Equal(hour) {
 		t.Fatalf("unexpected ping loss points: %#v", pingLossPoints)
 	}
 
@@ -149,6 +151,96 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	}
 	if markDoneCalls != 1 {
 		t.Fatalf("completed migration rewrote marker, calls=%d", markDoneCalls)
+	}
+}
+
+func TestLegacyHourlyP95PreservesHoursAndTaggedSeries(t *testing.T) {
+	ctx := context.Background()
+	metricDB, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "hourly-p95.db"))+"?mode=rwc")
+	if err != nil {
+		t.Fatalf("open metric db: %v", err)
+	}
+	store, err := metric.Open(ctx, metric.SQLite("", metric.WithDB(metricDB)))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+		_ = metricDB.Close()
+	})
+	if err := store.UpsertMetric(ctx, metric.Definition{Name: "test.p95", Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatalf("create test metric: %v", err)
+	}
+
+	base := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
+	aggregator := &legacyHourlyP95Aggregator{store: store}
+	inputs := [][]metric.Point{
+		{{MetricName: "test.p95", EntityID: "node-a", Timestamp: base.Add(time.Minute), Value: 10, Tags: map[string]string{"task_id": "1"}}},
+		{{MetricName: "test.p95", EntityID: "node-a", Timestamp: base.Add(2 * time.Minute), Value: 20, Tags: map[string]string{"task_id": "1"}}},
+		{{MetricName: "test.p95", EntityID: "node-a", Timestamp: base.Add(time.Hour), Value: 30, Tags: map[string]string{"task_id": "1"}}},
+		{{MetricName: "test.p95", EntityID: "node-a", Timestamp: base.Add(time.Minute), Value: 100, Tags: map[string]string{"task_id": "2"}}},
+	}
+	for _, points := range inputs {
+		if _, err := aggregator.Add(ctx, points); err != nil {
+			t.Fatalf("add aggregate input: %v", err)
+		}
+	}
+	if _, err := aggregator.Flush(ctx); err != nil {
+		t.Fatalf("flush aggregate input: %v", err)
+	}
+
+	taskOne, err := store.Query(ctx, metric.Query{
+		MetricName: "test.p95", EntityID: "node-a", Start: base.Add(-time.Second), End: base.Add(2 * time.Hour),
+		Tags: map[string]string{"task_id": "1"}, Order: metric.OrderAsc,
+	})
+	if err != nil {
+		t.Fatalf("query task one: %v", err)
+	}
+	if len(taskOne) != 2 || math.Abs(taskOne[0].Value-19.5) > 1e-9 || taskOne[1].Value != 30 {
+		t.Fatalf("unexpected task one aggregates: %#v", taskOne)
+	}
+	taskTwo, err := store.Query(ctx, metric.Query{
+		MetricName: "test.p95", EntityID: "node-a", Start: base.Add(-time.Second), End: base.Add(2 * time.Hour),
+		Tags: map[string]string{"task_id": "2"}, Order: metric.OrderAsc,
+	})
+	if err != nil {
+		t.Fatalf("query task two: %v", err)
+	}
+	if len(taskTwo) != 1 || taskTwo[0].Value != 100 || !taskTwo[0].Timestamp.Equal(base) {
+		t.Fatalf("unexpected task two aggregates: %#v", taskTwo)
+	}
+}
+
+func TestLegacyRecordProjectionFillsMissingMetricColumns(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "minimal-legacy.db"))+"?mode=rwc"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open minimal legacy db: %v", err)
+	}
+	if sqlDB, err := db.DB(); err == nil {
+		t.Cleanup(func() { _ = sqlDB.Close() })
+	} else {
+		t.Fatalf("minimal legacy sql db: %v", err)
+	}
+	if err := db.Exec("CREATE TABLE records_minimal (client TEXT NOT NULL, time DATETIME NOT NULL, cpu REAL NOT NULL)").Error; err != nil {
+		t.Fatalf("create minimal legacy table: %v", err)
+	}
+	base := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
+	if err := db.Exec("INSERT INTO records_minimal (client, time, cpu) VALUES (?, ?, ?)", "node-a", base, 42.5).Error; err != nil {
+		t.Fatalf("insert minimal legacy row: %v", err)
+	}
+	projection, err := legacyRecordProjection(db, "records_minimal")
+	if err != nil {
+		t.Fatalf("build legacy projection: %v", err)
+	}
+	var record models.Record
+	if err := db.Raw(projection).Scan(&record).Error; err != nil {
+		t.Fatalf("scan projected legacy row: %v", err)
+	}
+	if record.Client != "node-a" || !record.Time.Equal(base) || record.Cpu != 42.5 {
+		t.Fatalf("unexpected projected record: %#v", record)
+	}
+	if record.ConnectionsUdp != 0 || record.NetTotalDown != 0 {
+		t.Fatalf("missing metric columns were not zero-filled: %#v", record)
 	}
 }
 
