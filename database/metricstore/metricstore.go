@@ -517,6 +517,12 @@ func createMetricDefinitions(ctx context.Context, s *metric.Store) error {
 	return createMetricDefinitionsWithDefaultRetention(ctx, s, defaultBuiltinMetricRetentionDays)
 }
 
+// EnsureBuiltinMetricDefinitions registers definitions for the server's
+// built-in report and ping writers before a standalone Store receives points.
+func EnsureBuiltinMetricDefinitions(ctx context.Context, s *metric.Store) error {
+	return createMetricDefinitions(ctx, s)
+}
+
 func createMetricDefinitionsWithDefaultRetention(ctx context.Context, s *metric.Store, defaultRetentionDays int) error {
 	if defaultRetentionDays < defaultBuiltinMetricRetentionDays {
 		defaultRetentionDays = defaultBuiltinMetricRetentionDays
@@ -529,13 +535,9 @@ func createMetricDefinitionsWithDefaultRetention(ctx context.Context, s *metric.
 		{Name: MetricGPUMemTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "GPU memory total", RetentionDays: defaultRetentionDays},
 		{Name: MetricGPUTemp, Type: metric.TypeGauge, Unit: "°C", Description: "GPU temperature", RetentionDays: defaultRetentionDays},
 		{Name: MetricRAM, Type: metric.TypeGauge, Unit: "bytes", Description: "RAM used", RetentionDays: defaultRetentionDays},
-		{Name: MetricRAMTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "RAM total", RetentionDays: defaultRetentionDays},
 		{Name: MetricSwap, Type: metric.TypeGauge, Unit: "bytes", Description: "Swap used", RetentionDays: defaultRetentionDays},
-		{Name: MetricSwapTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "Swap total", RetentionDays: defaultRetentionDays},
 		{Name: MetricLoad, Type: metric.TypeGauge, Unit: "", Description: "System load average", RetentionDays: defaultRetentionDays},
-		{Name: MetricTemp, Type: metric.TypeGauge, Unit: "°C", Description: "System temperature", RetentionDays: defaultRetentionDays},
 		{Name: MetricDisk, Type: metric.TypeGauge, Unit: "bytes", Description: "Disk used", RetentionDays: defaultRetentionDays},
-		{Name: MetricDiskTotal, Type: metric.TypeGauge, Unit: "bytes", Description: "Disk total", RetentionDays: defaultRetentionDays},
 		{Name: MetricNetIn, Type: metric.TypeGauge, Unit: "bytes/s", Description: "Network in rate", RetentionDays: defaultRetentionDays},
 		{Name: MetricNetOut, Type: metric.TypeGauge, Unit: "bytes/s", Description: "Network out rate", RetentionDays: defaultRetentionDays},
 		{Name: MetricNetTotalUp, Type: metric.TypeCounter, Unit: "bytes", Description: "Network total upload", RetentionDays: defaultRetentionDays},
@@ -565,6 +567,11 @@ func createMetricDefinitionsWithDefaultRetention(ctx context.Context, s *metric.
 		}
 		if err := s.UpsertMetric(ctx, def); err != nil {
 			return fmt.Errorf("failed to create metric %s: %w", def.Name, err)
+		}
+	}
+	for _, name := range obsoleteBuiltinMetricNames {
+		if err := s.DeleteMetric(ctx, name); err != nil {
+			return fmt.Errorf("failed to remove obsolete metric %s: %w", name, err)
 		}
 	}
 
@@ -753,20 +760,12 @@ func applyRecordMetricValue(rec *models.Record, metricName string, value float64
 		rec.Gpu = float32(value)
 	case MetricRAM:
 		rec.Ram = int64(value)
-	case MetricRAMTotal:
-		rec.RamTotal = int64(value)
 	case MetricSwap:
 		rec.Swap = int64(value)
-	case MetricSwapTotal:
-		rec.SwapTotal = int64(value)
 	case MetricLoad:
 		rec.Load = float32(value)
-	case MetricTemp:
-		rec.Temp = float32(value)
 	case MetricDisk:
 		rec.Disk = int64(value)
-	case MetricDiskTotal:
-		rec.DiskTotal = int64(value)
 	case MetricNetIn:
 		rec.NetIn = int64(value)
 	case MetricNetOut:

@@ -118,6 +118,27 @@ func TestWriteReportStoresRawMetricsAndResetAwareTraffic(t *testing.T) {
 	assertMetricValues(t, s, MetricTrafficDown, report.UUID, now.Add(-time.Second), now.Add(time.Second), []float64{20})
 }
 
+func TestWriteReportSkipsMetricsWithoutAgentData(t *testing.T) {
+	ctx := context.Background()
+	s := useReportTestStore(t, nil)
+	timestamp := time.Now().UTC()
+	if _, err := WriteReport(ctx, v1.Report{
+		UUID: "node-without-gpu", UpdatedAt: timestamp,
+	}); err != nil {
+		t.Fatalf("write report: %v", err)
+	}
+	points, err := s.Query(ctx, metric.Query{
+		MetricName: MetricGPU, EntityID: "node-without-gpu",
+		Start: timestamp.Add(-time.Second), End: timestamp.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("query GPU metric: %v", err)
+	}
+	if len(points) != 0 {
+		t.Fatalf("GPU metric was written without GPU data: %#v", points)
+	}
+}
+
 func TestReportBatcherFlushesQueuedReports(t *testing.T) {
 	ctx := context.Background()
 	s := useReportTestStore(t, nil)

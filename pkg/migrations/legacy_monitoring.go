@@ -171,7 +171,7 @@ func InspectLegacyMonitoring(db *gorm.DB) (LegacyMonitoringSummary, error) {
 	}
 
 	summary.MonitoringRows = summary.LoadRows + summary.GPURows + summary.LatencyRows
-	summary.EstimatedPoints = summary.LoadRows*19 + summary.GPURows*4 + summary.LatencyRows*2
+	summary.EstimatedPoints = summary.LoadRows*15 + summary.GPURows*4 + summary.LatencyRows*2
 	if !oldest.IsZero() {
 		oldestCopy := oldest
 		summary.OldestAt = &oldestCopy
@@ -228,6 +228,9 @@ func DeleteLegacyMonitoringBefore(db *gorm.DB, cutoff time.Time) (LegacyMonitori
 }
 
 func MigrateLegacyMonitoring(ctx context.Context, db *gorm.DB, s *metric.Store, progress func(LegacyMonitoringProgress)) (LegacyMonitoringStats, error) {
+	if err := metricstore.EnsureBuiltinMetricDefinitions(ctx, s); err != nil {
+		return LegacyMonitoringStats{}, fmt.Errorf("ensure built-in metric definitions: %w", err)
+	}
 	return migrateLegacyMonitoringTables(ctx, db, s, progress)
 }
 
@@ -357,7 +360,7 @@ func migrateLegacyRecordTable(ctx context.Context, s *metric.Store, db *gorm.DB,
 			break
 		}
 
-		points := make([]metric.Point, 0, len(rows)*19)
+		points := make([]metric.Point, 0, len(rows)*15)
 		for i := range rows {
 			points = append(points, recordToPoints(rows[i].Record)...)
 		}
@@ -490,13 +493,9 @@ func recordToPoints(rec models.Record) []metric.Point {
 		{MetricName: metricstore.MetricCPU, EntityID: entityID, Timestamp: ts, Value: float64(rec.Cpu)},
 		{MetricName: metricstore.MetricGPU, EntityID: entityID, Timestamp: ts, Value: float64(rec.Gpu)},
 		{MetricName: metricstore.MetricRAM, EntityID: entityID, Timestamp: ts, Value: float64(rec.Ram)},
-		{MetricName: metricstore.MetricRAMTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.RamTotal)},
 		{MetricName: metricstore.MetricSwap, EntityID: entityID, Timestamp: ts, Value: float64(rec.Swap)},
-		{MetricName: metricstore.MetricSwapTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.SwapTotal)},
 		{MetricName: metricstore.MetricLoad, EntityID: entityID, Timestamp: ts, Value: float64(rec.Load)},
-		{MetricName: metricstore.MetricTemp, EntityID: entityID, Timestamp: ts, Value: float64(rec.Temp)},
 		{MetricName: metricstore.MetricDisk, EntityID: entityID, Timestamp: ts, Value: float64(rec.Disk)},
-		{MetricName: metricstore.MetricDiskTotal, EntityID: entityID, Timestamp: ts, Value: float64(rec.DiskTotal)},
 		{MetricName: metricstore.MetricNetIn, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetIn)},
 		{MetricName: metricstore.MetricNetOut, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetOut)},
 		{MetricName: metricstore.MetricNetTotalUp, EntityID: entityID, Timestamp: ts, Value: float64(rec.NetTotalUp)},

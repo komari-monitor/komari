@@ -339,21 +339,12 @@ func writeReportBatch(ctx context.Context, reports []v1.Report) ([]v1.Report, er
 func reportMetricPoints(report v1.Report, trafficUp, trafficDown int64) []metric.Point {
 	entityID := report.UUID
 	ts := report.UpdatedAt
-	gpuUsage := 0.0
-	if report.GPU != nil {
-		gpuUsage = report.GPU.AverageUsage
-	}
 	points := []metric.Point{
 		{MetricName: MetricCPU, EntityID: entityID, Timestamp: ts, Value: report.CPU.Usage},
-		{MetricName: MetricGPU, EntityID: entityID, Timestamp: ts, Value: gpuUsage},
 		{MetricName: MetricRAM, EntityID: entityID, Timestamp: ts, Value: float64(report.Ram.Used)},
-		{MetricName: MetricRAMTotal, EntityID: entityID, Timestamp: ts, Value: float64(report.Ram.Total)},
 		{MetricName: MetricSwap, EntityID: entityID, Timestamp: ts, Value: float64(report.Swap.Used)},
-		{MetricName: MetricSwapTotal, EntityID: entityID, Timestamp: ts, Value: float64(report.Swap.Total)},
 		{MetricName: MetricLoad, EntityID: entityID, Timestamp: ts, Value: report.Load.Load1},
-		{MetricName: MetricTemp, EntityID: entityID, Timestamp: ts, Value: 0},
 		{MetricName: MetricDisk, EntityID: entityID, Timestamp: ts, Value: float64(report.Disk.Used)},
-		{MetricName: MetricDiskTotal, EntityID: entityID, Timestamp: ts, Value: float64(report.Disk.Total)},
 		{MetricName: MetricNetIn, EntityID: entityID, Timestamp: ts, Value: float64(report.Network.Down)},
 		{MetricName: MetricNetOut, EntityID: entityID, Timestamp: ts, Value: float64(report.Network.Up)},
 		{MetricName: MetricNetTotalUp, EntityID: entityID, Timestamp: ts, Value: float64(report.Network.TotalUp)},
@@ -367,6 +358,7 @@ func reportMetricPoints(report v1.Report, trafficUp, trafficDown int64) []metric
 	if report.GPU == nil {
 		return points
 	}
+	points = append(points, metric.Point{MetricName: MetricGPU, EntityID: entityID, Timestamp: ts, Value: report.GPU.AverageUsage})
 	for deviceIndex, gpu := range report.GPU.DetailedInfo {
 		tags := map[string]string{
 			"device_index": strconv.Itoa(deviceIndex),

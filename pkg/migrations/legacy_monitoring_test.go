@@ -57,7 +57,7 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	if summary.LoadRows != 2 || summary.GPURows != 1 || summary.LatencyRows != 2 || summary.MonitoringRows != 5 {
 		t.Fatalf("unexpected legacy monitoring summary: %#v", summary)
 	}
-	if summary.EstimatedPoints != 46 || summary.RetentionDays < 1 {
+	if summary.EstimatedPoints != 38 || summary.RetentionDays < 1 {
 		t.Fatalf("unexpected legacy point estimate or retention: %#v", summary)
 	}
 
@@ -81,7 +81,7 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("migrate legacy monitoring with progress: %v", err)
 	}
-	if lastProgress.SourceRowsDone != 5 || lastProgress.SourceRowsTotal != 5 || lastProgress.WrittenPoints != 46 {
+	if lastProgress.SourceRowsDone != 5 || lastProgress.SourceRowsTotal != 5 || lastProgress.WrittenPoints != 38 {
 		t.Fatalf("unexpected final migration progress: %#v", lastProgress)
 	}
 

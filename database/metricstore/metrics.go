@@ -8,13 +8,9 @@ const (
 	MetricGPUMemTotal    = "gpu.memory.total"
 	MetricGPUTemp        = "gpu.temperature"
 	MetricRAM            = "memory.used"
-	MetricRAMTotal       = "memory.total"
 	MetricSwap           = "swap.used"
-	MetricSwapTotal      = "swap.total"
 	MetricLoad           = "load.average"
-	MetricTemp           = "temperature"
 	MetricDisk           = "disk.used"
-	MetricDiskTotal      = "disk.total"
 	MetricNetIn          = "net.in.rate"
 	MetricNetOut         = "net.out.rate"
 	MetricNetTotalUp     = "net.total.up"
@@ -31,10 +27,16 @@ const (
 // loadRecordMetricNames are the entity-level metrics used to reconstruct the
 // legacy Record response shape.
 var loadRecordMetricNames = []string{
-	MetricCPU, MetricGPU, MetricRAM, MetricRAMTotal, MetricSwap, MetricSwapTotal,
-	MetricLoad, MetricTemp, MetricDisk, MetricDiskTotal, MetricNetIn, MetricNetOut,
+	MetricCPU, MetricGPU, MetricRAM, MetricSwap, MetricLoad, MetricDisk, MetricNetIn, MetricNetOut,
 	MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown,
 	MetricProcess, MetricConnections, MetricConnectionsUDP,
+}
+
+var obsoleteBuiltinMetricNames = []string{
+	"memory.total",
+	"swap.total",
+	"temperature",
+	"disk.total",
 }
 
 // gpuDeviceRecordMetricNames are stored separately from the entity-level GPU
