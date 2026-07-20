@@ -3,11 +3,13 @@ package metric
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSQLiteStorageSizeAndReclaimSpace(t *testing.T) {
@@ -70,6 +72,48 @@ func TestSQLiteStorageSizeAndReclaimSpace(t *testing.T) {
 	}
 	if err := store.ReclaimSpace(ctx); !errors.Is(err, ErrClosed) {
 		t.Fatalf("ReclaimSpace() after Close error = %v, want ErrClosed", err)
+	}
+}
+
+func TestCleanupOrphanedMetricData(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore(t)
+	if err := store.CreateMetric(ctx, Definition{Name: "known", Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatalf("create known definition: %v", err)
+	}
+	if err := store.writeBatch(ctx, store.db, []Point{{
+		MetricName: "orphan", EntityID: "node-1", Timestamp: time.Now().UTC(), Value: 1,
+	}}); err != nil {
+		t.Fatalf("seed orphan point: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, fmt.Sprintf(
+		`INSERT INTO %s (metric_name, entity_id, tags_hash, tags, resolution_nano, bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts, last_val, last_ts, digest, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		store.tables.rollups,
+	), "orphan", "node-1", "", "{}", int64(time.Minute), time.Now().UTC().UnixNano(), 1, 1, 1, 1, 1, 1, time.Now().UTC().UnixNano(), 1, time.Now().UTC().UnixNano(), []byte{}, time.Now().UTC().UnixNano()); err != nil {
+		t.Fatalf("seed orphan rollup: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, fmt.Sprintf(
+		`INSERT INTO %s (metric_name, watermark_nano, updated_at) VALUES (?, ?, ?)`, store.tables.watermarks,
+	), "orphan", time.Now().UTC().UnixNano(), time.Now().UTC().UnixNano()); err != nil {
+		t.Fatalf("seed orphan watermark: %v", err)
+	}
+
+	deleted, err := store.cleanupOrphanedMetricData(ctx)
+	if err != nil {
+		t.Fatalf("clean orphaned metric data: %v", err)
+	}
+	if deleted != 3 {
+		t.Fatalf("deleted rows = %d, want 3", deleted)
+	}
+	for _, table := range []string{store.tables.points, store.tables.rollups, store.tables.watermarks} {
+		var count int
+		if err := store.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE metric_name = ?`, table), "orphan").Scan(&count); err != nil {
+			t.Fatalf("count orphan rows in %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("orphan rows remain in %s: %d", table, count)
+		}
 	}
 }
 

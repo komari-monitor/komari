@@ -742,25 +742,26 @@ func (s *Store) WriteBatch(ctx context.Context, points []Point) error {
 	return tx.Commit()
 }
 
-// filterDisabledMetricPoints preserves the historic behavior for unknown
-// metrics while dropping points whose known definition has zero retention.
+// filterDisabledMetricPoints rejects points without a definition and drops
+// points whose definition has zero retention. Definitions are the source of
+// truth for a metric's retention and lifecycle, so accepting an unknown name
+// would create data that compaction and retention cleanup cannot manage.
 func (s *Store) filterDisabledMetricPoints(ctx context.Context, points []Point) ([]Point, error) {
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
 		return nil, err
 	}
-	disabled := make(map[string]struct{})
+	definitions := make(map[string]Definition, len(defs))
 	for _, def := range defs {
-		if def.RetentionDays == 0 {
-			disabled[def.Name] = struct{}{}
-		}
-	}
-	if len(disabled) == 0 {
-		return points, nil
+		definitions[def.Name] = def
 	}
 	filtered := make([]Point, 0, len(points))
 	for _, point := range points {
-		if _, ok := disabled[point.MetricName]; !ok {
+		def, ok := definitions[point.MetricName]
+		if !ok {
+			return nil, fmt.Errorf("%w: metric %q", ErrNotFound, point.MetricName)
+		}
+		if def.RetentionDays > 0 {
 			filtered = append(filtered, point)
 		}
 	}

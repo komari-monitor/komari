@@ -91,6 +91,9 @@ func (s *Store) ReclaimSpace(ctx context.Context) error {
 	if s.closed || s.db == nil {
 		return ErrClosed
 	}
+	if _, err := s.cleanupOrphanedMetricData(ctx); err != nil {
+		return err
+	}
 
 	switch s.cfg.Driver {
 	case DriverSQLite:
@@ -121,6 +124,32 @@ func (s *Store) ReclaimSpace(ctx context.Context) error {
 	default:
 		return fmt.Errorf("%w: unsupported driver %q", ErrInvalidArgument, s.cfg.Driver)
 	}
+}
+
+// cleanupOrphanedMetricData removes rows whose metric definition no longer
+// exists. It runs immediately before an explicit space-reclaim operation so
+// the physical rewrite returns the freed pages to the filesystem in the same
+// maintenance window.
+func (s *Store) cleanupOrphanedMetricData(ctx context.Context) (int64, error) {
+	var deleted int64
+	for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.watermarks} {
+		if table == "" {
+			continue
+		}
+		result, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s WHERE %s.name = %s.metric_name)`,
+			table, s.tables.definitions, s.tables.definitions, table,
+		))
+		if err != nil {
+			return deleted, fmt.Errorf("metric: delete orphaned rows from %s: %w", table, err)
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return deleted, err
+		}
+		deleted += count
+	}
+	return deleted, nil
 }
 
 func (s *Store) sqliteStorageSize(ctx context.Context) (int64, error) {

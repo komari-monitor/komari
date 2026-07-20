@@ -94,6 +94,9 @@ func TestWriteRejectsNonFiniteValues(t *testing.T) {
 		t.Fatalf("open sqlite store: %v", err)
 	}
 	defer store.Close()
+	if err := store.CreateMetric(ctx, Definition{Name: "bad", Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
 
 	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
 		err := store.Write(ctx, Point{
@@ -105,6 +108,22 @@ func TestWriteRejectsNonFiniteValues(t *testing.T) {
 		if !errors.Is(err, ErrInvalidArgument) {
 			t.Fatalf("expected ErrInvalidArgument for %v, got %v", value, err)
 		}
+	}
+}
+
+func TestWriteBatchRequiresMetricDefinition(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore(t)
+	point := Point{MetricName: "custom.metric", EntityID: "server-1", Timestamp: time.Now().UTC(), Value: 1}
+
+	if err := store.Write(ctx, point); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("write undefined metric error = %v, want ErrNotFound", err)
+	}
+	if err := store.CreateMetric(ctx, Definition{Name: point.MetricName, Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatalf("register dynamic metric: %v", err)
+	}
+	if err := store.Write(ctx, point); err != nil {
+		t.Fatalf("write registered dynamic metric: %v", err)
 	}
 }
 
