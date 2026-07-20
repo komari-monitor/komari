@@ -9,7 +9,7 @@ func systemMemoryBytes() (uint64, error) {
 	if err := unix.Sysinfo(&info); err != nil {
 		return 0, err
 	}
-	return info.Totalram * uint64(info.Unit), nil
+	return uint64(info.Totalram) * uint64(info.Unit), nil
 }
 
 func systemDiskFreeBytes(path string) (uint64, error) {
