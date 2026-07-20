@@ -13,7 +13,24 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  resolve-release:
+    runs-on: ubuntu-latest
+    outputs:
+      frontend_ref: ${{ steps.release.outputs.frontend_ref }}
+
+    steps:
+      - id: release
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          frontend_ref=""
+          if [[ "$TAG" =~ ^(.+)-fix[0-9]+$ ]]; then
+            frontend_ref="${BASH_REMATCH[1]}"
+          fi
+          echo "frontend_ref=$frontend_ref" >> "$GITHUB_OUTPUT"
+
   build-frontend:
+    needs: resolve-release
     runs-on: ubuntu-latest
 
     steps:
@@ -24,6 +41,7 @@ jobs:
         uses: ./.github/actions/build-frontend
         with:
           artifact-name: komari-frontend
+          ref: ${{ needs.resolve-release.outputs.frontend_ref }}
 
   build-and-attach-binaries:
     needs: build-frontend
