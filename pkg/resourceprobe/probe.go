@@ -2,12 +2,14 @@ package resourceprobe
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"time"
+	"unsafe"
 )
 
 const (
@@ -104,18 +106,26 @@ func benchmarkRandomWrite(ctx context.Context, dataDir string, duration time.Dur
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return 0, 0, err
 	}
-	f, err := os.CreateTemp(dataDir, ".komari-resource-probe-*")
+	placeholder, err := os.CreateTemp(dataDir, ".komari-resource-probe-*")
 	if err != nil {
 		return 0, 0, err
 	}
-	name := f.Name()
+	name := placeholder.Name()
+	if err := placeholder.Close(); err != nil {
+		os.Remove(name)
+		return 0, 0, err
+	}
 	defer os.Remove(name)
+	f, err := openUnbufferedBenchmarkFile(name)
+	if err != nil {
+		return 0, 0, err
+	}
 	defer f.Close()
 	if err := f.Truncate(diskBenchmarkFileSize); err != nil {
 		return 0, 0, err
 	}
 
-	block := make([]byte, diskBlockSize)
+	block := alignedBlock(int(diskBlockSize), int(diskBlockSize))
 	var state uint64 = 0x243f6a8885a308d3
 	blocks := uint64(diskBenchmarkFileSize / diskBlockSize)
 	start := time.Now()
@@ -130,11 +140,9 @@ func benchmarkRandomWrite(ctx context.Context, dataDir string, duration time.Dur
 		state ^= state << 13
 		state ^= state >> 7
 		state ^= state << 17
+		binary.LittleEndian.PutUint64(block, state)
 		offset := int64(state%blocks) * diskBlockSize
 		if _, err := f.WriteAt(block, offset); err != nil {
-			return 0, 0, err
-		}
-		if err := f.Sync(); err != nil {
 			return 0, 0, err
 		}
 		writes++
@@ -143,7 +151,17 @@ func benchmarkRandomWrite(ctx context.Context, dataDir string, duration time.Dur
 	if elapsed <= 0 || writes == 0 {
 		return 0, 0, errors.New("no writes completed")
 	}
+	if err := f.Sync(); err != nil {
+		return 0, 0, err
+	}
 	return float64(writes*uint64(diskBlockSize)) / elapsed, float64(writes) / elapsed, nil
+}
+
+func alignedBlock(size, alignment int) []byte {
+	raw := make([]byte, size+alignment)
+	address := uintptr(unsafe.Pointer(&raw[0]))
+	offset := int((uintptr(alignment) - address%uintptr(alignment)) % uintptr(alignment))
+	return raw[offset : offset+size]
 }
 
 func absoluteDir(path string) (string, error) {
