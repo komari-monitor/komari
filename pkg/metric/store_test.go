@@ -127,6 +127,45 @@ func TestWriteBatchRequiresMetricDefinition(t *testing.T) {
 	}
 }
 
+func TestUpdateMetricRetentionDefersDisabledMetricCleanup(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore(t)
+	const metricName = "deferred.cleanup"
+	if err := store.CreateMetric(ctx, Definition{Name: metricName, Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+	point := Point{MetricName: metricName, EntityID: "server-1", Timestamp: time.Now().UTC(), Value: 1}
+	if err := store.Write(ctx, point); err != nil {
+		t.Fatalf("write point: %v", err)
+	}
+
+	if _, err := store.UpdateMetricRetention(ctx, metricName, 0); err != nil {
+		t.Fatalf("disable metric retention: %v", err)
+	}
+	points, err := store.Query(ctx, Query{MetricName: metricName, EntityID: point.EntityID, Start: point.Timestamp.Add(-time.Second), End: point.Timestamp.Add(time.Second)})
+	if err != nil {
+		t.Fatalf("query retained point before cleanup: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("points before cleanup = %d, want 1", len(points))
+	}
+
+	deleted, err := store.DeleteMetricDataIfDisabled(ctx, metricName)
+	if err != nil {
+		t.Fatalf("delete disabled metric data: %v", err)
+	}
+	if !deleted {
+		t.Fatal("expected disabled metric data to be deleted")
+	}
+	points, err = store.Query(ctx, Query{MetricName: metricName, EntityID: point.EntityID, Start: point.Timestamp.Add(-time.Second), End: point.Timestamp.Add(time.Second)})
+	if err != nil {
+		t.Fatalf("query cleaned metric: %v", err)
+	}
+	if len(points) != 0 {
+		t.Fatalf("points after cleanup = %d, want 0", len(points))
+	}
+}
+
 // TestSQLiteInDirCreatesDirectoryAndAppliesPragmas verifies SQLite file setup and PRAGMAs.
 //
 // TestSQLiteInDirCreatesDirectoryAndAppliesPragmas 验证 SQLite 文件初始化和 PRAGMA 设置。

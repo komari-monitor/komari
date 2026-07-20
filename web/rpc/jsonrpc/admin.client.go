@@ -5,6 +5,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
@@ -129,6 +130,7 @@ func adminRemoveClient(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if err := clients.DeleteClient(params.UUID); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to delete client"+err.Error(), nil)
 	}
+	metricstore.DeleteEntityAsync(params.UUID)
 	actor, ip := auditActor(ctx)
 	auditlog.Log(ip, actor, "delete client:"+params.UUID, "warn")
 	agent_runtime.DeleteConnectedClients(params.UUID)

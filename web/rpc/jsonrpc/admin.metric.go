@@ -103,12 +103,15 @@ func adminUpdateMetricDefinition(ctx context.Context, req *rpc.JsonRpcRequest) (
 	if store == nil {
 		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
 	}
-	def, err := store.SetMetricRetention(ctx, params.Name, params.RetentionDays)
+	def, err := store.UpdateMetricRetention(ctx, params.Name, params.RetentionDays)
 	if errors.Is(err, metric.ErrNotFound) {
 		return nil, rpc.MakeError(rpc.InvalidParams, "metric not found: "+params.Name, nil)
 	}
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to update metric definition: "+err.Error(), nil)
+	}
+	if params.RetentionDays == 0 {
+		metricstore.DeleteMetricDataAsync(params.Name)
 	}
 
 	actor, ip := auditActor(ctx)

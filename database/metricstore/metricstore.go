@@ -1010,3 +1010,28 @@ func DeleteEntity(ctx context.Context, entityID string) error {
 	deleteReportTrafficState(entityID)
 	return nil
 }
+
+// DeleteEntityAsync clears one agent's metric history without delaying the
+// client deletion response.
+func DeleteEntityAsync(entityID string) {
+	go func() {
+		if err := DeleteEntity(context.Background(), entityID); err != nil {
+			log.Printf("Failed to delete metric records for entity %s: %v", entityID, err)
+		}
+	}()
+}
+
+// DeleteMetricDataAsync clears disabled metric history without delaying an
+// admin retention-policy update response.
+func DeleteMetricDataAsync(metricName string) {
+	go func() {
+		s := GetStore()
+		if s == nil {
+			log.Printf("Failed to delete disabled metric %s: metric store not enabled", metricName)
+			return
+		}
+		if _, err := s.DeleteMetricDataIfDisabled(context.Background(), metricName); err != nil {
+			log.Printf("Failed to delete disabled metric %s: %v", metricName, err)
+		}
+	}()
+}
