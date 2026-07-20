@@ -194,7 +194,6 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ github.event.release.tag_name }}
-            type=raw,value=latest,enable=${{ steps.release.outputs.is_latest == 'true' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -206,3 +205,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           no-cache: true
           provenance: false
+
+      - name: Promote Docker latest tag
+        if: steps.release.outputs.is_latest == 'true'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: docker buildx imagetools create --tag "${REGISTRY}/${IMAGE_NAME}:latest" "${REGISTRY}/${IMAGE_NAME}:${TAG}"
