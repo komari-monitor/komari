@@ -190,6 +190,100 @@ func TestReportBatcherFlushesQueuedReports(t *testing.T) {
 	assertMetricValues(t, s, MetricTrafficDown, first.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 60})
 }
 
+func TestCoalesceReportsP95KeepsLatestCounters(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	reports := make([]v1.Report, 20)
+	for i := range reports {
+		value := i + 1
+		reports[i] = v1.Report{
+			UUID:      "p95-node",
+			UpdatedAt: base.Add(time.Duration(i) * time.Second),
+			CPU:       v1.CPUReport{Usage: float64(value)},
+			Ram:       v1.RamReport{Used: int64(value)},
+			Network: v1.NetworkReport{
+				Up:        int64(value),
+				TotalUp:   int64(value * 100),
+				TotalDown: int64(value * 200),
+			},
+			Process: value,
+		}
+	}
+
+	got := coalesceReportsP95(reports)
+	if len(got) != 1 {
+		t.Fatalf("coalesced report count = %d, want 1", len(got))
+	}
+	if got[0].CPU.Usage != 19 || got[0].Ram.Used != 19 || got[0].Network.Up != 19 || got[0].Process != 19 {
+		t.Fatalf("P95 fields = %#v, want nearest-rank P95 of 19", got[0])
+	}
+	if got[0].Network.TotalUp != 2000 || got[0].Network.TotalDown != 4000 {
+		t.Fatalf("cumulative counters = %#v, want latest report counters", got[0].Network)
+	}
+	if !got[0].UpdatedAt.Equal(base.Add(19 * time.Second)) {
+		t.Fatalf("timestamp = %s, want latest timestamp", got[0].UpdatedAt)
+	}
+}
+
+func TestLowResourceBatchWritesOneReportPerNode(t *testing.T) {
+	ctx := context.Background()
+	s := useReportTestStore(t, nil)
+	base := time.Now().UTC().Truncate(time.Second)
+	pending := []v1.Report{
+		{UUID: "node-a", UpdatedAt: base, CPU: v1.CPUReport{Usage: 10}, Network: v1.NetworkReport{TotalUp: 100}},
+		{UUID: "node-a", UpdatedAt: base.Add(time.Second), CPU: v1.CPUReport{Usage: 20}, Network: v1.NetworkReport{TotalUp: 150}},
+		{UUID: "node-b", UpdatedAt: base, CPU: v1.CPUReport{Usage: 30}, Network: v1.NetworkReport{TotalUp: 200}},
+		{UUID: "node-b", UpdatedAt: base.Add(time.Second), CPU: v1.CPUReport{Usage: 40}, Network: v1.NetworkReport{TotalUp: 260}},
+	}
+
+	if err := writePendingReports(ctx, &pending, true); err != nil {
+		t.Fatalf("write low resource batch: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending reports = %d, want 0", len(pending))
+	}
+	assertMetricValues(t, s, MetricCPU, "node-a", base.Add(-time.Second), base.Add(time.Minute), []float64{20})
+	assertMetricValues(t, s, MetricCPU, "node-b", base.Add(-time.Second), base.Add(time.Minute), []float64{40})
+}
+
+func TestLowResourceQueueFullDoesNotBlockRealtimeReport(t *testing.T) {
+	ctx := context.Background()
+	useReportTestStore(t, nil)
+	worker := &reportBatchWorker{
+		queue:    make(chan v1.Report, 1),
+		requests: make(chan reportBatchRequest, 1),
+		done:     make(chan struct{}),
+	}
+	worker.queue <- v1.Report{UUID: "already-queued"}
+	reportBatcherMu.Lock()
+	reportBatcher = worker
+	reportBatcherMu.Unlock()
+	setLowResourceMode(true)
+	t.Cleanup(func() {
+		reportBatcherMu.Lock()
+		if reportBatcher == worker {
+			reportBatcher = nil
+		}
+		reportBatcherMu.Unlock()
+		setLowResourceMode(false)
+		droppedReports.Store(0)
+	})
+
+	report := v1.Report{
+		UUID:      "realtime-node",
+		UpdatedAt: time.Now().UTC(),
+	}
+	saved, err := WriteReport(ctx, report)
+	if err != nil {
+		t.Fatalf("low resource queue full should not fail realtime ingest: %v", err)
+	}
+	if saved.UUID != report.UUID {
+		t.Fatalf("saved report UUID = %q, want %q", saved.UUID, report.UUID)
+	}
+	if droppedReports.Load() != 1 {
+		t.Fatalf("dropped reports = %d, want 1", droppedReports.Load())
+	}
+}
+
 func TestRecordReconstructionUsesMetricSpecificAggregation(t *testing.T) {
 	ctx := context.Background()
 	s := useReportTestStore(t, nil)

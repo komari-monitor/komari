@@ -115,6 +115,7 @@ var metricStoreConfigKeys = map[string]struct{}{
 	metricstore.MetricDBDriverKey:            {},
 	metricstore.MetricDBDSNKey:               {},
 	metricstore.MetricDownsamplingEnabledKey: {},
+	config.LowResourceModeKey:                {},
 	metricstore.MetricTablePrefixKey:         {},
 	metricstore.MetricMaxOpenConnsKey:        {},
 	metricstore.MetricMaxIdleConnsKey:        {},
@@ -169,6 +170,11 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if err := config.SetMany(cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to update settings: "+err.Error(), nil)
 	}
+	if v, ok := cfg[config.LowResourceModeKey]; ok {
+		if err := dbcore.ConfigureLowResourceMode(toBool(v, false)); err != nil {
+			return nil, rpc.MakeError(rpc.InternalError, "Failed to apply low resource mode: "+err.Error(), nil)
+		}
+	}
 
 	// 配置已落库，热重载 metric store（无需重启）。连接已在上面验证过，
 	// 这里再次失败属异常情况，回报给用户。
@@ -215,6 +221,9 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 	}
 	if v, ok := cfg[metricstore.MetricDownsamplingEnabledKey]; ok {
 		merged.DownsamplingEnabled = toBool(v, merged.DownsamplingEnabled)
+	}
+	if v, ok := cfg[config.LowResourceModeKey]; ok {
+		merged.LowResourceMode = toBool(v, merged.LowResourceMode)
 	}
 	if v, ok := cfg[metricstore.MetricTablePrefixKey]; ok {
 		if s, ok := v.(string); ok {

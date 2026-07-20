@@ -465,3 +465,33 @@ func doInitialize() error {
 
 	return nil
 }
+
+// ConfigureLowResourceMode updates connection-local SQLite memory settings.
+// The main database uses one connection, so these PRAGMAs remain effective for
+// the lifetime of the pool and can be switched without reopening the database.
+func ConfigureLowResourceMode(enabled bool) error {
+	if instance == nil || flags.ApplyDatabaseTypeNormalization() != flags.DatabaseTypeSQLite {
+		return nil
+	}
+	pragmas := []string{
+		"PRAGMA synchronous = NORMAL;",
+		"PRAGMA mmap_size = 0;",
+	}
+	if enabled {
+		pragmas = append(pragmas,
+			"PRAGMA cache_size = -8192;",
+			"PRAGMA temp_store = FILE;",
+		)
+	} else {
+		pragmas = append(pragmas,
+			"PRAGMA cache_size = -65536;",
+			"PRAGMA temp_store = MEMORY;",
+		)
+	}
+	for _, pragma := range pragmas {
+		if err := instance.Exec(pragma).Error; err != nil {
+			return fmt.Errorf("apply SQLite resource setting %q: %w", pragma, err)
+		}
+	}
+	return nil
+}

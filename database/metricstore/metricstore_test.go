@@ -86,6 +86,32 @@ func TestBuildMetricConfigCanDisableDownsampling(t *testing.T) {
 	}
 }
 
+func TestBuildMetricConfigUsesSmallSQLiteProfileInLowResourceMode(t *testing.T) {
+	cfg, err := buildMetricConfig(&MetricStoreConfig{
+		Driver:          "sqlite",
+		DSN:             "./data/metrics.db",
+		LowResourceMode: true,
+	}, false)
+	if err != nil {
+		t.Fatalf("build metric config: %v", err)
+	}
+	if cfg.SQLite.CacheSizeKB != 8*1024 {
+		t.Fatalf("cache size = %dKiB, want 8192KiB", cfg.SQLite.CacheSizeKB)
+	}
+	if cfg.SQLite.MMapSizeBytes != 0 {
+		t.Fatalf("mmap size = %d, want 0", cfg.SQLite.MMapSizeBytes)
+	}
+	if cfg.SQLite.TempStoreMemory {
+		t.Fatal("temp store should use FILE in low resource mode")
+	}
+	if cfg.SQLite.ReadPoolSize != 0 {
+		t.Fatalf("read pool size = %d, want 0", cfg.SQLite.ReadPoolSize)
+	}
+	if cfg.SQLite.PerformanceProfile != metric.SQLiteProfileBalanced {
+		t.Fatalf("SQLite profile = %q, want balanced", cfg.SQLite.PerformanceProfile)
+	}
+}
+
 func TestGetPingRecordsReadsRollupsAfterRawCompaction(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)

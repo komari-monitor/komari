@@ -27,6 +27,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/pkg/migrations"
+	"github.com/komari-monitor/komari/pkg/resourceprobe"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logutil "github.com/komari-monitor/komari/utils/log"
@@ -116,12 +117,51 @@ func (a *App) Bootstrap() error {
 		return fmt.Errorf("failed to ensure default admin account: %w", err)
 	}
 
+	lowResourceMode, err := ensureLowResourceModeDefault()
+	if err != nil {
+		return fmt.Errorf("failed to initialize low resource mode: %w", err)
+	}
+	if err := dbcore.ConfigureLowResourceMode(lowResourceMode); err != nil {
+		return err
+	}
+
 	conf, err := config.GetManyAs[config.Settings]()
 	if err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 	a.settings = conf
 	return nil
+}
+
+func ensureLowResourceModeDefault() (bool, error) {
+	values, err := config.GetMany(map[string]any{config.LowResourceModeKey: nil})
+	if err != nil {
+		return false, err
+	}
+	if saved, ok := values[config.LowResourceModeKey]; ok {
+		if enabled, ok := saved.(bool); ok {
+			return enabled, nil
+		}
+		return false, fmt.Errorf("%s must be a boolean", config.LowResourceModeKey)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
+	defer cancel()
+	result := resourceprobe.Detect(ctx, "./data")
+	if err := config.Set(config.LowResourceModeKey, result.LowResource); err != nil {
+		return false, err
+	}
+	log.Printf(
+		"Low resource mode auto-detection: enabled=%t memory=%dMiB disk_free=%dMiB cpu=%.0fops/s random_write=%.2fMiB/s iops=%.0f reasons=%v",
+		result.LowResource,
+		result.MemoryBytes/(1024*1024),
+		result.DiskFreeBytes/(1024*1024),
+		result.CPUOpsPerSecond,
+		result.WriteBytesPerSecond/(1024*1024),
+		result.WriteIOPS,
+		result.Reasons,
+	)
+	return result.LowResource, nil
 }
 
 // InitStores 初始化独立存储组件（metric store）并执行 metrics 迁移。

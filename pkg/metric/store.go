@@ -295,6 +295,8 @@ func (s *Store) configureSQLite(ctx context.Context, db *sql.DB) error {
 	}
 	if s.cfg.SQLite.TempStoreMemory {
 		pragmas = append(pragmas, "PRAGMA temp_store = MEMORY")
+	} else {
+		pragmas = append(pragmas, "PRAGMA temp_store = FILE")
 	}
 
 	for _, pragma := range pragmas {
