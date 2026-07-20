@@ -155,6 +155,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check whether this is the latest GitHub release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          is_latest="$(gh api graphql \
+            -f 'query=query($owner: String!, $name: String!, $tag: String!) { repository(owner: $owner, name: $name) { release(tagName: $tag) { isLatest } } }' \
+            -F owner="${{ github.repository_owner }}" \
+            -F name="${{ github.event.repository.name }}" \
+            -F tag="$TAG" \
+            --jq '.data.repository.release.isLatest')"
+          echo "is_latest=$is_latest" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -162,7 +176,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ github.event.release.tag_name }}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ steps.release.outputs.is_latest == 'true' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
