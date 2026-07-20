@@ -2,6 +2,9 @@ package metricstore
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -348,6 +351,73 @@ func TestCompactCleansExpiredRawPointsWhenDownsamplingDisabled(t *testing.T) {
 	}
 	if len(points) != 1 || points[0].Value != 2 {
 		t.Fatalf("expected only the retained raw point, got %#v", points)
+	}
+}
+
+func TestCompactContinuesAfterOneMetricFails(t *testing.T) {
+	ctx := context.Background()
+	dsn := filepath.Join(t.TempDir(), "compact.db")
+	s, err := metric.Open(ctx, metric.SQLite(dsn,
+		metric.WithMaxOpenConns(1),
+		metric.WithRollupPolicy(defaultRollupPolicy()),
+	))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	for _, name := range []string{"a.invalid", "b.healthy"} {
+		if err := s.CreateMetric(ctx, metric.Definition{Name: name, Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
+			t.Fatalf("create metric %s: %v", name, err)
+		}
+	}
+
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Hour)
+	if err := s.Write(ctx, metric.Point{MetricName: "b.healthy", EntityID: "node", Timestamp: old, Value: 2}); err != nil {
+		t.Fatalf("write healthy point: %v", err)
+	}
+
+	rawDB, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open raw sqlite connection: %v", err)
+	}
+	_, err = rawDB.ExecContext(ctx, `INSERT INTO metric_points
+		(metric_name, entity_id, tags_hash, ts_nano, value, tags, labels, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"a.invalid", "node", "invalid", old.UnixNano(), 1, "not-json", "{}", now.UnixNano(),
+	)
+	_ = rawDB.Close()
+	if err != nil {
+		t.Fatalf("insert malformed point: %v", err)
+	}
+
+	storeMu.Lock()
+	previousStore := store
+	previousCompactAt := compactAt
+	store = s
+	compactAt = 0
+	storeMu.Unlock()
+	t.Cleanup(func() {
+		storeMu.Lock()
+		store = previousStore
+		compactAt = previousCompactAt
+		storeMu.Unlock()
+	})
+
+	if _, err := Compact(ctx, now); err == nil {
+		t.Fatal("expected malformed metric to fail compaction")
+	}
+	points, err := s.Query(ctx, metric.Query{
+		MetricName: "b.healthy",
+		EntityID:   "node",
+		Start:      old.Add(-time.Minute),
+		End:        now,
+	})
+	if err != nil {
+		t.Fatalf("query healthy raw points: %v", err)
+	}
+	if len(points) != 0 {
+		t.Fatalf("healthy metric was blocked by another metric failure: %s", fmt.Sprint(points))
 	}
 }
 

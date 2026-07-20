@@ -985,6 +985,97 @@ func (s *Store) Latest(ctx context.Context, metricName, entityID string, limit i
 	return out, rows.Err()
 }
 
+// LatestBefore returns the newest retained point before an exclusive boundary.
+// It checks both indexed raw points and rollup last-values so callers do not
+// need to scan and aggregate an entire retention window to restore a counter.
+func (s *Store) LatestBefore(ctx context.Context, metricName, entityID string, before time.Time) (Point, bool, error) {
+	if err := s.ensureOpen(); err != nil {
+		return Point{}, false, err
+	}
+	if strings.TrimSpace(metricName) == "" {
+		return Point{}, false, fmt.Errorf("%w: metric name is required", ErrInvalidArgument)
+	}
+	if strings.TrimSpace(entityID) == "" {
+		return Point{}, false, fmt.Errorf("%w: entity id is required", ErrInvalidArgument)
+	}
+	if before.IsZero() {
+		return Point{}, false, fmt.Errorf("%w: before time is required", ErrInvalidArgument)
+	}
+
+	beforeNano := before.UTC().UnixNano()
+	var latest Point
+	found := false
+	rawSQL := fmt.Sprintf(
+		`SELECT metric_name, entity_id, ts_nano, value, tags, labels FROM %s
+		 WHERE metric_name = %s AND entity_id = %s AND ts_nano < %s
+		 ORDER BY ts_nano DESC LIMIT 1`,
+		s.tables.points, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3),
+	)
+	var rawTags, rawLabels any
+	var rawNano int64
+	err := s.reader().QueryRowContext(ctx, rawSQL, metricName, entityID, beforeNano).Scan(
+		&latest.MetricName, &latest.EntityID, &rawNano, &latest.Value, &rawTags, &rawLabels,
+	)
+	if err == nil {
+		latest.Timestamp = time.Unix(0, rawNano).UTC()
+		latest.Tags, err = decodeMap(rawTags)
+		if err != nil {
+			return Point{}, false, err
+		}
+		latest.Labels, err = decodeMap(rawLabels)
+		if err != nil {
+			return Point{}, false, err
+		}
+		found = true
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Point{}, false, err
+	}
+	if found {
+		rawCutoff := s.cfg.RollupPolicy.rawCutoff(before)
+		if rawCutoff.IsZero() || !latest.Timestamp.Before(rawCutoff) {
+			return latest, true, nil
+		}
+	}
+
+	for _, tier := range s.cfg.RollupPolicy.Tiers {
+		rollupSQL := fmt.Sprintf(
+			`SELECT tags, last_val, last_ts FROM %s
+			 WHERE metric_name = %s AND entity_id = %s AND resolution_nano = %s AND last_ts < %s
+			 ORDER BY last_ts DESC LIMIT 1`,
+			s.tables.rollups, s.dialect.placeholder(1), s.dialect.placeholder(2),
+			s.dialect.placeholder(3), s.dialect.placeholder(4),
+		)
+		var tags any
+		var value float64
+		var timestamp int64
+		err = s.reader().QueryRowContext(ctx, rollupSQL, metricName, entityID, tier.Interval.Nanoseconds(), beforeNano).Scan(
+			&tags, &value, &timestamp,
+		)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return Point{}, false, err
+		}
+		if found && timestamp <= latest.Timestamp.UnixNano() {
+			continue
+		}
+		decodedTags, err := decodeMap(tags)
+		if err != nil {
+			return Point{}, false, err
+		}
+		latest = Point{
+			MetricName: metricName,
+			EntityID:   entityID,
+			Timestamp:  time.Unix(0, timestamp).UTC(),
+			Value:      value,
+			Tags:       decodedTags,
+		}
+		found = true
+	}
+	return latest, found, nil
+}
+
 // Aggregate computes bucketed aggregates from raw points.
 //
 // Aggregate 对原始点执行分桶聚合，能下推到 SQL 的聚合会优先下推。

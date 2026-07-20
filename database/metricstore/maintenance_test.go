@@ -62,8 +62,17 @@ func TestReclaimSpaceReportsBusyStore(t *testing.T) {
 	if !errors.Is(result.BeforeSizeError, ErrStoreBusy) || !errors.Is(result.AfterSizeError, ErrStoreBusy) {
 		t.Fatalf("busy result should mark both measurements unavailable: %#v", result)
 	}
+	compactCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Compact(compactCtx, time.Now()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("compact error = %v, want %v", err, context.Canceled)
+	}
+	if !compactOperations.TryAcquire() {
+		t.Fatal("acquire compact operation gate")
+	}
+	defer compactOperations.Release()
 	if _, err := Compact(context.Background(), time.Now()); !errors.Is(err, ErrCompactInProgress) {
-		t.Fatalf("compact error = %v, want %v", err, ErrCompactInProgress)
+		t.Fatalf("overlapping compact error = %v, want %v", err, ErrCompactInProgress)
 	}
 }
 

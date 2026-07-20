@@ -26,6 +26,50 @@ func newRollupStore(t *testing.T, policy RollupPolicy) *Store {
 	return store
 }
 
+func TestLatestBeforeUsesRawAndRollupData(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 15 * time.Minute,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 24 * time.Hour},
+		},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "counter", Type: TypeCounter, RetentionDays: 1}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+	base := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	if err := s.WriteBatch(ctx, []Point{
+		{MetricName: "counter", EntityID: "node", Timestamp: base, Value: 10},
+		{MetricName: "counter", EntityID: "node", Timestamp: base.Add(5 * time.Minute), Value: 20},
+	}); err != nil {
+		t.Fatalf("write old counters: %v", err)
+	}
+	if _, err := s.Compact(ctx, base.Add(30*time.Minute)); err != nil {
+		t.Fatalf("compact counters: %v", err)
+	}
+
+	point, ok, err := s.LatestBefore(ctx, "counter", "node", base.Add(4*time.Minute))
+	if err != nil {
+		t.Fatalf("latest rollup before boundary: %v", err)
+	}
+	if !ok || point.Value != 10 || !point.Timestamp.Equal(base) {
+		t.Fatalf("unexpected bounded rollup point: %#v, found=%v", point, ok)
+	}
+
+	recent := base.Add(29 * time.Minute)
+	if err := s.Write(ctx, Point{MetricName: "counter", EntityID: "node", Timestamp: recent, Value: 30}); err != nil {
+		t.Fatalf("write recent counter: %v", err)
+	}
+	point, ok, err = s.LatestBefore(ctx, "counter", "node", base.Add(30*time.Minute))
+	if err != nil {
+		t.Fatalf("latest raw before boundary: %v", err)
+	}
+	if !ok || point.Value != 30 || !point.Timestamp.Equal(recent) {
+		t.Fatalf("unexpected latest raw point: %#v, found=%v", point, ok)
+	}
+}
+
 // TestArbitraryPercentileOverRaw verifies arbitrary percentile (pxx)
 // aggregation end-to-end over raw points.
 //

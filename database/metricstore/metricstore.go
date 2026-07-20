@@ -16,12 +16,13 @@ import (
 )
 
 var (
-	store            *metric.Store
-	storeFingerprint string
-	storeMu          sync.RWMutex
-	storeOnce        sync.Once
-	storeOperations  = newStoreOperationGate()
-	compactAt        int
+	store             *metric.Store
+	storeFingerprint  string
+	storeMu           sync.RWMutex
+	storeOnce         sync.Once
+	storeOperations   = newStoreOperationGate()
+	compactOperations = newStoreOperationGate()
+	compactAt         int
 )
 
 var ErrCompactInProgress = errors.New("metric store compact already in progress")
@@ -428,8 +429,12 @@ func summarizeRetentionDefinitions(defs []metric.Definition) RetentionSummary {
 }
 
 func Compact(ctx context.Context, now time.Time) (int, error) {
-	if !storeOperations.TryAcquire() {
+	if !compactOperations.TryAcquire() {
 		return 0, ErrCompactInProgress
+	}
+	defer compactOperations.Release()
+	if err := storeOperations.Acquire(ctx); err != nil {
+		return 0, fmt.Errorf("wait for metric store operations before compaction: %w", err)
 	}
 	defer storeOperations.Release()
 
@@ -454,20 +459,29 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 
 	total := 0
 	start := compactAt
+	failedAt := -1
+	var compactErrors []error
 	for i := 0; i < len(defs); i++ {
 		idx := (start + i) % len(defs)
 		n, err := activeStore.CompactMetric(ctx, defs[idx].Name, now)
 		if err != nil {
-			compactAt = idx
-			return total, fmt.Errorf("compact metric %q: %w", defs[idx].Name, err)
+			if failedAt < 0 {
+				failedAt = idx
+			}
+			compactErrors = append(compactErrors, fmt.Errorf("compact metric %q: %w", defs[idx].Name, err))
+			continue
 		}
 		total += n
-		compactAt = (idx + 1) % len(defs)
 	}
 	if _, err := activeStore.CleanupExpired(ctx, now); err != nil {
-		return total, fmt.Errorf("clean up expired raw metrics: %w", err)
+		compactErrors = append(compactErrors, fmt.Errorf("clean up expired raw metrics: %w", err))
 	}
-	return total, nil
+	if failedAt >= 0 {
+		compactAt = failedAt
+	} else {
+		compactAt = start
+	}
+	return total, errors.Join(compactErrors...)
 }
 
 // CloseStoreContext stops the asynchronous store migration before taking the

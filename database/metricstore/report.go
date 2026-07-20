@@ -284,14 +284,22 @@ func writeReportBatch(ctx context.Context, reports []v1.Report) ([]v1.Report, er
 			state.mu.Unlock()
 		}
 		if !values.initialized {
-			var err error
-			values.totalUp, values.hasUp, err = latestReportCounter(ctx, s, MetricNetTotalUp, report.UUID, report.UpdatedAt)
-			if err != nil {
-				return nil, fmt.Errorf("load previous upload counter: %w", err)
+			totalUp, hasUp, err := latestReportCounter(ctx, s, MetricNetTotalUp, report.UUID, report.UpdatedAt)
+			if err == nil {
+				values.totalUp = totalUp
+				values.hasUp = hasUp
+			} else if ctx.Err() == nil {
+				log.Printf("failed to restore previous upload counter for %s: %v", report.UUID, err)
 			}
-			values.totalDown, values.hasDown, err = latestReportCounter(ctx, s, MetricNetTotalDown, report.UUID, report.UpdatedAt)
-			if err != nil {
-				return nil, fmt.Errorf("load previous download counter: %w", err)
+			totalDown, hasDown, err := latestReportCounter(ctx, s, MetricNetTotalDown, report.UUID, report.UpdatedAt)
+			if err == nil {
+				values.totalDown = totalDown
+				values.hasDown = hasDown
+			} else if ctx.Err() == nil {
+				log.Printf("failed to restore previous download counter for %s: %v", report.UUID, err)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 			values.initialized = true
 		}
@@ -375,39 +383,14 @@ func reportMetricPoints(report v1.Report, trafficUp, trafficDown int64) []metric
 }
 
 func latestReportCounter(ctx context.Context, s *metric.Store, metricName, entityID string, before time.Time) (int64, bool, error) {
-	def, err := s.GetMetric(ctx, metricName)
-	if errors.Is(err, metric.ErrNotFound) {
-		return 0, false, nil
-	}
+	point, ok, err := s.LatestBefore(ctx, metricName, entityID, before)
 	if err != nil {
 		return 0, false, err
 	}
-	if def.RetentionDays <= 0 {
+	if !ok {
 		return 0, false, nil
 	}
-
-	end := before.UTC().Add(-time.Nanosecond)
-	start := end.Add(-time.Duration(def.RetentionDays) * 24 * time.Hour)
-	interval := s.CompatibleSeriesInterval(start, before, 24*time.Hour)
-	points, err := s.Series(ctx, metric.AggregateQuery{
-		Query: metric.Query{
-			MetricName: metricName,
-			EntityID:   entityID,
-			Start:      start,
-			End:        end,
-			Order:      metric.OrderAsc,
-		},
-		Aggregation:    metric.AggLast,
-		Interval:       interval,
-		PreserveSeries: true,
-	}, before)
-	if err != nil {
-		return 0, false, err
-	}
-	if len(points) == 0 {
-		return 0, false, nil
-	}
-	return int64(points[len(points)-1].Value), true, nil
+	return int64(point.Value), true, nil
 }
 
 // GetLatestTrafficBefore returns the latest retained upload/download counters
