@@ -39,6 +39,7 @@ const (
 	lowResourceReportWindow    = 30 * time.Second
 	reportBatchQueueSize       = 4096
 	lowResourceBatchMaxReports = 128
+	pingBatchMaxRecords        = 512
 	reportBatchWriteTimeout    = 10 * time.Second
 )
 
@@ -52,6 +53,7 @@ var (
 var (
 	ErrReportBatchQueueFull = errors.New("metric report batch queue is full")
 	ErrReportBatchStopped   = errors.New("metric report batcher is stopped")
+	ErrPingBatchQueueFull   = errors.New("ping batch queue is full")
 )
 
 type reportBatchRequest struct {
@@ -61,11 +63,12 @@ type reportBatchRequest struct {
 }
 
 type reportBatchWorker struct {
-	mu       sync.Mutex
-	queue    chan v1.Report
-	requests chan reportBatchRequest
-	done     chan struct{}
-	stopping bool
+	mu        sync.Mutex
+	queue     chan v1.Report
+	pingQueue chan models.PingRecord
+	requests  chan reportBatchRequest
+	done      chan struct{}
+	stopping  bool
 }
 
 func setLowResourceMode(enabled bool) {
@@ -85,9 +88,10 @@ func StartReportBatcher() {
 		return
 	}
 	worker := &reportBatchWorker{
-		queue:    make(chan v1.Report, reportBatchQueueSize),
-		requests: make(chan reportBatchRequest, 1),
-		done:     make(chan struct{}),
+		queue:     make(chan v1.Report, reportBatchQueueSize),
+		pingQueue: make(chan models.PingRecord, reportBatchQueueSize),
+		requests:  make(chan reportBatchRequest, 1),
+		done:      make(chan struct{}),
 	}
 	reportBatcher = worker
 	go worker.run()
@@ -216,12 +220,17 @@ func (w *reportBatchWorker) run() {
 	defer ticker.Stop()
 
 	var pending []v1.Report
+	var pendingPings []models.PingRecord
 	lastFlush := time.Now()
 	for {
 		select {
 		case request := <-w.requests:
 			pending = append(pending, drainReportQueue(w.queue, reportBatchQueueSize)...)
-			err := writePendingReports(request.ctx, &pending, LowResourceModeEnabled())
+			pendingPings = append(pendingPings, drainPingQueue(w.pingQueue, reportBatchQueueSize)...)
+			err := errors.Join(
+				writePendingReports(request.ctx, &pending, LowResourceModeEnabled()),
+				writePendingPingRecords(request.ctx, &pendingPings),
+			)
 			if request.stop {
 				if err != nil {
 					logger.Errorf("metricstore", "failed to flush metric report batch during shutdown: %v", err)
@@ -235,6 +244,10 @@ func (w *reportBatchWorker) run() {
 			}
 			request.done <- err
 		case <-ticker.C:
+			pendingPings = append(pendingPings, drainPingQueue(w.pingQueue, reportBatchQueueSize)...)
+			if err := writePendingPingRecords(context.Background(), &pendingPings); err != nil {
+				logger.Errorf("metricstore", "failed to flush ping batch: %v", err)
+			}
 			lowResource := LowResourceModeEnabled()
 			if lowResource && time.Since(lastFlush) < lowResourceReportWindow {
 				continue
@@ -252,6 +265,23 @@ func (w *reportBatchWorker) run() {
 	}
 }
 
+func (w *reportBatchWorker) enqueuePing(ctx context.Context, record models.PingRecord) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopping {
+		return ErrReportBatchStopped
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case w.pingQueue <- record:
+		return nil
+	default:
+		return ErrPingBatchQueueFull
+	}
+}
+
 func drainReportQueue(queue <-chan v1.Report, limit int) []v1.Report {
 	if limit <= 0 {
 		return nil
@@ -266,6 +296,22 @@ func drainReportQueue(queue <-chan v1.Report, limit int) []v1.Report {
 		}
 	}
 	return reports
+}
+
+func drainPingQueue(queue <-chan models.PingRecord, limit int) []models.PingRecord {
+	if limit <= 0 {
+		return nil
+	}
+	records := make([]models.PingRecord, 0, limit)
+	for len(records) < limit {
+		select {
+		case record := <-queue:
+			records = append(records, record)
+		default:
+			return records
+		}
+	}
+	return records
 }
 
 func writePendingReports(ctx context.Context, pending *[]v1.Report, lowResource bool) error {
@@ -293,6 +339,23 @@ func writePendingReports(ctx context.Context, pending *[]v1.Report, lowResource 
 		if lowResource {
 			runtime.Gosched()
 		}
+	}
+	return nil
+}
+
+func writePendingPingRecords(ctx context.Context, pending *[]models.PingRecord) error {
+	for len(*pending) > 0 {
+		batchSize := len(*pending)
+		if batchSize > pingBatchMaxRecords {
+			batchSize = pingBatchMaxRecords
+		}
+		writeCtx, cancel := context.WithTimeout(ctx, reportBatchWriteTimeout)
+		err := writePingRecords(writeCtx, (*pending)[:batchSize])
+		cancel()
+		if err != nil {
+			return err
+		}
+		*pending = (*pending)[batchSize:]
 	}
 	return nil
 }

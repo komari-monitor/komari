@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/metric"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
 )
@@ -188,6 +189,78 @@ func TestReportBatcherFlushesQueuedReports(t *testing.T) {
 	assertMetricValues(t, s, MetricCPU, first.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{10, 20})
 	assertMetricValues(t, s, MetricTrafficUp, first.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 50})
 	assertMetricValues(t, s, MetricTrafficDown, first.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 60})
+}
+
+func TestPingBatcherFlushesLatencyAndLossTogether(t *testing.T) {
+	ctx := context.Background()
+	s := useReportTestStore(t, nil)
+	StartReportBatcher()
+	t.Cleanup(func() {
+		if err := StopReportBatcher(ctx); err != nil {
+			t.Errorf("stop report batcher: %v", err)
+		}
+	})
+
+	base := time.Now().UTC().Truncate(time.Second)
+	records := []models.PingRecord{
+		{Client: "ping-node", TaskId: 7, Time: base, Value: 24},
+		{Client: "ping-node", TaskId: 7, Time: base.Add(time.Minute), Value: -1},
+		{Client: "ping-node", TaskId: 8, Time: base, Value: 31},
+	}
+	for _, record := range records {
+		if err := WritePingRecord(ctx, record); err != nil {
+			t.Fatalf("queue ping record: %v", err)
+		}
+	}
+
+	for _, name := range []string{MetricPingLatency, MetricPingLoss} {
+		points, err := s.Query(ctx, metric.Query{
+			MetricName: name,
+			EntityID:   "ping-node",
+			Start:      base.Add(-time.Second),
+			End:        base.Add(2 * time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("query queued %s points: %v", name, err)
+		}
+		if len(points) != 0 {
+			t.Fatalf("queued %s points were written before flush: %#v", name, points)
+		}
+	}
+
+	if err := FlushReportBatch(ctx); err != nil {
+		t.Fatalf("flush ping batch: %v", err)
+	}
+
+	latency, err := s.Query(ctx, metric.Query{
+		MetricName: MetricPingLatency,
+		EntityID:   "ping-node",
+		Tags:       map[string]string{"task_id": "7"},
+		Start:      base.Add(-time.Second),
+		End:        base.Add(2 * time.Minute),
+		Order:      metric.OrderAsc,
+	})
+	if err != nil {
+		t.Fatalf("query flushed latency points: %v", err)
+	}
+	if len(latency) != 2 || latency[0].Value != 24 || latency[1].Value != -1 {
+		t.Fatalf("latency points = %#v, want both original samples", latency)
+	}
+
+	loss, err := s.Query(ctx, metric.Query{
+		MetricName: MetricPingLoss,
+		EntityID:   "ping-node",
+		Tags:       map[string]string{"task_id": "7"},
+		Start:      base.Add(-time.Second),
+		End:        base.Add(2 * time.Minute),
+		Order:      metric.OrderAsc,
+	})
+	if err != nil {
+		t.Fatalf("query flushed loss points: %v", err)
+	}
+	if len(loss) != 2 || loss[0].Value != 0 || loss[1].Value != 1 {
+		t.Fatalf("loss points = %#v, want success and loss samples", loss)
+	}
 }
 
 func TestCoalesceReportsP95KeepsLatestCounters(t *testing.T) {
