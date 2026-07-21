@@ -530,7 +530,7 @@ func (s *Store) scanRollupRows(ctx context.Context, q querier, metricName string
 		return nil, err
 	}
 	defer rows.Close()
-	return scanStoredRollups(rows)
+	return scanStoredRollups(rows, true)
 }
 
 // mergeRollupBucketsTx merges a consumed raw-data delta into the affected

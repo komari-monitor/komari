@@ -221,13 +221,22 @@ type rollupBucket struct {
 //
 // newRollupBucket 创建一个空的 rollup 累加器。
 func newRollupBucket(compression float64) *rollupBucket {
-	return &rollupBucket{
+	return newRollupBucketWithDigest(compression, true)
+}
+
+// newRollupBucketWithDigest creates a query or compaction accumulator. Query
+// paths only need the digest for percentile aggregations.
+func newRollupBucketWithDigest(compression float64, includeDigest bool) *rollupBucket {
+	bucket := &rollupBucket{
 		min:     0,
 		max:     0,
 		firstTS: 0,
 		lastTS:  0,
-		digest:  NewTDigest(compression),
 	}
+	if includeDigest {
+		bucket.digest = NewTDigest(compression)
+	}
+	return bucket
 }
 
 // addPoint folds a raw observation into the bucket.
@@ -255,7 +264,9 @@ func (b *rollupBucket) addPoint(value float64, tsNano int64) {
 	b.count++
 	b.sum += value
 	b.sumSq += value * value
-	b.digest.Add(value, 1)
+	if b.digest != nil {
+		b.digest.Add(value, 1)
+	}
 }
 
 // mergeStored folds a finer rollup row (already-summarized) into this coarser
@@ -289,10 +300,12 @@ func (b *rollupBucket) mergeStored(o *rollupBucket) {
 	b.count += o.count
 	b.sum += o.sum
 	b.sumSq += o.sumSq
-	if b.digest == nil {
-		b.digest = NewTDigest(defaultTDigestCompression)
+	if o.digest != nil {
+		if b.digest == nil {
+			b.digest = NewTDigest(defaultTDigestCompression)
+		}
+		b.digest.Merge(o.digest)
 	}
-	b.digest.Merge(o.digest)
 }
 
 // value computes the requested aggregation from the bucket summaries. ok=false

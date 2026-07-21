@@ -116,6 +116,46 @@ func TestArbitraryPercentileOverRaw(t *testing.T) {
 	}
 }
 
+func TestAggregateRollupSkipsDigestForNonPercentile(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 2 * time.Minute,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: time.Hour},
+		},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "latency", Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+
+	base := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	if err := s.WriteBatch(ctx, []Point{
+		{MetricName: "latency", EntityID: "node", Timestamp: base.Add(10 * time.Second), Value: 10},
+		{MetricName: "latency", EntityID: "node", Timestamp: base.Add(20 * time.Second), Value: 20},
+	}); err != nil {
+		t.Fatalf("write points: %v", err)
+	}
+	if _, err := s.Compact(ctx, base.Add(4*time.Minute)); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET digest = ?", s.tables.rollups), []byte("invalid")); err != nil {
+		t.Fatalf("corrupt digest: %v", err)
+	}
+
+	query := Query{MetricName: "latency", EntityID: "node", Start: base, End: base.Add(time.Minute)}
+	avg, err := s.AggregateRollup(ctx, AggregateQuery{Query: query, Aggregation: AggAvg, Interval: time.Minute}, time.Minute)
+	if err != nil {
+		t.Fatalf("average should not read digest: %v", err)
+	}
+	if len(avg) != 1 || avg[0].Value != 15 {
+		t.Fatalf("average = %#v, want one bucket with value 15", avg)
+	}
+	if _, err := s.AggregateRollup(ctx, AggregateQuery{Query: query, Aggregation: Pxx(4), Interval: time.Minute}, time.Minute); err == nil {
+		t.Fatal("percentile query should reject an invalid digest")
+	}
+}
+
 // percentileSortedRange computes an exact percentile for an integer range.
 //
 // percentileSortedRange 为整数范围计算精确百分位。
