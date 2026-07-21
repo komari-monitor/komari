@@ -55,14 +55,7 @@ sudo ./install-komari.sh
      --name komari \
      ghcr.io/komari-monitor/komari:latest
    ```
-3. 查看預設帳號和密碼：
-   ```bash
-   docker logs komari
-   ```
-4. 在瀏覽器中存取 `http://<your_server_ip>:25774`。
-
-> [!NOTE]
-> 你也可以透過環境變數 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 自訂初始使用者名稱和密碼。
+3. 在瀏覽器中存取 `http://<your_server_ip>:25774` 並完成安裝精靈。精靈會建立管理員帳號，並設定站點中繼資料和監控資料庫。
 
 ### 3. 二進位檔案部署
 
@@ -72,7 +65,7 @@ sudo ./install-komari.sh
    ./komari server -l 0.0.0.0:25774
    ```
 3. 在瀏覽器中存取 `http://<your_server_ip>:25774`，預設監聽 `25774` 連接埠。
-4. 預設帳號和密碼可在啟動日誌中查看，或透過環境變數 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 設定。
+4. 按照安裝精靈建立管理員帳號，並設定站點中繼資料和監控資料庫。
 
 > [!NOTE]
 > 確保二進位檔案具有可執行權限（`chmod +x komari`）。資料將保存在執行目錄下的 `data` 資料夾中。

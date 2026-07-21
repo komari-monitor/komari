@@ -112,13 +112,12 @@ func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonR
 //
 // 注意：metric_store_enabled 已废弃（metric store 始终启用），不再纳入此集合。
 var metricStoreConfigKeys = map[string]struct{}{
-	metricstore.MetricDBDriverKey:            {},
-	metricstore.MetricDBDSNKey:               {},
-	metricstore.MetricDownsamplingEnabledKey: {},
-	config.LowResourceModeKey:                {},
-	metricstore.MetricTablePrefixKey:         {},
-	metricstore.MetricMaxOpenConnsKey:        {},
-	metricstore.MetricMaxIdleConnsKey:        {},
+	metricstore.MetricDBDriverKey:     {},
+	metricstore.MetricDBDSNKey:        {},
+	config.LowResourceModeKey:         {},
+	metricstore.MetricTablePrefixKey:  {},
+	metricstore.MetricMaxOpenConnsKey: {},
+	metricstore.MetricMaxIdleConnsKey: {},
 }
 
 // metricKeysTouched 判断本次设置变更是否涉及 metrics 数据库相关键。
@@ -218,9 +217,6 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 		if s, ok := v.(string); ok {
 			merged.DSN = s
 		}
-	}
-	if v, ok := cfg[metricstore.MetricDownsamplingEnabledKey]; ok {
-		merged.DownsamplingEnabled = toBool(v, merged.DownsamplingEnabled)
 	}
 	if v, ok := cfg[config.LowResourceModeKey]; ok {
 		merged.LowResourceMode = toBool(v, merged.LowResourceMode)

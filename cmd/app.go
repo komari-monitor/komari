@@ -33,6 +33,7 @@ import (
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/api"
+	installweb "github.com/komari-monitor/komari/web/install"
 	"github.com/komari-monitor/komari/web/oauth"
 	frontendpublic "github.com/komari-monitor/komari/web/public"
 	"github.com/komari-monitor/komari/web/router"
@@ -54,7 +55,7 @@ type cleanupFunc struct {
 //
 // App 把这些拆成有序阶段：
 //
-//	Bootstrap    基础设施：目录、数据库、默认管理员、配置快照
+//	Bootstrap    基础设施：目录、数据库、配置快照
 //	InitStores   存储：metric store
 //	InitProviders 外部 provider：OAuth（同步，路由依赖）、GeoIP、消息发送
 //	StartBackground 后台：定时任务
@@ -87,7 +88,7 @@ func (a *App) addCleanup(name string, fn func(ctx context.Context) error) {
 	a.cleanups = append(a.cleanups, cleanupFunc{name: name, fn: fn})
 }
 
-// Bootstrap 初始化基础设施：数据目录、数据库、默认管理员账号、配置快照。
+// Bootstrap 初始化基础设施：数据目录、数据库、配置快照。
 func (a *App) Bootstrap() error {
 	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create theme directory: %w", err)
@@ -108,11 +109,6 @@ func (a *App) Bootstrap() error {
 	})
 
 	gin.SetMode(gin.ReleaseMode)
-
-	// 首次启动创建默认管理员账号。
-	if err := ensureDefaultAdmin(); err != nil {
-		return fmt.Errorf("failed to ensure default admin account: %w", err)
-	}
 
 	lowResourceMode, err := ensureLowResourceModeDefault()
 	if err != nil {
@@ -141,7 +137,6 @@ func ensureLowResourceModeDefault() (bool, error) {
 		}
 		return false, fmt.Errorf("%s must be a boolean", config.LowResourceModeKey)
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
 	defer cancel()
 	result := resourceprobe.Detect(ctx, "./data")
@@ -242,6 +237,83 @@ func (a *App) initOAuth() {
 
 func (a *App) LegacyUpgradeRequired() (bool, migrations.LegacyMonitoringSummary, error) {
 	return migrations.LegacyMonitoringMigrationRequired(dbcore.GetDBInstance())
+}
+
+// InstallRequired reports whether the instance still needs the first-run guide.
+// A zero-user database is deliberately treated as incomplete so an interrupted
+// guide can be resumed after a restart.
+func (a *App) InstallRequired() (bool, error) {
+	var count int64
+	if err := dbcore.GetDBInstance().Model(&models.User{}).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count == 0, nil
+}
+
+// RunInstallGuide starts the restricted first-run HTTP server.
+func (a *App) RunInstallGuide() (bool, error) {
+	controller := installweb.NewController(dbcore.GetDBInstance())
+	controller.Activate()
+	defer controller.Deactivate()
+
+	r := gin.New()
+	r.Use(logger.GinLogger())
+	r.Use(logger.GinRecovery())
+	r.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api") {
+			c.Header("Cache-Control", "no-store")
+		}
+		c.Next()
+	})
+	controller.Register(r)
+	frontendpublic.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
+		r.NoRoute(func(c *gin.Context) {
+			requestPath := c.Request.URL.Path
+			if strings.HasPrefix(requestPath, "/api") {
+				api.RespondError(c, http.StatusNotFound, "Not found in install mode")
+				return
+			}
+			if c.Request.Method == http.MethodGet && requestPath != installweb.PagePath && filepath.Ext(requestPath) == "" {
+				c.Redirect(http.StatusTemporaryRedirect, installweb.PagePath)
+				return
+			}
+			for _, handler := range handlers {
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		})
+	})
+
+	a.engine = r
+	a.server = &http.Server{Addr: flags.Listen, Handler: r}
+	serverErr := make(chan error, 1)
+	logger.Infof("server", "First-run installation guide is available on %s", flags.Listen)
+	go func() {
+		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(quit)
+	select {
+	case err := <-serverErr:
+		return false, fmt.Errorf("listen in install mode: %w", err)
+	case <-quit:
+		return false, a.Shutdown()
+	case <-controller.Done():
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := a.server.Shutdown(ctx); err != nil {
+			return false, fmt.Errorf("stop install server: %w", err)
+		}
+		a.server = nil
+		a.engine = nil
+		return true, nil
+	}
 }
 
 // RunLegacyUpgrade starts a restricted HTTP server on the normal listen
@@ -463,21 +535,6 @@ func (a *App) onFatal(err error) {
 			logger.Errorf("server", "cleanup %q failed: %v", c.name, cerr)
 		}
 	}
-}
-
-// ensureDefaultAdmin 首次启动（无任何用户）时创建默认管理员账号。
-func ensureDefaultAdmin() error {
-	var count int64
-	dbcore.GetDBInstance().Model(&models.User{}).Count(&count)
-	if count != 0 {
-		return nil
-	}
-	user, passwd, err := accounts.CreateDefaultAdminAccount()
-	if err != nil {
-		return err
-	}
-	logger.InfoArgs("server", "Default admin account created. Username:", user, ", Password:", passwd)
-	return nil
 }
 
 // registerScheduledWork 注册所有定时任务与首启动同步逻辑。

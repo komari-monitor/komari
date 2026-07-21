@@ -55,14 +55,7 @@ sudo ./install-komari.sh
      --name komari \
      ghcr.io/komari-monitor/komari:latest
    ```
-3. 查看默认账号和密码：
-   ```bash
-   docker logs komari
-   ```
-4. 在浏览器中访问 `http://<your_server_ip>:25774`。
-
-> [!NOTE]
-> 你也可以通过环境变量 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 自定义初始用户名和密码。
+3. 在浏览器中访问 `http://<your_server_ip>:25774` 并完成安装向导。向导会创建管理员账号，并设置站点元信息和监控数据库。
 
 ### 3. 二进制文件部署
 
@@ -72,7 +65,7 @@ sudo ./install-komari.sh
    ./komari server -l 0.0.0.0:25774
    ```
 3. 在浏览器中访问 `http://<your_server_ip>:25774`，默认监听 `25774` 端口。
-4. 默认账号和密码可在启动日志中查看，或通过环境变量 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 设置。
+4. 按照安装向导创建管理员账号，并设置站点元信息和监控数据库。
 
 > [!NOTE]
 > 确保二进制文件具有可执行权限（`chmod +x komari`）。数据将保存在运行目录下的 `data` 文件夹中。

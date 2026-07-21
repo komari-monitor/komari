@@ -58,14 +58,7 @@ sudo ./install-komari.sh
      --name komari \
      ghcr.io/komari-monitor/komari:latest
    ```
-3. View the default username and password:
-   ```bash
-   docker logs komari
-   ```
-4. Access `http://<your_server_ip>:25774` in your browser.
-
-> [!NOTE]
-> You can also customize the initial username and password through the environment variables `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+3. Access `http://<your_server_ip>:25774` in your browser and complete the installation guide. The guide creates the administrator account and configures the site metadata and monitoring database.
 
 ### 3. Binary File Deployment
 
@@ -75,7 +68,7 @@ sudo ./install-komari.sh
    ./komari server -l 0.0.0.0:25774
    ```
 3. Access `http://<your_server_ip>:25774` in your browser. The default port is `25774`.
-4. The default username and password can be found in the startup logs or set via the environment variables `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+4. Complete the installation guide to create the administrator account and configure the site metadata and monitoring database.
 
 > [!NOTE]
 > Ensure the binary has execute permissions (`chmod +x komari`). Data will be saved in the `data` folder in the running directory.

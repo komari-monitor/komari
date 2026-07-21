@@ -40,10 +40,9 @@ func TestDefaultRollupPolicy(t *testing.T) {
 
 func TestBuildMetricConfigEnablesDefaultRollupPolicy(t *testing.T) {
 	cfg, err := buildMetricConfig(&MetricStoreConfig{
-		Driver:              "sqlite",
-		DSN:                 ":memory:",
-		DownsamplingEnabled: true,
-		TablePrefix:         "metric_",
+		Driver:      "sqlite",
+		DSN:         ":memory:",
+		TablePrefix: "metric_",
 	}, false)
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
@@ -58,9 +57,8 @@ func TestBuildMetricConfigEnablesDefaultRollupPolicy(t *testing.T) {
 
 func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
 	cfg, err := buildMetricConfig(&MetricStoreConfig{
-		Driver:              "sqlite",
-		DSN:                 ":memory:",
-		DownsamplingEnabled: true,
+		Driver: "sqlite",
+		DSN:    ":memory:",
 	}, false)
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
@@ -72,17 +70,16 @@ func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
 	}
 }
 
-func TestBuildMetricConfigCanDisableDownsampling(t *testing.T) {
+func TestBuildMetricConfigAlwaysEnablesDownsampling(t *testing.T) {
 	cfg, err := buildMetricConfig(&MetricStoreConfig{
-		Driver:              "sqlite",
-		DSN:                 ":memory:",
-		DownsamplingEnabled: false,
+		Driver: "sqlite",
+		DSN:    ":memory:",
 	}, false)
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
 	}
-	if cfg.RollupPolicy.Enabled() {
-		t.Fatal("expected rollup policy to be disabled")
+	if !cfg.RollupPolicy.Enabled() {
+		t.Fatal("expected rollup policy to be enabled")
 	}
 }
 

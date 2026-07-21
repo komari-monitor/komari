@@ -30,10 +30,6 @@ func GenerateRandomString(length int) string {
 	return string(out)
 }
 
-func GeneratePassword() string {
-	return GenerateRandomString(12)
-}
-
 func GenerateToken() string {
 	return GenerateRandomString(22)
 }

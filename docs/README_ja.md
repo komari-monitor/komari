@@ -55,14 +55,7 @@ sudo ./install-komari.sh
      --name komari \
      ghcr.io/komari-monitor/komari:latest
    ```
-3. デフォルトのユーザー名とパスワードを表示します:
-   ```bash
-   docker logs komari
-   ```
-4. ブラウザで `http://<your_server_ip>:25774` にアクセスします。
-
-> [!NOTE]
-> 環境変数 `ADMIN_USERNAME` と `ADMIN_PASSWORD` を使用して、初期のユーザー名とパスワードをカスタマイズすることもできます。
+3. ブラウザで `http://<your_server_ip>:25774` にアクセスし、インストールガイドを完了します。ガイドで管理者アカウント、サイト情報、監視データベースを設定します。
 
 ### 3. バイナリファイル展開
 
@@ -72,7 +65,7 @@ sudo ./install-komari.sh
    ./komari server -l 0.0.0.0:25774
    ```
 3. ブラウザで `http://<your_server_ip>:25774` にアクセスします。デフォルトのポートは `25774` です。
-4. デフォルトのユーザー名とパスワードは、起動ログで確認するか、環境変数 `ADMIN_USERNAME` と `ADMIN_PASSWORD` を介して設定できます。
+4. インストールガイドに従って管理者アカウント、サイト情報、監視データベースを設定します。
 
 > [!NOTE]
 > バイナリに実行権限があることを確認してください（`chmod +x komari`）。データは実行ディレクトリの `data` フォルダに保存されます。

@@ -34,6 +34,22 @@ func RunServer() {
 		logger.Fatalf("server", "server startup failed at %q: %v", "bootstrap", err)
 	}
 
+	installRequired, err := app.InstallRequired()
+	if err != nil {
+		_ = app.Shutdown()
+		logger.Fatalf("server", "server startup failed at %q: %v", "detect-first-run-install", err)
+	}
+	if installRequired {
+		completed, err := app.RunInstallGuide()
+		if err != nil {
+			_ = app.Shutdown()
+			logger.Fatalf("server", "server startup failed at %q: %v", "run-first-run-install", err)
+		}
+		if !completed {
+			return
+		}
+	}
+
 	required, summary, err := app.LegacyUpgradeRequired()
 	if err != nil {
 		_ = app.Shutdown()
