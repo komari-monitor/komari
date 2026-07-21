@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -156,7 +156,7 @@ func WebSocketV2RPC(c *gin.Context) {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Client %s v2 connection error: %v", uuid, err)
+				logger.Errorf("client-api", "Client %s v2 connection error: %v", uuid, err)
 			}
 			return
 		}
@@ -169,7 +169,7 @@ func WebSocketV2RPC(c *gin.Context) {
 		resp := handleV2RPC(uuid, req, false)
 		if req.ID != nil {
 			if err := conn.WriteJSON(resp); err != nil {
-				log.Printf("failed to write v2 rpc response: %v", err)
+				logger.Errorf("client-api", "failed to write v2 rpc response: %v", err)
 				return
 			}
 		}
@@ -186,7 +186,7 @@ func pushQueuedV2Events(conn *connection.SafeConn, uuid string) bool {
 		payload := v2.Request{JSONRPC: v2.Version, Method: event.Method, Params: event.Params}
 		if err := conn.WriteJSON(payload); err != nil {
 			agent_runtime.AckV2Events(uuid, ackIDs)
-			log.Printf("failed to push queued v2 event %s to client %s: %v", event.ID, uuid, err)
+			logger.Errorf("client-api", "failed to push queued v2 event %s to client %s: %v", event.ID, uuid, err)
 			return false
 		}
 		ackIDs = append(ackIDs, event.ID)

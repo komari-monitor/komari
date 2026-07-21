@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 
 	"github.com/komari-monitor/komari/pkg/config"
 )
@@ -60,7 +60,7 @@ func (m *ReloadManager) Start() {
 func (m *ReloadManager) dispatch(h reloadHandler, event config.ConfigEvent) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("config reload handler %q panicked: %v", h.name, r)
+			logger.Errorf("reload", "config reload handler %q panicked: %v", h.name, r)
 		}
 	}()
 	h.handler(event)

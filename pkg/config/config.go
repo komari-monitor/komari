@@ -3,11 +3,11 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
 
+	logger "github.com/komari-monitor/komari/utils/log"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -105,7 +105,7 @@ func GetMany(keys map[string]any) (map[string]any, error) {
 				// 序列化后加入待写入列表
 				jsonBytes, err := json.Marshal(def)
 				if err != nil {
-					slog.Warn("marshal default value failed", "key", k, "error", err)
+					logger.Warn("config", "marshal default value failed", "key", k, "error", err)
 					continue
 				}
 				toInsert = append(toInsert, ConfigItem{
@@ -122,7 +122,7 @@ func GetMany(keys map[string]any) (map[string]any, error) {
 			Columns:   []clause.Column{{Name: "key"}},
 			DoUpdates: clause.AssignmentColumns([]string{"value"}),
 		}).Create(&toInsert).Error; err != nil {
-			slog.Warn("batch insert default config failed", "error", err)
+			logger.Warn("config", "batch insert default config failed", "error", err)
 		}
 	}
 
@@ -199,18 +199,18 @@ func GetManyAs[T any]() (*T, error) {
 		if dbValue, found := foundItems[fi.key]; found {
 			// 数据库中存在，使用数据库值
 			if err := unmarshalToField(dbValue, fieldVal); err != nil {
-				slog.Warn("unmarshal config failed", "key", fi.key, "error", err)
+				logger.Warn("config", "unmarshal config failed", "key", fi.key, "error", err)
 			}
 		} else if fi.hasDefault {
 			// 数据库中不存在，但有 default tag，解析默认值并写入数据库
 			if err := parseDefaultToField(fi.defaultVal, fieldVal); err != nil {
-				slog.Warn("parse default value failed", "key", fi.key, "error", err)
+				logger.Warn("config", "parse default value failed", "key", fi.key, "error", err)
 				continue
 			}
 			// 序列化后写入数据库
 			jsonBytes, err := json.Marshal(fieldVal.Interface())
 			if err != nil {
-				slog.Warn("marshal default value failed", "key", fi.key, "error", err)
+				logger.Warn("config", "marshal default value failed", "key", fi.key, "error", err)
 				continue
 			}
 			toInsert = append(toInsert, ConfigItem{
@@ -227,7 +227,7 @@ func GetManyAs[T any]() (*T, error) {
 			Columns:   []clause.Column{{Name: "key"}},
 			DoUpdates: clause.AssignmentColumns([]string{"value"}),
 		}).Create(&toInsert).Error; err != nil {
-			slog.Warn("batch insert default config failed", "error", err)
+			logger.Warn("config", "batch insert default config failed", "error", err)
 		}
 	}
 

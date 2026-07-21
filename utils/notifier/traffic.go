@@ -2,7 +2,6 @@ package notifier
 
 import (
 	"fmt"
-	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	cache "github.com/patrickmn/go-cache"
@@ -29,7 +29,7 @@ func CheckTraffic() {
 	}
 	cfg, err := config.GetAs[float64](config.TrafficLimitPercentageKey, 80.0)
 	if err != nil {
-		slog.Error("failed to get traffic limit percentage", "error", err)
+		logger.Error("notifier", "failed to get traffic limit percentage", "error", err)
 	}
 
 	if cfg <= 0 {

@@ -3,7 +3,7 @@ package database
 import (
 	"context"
 	"encoding/json"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,7 +67,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 	tc_data := gin.H{}
 	err = json.Unmarshal([]byte(tc.Data), &tc_data)
 	if err != nil {
-		log.Printf("%v", err)
+		logger.Infof("database", "%v", err)
 	}
 	// Try to load theme declaration file and merge defaults for managed configuration
 	// Theme declarations live in ./data/theme/<short>/komari-theme.json

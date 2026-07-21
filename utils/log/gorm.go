@@ -1,13 +1,11 @@
-package log
+package logger
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
-	komari_utils "github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/gorm/utils"
@@ -25,12 +23,10 @@ func NewGormLogger() *GormLogger {
 	return &GormLogger{
 		SlowThreshold:             200 * time.Millisecond,
 		IgnoreRecordNotFoundError: true,
-		LogLevel: func(hash string) gormlogger.LogLevel {
-			if hash == "unknown" {
-				return gormlogger.Info
-			}
-			return gormlogger.Silent
-		}(komari_utils.VersionHash),
+		// Successful queries are high-volume and provide little diagnostic value
+		// in normal debug output. Callers investigating SQL can explicitly use
+		// LogMode(gormlogger.Info) for per-query traces.
+		LogLevel: gormlogger.Warn,
 	}
 }
 
@@ -42,19 +38,19 @@ func (l *GormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 
 func (l *GormLogger) Info(ctx context.Context, msg string, data ...interface{}) {
 	if l.LogLevel >= gormlogger.Info {
-		slog.InfoContext(ctx, fmt.Sprintf(msg, data...))
+		InfoContext(ctx, "gorm", fmt.Sprintf(msg, data...))
 	}
 }
 
 func (l *GormLogger) Warn(ctx context.Context, msg string, data ...interface{}) {
 	if l.LogLevel >= gormlogger.Warn {
-		slog.WarnContext(ctx, fmt.Sprintf(msg, data...))
+		WarnContext(ctx, "gorm", fmt.Sprintf(msg, data...))
 	}
 }
 
 func (l *GormLogger) Error(ctx context.Context, msg string, data ...interface{}) {
 	if l.LogLevel >= gormlogger.Error {
-		slog.ErrorContext(ctx, fmt.Sprintf(msg, data...))
+		ErrorContext(ctx, "gorm", fmt.Sprintf(msg, data...))
 	}
 }
 
@@ -68,26 +64,12 @@ func (l *GormLogger) Trace(ctx context.Context, begin time.Time, fc func() (stri
 
 	fileWithLineNum := utils.FileWithLineNum()
 
-	handler := slog.Default().Handler()
-
 	switch {
 	case err != nil && l.LogLevel >= gormlogger.Error && (!errors.Is(err, gorm.ErrRecordNotFound) || !l.IgnoreRecordNotFoundError):
-		msg := fmt.Sprintf("[%.3fms] [rows:%d] %s | ERROR: %v %s",
-			float64(elapsed.Nanoseconds())/1e6, rows, sql, err, Gray("(%s)", fileWithLineNum))
-		r := slog.NewRecord(time.Now().UTC(), slog.LevelError, msg, 0)
-		r.AddAttrs(slog.String("_group", "GORM"))
-		handler.Handle(ctx, r)
+		ErrorContext(ctx, "gorm", "query failed", "elapsed", elapsed, "rows", rows, "sql", sql, "error", err, "source", fileWithLineNum)
 	case elapsed > l.SlowThreshold && l.SlowThreshold != 0 && l.LogLevel >= gormlogger.Warn:
-		msg := fmt.Sprintf("[%.3fms] [rows:%d] %s | SLOW QUERY %s",
-			float64(elapsed.Nanoseconds())/1e6, rows, sql, Gray("(%s)", fileWithLineNum))
-		r := slog.NewRecord(time.Now().UTC(), slog.LevelWarn, msg, 0)
-		r.AddAttrs(slog.String("_group", "GORM"))
-		handler.Handle(ctx, r)
+		WarnContext(ctx, "gorm", "slow query", "elapsed", elapsed, "rows", rows, "sql", sql, "source", fileWithLineNum)
 	case l.LogLevel >= gormlogger.Info:
-		msg := fmt.Sprintf("[%.3fms] [rows:%d] %s %s",
-			float64(elapsed.Nanoseconds())/1e6, rows, sql, Gray("(%s)", fileWithLineNum))
-		r := slog.NewRecord(time.Now().UTC(), slog.LevelDebug, msg, 0)
-		r.AddAttrs(slog.String("_group", "GORM"))
-		handler.Handle(ctx, r)
+		DebugContext(ctx, "gorm", "query completed", "elapsed", elapsed, "rows", rows, "sql", sql, "source", fileWithLineNum)
 	}
 }

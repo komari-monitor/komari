@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,7 +29,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/resourceprobe"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/geoip"
-	logutil "github.com/komari-monitor/komari/utils/log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/api"
@@ -108,9 +107,7 @@ func (a *App) Bootstrap() error {
 		return dbcore.Close()
 	})
 
-	if utils.VersionHash != "unknown" {
-		gin.SetMode(gin.ReleaseMode)
-	}
+	gin.SetMode(gin.ReleaseMode)
 
 	// 首次启动创建默认管理员账号。
 	if err := ensureDefaultAdmin(); err != nil {
@@ -151,7 +148,7 @@ func ensureLowResourceModeDefault() (bool, error) {
 	if err := config.Set(config.LowResourceModeKey, result.LowResource); err != nil {
 		return false, err
 	}
-	log.Printf(
+	logger.Infof("server",
 		"Low resource mode auto-detection: enabled=%t memory=%dMiB disk_free=%dMiB cpu=%.0fops/s random_write=%.2fMiB/s iops=%.0f reasons=%v",
 		result.LowResource,
 		result.MemoryBytes/(1024*1024),
@@ -234,7 +231,7 @@ func (a *App) initOAuth() {
 	}
 	if err := oauth.Initialize(); err != nil {
 		// Keep password login available when an OAuth provider is misconfigured.
-		log.Printf("Failed to initialize OAuth provider: %v", err)
+		logger.Errorf("server", "Failed to initialize OAuth provider: %v", err)
 		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize OAuth provider: %v", err))
 	}
 	a.oauthReady = true
@@ -257,8 +254,8 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	defer controller.Deactivate()
 
 	r := gin.New()
-	r.Use(logutil.GinLogger())
-	r.Use(logutil.GinRecovery())
+	r.Use(logger.GinLogger())
+	r.Use(logger.GinRecovery())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
 	r.Use(cors.Middleware())
 	r.Use(api.IdentityMiddleware())
@@ -293,7 +290,7 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	a.engine = r
 	a.server = &http.Server{Addr: flags.Listen, Handler: r}
 	serverErr := make(chan error, 1)
-	log.Printf("Legacy monitoring data requires the 1.2.7 upgrade wizard on %s", flags.Listen)
+	logger.Infof("server", "Legacy monitoring data requires the 1.2.7 upgrade wizard on %s", flags.Listen)
 	go func() {
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			serverErr <- err
@@ -341,10 +338,10 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 			}
 			oidcProvider, err := database.GetOidcConfigByName(t)
 			if err != nil {
-				log.Printf("Failed to get OIDC provider config: %v", err)
+				logger.Errorf("server", "Failed to get OIDC provider config: %v", err)
 				return
 			}
-			log.Printf("Using %s as OIDC provider", oidcProvider.Name)
+			logger.Infof("server", "Using %s as OIDC provider", oidcProvider.Name)
 			if err := oauth.LoadProvider(oidcProvider.Name, oidcProvider.Addition); err != nil {
 				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
 			}
@@ -374,8 +371,8 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 // BuildRouter 构建 Gin 引擎、中间件与全部路由，并登记热重载处理器。
 func (a *App) BuildRouter() error {
 	r := gin.New()
-	r.Use(logutil.GinLogger())
-	r.Use(logutil.GinRecovery())
+	r.Use(logger.GinLogger())
+	r.Use(logger.GinRecovery())
 
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
 	r.Use(cors.Middleware())
@@ -408,7 +405,7 @@ func (a *App) Run() error {
 	}
 
 	serverErr := make(chan error, 1)
-	log.Printf("Starting server on %s ...", flags.Listen)
+	logger.Infof("server", "Starting server on %s ...", flags.Listen)
 	go func() {
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			serverErr <- err
@@ -439,7 +436,7 @@ func (a *App) Shutdown() error {
 	// 先关闭 HTTP 服务，停止接收新请求。
 	if a.server != nil {
 		if err := a.server.Shutdown(ctx); err != nil {
-			log.Printf("HTTP server forced to shutdown: %v", err)
+			logger.Infof("server", "HTTP server forced to shutdown: %v", err)
 		}
 	}
 
@@ -447,7 +444,7 @@ func (a *App) Shutdown() error {
 	for i := len(a.cleanups) - 1; i >= 0; i-- {
 		c := a.cleanups[i]
 		if err := c.fn(ctx); err != nil {
-			log.Printf("cleanup %q failed: %v", c.name, err)
+			logger.Errorf("server", "cleanup %q failed: %v", c.name, err)
 		}
 	}
 	return nil
@@ -463,7 +460,7 @@ func (a *App) onFatal(err error) {
 	for i := len(a.cleanups) - 1; i >= 0; i-- {
 		c := a.cleanups[i]
 		if cerr := c.fn(ctx); cerr != nil {
-			log.Printf("cleanup %q failed: %v", c.name, cerr)
+			logger.Errorf("server", "cleanup %q failed: %v", c.name, cerr)
 		}
 	}
 }
@@ -479,30 +476,30 @@ func ensureDefaultAdmin() error {
 	if err != nil {
 		return err
 	}
-	log.Println("Default admin account created. Username:", user, ", Password:", passwd)
+	logger.InfoArgs("server", "Default admin account created. Username:", user, ", Password:", passwd)
 	return nil
 }
 
 // registerScheduledWork 注册所有定时任务与首启动同步逻辑。
 func registerScheduledWork() {
 	if err := tasks.ReloadPingSchedule(); err != nil {
-		log.Println("Failed to reload ping schedule:", err)
+		logger.ErrorArgs("server", "Failed to reload ping schedule:", err)
 	}
 	if err := d_notification.ReloadLoadNotificationSchedule(); err != nil {
-		log.Println("Failed to reload load notification schedule:", err)
+		logger.ErrorArgs("server", "Failed to reload load notification schedule:", err)
 	}
 
 	if err := corn.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
-		log.Println("Failed to add cleanup scheduled task:", err)
+		logger.ErrorArgs("server", "Failed to add cleanup scheduled task:", err)
 	}
 	if err := corn.AddContextFunc("metrics:compact", "@every 5m", true, compactMetricStore); err != nil {
-		log.Println("Failed to add metric compact scheduled task:", err)
+		logger.ErrorArgs("server", "Failed to add metric compact scheduled task:", err)
 	}
 	if err := corn.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
-		log.Println("Failed to add traffic notification task:", err)
+		logger.ErrorArgs("server", "Failed to add traffic notification task:", err)
 	}
 	if err := corn.AddFunc("notifier:expire", "0 0 9 * * *", notifier.CheckExpireScheduledWork); err != nil {
-		log.Println("Failed to add expire notification scheduled task:", err)
+		logger.ErrorArgs("server", "Failed to add expire notification scheduled task:", err)
 	}
 
 	notifier.InitTrafficReportSchedule()
@@ -513,7 +510,7 @@ const taskResultRetentionDays = 30
 func cleanupScheduledData() {
 	before := time.Now().UTC().Add(-24 * time.Hour * taskResultRetentionDays)
 	if err := tasks.ClearTaskResultsByTimeBefore(before); err != nil {
-		log.Printf("Failed to clean expired task results: %v", err)
+		logger.Errorf("server", "Failed to clean expired task results: %v", err)
 	}
 
 	auditlog.RemoveOldLogs()
@@ -529,10 +526,10 @@ func compactMetricStore(ctx context.Context) {
 		return
 	}
 	if err != nil {
-		log.Printf("Failed to compact metric store after writing %d rollup buckets: %v", written, err)
+		logger.Errorf("server", "Failed to compact metric store after writing %d rollup buckets: %v", written, err)
 		return
 	}
 	if written > 0 {
-		log.Printf("Metric store compacted %d rollup buckets", written)
+		logger.Infof("server", "Metric store compacted %d rollup buckets", written)
 	}
 }

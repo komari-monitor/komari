@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -99,7 +99,7 @@ func postPresenceExpired(uuid string, connID int64, gen uint64) {
 func UploadReport(c *gin.Context) {
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		log.Println("Failed to read request body:", err)
+		logger.ErrorArgs("client-api", "Failed to read request body:", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
@@ -156,7 +156,7 @@ func WebSocketReport(c *gin.Context) {
 
 	_, message, err := conn.ReadMessage()
 	if err != nil {
-		log.Println("Error reading message:", err)
+		logger.ErrorArgs("client-api", "Error reading message:", err)
 		return
 	}
 
@@ -188,13 +188,13 @@ func WebSocketReport(c *gin.Context) {
 
 	// 接受新连接，并处理旧连接
 	if oldConn, exists := agent_runtime.GetConnectedClients()[uuid]; exists {
-		log.Printf("Client %s is reconnecting. Closing the old connection.", uuid)
+		logger.Infof("client-api", "Client %s is reconnecting. Closing the old connection.", uuid)
 
 		// 强制关闭旧连接。这将导致旧连接的 ReadMessage() 循环出错退出。
 		go oldConn.Close()
 	}
 	agent_runtime.SetConnectedClients(uuid, conn)
-	log.Printf("Client %s is reconnect success, connID: %d", uuid, conn.ID)
+	logger.Infof("client-api", "Client %s is reconnect success, connID: %d", uuid, conn.ID)
 	go notifier.OnlineNotification(uuid, conn.ID)
 	defer func() {
 		agent_runtime.DeleteClientConditionally(uuid, conn)
@@ -210,7 +210,7 @@ func WebSocketReport(c *gin.Context) {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Client %s connection error: %v", uuid, err)
+				logger.Errorf("client-api", "Client %s connection error: %v", uuid, err)
 			}
 			break // 任何读错误（包括超时）都意味着连接已断开，退出循环
 		}
@@ -258,7 +258,7 @@ func processMessage(conn *connection.SafeConn, message []byte, uuid string) {
 			conn.WriteJSON(gin.H{"status": "error", "error": "Failed to save ping result"})
 		}
 	default:
-		log.Printf("Unknown message type: %s", msgType.Type)
+		logger.Warnf("client-api", "Unknown message type: %s", msgType.Type)
 		conn.WriteJSON(gin.H{"status": "error", "error": "Unknown message type"})
 	}
 }

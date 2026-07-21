@@ -2,7 +2,7 @@ package notifier
 
 import (
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"reflect"
 	"sync"
 	"time"
@@ -140,7 +140,7 @@ func getMetricValue(record models.Record, metric string) float32 {
 	case "ram":
 		client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
 		if err != nil {
-			log.Printf("Failed to get client info for %s: %v", record.Client, err)
+			logger.Errorf("notifier", "Failed to get client info for %s: %v", record.Client, err)
 			return 0
 		}
 		if record.RamTotal > 0 {
@@ -150,7 +150,7 @@ func getMetricValue(record models.Record, metric string) float32 {
 	case "swap":
 		client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
 		if err != nil {
-			log.Printf("Failed to get client info for %s: %v", record.Client, err)
+			logger.Errorf("notifier", "Failed to get client info for %s: %v", record.Client, err)
 			return 0
 		}
 		if record.SwapTotal > 0 {
@@ -164,7 +164,7 @@ func getMetricValue(record models.Record, metric string) float32 {
 	case "disk":
 		client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
 		if err != nil {
-			log.Printf("Failed to get client info for %s: %v", record.Client, err)
+			logger.Errorf("notifier", "Failed to get client info for %s: %v", record.Client, err)
 			return 0
 		}
 		if record.DiskTotal > 0 {
@@ -225,7 +225,7 @@ func sendLoadNotification(clientUUIDs []string, task models.LoadNotification) {
 func updateLastNotified(taskId uint, notifyTime time.Time) {
 	db := dbcore.GetDBInstance()
 	if err := db.Model(&models.LoadNotification{}).Where("id = ?", taskId).Update("last_notified", notifyTime.UTC()).Error; err != nil {
-		log.Printf("Failed to update last_notified for task %d: %v", taskId, err)
+		logger.Errorf("notifier", "Failed to update last_notified for task %d: %v", taskId, err)
 	}
 }
 

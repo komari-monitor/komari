@@ -3,7 +3,7 @@ package metricstore
 import (
 	"context"
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"strings"
 	"sync"
 	"time"
@@ -191,7 +191,7 @@ func runStoreMigration(ctx context.Context, cancel context.CancelFunc, done chan
 	if err != nil {
 		if ctx.Err() != nil {
 			finishStoreMigration("canceled", nil)
-			log.Printf("[store-migration] canceled after %d points", total)
+			logger.Warnf("metricstore", "[store-migration] canceled after %d points", total)
 			return
 		}
 		finishStoreMigration("failed", err)
@@ -200,10 +200,10 @@ func runStoreMigration(ctx context.Context, cancel context.CancelFunc, done chan
 
 	// 搬运成功：登记当前目标指纹，避免下次启动重复搬运。
 	if err := config.Set(MigrationTargetKey, targetFP); err != nil {
-		log.Printf("[store-migration] failed to persist migration target fingerprint: %v", err)
+		logger.Errorf("metricstore", "[store-migration] failed to persist migration target fingerprint: %v", err)
 	}
 	finishStoreMigration("completed", nil)
-	log.Printf("[store-migration] completed via API (%d points) target_driver=%s", total, ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
+	logger.Infof("metricstore", "[store-migration] completed via API (%d points) target_driver=%s", total, ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
 }
 
 // finishStoreMigration 统一收尾：设置终态状态、结束时间与错误信息。

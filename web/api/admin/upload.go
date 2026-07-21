@@ -3,8 +3,8 @@ package admin
 import (
 	"archive/zip"
 	"fmt"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -118,7 +118,7 @@ func UploadBackup(c *gin.Context) {
 	})
 
 	go func() {
-		log.Println("Backup uploaded, restarting service in 2 seconds to apply on startup...")
+		logger.InfoArgs("admin-api", "Backup uploaded, restarting service in 2 seconds to apply on startup...")
 		time.Sleep(2 * time.Second)
 		os.Exit(0)
 	}()

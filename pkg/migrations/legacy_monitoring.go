@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"math"
 	"sort"
 	"strings"
@@ -104,7 +104,7 @@ func RunMetricStoreMigrations(ctx MetricContext) error {
 		return err
 	}
 	if stats.Records > 0 || stats.GPU > 0 || stats.Ping > 0 {
-		log.Printf("Legacy monitoring table migration completed (records=%d, gpu=%d, ping=%d)", stats.Records, stats.GPU, stats.Ping)
+		logger.Infof("migration", "Legacy monitoring table migration completed (records=%d, gpu=%d, ping=%d)", stats.Records, stats.GPU, stats.Ping)
 	}
 	return nil
 }
@@ -368,14 +368,14 @@ func migrateLegacyRecordTables(ctx context.Context, s *metric.Store, db *gorm.DB
 	}
 	defer rows.Close()
 
-	log.Printf("[legacy-migration] aggregating %d rows from %s into 1h P95 points", total, strings.Join(existing, ","))
+	logger.Infof("migration", "[legacy-migration] aggregating %d rows from %s into 1h P95 points", total, strings.Join(existing, ","))
 	migrated, err := migrateLegacyStream(ctx, db, s, rows, "records", func() *models.Record { return &models.Record{} }, func(value models.Record) []metric.Point {
 		return recordToPoints(value)
 	}, progress)
 	if err != nil {
 		return migrated, fmt.Errorf("aggregate legacy record tables: %w", err)
 	}
-	log.Printf("[legacy-migration] aggregated %d rows from %s", migrated, strings.Join(existing, ","))
+	logger.Infof("migration", "[legacy-migration] aggregated %d rows from %s", migrated, strings.Join(existing, ","))
 	return migrated, nil
 }
 
@@ -397,14 +397,14 @@ func migrateLegacyGPURecordTable(ctx context.Context, s *metric.Store, db *gorm.
 		return 0, fmt.Errorf("stream legacy %s: %w", table, err)
 	}
 	defer rows.Close()
-	log.Printf("[legacy-migration] aggregating %d rows from %s into 1h P95 points", total, table)
+	logger.Infof("migration", "[legacy-migration] aggregating %d rows from %s into 1h P95 points", total, table)
 	migrated, err := migrateLegacyStream(ctx, db, s, rows, table, func() *models.GPURecord { return &models.GPURecord{} }, func(value models.GPURecord) []metric.Point {
 		return gpuRecordToPoints(value)
 	}, progress)
 	if err != nil {
 		return migrated, fmt.Errorf("aggregate legacy %s: %w", table, err)
 	}
-	log.Printf("[legacy-migration] aggregated %d rows from %s", migrated, table)
+	logger.Infof("migration", "[legacy-migration] aggregated %d rows from %s", migrated, table)
 	return migrated, nil
 }
 
@@ -426,14 +426,14 @@ func migrateLegacyPingRecordTable(ctx context.Context, s *metric.Store, db *gorm
 		return 0, fmt.Errorf("stream legacy %s: %w", table, err)
 	}
 	defer rows.Close()
-	log.Printf("[legacy-migration] aggregating %d rows from %s into 1h P95 points", total, table)
+	logger.Infof("migration", "[legacy-migration] aggregating %d rows from %s into 1h P95 points", total, table)
 	migrated, err := migrateLegacyStream(ctx, db, s, rows, table, func() *models.PingRecord { return &models.PingRecord{} }, func(value models.PingRecord) []metric.Point {
 		return pingRecordToPoints(value)
 	}, progress)
 	if err != nil {
 		return migrated, fmt.Errorf("aggregate legacy %s: %w", table, err)
 	}
-	log.Printf("[legacy-migration] aggregated %d rows from %s", migrated, table)
+	logger.Infof("migration", "[legacy-migration] aggregated %d rows from %s", migrated, table)
 	return migrated, nil
 }
 
@@ -735,7 +735,7 @@ func dropLegacyMonitoringTables(db *gorm.DB) error {
 		if !db.Migrator().HasTable(table) {
 			continue
 		}
-		log.Printf("[legacy-migration] dropping legacy table %s", table)
+		logger.Infof("migration", "[legacy-migration] dropping legacy table %s", table)
 		if err := db.Migrator().DropTable(table); err != nil {
 			return fmt.Errorf("drop legacy table %s: %w", table, err)
 		}

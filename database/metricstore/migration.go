@@ -2,7 +2,7 @@ package metricstore
 
 import (
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"strings"
 
 	"github.com/komari-monitor/komari/pkg/config"
@@ -66,7 +66,7 @@ func RunStartupMigration() error {
 	}
 
 	if err := config.Set(MigrationTargetKey, current); err != nil {
-		log.Printf("Failed to persist migration target fingerprint: %v", err)
+		logger.Errorf("metricstore", "Failed to persist migration target fingerprint: %v", err)
 	}
 	return nil
 }

@@ -1,7 +1,7 @@
 package terminal
 
 import (
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"net/http"
 	"time"
 
@@ -46,7 +46,7 @@ func RequestTerminal(c *gin.Context) {
 	TerminalSessions[id] = session
 	TerminalSessionsMutex.Unlock()
 	conn.SetCloseHandler(func(code int, text string) error {
-		log.Println("Terminal connection closed:", code, text)
+		logger.InfoArgs("terminal", "Terminal connection closed:", code, text)
 		TerminalSessionsMutex.Lock()
 		delete(TerminalSessions, id)
 		TerminalSessionsMutex.Unlock()

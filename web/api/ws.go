@@ -61,7 +61,6 @@ func GetClients(c *gin.Context) {
 
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			//log.Println("Error reading message:", err)
 			return
 		}
 		message := string(data)

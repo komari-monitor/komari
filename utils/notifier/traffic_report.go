@@ -2,10 +2,11 @@ package notifier
 
 import (
 	"fmt"
-	"log"
 	"sort"
 	"strings"
 	"time"
+
+	logger "github.com/komari-monitor/komari/utils/log"
 
 	"context"
 
@@ -24,24 +25,22 @@ func InitTrafficReportSchedule() {
 	if err := corn.AddFunc("traffic-report-daily", "0 0 0 * * *", func() {
 		sendTrafficReport(true, false, false)
 	}); err != nil {
-		log.Println("Failed to register daily traffic report job:", err)
+		logger.ErrorArgs("notifier", "Failed to register daily traffic report job:", err)
 	}
 
 	// 周报：每周一凌晨 0 点 (dow=1)
 	if err := corn.AddFunc("traffic-report-weekly", "0 0 0 * * 1", func() {
 		sendTrafficReport(false, true, false)
 	}); err != nil {
-		log.Println("Failed to register weekly traffic report job:", err)
+		logger.ErrorArgs("notifier", "Failed to register weekly traffic report job:", err)
 	}
 
 	// 月报：每月 1 日凌晨 0 点
 	if err := corn.AddFunc("traffic-report-monthly", "0 0 0 1 * *", func() {
 		sendTrafficReport(false, false, true)
 	}); err != nil {
-		log.Println("Failed to register monthly traffic report job:", err)
+		logger.ErrorArgs("notifier", "Failed to register monthly traffic report job:", err)
 	}
-
-	log.Println("Traffic report schedules registered: daily, weekly, monthly")
 }
 
 // sendTrafficReport 汇聚所有启用了指定报告类型的服务器流量，合并成一条通知发送
@@ -86,7 +85,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 		query = query.Where("monthly = ?", true)
 	}
 	if err := query.Find(&notifications).Error; err != nil {
-		log.Printf("Failed to query traffic report notifications (%s): %v", label, err)
+		logger.Errorf("notifier", "Failed to query traffic report notifications (%s): %v", label, err)
 		return
 	}
 	if len(notifications) == 0 {
@@ -100,7 +99,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 	}
 	var clientList []models.Client
 	if err := db.Where("uuid IN ?", clientUUIDs).Find(&clientList).Error; err != nil {
-		log.Printf("Failed to query clients for traffic report (%s): %v", label, err)
+		logger.Errorf("notifier", "Failed to query clients for traffic report (%s): %v", label, err)
 		return
 	}
 	clientMap := make(map[string]models.Client, len(clientList))
@@ -119,7 +118,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 
 		used, err := getClientTrafficInRange(n.Client, c.TrafficLimitType, start, end)
 		if err != nil {
-			log.Printf("Failed to compute traffic for client %s (%s): %v", n.Client, label, err)
+			logger.Errorf("notifier", "Failed to compute traffic for client %s (%s): %v", n.Client, label, err)
 			continue
 		}
 
@@ -149,7 +148,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 		Emoji:   emoji,
 		Message: message,
 	}); err != nil {
-		log.Printf("Failed to send %s traffic report: %v", label, err)
+		logger.Errorf("notifier", "Failed to send %s traffic report: %v", label, err)
 	}
 }
 

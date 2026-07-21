@@ -3,7 +3,7 @@ package oauth
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"sync"
 
 	"github.com/komari-monitor/komari/database"
@@ -43,7 +43,7 @@ func LoadProvider(name string, configJson string) error {
 	defer mu.Unlock()
 	if currentProvider != nil {
 		if err := currentProvider.Destroy(); err != nil {
-			log.Printf("Failed to destroy provider %s: %v", currentProvider.GetName(), err)
+			logger.Errorf("oauth", "Failed to destroy provider %s: %v", currentProvider.GetName(), err)
 		}
 	}
 	constructor, exists := factory.GetConstructor(name)
@@ -73,14 +73,14 @@ func Initialize() error {
 			config := provider.GetConfiguration()
 			configBytes, err := json.Marshal(config)
 			if err != nil {
-				log.Printf("Failed to marshal config for provider %s: %v", provider.GetName(), err)
+				logger.Errorf("oauth", "Failed to marshal config for provider %s: %v", provider.GetName(), err)
 				return
 			}
 			if err := database.SaveOidcConfig(&models.OidcProvider{
 				Name:     provider.GetName(),
 				Addition: string(configBytes),
 			}); err != nil {
-				log.Printf("Failed to save default config for provider %s: %v", provider.GetName(), err)
+				logger.Errorf("oauth", "Failed to save default config for provider %s: %v", provider.GetName(), err)
 				return
 			}
 		}
@@ -98,7 +98,7 @@ func Initialize() error {
 	}
 	err = LoadProvider(provider.Name, provider.Addition)
 	if err != nil {
-		log.Printf("Failed to load OIDC provider %s: %v", provider.Name, err)
+		logger.Errorf("oauth", "Failed to load OIDC provider %s: %v", provider.Name, err)
 		return err
 	}
 	return nil
@@ -106,13 +106,13 @@ func Initialize() error {
 
 func cleanupRemovedProviders() {
 	if err := database.DeleteOidcConfigByName(removedCloudflareAccessProvider); err != nil {
-		log.Printf("Failed to delete removed OIDC provider %s: %v", removedCloudflareAccessProvider, err)
+		logger.Errorf("oauth", "Failed to delete removed OIDC provider %s: %v", removedCloudflareAccessProvider, err)
 	}
 
 	cfg, _ := config.GetAs[string](config.OAuthProviderKey, "github")
 	if cfg == removedCloudflareAccessProvider {
 		if err := config.Set(config.OAuthProviderKey, "github"); err != nil {
-			log.Printf("Failed to reset removed OIDC provider %s: %v", removedCloudflareAccessProvider, err)
+			logger.Errorf("oauth", "Failed to reset removed OIDC provider %s: %v", removedCloudflareAccessProvider, err)
 		}
 	}
 }

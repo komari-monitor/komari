@@ -3,7 +3,7 @@ package migrations
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"reflect"
 	"strings"
 	"time"
@@ -176,7 +176,7 @@ func hasTableColumn(db *gorm.DB, tableName, columnName string) bool {
 
 func migrateLegacyLoadNotification(db *gorm.DB) error {
 	if db.Migrator().HasColumn(&models.LoadNotification{}, "client") {
-		log.Println("[>0.1.4] Rebuilding LoadNotification table....")
+		logger.InfoArgs("migration", "[>0.1.4] Rebuilding LoadNotification table....")
 		return db.Migrator().DropTable(&models.LoadNotification{})
 	}
 	return nil
@@ -187,7 +187,7 @@ func migrateLegacyOidcConfig(db *gorm.DB) error {
 		return nil
 	}
 
-	log.Println("[>1.0.2] Merge OidcProvider table....")
+	logger.InfoArgs("migration", "[>1.0.2] Merge OidcProvider table....")
 	var oldData struct {
 		OAuthClientID     string `gorm:"column:o_auth_client_id"`
 		OAuthClientSecret string `gorm:"column:o_auth_client_secret"`
@@ -224,7 +224,7 @@ func migrateLegacyMessageSenderConfig(db *gorm.DB) error {
 		return nil
 	}
 
-	log.Println("[>1.0.2] Migrate MessageSender configuration....")
+	logger.InfoArgs("migration", "[>1.0.2] Migrate MessageSender configuration....")
 	var oldData struct {
 		TelegramBotToken   string `gorm:"column:telegram_bot_token"`
 		TelegramChatID     string `gorm:"column:telegram_chat_id"`
@@ -308,7 +308,7 @@ func saveLegacyMessageSenderConfig(db *gorm.DB, name string, config map[string]i
 }
 
 func migrateLegacyConfigToItems(db *gorm.DB) error {
-	log.Println("[>1.1.4] Moving legacy config data...")
+	logger.InfoArgs("migration", "[>1.1.4] Moving legacy config data...")
 
 	var oldData legacyConfig
 	if err := db.Order("id desc").First(&oldData).Error; err != nil {
@@ -371,7 +371,7 @@ func migrateLegacyClientInfo(db *gorm.DB) error {
 		return nil
 	}
 
-	log.Println("[>0.0.5] Legacy ClientInfo table detected, starting data migration...")
+	logger.InfoArgs("migration", "[>0.0.5] Legacy ClientInfo table detected, starting data migration...")
 	if err := db.AutoMigrate(&models.Client{}); err != nil {
 		return err
 	}
@@ -384,7 +384,7 @@ func migrateLegacyClientInfo(db *gorm.DB) error {
 	for _, info := range clientInfos {
 		var client models.Client
 		if err := db.Where("uuid = ?", info.UUID).First(&client).Error; err != nil {
-			log.Printf("Could not find Client record with UUID %s: %v", info.UUID, err)
+			logger.Errorf("migration", "Could not find Client record with UUID %s: %v", info.UUID, err)
 			continue
 		}
 
@@ -416,7 +416,7 @@ func migrateLegacyClientInfo(db *gorm.DB) error {
 	if err := db.Migrator().RenameTable("client_infos", "client_infos_backup"); err != nil {
 		return fmt.Errorf("backup legacy ClientInfo table: %w", err)
 	}
-	log.Println("Data migration completed, old table has been backed up as client_infos_backup")
+	logger.InfoArgs("migration", "Data migration completed, old table has been backed up as client_infos_backup")
 	return nil
 }
 

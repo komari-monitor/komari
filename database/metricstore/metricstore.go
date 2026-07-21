@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"sort"
 	"strings"
 	"sync"
@@ -345,7 +345,7 @@ func InitializeStore() error {
 		setLowResourceMode(cfg.LowResourceMode)
 		clearStoreClosing()
 
-		log.Printf("Metric store initialized successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
+		logger.Infof("metricstore", "Metric store initialized successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
 	})
 
 	return initErr
@@ -387,11 +387,11 @@ func Reload(ctx context.Context) error {
 
 	if old != nil {
 		if cerr := old.Close(); cerr != nil {
-			log.Printf("Failed to close previous metric store on reload: %v", cerr)
+			logger.Errorf("metricstore", "Failed to close previous metric store on reload: %v", cerr)
 		}
 	}
 
-	log.Printf("Metric store reloaded successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
+	logger.Infof("metricstore", "Metric store reloaded successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
 	return nil
 }
 
@@ -967,7 +967,7 @@ func DeleteAllRecords(ctx context.Context) error {
 
 	for _, metricName := range recordMetricNames {
 		if _, err := s.DeleteBefore(ctx, metricName, farFuture()); err != nil {
-			log.Printf("Failed to delete metric %s: %v", metricName, err)
+			logger.Errorf("metricstore", "Failed to delete metric %s: %v", metricName, err)
 		}
 	}
 	clearReportTrafficStates()
@@ -1026,7 +1026,7 @@ func DeleteEntity(ctx context.Context, entityID string) error {
 func DeleteEntityAsync(entityID string) {
 	go func() {
 		if err := DeleteEntity(context.Background(), entityID); err != nil {
-			log.Printf("Failed to delete metric records for entity %s: %v", entityID, err)
+			logger.Errorf("metricstore", "Failed to delete metric records for entity %s: %v", entityID, err)
 		}
 	}()
 }
@@ -1037,11 +1037,11 @@ func DeleteMetricDataAsync(metricName string) {
 	go func() {
 		s := GetStore()
 		if s == nil {
-			log.Printf("Failed to delete disabled metric %s: metric store not enabled", metricName)
+			logger.Errorf("metricstore", "Failed to delete disabled metric %s: metric store not enabled", metricName)
 			return
 		}
 		if _, err := s.DeleteMetricDataIfDisabled(context.Background(), metricName); err != nil {
-			log.Printf("Failed to delete disabled metric %s: %v", metricName, err)
+			logger.Errorf("metricstore", "Failed to delete disabled metric %s: %v", metricName, err)
 		}
 	}()
 }

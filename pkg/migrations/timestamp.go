@@ -3,7 +3,7 @@ package migrations
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"math"
 	"os"
 	"strconv"
@@ -90,7 +90,7 @@ func migrateLegacyTimestampColumns(db *gorm.DB) error {
 		return err
 	}
 	if converted > 0 {
-		log.Printf("Converted %d legacy timestamp values to explicit UTC", converted)
+		logger.Infof("migration", "Converted %d legacy timestamp values to explicit UTC", converted)
 	}
 	return nil
 }
@@ -204,7 +204,7 @@ func legacyTimestampLocation() *time.Location {
 	}
 	location, err := time.LoadLocation(name)
 	if err != nil {
-		log.Printf("Legacy timezone %q cannot be loaded; interpreting old timestamps as UTC: %v", name, err)
+		logger.Infof("migration", "Legacy timezone %q cannot be loaded; interpreting old timestamps as UTC: %v", name, err)
 		return time.UTC
 	}
 	return location

@@ -1,7 +1,7 @@
 package factory
 
 import (
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 
 	"github.com/komari-monitor/komari/utils/item"
 )
@@ -19,7 +19,7 @@ func RegisterMessageSender(constructor MessageSenderConstructor) {
 		panic("Message sender constructor returned nil")
 	}
 	if _, exists := senders[sender.GetName()]; exists {
-		log.Println("Message sender already registered: " + sender.GetName())
+		logger.InfoArgs("message-sender", "Message sender already registered: "+sender.GetName())
 	}
 	senders[sender.GetName()] = sender
 
@@ -54,7 +54,7 @@ func GetAllMessageSenderNames() []string {
 func Initialize() {
 	for _, sender := range senders {
 		if err := sender.Init(); err != nil {
-			log.Printf("Failed to initialize message sender %s: %v", sender.GetName(), err)
+			logger.Errorf("message-sender", "Failed to initialize message sender %s: %v", sender.GetName(), err)
 		}
 	}
 }

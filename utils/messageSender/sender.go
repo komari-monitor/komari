@@ -3,7 +3,7 @@ package messageSender
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"strings"
 	"sync"
 	"time"
@@ -51,14 +51,14 @@ func Initialize() {
 				config := provider.GetConfiguration()
 				configBytes, err := json.Marshal(config)
 				if err != nil {
-					log.Printf("Failed to marshal config for provider %s: %v", provider.GetName(), err)
+					logger.Errorf("message-sender", "Failed to marshal config for provider %s: %v", provider.GetName(), err)
 					return
 				}
 				if err := database.SaveMessageSenderConfig(&models.MessageSenderProvider{
 					Name:     provider.GetName(),
 					Addition: string(configBytes),
 				}); err != nil {
-					log.Printf("Failed to save default config for provider %s: %v", provider.GetName(), err)
+					logger.Errorf("message-sender", "Failed to save default config for provider %s: %v", provider.GetName(), err)
 					return
 				}
 			}

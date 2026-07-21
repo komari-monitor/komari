@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/spf13/cobra"
@@ -31,19 +31,19 @@ func RunServer() {
 	app := NewApp()
 	if err := app.Bootstrap(); err != nil {
 		_ = app.Shutdown()
-		log.Fatalf("server startup failed at %q: %v", "bootstrap", err)
+		logger.Fatalf("server", "server startup failed at %q: %v", "bootstrap", err)
 	}
 
 	required, summary, err := app.LegacyUpgradeRequired()
 	if err != nil {
 		_ = app.Shutdown()
-		log.Fatalf("server startup failed at %q: %v", "detect-1.2.7-upgrade", err)
+		logger.Fatalf("server", "server startup failed at %q: %v", "detect-1.2.7-upgrade", err)
 	}
 	if required {
 		completed, err := app.RunLegacyUpgrade(summary)
 		if err != nil {
 			_ = app.Shutdown()
-			log.Fatalf("server startup failed at %q: %v", "run-1.2.7-upgrade", err)
+			logger.Fatalf("server", "server startup failed at %q: %v", "run-1.2.7-upgrade", err)
 		}
 		if !completed {
 			return
@@ -65,11 +65,11 @@ func RunServer() {
 		if err := s.fn(); err != nil {
 			// 已登记的资源尽力回收，再退出。
 			_ = app.Shutdown()
-			log.Fatalf("server startup failed at %q: %v", s.name, err)
+			logger.Fatalf("server", "server startup failed at %q: %v", s.name, err)
 		}
 	}
 
 	if err := app.Run(); err != nil {
-		log.Fatalf("server exited with error: %v", err)
+		logger.Fatalf("server", "server exited with error: %v", err)
 	}
 }

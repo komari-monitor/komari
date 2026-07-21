@@ -3,7 +3,7 @@ package metricstore
 import (
 	"context"
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"strings"
 	"time"
 
@@ -74,12 +74,12 @@ func migrateFromPreviousStore(prevFingerprint string, cfg *MetricStoreConfig, ds
 	}
 	defer src.Close()
 
-	log.Printf("Migrating metrics from previous store %s to current target...", prevFingerprint)
+	logger.Infof("metricstore", "Migrating metrics from previous store %s to current target...", prevFingerprint)
 	total, err := MigrateBetweenStores(ctx, src, dst)
 	if err != nil {
 		return fmt.Errorf("store-to-store metrics migration failed: %w", err)
 	}
-	log.Printf("Store-to-store metrics migration completed (%d points)", total)
+	logger.Infof("metricstore", "Store-to-store metrics migration completed (%d points)", total)
 	return nil
 }
 
@@ -169,7 +169,7 @@ func migrateBetweenStores(ctx context.Context, src, dst *metric.Store, observe s
 			}
 		}
 		if migrated > 0 {
-			log.Printf("[store-migration] metric %q: migrated %d points", def.Name, migrated)
+			logger.Infof("metricstore", "[store-migration] metric %q: migrated %d points", def.Name, migrated)
 		}
 	}
 

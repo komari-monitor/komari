@@ -3,7 +3,7 @@ package corn
 import (
 	"context"
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"strconv"
 	"strings"
 	"sync"
@@ -172,7 +172,7 @@ func (m *Manager) run(ctx context.Context, name string, s schedule, runImmediate
 
 	nextTick := s.Next(time.Now())
 	if nextTick.IsZero() {
-		log.Printf("corn job %s has no next run time", name)
+		logger.Warnf("scheduler", "corn job %s has no next run time", name)
 		return
 	}
 	timer := time.NewTimer(time.Until(nextTick))
@@ -203,7 +203,7 @@ func resetTimer(timer *time.Timer, duration time.Duration) {
 func safeRun(ctx context.Context, name string, fn Func) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("corn job %s panic: %v", name, r)
+			logger.Errorf("scheduler", "corn job %s panic: %v", name, r)
 		}
 	}()
 

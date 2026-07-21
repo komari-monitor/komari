@@ -2,7 +2,7 @@ package notifier
 
 import (
 	"fmt"
-	"log"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"sync"
 	"time"
 
@@ -40,7 +40,7 @@ func getNotificationConfig(clientID string) (*models.OfflineNotification, bool) 
 	notiConf := models.OfflineNotification{Client: clientID}
 	db := dbcore.GetDBInstance()
 	if err := db.Model(&models.OfflineNotification{}).Where("client = ?", clientID).FirstOrCreate(&notiConf).Error; err != nil {
-		log.Printf("Failed to get or create offline notification config for client %s: %v", clientID, err)
+		logger.Errorf("notifier", "Failed to get or create offline notification config for client %s: %v", clientID, err)
 		return nil, false
 	}
 
@@ -96,7 +96,7 @@ func OfflineNotification(clientID string, endedConnectionID int64) {
 		// 若为零值，说明客户端已重连。
 		// 当前的 connectionID 是否还是我们触发离线时的那个ID。如果不是，说明客户端重连过，本次离线通知已失效。
 		if state.pendingOfflineSince.IsZero() || state.connectionID != expectedConnectionID {
-			log.Printf("%s is reconnected new connID: %d, old connID: %d", clientID, state.connectionID, expectedConnectionID)
+			logger.Infof("notifier", "%s is reconnected new connID: %d, old connID: %d", clientID, state.connectionID, expectedConnectionID)
 			return
 		}
 
@@ -115,14 +115,14 @@ func OfflineNotification(clientID string, endedConnectionID int64) {
 				//Message: msg,
 				Emoji: "🔴",
 			}); err != nil {
-				log.Println("Failed to send offline notification:", err)
+				logger.ErrorArgs("notifier", "Failed to send offline notification:", err)
 			}
 		}(message)
 
 		// 更新数据库中的最后通知时间
 		db := dbcore.GetDBInstance()
 		if err := db.Model(&models.OfflineNotification{}).Where("client = ?", clientID).Update("last_notified", now.UTC()).Error; err != nil {
-			log.Printf("Failed to update last_notified for client %s: %v", clientID, err)
+			logger.Errorf("notifier", "Failed to update last_notified for client %s: %v", clientID, err)
 		}
 	}(now, endedConnectionID)
 }
@@ -168,7 +168,7 @@ func OnlineNotification(clientID string, connectionID int64) {
 	// 规则3: 没断开后重连, 不通知
 	// 为了解决OfflineNotify中不是全程加锁
 	if state.isConnExist {
-		log.Printf("%s has connection exist: %d", clientID, connectionID)
+		logger.Infof("notifier", "%s has connection exist: %d", clientID, connectionID)
 		return
 	} else {
 		state.isConnExist = true
@@ -184,7 +184,7 @@ func OnlineNotification(clientID string, connectionID int64) {
 			//Message: msg,
 			Emoji: "🟢",
 		}); err != nil {
-			log.Println("Failed to send online notification:", err)
+			logger.ErrorArgs("notifier", "Failed to send online notification:", err)
 		}
 	}(message)
 }
