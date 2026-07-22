@@ -85,6 +85,10 @@ func registerAdminRoutes(r *gin.Engine) {
 	// --- 二进制/流/重定向类，保留 REST handler ---
 	g.GET("/download/backup", admin.DownloadBackup)
 	g.POST("/upload/backup", admin.UploadBackup)
+	// chunk upload 用于大备份文件分块上传，提高稳定性
+	g.POST("/upload/backup/init", admin.InitChunkUpload)
+	g.POST("/upload/backup/chunk", admin.UploadChunk)
+	g.POST("/upload/backup/merge", admin.MergeChunkUpload)
 	g.GET("/test/geoip", jsonRpc.Bind("admin:testGeoip", jsonRpc.WithQuery("ip")))
 	g.POST("/test/sendMessage", jsonRpc.Bind("admin:testSendMessage"))
 	g.POST("/update/mmdb", admin.UpdateMmdbGeoIP)
