@@ -75,6 +75,10 @@ func replaceHTMLLanguage(htmlStr, language string) string {
 	return htmlStr
 }
 
+func stripServiceWorkerRegistration(html string) string {
+	return strings.ReplaceAll(html, `<script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script>`, "")
+}
+
 // isSafePath 验证路径是否在指定的基础目录内，防止路径穿透攻击
 func isSafePath(basePath, targetPath string) bool {
 	// 获取基础目录的绝对路径
@@ -108,6 +112,17 @@ func isSafePath(basePath, targetPath string) bool {
 
 // Static 注册静态资源和 SPA 路由处理
 func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
+	static(r, noRoute, false)
+}
+
+// StaticRestricted serves only the embedded default frontend. Restricted
+// startup listeners must not let an installed theme override same-named JS,
+// CSS, manifest, or favicon assets used by login and recovery pages.
+func StaticRestricted(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
+	static(r, noRoute, true)
+}
+
+func static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), forceDefaultTheme bool) {
 	// 初始化嵌入式文件系统，指向 defaultTheme 根目录
 	// 假设 defaultTheme 内部结构也是: dist/, theme.json 等
 	defaultThemeFS, err := fs.Sub(PublicFS, "defaultTheme")
@@ -180,7 +195,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		shouldReplace := true
 
 		// 特殊页面：强制使用 default 主题，且不进行内容替换
-		if strings.HasPrefix(reqPath, "/admin") || strings.HasPrefix(reqPath, "/terminal") {
+		if forceDefaultTheme || strings.HasPrefix(reqPath, "/admin") || strings.HasPrefix(reqPath, "/terminal") {
 			currentTheme = DefaultTheme
 			shouldReplace = false
 		}
@@ -195,6 +210,9 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		}
 
 		htmlStr := string(content)
+		if forceDefaultTheme {
+			htmlStr = stripServiceWorkerRegistration(htmlStr)
+		}
 		if language, err := c.Cookie(LanguageCookieName); err == nil {
 			htmlStr = replaceHTMLLanguage(htmlStr, language)
 		}
@@ -217,21 +235,26 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	}
 
 	// ================= 路由定义 =================
-
 	// 1. Favicon 优先策略
 	r.GET("/favicon.ico", func(c *gin.Context) {
 		// 优先：./data/favicon.ico
 		localFavicon := filepath.Join(DataDir, FaviconFile)
-		if _, err := os.Stat(localFavicon); err == nil {
-			c.File(localFavicon)
-			return
+		if !forceDefaultTheme {
+			if _, err := os.Stat(localFavicon); err == nil {
+				c.File(localFavicon)
+				return
+			}
 		}
 
 		// 其次：当前主题的 dist/favicon.ico 或 theme_root/favicon.ico ?
 		// 通常构建后的资源在 dist 中，这里假设优先找 dist 内的，如果你的 favicon 在根目录，去掉 DistDir 拼接即可
 		cfg := getConfig()
 		themeFaviconPath := path.Join(DistDir, FaviconFile)
-		content, mimeType, exists := getFileContent(cfg[config.ThemeKey].(string), themeFaviconPath)
+		currentTheme := cfg[config.ThemeKey].(string)
+		if forceDefaultTheme {
+			currentTheme = DefaultTheme
+		}
+		content, mimeType, exists := getFileContent(currentTheme, themeFaviconPath)
 		if exists {
 			c.Data(http.StatusOK, mimeType, content)
 			return
@@ -244,6 +267,13 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	// 允许访问 /themes/MyTheme/theme.json 和 /themes/MyTheme/dist/assets/a.js
 	r.GET("/themes/:id/*path", func(c *gin.Context) {
 		themeID := c.Param("id")
+		if forceDefaultTheme && themeID != DefaultTheme {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		if forceDefaultTheme {
+			themeID = DefaultTheme
+		}
 		// c.Param("path") 包含了开头的 /，getFileContent 会处理
 		filePath := c.Param("path")
 
@@ -300,6 +330,9 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		reqPath := c.Request.URL.Path
 		cfg := getConfig()
 		currentTheme := cfg[config.ThemeKey].(string)
+		if forceDefaultTheme {
+			currentTheme = DefaultTheme
+		}
 
 		// SPA 静态资源回退
 		distPath := path.Join(DistDir, reqPath)

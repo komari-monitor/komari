@@ -1,6 +1,18 @@
 package public
 
-import "testing"
+import (
+	"io"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/pkg/config"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
 
 func TestNormalizeHTMLLanguage(t *testing.T) {
 	tests := map[string]struct {
@@ -61,5 +73,58 @@ func TestReplaceHTMLLanguage(t *testing.T) {
 				t.Fatalf("replaceHTMLLanguage() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStaticRestrictedDoesNotServeCustomAssetOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Chdir(t.TempDir())
+	assetPath := filepath.Join("data", "theme", "custom", "dist", "assets")
+	if err := os.MkdirAll(assetPath, 0o755); err != nil {
+		t.Fatalf("create custom theme asset directory: %v", err)
+	}
+	const assetName = "about-D4JKo971.css"
+	if err := os.WriteFile(filepath.Join(assetPath, assetName), []byte("custom override"), 0o644); err != nil {
+		t.Fatalf("write custom theme asset: %v", err)
+	}
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open config db: %v", err)
+	}
+	config.SetDb(db)
+	if err := config.Set(config.ThemeKey, "custom"); err != nil {
+		t.Fatalf("set custom theme: %v", err)
+	}
+
+	router := gin.New()
+	StaticRestricted(router.Group("/"), func(handlers ...gin.HandlerFunc) {
+		router.NoRoute(handlers...)
+	})
+	for _, requestPath := range []string{"/assets/" + assetName} {
+		request := httptest.NewRequest("GET", requestPath, nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != 200 {
+			t.Fatalf("restricted asset %s status = %d, want 200", requestPath, recorder.Code)
+		}
+		body, err := io.ReadAll(recorder.Result().Body)
+		if err != nil {
+			t.Fatalf("read restricted asset %s: %v", requestPath, err)
+		}
+		if string(body) == "custom override" {
+			t.Fatalf("restricted listener served a custom theme asset override for %s", requestPath)
+		}
+	}
+
+	indexRequest := httptest.NewRequest("GET", "/database-recovery", nil)
+	indexRecorder := httptest.NewRecorder()
+	router.ServeHTTP(indexRecorder, indexRequest)
+	indexBody, err := io.ReadAll(indexRecorder.Result().Body)
+	if err != nil {
+		t.Fatalf("read restricted index: %v", err)
+	}
+	if strings.Contains(string(indexBody), `vite-plugin-pwa:register-sw`) {
+		t.Fatal("restricted index still registers a service worker")
 	}
 }

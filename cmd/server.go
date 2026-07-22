@@ -66,7 +66,20 @@ func RunServer() {
 		}
 	}
 
-	// 初始化阶段：任一步失败都不应继续对外服务。
+	// Metric store 是唯一允许进入恢复向导的启动阶段：主库已经在
+	// Bootstrap 中就绪，因此可以保留登录能力并让管理员修正 DSN。
+	if err := app.ConnectMetricStoreWithRetry(); err != nil {
+		completed, recoveryErr := app.RunMetricStoreRecovery(err)
+		if recoveryErr != nil {
+			_ = app.Shutdown()
+			logger.Fatalf("server", "server startup failed at %q: %v", "metric-store-recovery", recoveryErr)
+		}
+		if !completed {
+			return
+		}
+	}
+
+	// 其余初始化阶段：任一步失败都不应继续对外服务。
 	type stage struct {
 		name string
 		fn   func() error

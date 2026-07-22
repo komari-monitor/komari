@@ -19,7 +19,7 @@ var (
 	store             *metric.Store
 	storeFingerprint  string
 	storeMu           sync.RWMutex
-	storeOnce         sync.Once
+	storeInitMu       sync.Mutex
 	storeOperations   = newStoreOperationGate()
 	compactOperations = newStoreOperationGate()
 	compactAt         int
@@ -314,37 +314,98 @@ func TestConnection(ctx context.Context, cfg *MetricStoreConfig) error {
 	return s.Ping(ctx)
 }
 
-// InitializeStore 初始化 metric store（启动时调用，仅执行一次）。
+// InitializeStore 初始化 metric store（启动时调用，可在失败后重试）。
 func InitializeStore() error {
-	var initErr error
-	storeOnce.Do(func() {
-		cfg, err := config.GetManyAs[MetricStoreConfig]()
-		if err != nil {
-			initErr = fmt.Errorf("failed to load metric store config: %w", err)
-			return
+	storeInitMu.Lock()
+	defer storeInitMu.Unlock()
+
+	// A previous failed connection must remain retryable. The old sync.Once
+	// implementation consumed the one-time call on failure and returned nil on
+	// every later call while the store was still nil.
+	storeMu.RLock()
+	initialized := store != nil
+	storeMu.RUnlock()
+	if initialized {
+		return nil
+	}
+
+	cfg, err := config.GetManyAs[MetricStoreConfig]()
+	if err != nil {
+		return fmt.Errorf("failed to load metric store config: %w", err)
+	}
+
+	// metric store 始终启用；未配置时默认 SQLite（./data/metrics.db）。
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s, err := openStore(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
+	storeMu.Lock()
+	store = s
+	storeFingerprint = targetFingerprint(cfg)
+	storeMu.Unlock()
+	setLowResourceMode(cfg.LowResourceMode)
+	clearStoreClosing()
+
+	logger.Infof("metricstore", "Metric store initialized successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
+	return nil
+}
+
+// RecoverStore opens, persists, and activates a replacement store selected
+// from the restricted recovery page. Marking the opened target as current
+// makes the normal startup migration a no-op: recovery reconnects only and
+// never copies data from the unavailable store.
+func RecoverStore(ctx context.Context, cfg *MetricStoreConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("metric store recovery config is nil")
+	}
+
+	storeInitMu.Lock()
+	defer storeInitMu.Unlock()
+	if err := storeOperations.Acquire(ctx); err != nil {
+		return fmt.Errorf("wait for metric store operations before recovery: %w", err)
+	}
+	defer storeOperations.Release()
+	if isStoreClosing() {
+		return ErrStoreBusy
+	}
+
+	recovered := *cfg
+	recovered.DSN = strings.TrimSpace(recovered.DSN)
+	recovered.Driver = string(ResolveDriverFromConfig(recovered.Driver, recovered.DSN))
+	s, err := openStore(ctx, &recovered)
+	if err != nil {
+		return err
+	}
+
+	target := targetFingerprint(&recovered)
+	if err := config.SetMany(map[string]any{
+		MetricDBDriverKey:  recovered.Driver,
+		MetricDBDSNKey:     recovered.DSN,
+		MigrationTargetKey: target,
+	}); err != nil {
+		_ = s.Close()
+		return fmt.Errorf("save recovered metric store config: %w", err)
+	}
+
+	storeMu.Lock()
+	old := store
+	store = s
+	storeFingerprint = target
+	storeMu.Unlock()
+	setLowResourceMode(recovered.LowResourceMode)
+	clearStoreClosing()
+
+	if old != nil {
+		if closeErr := old.Close(); closeErr != nil {
+			logger.Errorf("metricstore", "Failed to close previous metric store during recovery: %v", closeErr)
 		}
-
-		// metric store 始终启用；未配置时默认 SQLite（./data/metrics.db）。
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		s, err := openStore(ctx, cfg)
-		if err != nil {
-			initErr = err
-			return
-		}
-
-		storeMu.Lock()
-		store = s
-		storeFingerprint = targetFingerprint(cfg)
-		storeMu.Unlock()
-		setLowResourceMode(cfg.LowResourceMode)
-		clearStoreClosing()
-
-		logger.Infof("metricstore", "Metric store initialized successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
-	})
-
-	return initErr
+	}
+	logger.Infof("metricstore", "Metric store recovered successfully (driver=%s)", recovered.Driver)
+	return nil
 }
 
 // Reload 根据最新配置热重载 metric store，无需重启进程。

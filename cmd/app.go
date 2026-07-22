@@ -36,6 +36,7 @@ import (
 	installweb "github.com/komari-monitor/komari/web/install"
 	"github.com/komari-monitor/komari/web/oauth"
 	frontendpublic "github.com/komari-monitor/komari/web/public"
+	recoveryweb "github.com/komari-monitor/komari/web/recovery"
 	"github.com/komari-monitor/komari/web/router"
 	"github.com/komari-monitor/komari/web/security"
 	upgradeweb "github.com/komari-monitor/komari/web/update"
@@ -66,15 +67,21 @@ type cleanupFunc struct {
 // 每个阶段返回错误即可让上层决定是否中止启动；各资源在创建时把对应清理登记到
 // cleanup 栈，关闭时按后进先出（LIFO）顺序释放。
 type App struct {
-	settings   *config.Settings
-	engine     *gin.Engine
-	server     *http.Server
-	reload     *ReloadManager
-	dbReady    bool
-	oauthReady bool
+	settings                *config.Settings
+	engine                  *gin.Engine
+	server                  *http.Server
+	reload                  *ReloadManager
+	dbReady                 bool
+	oauthReady              bool
+	metricStoreCleanupAdded bool
 
 	cleanups []cleanupFunc
 }
+
+const (
+	metricStoreReconnectAttempts = 3
+	metricStoreReconnectInterval = 5 * time.Second
+)
 
 // NewApp 构造一个空的 App。真正的初始化在各阶段方法中完成。
 func NewApp() *App {
@@ -156,23 +163,78 @@ func ensureLowResourceModeDefault() (bool, error) {
 	return result.LowResource, nil
 }
 
-// InitStores 初始化独立存储组件（metric store）并执行 metrics 迁移。
-//
-// metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）：
-// 未显式配置时使用 SQLite（./data/metrics.db），否则使用配置的 MySQL/PostgreSQL。
-// 初始化失败即启动失败，不再静默 fallback 到旧 records 表。
-//
-// 初始化成功后先执行需要 metric store 的一次性迁移，再执行启动迁移：当 metrics
-// 存储后端发生变化（例如从默认 SQLite 切换到 MySQL/PostgreSQL）时，把上一个
-// metrics 目标库的数据搬运到当前目标。迁移失败同样让启动失败，并打印明确错误。
-func (a *App) InitStores() error {
+// ConnectMetricStore performs one connection attempt and registers its
+// cleanup only after a store has actually been opened. InitializeStore is
+// retryable, so a failed attempt does not poison later attempts.
+func (a *App) ConnectMetricStore() error {
 	if err := metricstore.InitializeStore(); err != nil {
-		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize metric store: %v", err))
-		return fmt.Errorf("failed to initialize metric store: %w", err)
+		return fmt.Errorf("failed to initialize metric store: %s", redactMetricStoreError(err))
 	}
-	a.addCleanup("metric-store", func(ctx context.Context) error {
-		return metricstore.CloseStoreContext(ctx)
+	if !a.metricStoreCleanupAdded {
+		a.addCleanup("metric-store", func(ctx context.Context) error {
+			return metricstore.CloseStoreContext(ctx)
+		})
+		a.metricStoreCleanupAdded = true
+	}
+	return nil
+}
+
+func redactMetricStoreError(err error) string {
+	if err == nil {
+		return ""
+	}
+	dsn := ""
+	if cfg, cfgErr := config.GetManyAs[metricstore.MetricStoreConfig](); cfgErr == nil {
+		dsn = cfg.DSN
+	}
+	return metricstore.RedactConnectionError(err.Error(), dsn)
+}
+
+// ConnectMetricStoreWithRetry retries a failed monitoring database connection
+// every five seconds. The initial attempt is immediate; the interval applies
+// between subsequent attempts.
+func (a *App) ConnectMetricStoreWithRetry() error {
+	attempt := 0
+	err := retryMetricStoreConnection(metricStoreReconnectAttempts, metricStoreReconnectInterval, func() error {
+		attempt++
+		err := a.ConnectMetricStore()
+		if err != nil {
+			logger.Warn("server", "Metric store connection attempt failed", "attempt", attempt, "max_attempts", metricStoreReconnectAttempts, "error", err)
+		}
+		return err
 	})
+	if err == nil && attempt > 1 {
+		logger.Infof("server", "Metric store connection recovered on attempt %d/%d", attempt, metricStoreReconnectAttempts)
+	}
+	return err
+}
+
+func retryMetricStoreConnection(attempts int, interval time.Duration, connect func() error) error {
+	if attempts < 1 {
+		return fmt.Errorf("metric store retry attempts must be positive")
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(interval)
+		}
+		if err := connect(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// InitStores initializes independent storage components and runs metrics
+// migrations. The connection itself is established by ConnectMetricStore so
+// startup can enter the restricted recovery flow after repeated failures.
+func (a *App) InitStores() error {
+	if err := a.ConnectMetricStore(); err != nil {
+		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize metric store: %v", err))
+		return err
+	}
 
 	if err := migrations.RunMetricStoreMigrations(migrations.MetricContext{
 		DB:    dbcore.GetDBInstance(),
@@ -181,7 +243,6 @@ func (a *App) InitStores() error {
 		auditlog.EventLog("error", fmt.Sprintf("Metric store one-shot migrations failed: %v", err))
 		return fmt.Errorf("metric store one-shot migrations failed: %w", err)
 	}
-
 	// 存储后端切换时把上一个 metrics 目标库的数据搬运到当前目标（失败即启动失败）。
 	if err := metricstore.RunStartupMigration(); err != nil {
 		auditlog.EventLog("error", fmt.Sprintf("Metrics startup migration failed: %v", err))
@@ -309,6 +370,81 @@ func (a *App) RunInstallGuide() (bool, error) {
 		defer cancel()
 		if err := a.server.Shutdown(ctx); err != nil {
 			return false, fmt.Errorf("stop install server: %w", err)
+		}
+		a.server = nil
+		a.engine = nil
+		return true, nil
+	}
+}
+
+// RunMetricStoreRecovery serves the authenticated DSN-only recovery page
+// after the monitoring database has failed all automatic reconnect attempts.
+// The main SQLite database remains open, so existing administrator sessions
+// and password/OAuth login continue to work while the metric store is down.
+func (a *App) RunMetricStoreRecovery(initialErr error) (bool, error) {
+	a.initOAuth()
+	controller := recoveryweb.NewController(initialErr, metricStoreReconnectAttempts)
+	controller.Activate()
+	defer controller.Deactivate()
+
+	r := gin.New()
+	r.Use(logger.GinLogger())
+	r.Use(logger.GinRecovery())
+	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
+	r.Use(cors.Middleware())
+	r.Use(api.IdentityMiddleware())
+	r.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api") {
+			c.Header("Cache-Control", "no-store")
+		}
+		c.Next()
+	})
+
+	controller.Register(r)
+	frontendpublic.StaticRestricted(r.Group("/"), func(handlers ...gin.HandlerFunc) {
+		r.NoRoute(func(c *gin.Context) {
+			requestPath := c.Request.URL.Path
+			if strings.HasPrefix(requestPath, "/api") {
+				api.RespondError(c, http.StatusNotFound, "Not found in database recovery mode")
+				return
+			}
+			if c.Request.Method == http.MethodGet && requestPath != recoveryweb.PagePath && filepath.Ext(requestPath) == "" {
+				c.Redirect(http.StatusTemporaryRedirect, recoveryweb.PagePath)
+				return
+			}
+			for _, handler := range handlers {
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		})
+	})
+
+	a.engine = r
+	a.server = &http.Server{Addr: flags.Listen, Handler: r}
+	serverErr := make(chan error, 1)
+	logger.Infof("server", "Metric store recovery is available on %s", flags.Listen)
+	go func() {
+		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(quit)
+
+	select {
+	case err := <-serverErr:
+		return false, fmt.Errorf("listen in database recovery mode: %w", err)
+	case <-quit:
+		return false, a.Shutdown()
+	case <-controller.Done():
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := a.server.Shutdown(ctx); err != nil {
+			return false, fmt.Errorf("stop database recovery server: %w", err)
 		}
 		a.server = nil
 		a.engine = nil
@@ -457,6 +593,13 @@ func (a *App) BuildRouter() error {
 			c.Header("Cache-Control", "no-store")
 		}
 		c.Next()
+	})
+
+	// The recovery page only exists on the temporary listener. If a browser
+	// keeps its URL while the normal router comes back, leave the stale guide
+	// instead of serving it without its recovery API.
+	r.GET(recoveryweb.PagePath, func(c *gin.Context) {
+		c.Redirect(http.StatusTemporaryRedirect, "/")
 	})
 
 	router.Register(r)
