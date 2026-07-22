@@ -466,10 +466,10 @@ func writeReportBatch(ctx context.Context, reports []v1.Report) ([]v1.Report, er
 	if len(reports) == 0 {
 		return nil, nil
 	}
-	if err := storeOperations.Acquire(ctx); err != nil {
+	if err := storeOperations.AcquireShared(ctx); err != nil {
 		return nil, fmt.Errorf("wait for metric store operation before writing reports: %w", err)
 	}
-	defer storeOperations.Release()
+	defer storeOperations.ReleaseShared()
 
 	s := GetStore()
 	if s == nil {

@@ -503,14 +503,14 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 		return 0, ErrCompactInProgress
 	}
 	defer compactOperations.Release()
-	if err := storeOperations.Acquire(ctx); err != nil {
-		return 0, fmt.Errorf("wait for metric store operations before compaction: %w", err)
+	if err := storeOperations.AcquireShared(ctx); err != nil {
+		return 0, fmt.Errorf("wait for metric store operation before compaction: %w", err)
 	}
-	defer storeOperations.Release()
+	defer storeOperations.ReleaseShared()
 
 	storeMu.RLock()
+	defer storeMu.RUnlock()
 	activeStore := store
-	storeMu.RUnlock()
 	if activeStore == nil {
 		return 0, fmt.Errorf("metric store not initialized")
 	}

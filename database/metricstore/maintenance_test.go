@@ -47,10 +47,10 @@ func TestReclaimSpaceReportsBusyStore(t *testing.T) {
 	}
 	installTestStore(t, s)
 
-	if !storeOperations.TryAcquire() {
-		t.Fatal("acquire store operation gate")
+	if err := storeOperations.AcquireShared(context.Background()); err != nil {
+		t.Fatalf("acquire shared store operation gate: %v", err)
 	}
-	defer storeOperations.Release()
+	defer storeOperations.ReleaseShared()
 
 	result, err := ReclaimSpace(context.Background())
 	if !errors.Is(err, ErrStoreBusy) {
@@ -62,10 +62,10 @@ func TestReclaimSpaceReportsBusyStore(t *testing.T) {
 	if !errors.Is(result.BeforeSizeError, ErrStoreBusy) || !errors.Is(result.AfterSizeError, ErrStoreBusy) {
 		t.Fatalf("busy result should mark both measurements unavailable: %#v", result)
 	}
-	compactCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := Compact(compactCtx, time.Now()); !errors.Is(err, context.Canceled) {
-		t.Fatalf("compact error = %v, want %v", err, context.Canceled)
+	compactCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := Compact(compactCtx, time.Now()); err != nil {
+		t.Fatalf("compact should not wait for report writes: %v", err)
 	}
 	if !compactOperations.TryAcquire() {
 		t.Fatal("acquire compact operation gate")

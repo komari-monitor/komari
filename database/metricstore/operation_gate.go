@@ -1,38 +1,40 @@
 package metricstore
 
-import "context"
+import (
+	"context"
 
-// storeOperationGate serializes operations that need a stable active Store.
-// A channel-backed gate supports both non-blocking scheduled work and
-// context-aware admin/shutdown waits.
+	"golang.org/x/sync/semaphore"
+)
+
+// storeOperationGate keeps an active Store stable while allowing regular
+// reads, report writes, and compaction to proceed together. Store replacement
+// and maintenance take the whole gate exclusively.
 type storeOperationGate struct {
-	token chan struct{}
+	semaphore *semaphore.Weighted
 }
 
+const storeOperationGateWeight int64 = 1024
+
 func newStoreOperationGate() *storeOperationGate {
-	gate := &storeOperationGate{token: make(chan struct{}, 1)}
-	gate.token <- struct{}{}
-	return gate
+	return &storeOperationGate{semaphore: semaphore.NewWeighted(storeOperationGateWeight)}
 }
 
 func (g *storeOperationGate) Acquire(ctx context.Context) error {
-	select {
-	case <-g.token:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return g.semaphore.Acquire(ctx, storeOperationGateWeight)
 }
 
 func (g *storeOperationGate) TryAcquire() bool {
-	select {
-	case <-g.token:
-		return true
-	default:
-		return false
-	}
+	return g.semaphore.TryAcquire(storeOperationGateWeight)
 }
 
 func (g *storeOperationGate) Release() {
-	g.token <- struct{}{}
+	g.semaphore.Release(storeOperationGateWeight)
+}
+
+func (g *storeOperationGate) AcquireShared(ctx context.Context) error {
+	return g.semaphore.Acquire(ctx, 1)
+}
+
+func (g *storeOperationGate) ReleaseShared() {
+	g.semaphore.Release(1)
 }

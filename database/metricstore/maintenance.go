@@ -37,10 +37,10 @@ type MaintenanceResult struct {
 // InspectStorage reads physical storage information while preventing a store
 // reload from closing the active connection underneath the query.
 func InspectStorage(ctx context.Context) (StorageInfo, error) {
-	if err := storeOperations.Acquire(ctx); err != nil {
+	if err := storeOperations.AcquireShared(ctx); err != nil {
 		return StorageInfo{}, fmt.Errorf("wait for metric store operations before inspection: %w", err)
 	}
-	defer storeOperations.Release()
+	defer storeOperations.ReleaseShared()
 
 	storeMu.RLock()
 	activeStore := store
@@ -59,8 +59,8 @@ func InspectStorage(ctx context.Context) (StorageInfo, error) {
 }
 
 // ReclaimSpace performs the driver-specific physical maintenance operation.
-// It shares the exclusive operation lock with Compact so retention compaction
-// and a table/file rewrite can never run against the metric store concurrently.
+// It takes the exclusive operation lock, so a table/file rewrite cannot run
+// concurrently with report writes or compaction.
 func ReclaimSpace(ctx context.Context) (MaintenanceResult, error) {
 	if !storeOperations.TryAcquire() {
 		storeMu.RLock()
