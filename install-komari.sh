@@ -368,13 +368,7 @@ install_binary() {
     if systemctl is-active --quiet ${SERVICE_NAME}.service; then
         log_success "Komari 服务启动成功"
 
-        log_step "正在获取初始密码..."
-        sleep 5
-        local password=$(journalctl -u ${SERVICE_NAME} --since "1 minute ago" | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//')
-        if [ -z "$password" ]; then
-            log_error "未能获取初始密码，请检查日志"
-        fi
-        show_access_info "$password" "$LISTEN_PORT"
+        show_access_info "$LISTEN_PORT"
     else
         ui_msgbox "错误" "Komari 服务启动失败。\n\n查看日志: journalctl -u ${SERVICE_NAME} -f"
         return 1
@@ -408,16 +402,13 @@ EOF
 
 # Show access information
 show_access_info() {
-    local password=$1
-    local port=${2:-$DEFAULT_PORT}
+    local port=${1:-$DEFAULT_PORT}
     local ip=$(hostname -I | awk '{print $1}')
 
     local content="安装完成！\n\n"
     content+="访问信息：\n"
     content+="  URL: http://${ip}:${port}\n"
-    if [ -n "$password" ]; then
-        content+="  初始登录信息（仅显示一次）: ${password}\n"
-    fi
+    content+="\n首次使用请访问上述地址，按安装向导创建管理员账号。\n"
     content+="\n服务管理命令：\n"
     content+="  状态: systemctl status $SERVICE_NAME\n"
     content+="  启动: systemctl start $SERVICE_NAME\n"
