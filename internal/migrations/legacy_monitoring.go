@@ -26,11 +26,6 @@ const (
 
 var legacyMonitoringTables = []string{"records", "records_long_term", "gpu_records", "ping_records"}
 
-type MetricContext struct {
-	DB    *gorm.DB
-	Store *metric.Store
-}
-
 type LegacyMonitoringStats struct {
 	Records int64
 	GPU     int64
@@ -88,30 +83,9 @@ type legacyHourlyP95Aggregator struct {
 	groups       map[string]*legacyP95Group
 }
 
-// RunMetricStoreMigrations executes one-shot migrations that need the metric store
-// to be initialized. These cannot run inside Run because Run executes before the
-// metric store is opened.
-func RunMetricStoreMigrations(ctx MetricContext) error {
-	done, err := appconfig.GetAs[bool](legacyMonitoringMigrationDoneKey, false)
-	if err != nil {
-		return fmt.Errorf("read legacy monitoring migration marker: %w", err)
-	}
-
-	stats, err := runLegacyMonitoringMigration(context.Background(), ctx.DB, ctx.Store, done, func() error {
-		return appconfig.Set(legacyMonitoringMigrationDoneKey, true)
-	})
-	if err != nil {
-		return err
-	}
-	if stats.Records > 0 || stats.GPU > 0 || stats.Ping > 0 {
-		logger.Infof("migration", "Legacy monitoring table migration completed (records=%d, gpu=%d, ping=%d)", stats.Records, stats.GPU, stats.Ping)
-	}
-	return nil
-}
-
 // LegacyMonitoringMigrationRequired reports whether startup must enter the
-// restricted 1.2.7 upgrade flow. Empty legacy tables are handled by the normal
-// one-shot migration so fresh installations never see the wizard.
+// restricted 1.2.7 upgrade flow. The migration itself runs only after an
+// administrator explicitly starts it from that guide.
 func LegacyMonitoringMigrationRequired(db *gorm.DB) (bool, LegacyMonitoringSummary, error) {
 	done, err := appconfig.GetAs[bool](legacyMonitoringMigrationDoneKey, false)
 	if err != nil {

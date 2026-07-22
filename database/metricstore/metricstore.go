@@ -57,11 +57,16 @@ const (
 	MetricTablePrefixKey  = "metric_table_prefix"
 	MetricMaxOpenConnsKey = "metric_max_open_conns"
 	MetricMaxIdleConnsKey = "metric_max_idle_conns"
-	// MigrationTargetKey 记录上一次成功完成启动迁移的目标指纹（driver+dsn）。
-	// 当目标发生变化（例如从 SQLite 切换到 MySQL/PostgreSQL）时，启动迁移会
-	// 重新执行，把上一个目标库的数据搬运到新的目标 metrics 库。
+	// MigrationTargetKey 记录上一次成功完成手动迁移的目标指纹（driver+dsn），
+	// 用于在下一次管理员手动迁移时推断默认源库。
 	MigrationTargetKey = "metric_migration_target"
 )
+
+func targetFingerprint(cfg *MetricStoreConfig) string {
+	driver := ResolveDriverFromConfig(cfg.Driver, cfg.DSN)
+	dsn := strings.TrimSpace(cfg.DSN)
+	return fmt.Sprintf("%s|%s", driver, dsn)
+}
 
 // buildMetricConfig 根据 MetricStoreConfig 构造底层 metric.Config。
 // autoMigrate 控制是否在 Open 时自动建表：正式初始化/热加载时为 true，
@@ -355,9 +360,8 @@ func InitializeStore() error {
 }
 
 // RecoverStore opens, persists, and activates a replacement store selected
-// from the restricted recovery page. Marking the opened target as current
-// makes the normal startup migration a no-op: recovery reconnects only and
-// never copies data from the unavailable store.
+// from the restricted recovery page. It records that target as the current
+// manual-migration source, but does not copy data from the unavailable store.
 func RecoverStore(ctx context.Context, cfg *MetricStoreConfig) error {
 	if cfg == nil {
 		return fmt.Errorf("metric store recovery config is nil")
@@ -413,8 +417,7 @@ func RecoverStore(ctx context.Context, cfg *MetricStoreConfig) error {
 // 成功后再替换运行中的 store，最后关闭旧实例。任何失败都会保留旧 store 不变。
 //
 // 注意：Reload 只切换运行中的连接，不会把旧目标（如 SQLite）中的历史数据
-// 搬运到新目标（如 MySQL/PostgreSQL）。跨库数据迁移由启动迁移
-// （RunStartupMigration）在下次启动时按目标指纹自动完成。
+// 搬运到新目标（如 MySQL/PostgreSQL）。跨库数据迁移必须由管理员手动启动。
 func Reload(ctx context.Context) error {
 	if err := storeOperations.Acquire(ctx); err != nil {
 		return fmt.Errorf("wait for metric store operations before reload: %w", err)

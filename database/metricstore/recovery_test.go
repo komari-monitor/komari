@@ -65,7 +65,7 @@ func TestRecoverStoreFailureKeepsCurrentConfig(t *testing.T) {
 	}
 }
 
-func TestRecoverStoreActivatesWithoutStartupMigration(t *testing.T) {
+func TestRecoverStoreRecordsManualMigrationSource(t *testing.T) {
 	prepareRecoveryTest(t)
 	dsn := filepath.ToSlash(filepath.Join(t.TempDir(), "recovered.db"))
 	t.Cleanup(func() { _ = CloseStoreContext(context.Background()) })
@@ -79,8 +79,5 @@ func TestRecoverStoreActivatesWithoutStartupMigration(t *testing.T) {
 	wantTarget := targetFingerprint(cfg)
 	if got, _ := config.GetAs[string](MigrationTargetKey, ""); got != wantTarget {
 		t.Fatalf("migration target = %q, want %q", got, wantTarget)
-	}
-	if err := RunStartupMigration(); err != nil {
-		t.Fatalf("startup migration should be a no-op after recovery: %v", err)
 	}
 }

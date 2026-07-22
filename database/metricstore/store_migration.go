@@ -18,18 +18,15 @@ import (
 // ./data/metrics.db）中的全部指标数据搬运到当前正在运行的 metrics 目标库
 // （通常是用户新配置并热重载后的 MySQL/PostgreSQL）。
 //
-// 与启动迁移（RunStartupMigration）的区别：
-//   - 启动迁移在进程启动时自动、同步执行（komari.db → 当前 metrics 目标，或上一个
-//     metrics 目标 → 当前目标）。
-//   - 此处的 store 迁移由管理员在 WebUI 中「切换数据库后」手动触发，异步执行并可
-//     查询进度 / 取消。数据以 upsert 写入，可安全重复执行。
+// 此迁移仅能由管理员在 WebUI 中「切换数据库后」手动触发，异步执行并可查询进度 /
+// 取消。服务启动和指标库热重载均不会复制历史数据。数据以 upsert 写入，可安全重复执行。
 //
 // 典型流程：
 //  1. 管理员在设置中把 metric_db_dsn 改为 MySQL/PostgreSQL，保存 → 后端连接测试
 //     通过后热重载，当前 store 切到远端（此时远端为空）。
 //  2. 管理员调用 startMetricMigration（不带 source 参数），系统以上一个 metrics
 //     目标（默认 SQLite metrics.db）为源，把历史数据搬运到远端。
-//  3. 完成后登记目标指纹，下次启动不再重复搬运。
+//  3. 完成后登记目标指纹，供下一次手动迁移默认选择源库。
 
 // StoreMigrationProgress 描述一次 store-to-store 迁移的实时进度。
 type StoreMigrationProgress struct {
@@ -198,7 +195,7 @@ func runStoreMigration(ctx context.Context, cancel context.CancelFunc, done chan
 		return
 	}
 
-	// 搬运成功：登记当前目标指纹，避免下次启动重复搬运。
+	// 搬运成功：登记当前目标指纹，供下一次手动迁移推断源库。
 	if err := config.Set(MigrationTargetKey, targetFP); err != nil {
 		logger.Errorf("metricstore", "[store-migration] failed to persist migration target fingerprint: %v", err)
 	}

@@ -420,7 +420,7 @@ func doInitialize() error {
 	}
 	config.SetDb(instance)
 
-	// 配置库就绪后、执行后续 AutoMigrate 与一次性 metrics 迁移之前：
+	// 配置库就绪后、执行后续 AutoMigrate 之前：
 	// 基于配置中的版本标记检测升级并自动备份 ./data，便于回滚。
 	backupOnVersionUpgrade()
 
@@ -429,7 +429,7 @@ func doInitialize() error {
 	// 注意：负载/GPU/ping 历史监控数据运行期全部走 metric store（默认 SQLite
 	// ./data/metrics.db，或配置的 MySQL/PostgreSQL）。旧的 records /
 	// records_long_term / gpu_records / ping_records 表不再建表、不再写入。
-	// 若升级时旧表仍存在，会在 internal/migrations.RunMetricStoreMigrations 中先导入再清理。
+	// 若升级时旧表仍存在，管理员可通过升级向导显式导入并清理。
 	// models.Record / models.PingRecord / models.GPURecord 结构体仍作为
 	// metric store 的读写 DTO 和旧表导入 DTO 保留在 models 包中。
 

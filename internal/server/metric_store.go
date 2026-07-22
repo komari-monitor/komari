@@ -5,10 +5,8 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/internal/config"
-	"github.com/komari-monitor/komari/internal/migrations"
 	logger "github.com/komari-monitor/komari/utils/log"
 )
 
@@ -76,19 +74,12 @@ func retryMetricStoreConnection(attempts int, interval time.Duration, connect fu
 	return lastErr
 }
 
-// InitStores runs one-shot metric migrations after the connection is ready.
+// InitStores opens the metric store and starts its report batcher. Historical
+// data migrations are started only through an explicit administrator action.
 func (a *App) InitStores() error {
 	if err := a.ConnectMetricStore(); err != nil {
 		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize metric store: %v", err))
 		return err
-	}
-	if err := migrations.RunMetricStoreMigrations(migrations.MetricContext{DB: dbcore.GetDBInstance(), Store: metricstore.GetStore()}); err != nil {
-		auditlog.EventLog("error", fmt.Sprintf("Metric store one-shot migrations failed: %v", err))
-		return fmt.Errorf("metric store one-shot migrations failed: %w", err)
-	}
-	if err := metricstore.RunStartupMigration(); err != nil {
-		auditlog.EventLog("error", fmt.Sprintf("Metrics startup migration failed: %v", err))
-		return fmt.Errorf("metrics startup migration failed: %w", err)
 	}
 	metricstore.StartReportBatcher()
 	a.addCleanup("metric-report-batcher", metricstore.StopReportBatcher)

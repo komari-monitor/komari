@@ -26,7 +26,7 @@ func TestGinLoggerFormatsCompletedRequest(t *testing.T) {
 	router.ServeHTTP(httptest.NewRecorder(), request)
 
 	line := output.String()
-	if !regexp.MustCompile(`\[INFO/GIN\] 200 POST /api/clients/v2/rpc \| 8\.148\.73\.139 \| [^\r\n]+`).MatchString(line) {
+	if !regexp.MustCompile(`(?:\x1b\[\d+m)?\[INFO/GIN\](?:\x1b\[0m)? 200 POST /api/clients/v2/rpc \| 8\.148\.73\.139 \| [^\r\n]+`).MatchString(line) {
 		t.Fatalf("unexpected Gin log format %q", line)
 	}
 	if bytes.Contains([]byte(line), []byte("token=secret")) {

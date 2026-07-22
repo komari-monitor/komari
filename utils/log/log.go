@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 var defaultLogger *slog.Logger
@@ -125,6 +127,16 @@ func formatValue(value slog.Value) string {
 func Setup(level slog.Level) {
 	defaultLogger = slog.New(NewConsoleHandler(os.Stdout, level))
 	slog.SetDefault(defaultLogger)
+	// The MySQL driver otherwise writes critical connection errors directly to stderr.
+	_ = mysql.SetLogger(mysqlDriverLogger{})
+}
+
+// mysqlDriverLogger bridges go-sql-driver/mysql's Logger interface to the
+// process-wide structured logging surface.
+type mysqlDriverLogger struct{}
+
+func (mysqlDriverLogger) Print(args ...any) {
+	ErrorArgs("mysql", args...)
 }
 
 func logger() *slog.Logger {

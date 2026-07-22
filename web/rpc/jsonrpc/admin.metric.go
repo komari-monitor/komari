@@ -16,10 +16,9 @@ import (
 // admin.metric.go
 // Metrics 数据库迁移相关 RPC 方法（admin 命名空间）。
 //
-// 语义变更：过去这些方法用于把旧 komari.db 的 records/ping 表迁移到 metric store。
-// 现在“旧表 → metrics”已改为进程启动时自动一次性完成（见 metricstore.RunStartupMigration），
-// 无需 WebUI 介入。因此这些方法现在服务于「metrics 存储后端迁移」——即把默认
-// SQLite（./data/metrics.db）中的历史数据搬运到管理员新配置的 MySQL/PostgreSQL。
+// 这些方法服务于「metrics 存储后端迁移」：把默认 SQLite（./data/metrics.db）中的
+// 历史数据搬运到管理员新配置的 MySQL/PostgreSQL。此操作只会由管理员显式触发，
+// 服务启动不会自动迁移数据。
 //
 // 典型使用顺序（WebUI）：
 //  1. admin:editSettings 修改 metric_db_dsn 为 MySQL/PostgreSQL（后端会做连接测试

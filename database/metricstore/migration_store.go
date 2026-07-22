@@ -102,8 +102,8 @@ func MigrateBetweenStores(ctx context.Context, src, dst *metric.Store) (int64, e
 }
 
 // migrateBetweenStores 是 MigrateBetweenStores 的内部实现，额外接受一个可选的进度
-// 观察者 observe（为 nil 时行为与旧版本完全一致）。启动迁移走 nil，WebUI/API 触发
-// 的迁移传入回调以实时更新进度。
+// 观察者 observe（为 nil 时行为与旧版本完全一致）。WebUI/API 手动触发的迁移传入
+// 回调以实时更新进度。
 func migrateBetweenStores(ctx context.Context, src, dst *metric.Store, observe storeMigrationObserver) (int64, error) {
 	if src == nil || dst == nil {
 		return 0, fmt.Errorf("source or destination metric store is nil")
