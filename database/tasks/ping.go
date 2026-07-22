@@ -149,9 +149,8 @@ func DeleteAllPingRecords() error {
 }
 
 func ReloadPingSchedule() error {
-	db := dbcore.GetDBInstance()
-	var pingTasks []models.PingTask
-	if err := db.Find(&pingTasks).Error; err != nil {
+	pingTasks, err := GetAllPingTasks()
+	if err != nil {
 		return err
 	}
 	return utils.ReloadPingSchedule(pingTasks)

@@ -40,3 +40,29 @@ func TestClearTaskResultsByTimeBeforeUsesUTCTimeValue(t *testing.T) {
 		t.Fatalf("remaining results = %#v, want boundary and new", remaining)
 	}
 }
+
+func TestGetAllPingTasksOrdersByWeightThenID(t *testing.T) {
+	flags.DatabaseType = flags.DatabaseTypeSQLite
+	flags.DatabaseFile = "file:ping_task_order?mode=memory&cache=shared"
+	db := dbcore.GetDBInstance()
+
+	tasks := []models.PingTask{
+		{Name: "third", Weight: 2, Type: "icmp", Target: "third.example", Interval: 60},
+		{Name: "first", Weight: 0, Type: "icmp", Target: "first.example", Interval: 60},
+		{Name: "second", Weight: 0, Type: "icmp", Target: "second.example", Interval: 60},
+	}
+	if err := db.Create(&tasks).Error; err != nil {
+		t.Fatalf("create ping tasks: %v", err)
+	}
+
+	ordered, err := GetAllPingTasks()
+	if err != nil {
+		t.Fatalf("get ordered ping tasks: %v", err)
+	}
+	if len(ordered) != len(tasks) {
+		t.Fatalf("ordered ping task count = %d, want %d", len(ordered), len(tasks))
+	}
+	if ordered[0].Id != tasks[1].Id || ordered[1].Id != tasks[2].Id || ordered[2].Id != tasks[0].Id {
+		t.Fatalf("ping task order = %#v, want ids [%d %d %d]", ordered, tasks[1].Id, tasks[2].Id, tasks[0].Id)
+	}
+}
