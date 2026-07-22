@@ -12,7 +12,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/database/records"
-	"github.com/komari-monitor/komari/pkg/corn"
+	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/utils/messageSender"
 )
 
@@ -31,7 +31,7 @@ func (m *LoadNotificationService) Reload(loadNotifications []models.LoadNotifica
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	corn.RemovePrefix("load-notification:")
+	scheduler.RemovePrefix("load-notification:")
 	m.tasks = make(map[int][]models.LoadNotification)
 
 	// 按Interval分组任务
@@ -45,7 +45,7 @@ func (m *LoadNotificationService) Reload(loadNotifications []models.LoadNotifica
 		interval := interval
 		tasks := append([]models.LoadNotification(nil), tasks...)
 		m.tasks[interval] = tasks
-		if err := corn.AddFunc(fmt.Sprintf("load-notification:%d", interval), corn.Every(time.Duration(interval)*time.Minute), func() {
+		if err := scheduler.AddFunc(fmt.Sprintf("load-notification:%d", interval), scheduler.Every(time.Duration(interval)*time.Minute), func() {
 			for _, task := range tasks {
 				go executeLoadNotificationTask(task)
 			}

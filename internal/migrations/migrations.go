@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
-	appconfig "github.com/komari-monitor/komari/pkg/config"
+	appconfig "github.com/komari-monitor/komari/internal/config"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )

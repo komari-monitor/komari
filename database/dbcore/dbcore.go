@@ -12,8 +12,8 @@ import (
 
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/pkg/config"
-	"github.com/komari-monitor/komari/pkg/migrations"
+	"github.com/komari-monitor/komari/internal/config"
+	"github.com/komari-monitor/komari/internal/migrations"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -429,7 +429,7 @@ func doInitialize() error {
 	// 注意：负载/GPU/ping 历史监控数据运行期全部走 metric store（默认 SQLite
 	// ./data/metrics.db，或配置的 MySQL/PostgreSQL）。旧的 records /
 	// records_long_term / gpu_records / ping_records 表不再建表、不再写入。
-	// 若升级时旧表仍存在，会在 pkg/migrations.RunMetricStoreMigrations 中先导入再清理。
+	// 若升级时旧表仍存在，会在 internal/migrations.RunMetricStoreMigrations 中先导入再清理。
 	// models.Record / models.PingRecord / models.GPURecord 结构体仍作为
 	// metric store 的读写 DTO 和旧表导入 DTO 保留在 models 包中。
 

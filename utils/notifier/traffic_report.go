@@ -14,29 +14,29 @@ import (
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
-	"github.com/komari-monitor/komari/pkg/config"
-	"github.com/komari-monitor/komari/pkg/corn"
+	"github.com/komari-monitor/komari/internal/config"
+	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/utils/messageSender"
 )
 
 // InitTrafficReportSchedule 注册三个定时任务：日报、周报、月报
 func InitTrafficReportSchedule() {
 	// 日报：每天凌晨 0 点
-	if err := corn.AddFunc("traffic-report-daily", "0 0 0 * * *", func() {
+	if err := scheduler.AddFunc("traffic-report-daily", "0 0 0 * * *", func() {
 		sendTrafficReport(true, false, false)
 	}); err != nil {
 		logger.ErrorArgs("notifier", "Failed to register daily traffic report job:", err)
 	}
 
 	// 周报：每周一凌晨 0 点 (dow=1)
-	if err := corn.AddFunc("traffic-report-weekly", "0 0 0 * * 1", func() {
+	if err := scheduler.AddFunc("traffic-report-weekly", "0 0 0 * * 1", func() {
 		sendTrafficReport(false, true, false)
 	}); err != nil {
 		logger.ErrorArgs("notifier", "Failed to register weekly traffic report job:", err)
 	}
 
 	// 月报：每月 1 日凌晨 0 点
-	if err := corn.AddFunc("traffic-report-monthly", "0 0 0 1 * *", func() {
+	if err := scheduler.AddFunc("traffic-report-monthly", "0 0 0 1 * *", func() {
 		sendTrafficReport(false, false, true)
 	}); err != nil {
 		logger.ErrorArgs("notifier", "Failed to register monthly traffic report job:", err)

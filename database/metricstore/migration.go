@@ -5,14 +5,14 @@ import (
 	logger "github.com/komari-monitor/komari/utils/log"
 	"strings"
 
-	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/internal/config"
 )
 
 // migration.go
 //
 // 启动阶段的 metrics 数据迁移。这里只处理 metrics 存储后端切换时的数据搬运
 // （例如默认 SQLite ./data/metrics.db 切换到 MySQL/PostgreSQL）。旧 komari.db
-// 监控表导入属于一次性迁移，见 pkg/migrations.RunMetricStoreMigrations。
+// 监控表导入属于一次性迁移，见 internal/migrations.RunMetricStoreMigrations。
 
 // targetFingerprint 返回当前 metrics 目标库的指纹（driver + 归一化 DSN），
 // 用于判断 metrics 存储后端是否发生变化（例如从 SQLite 切换到 MySQL/PostgreSQL）。

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/pkg/corn"
+	"github.com/komari-monitor/komari/internal/scheduler"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
@@ -27,7 +27,7 @@ func (m *PingTaskManager) Reload(pingTasks []models.PingTask) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	corn.RemovePrefix("ping:")
+	scheduler.RemovePrefix("ping:")
 	m.tasks = make(map[int][]models.PingTask)
 
 	// 按Interval分组任务
@@ -44,7 +44,7 @@ func (m *PingTaskManager) Reload(pingTasks []models.PingTask) error {
 		interval := interval
 		tasks := append([]models.PingTask(nil), tasks...)
 		m.tasks[interval] = tasks
-		if err := corn.AddContextFunc(fmt.Sprintf("ping:%d", interval), corn.Every(time.Duration(interval)*time.Second), false, func(ctx context.Context) {
+		if err := scheduler.AddContextFunc(fmt.Sprintf("ping:%d", interval), scheduler.Every(time.Duration(interval)*time.Second), false, func(ctx context.Context) {
 			for _, task := range tasks {
 				go executePingTask(ctx, task)
 			}

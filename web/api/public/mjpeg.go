@@ -21,7 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/models"
-	conf "github.com/komari-monitor/komari/pkg/config"
+	conf "github.com/komari-monitor/komari/internal/config"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"

@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
-	appconfig "github.com/komari-monitor/komari/pkg/config"
+	appconfig "github.com/komari-monitor/komari/internal/config"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )

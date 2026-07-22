@@ -1,4 +1,4 @@
-package corn
+package scheduler
 
 import (
 	"testing"

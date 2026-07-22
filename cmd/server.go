@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	appserver "github.com/komari-monitor/komari/internal/server"
 	logger "github.com/komari-monitor/komari/utils/log"
 
 	"github.com/komari-monitor/komari/cmd/flags"
@@ -25,10 +26,10 @@ func init() {
 
 // RunServer 按显式的生命周期阶段启动服务端。
 //
-// 具体各阶段的职责与顺序见 App（cmd/app.go）。这里只负责串联：
+// 具体各阶段的职责与顺序见 internal/server.App。这里只负责串联：
 // 任一初始化阶段失败即中止启动，避免在半初始化状态下对外提供服务。
 func RunServer() {
-	app := NewApp()
+	app := appserver.New(appserver.Options{ListenAddr: flags.Listen})
 	if err := app.Bootstrap(); err != nil {
 		_ = app.Shutdown()
 		logger.Fatalf("server", "server startup failed at %q: %v", "bootstrap", err)
