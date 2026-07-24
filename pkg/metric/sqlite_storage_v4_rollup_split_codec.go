@@ -15,6 +15,7 @@ const (
 	sqliteV4RollupSummaryMagic = "KMS4"
 	sqliteV4RollupDigestMagic  = "KMD4"
 	sqliteV4RollupDigestCodec  = 1
+	sqliteV4RollupDigestLevel  = 6
 )
 
 func encodeSQLiteV4RollupBlock(records []sqliteV4RollupRecord) (sqliteV4EncodedRollupBlock, error) {
@@ -98,7 +99,7 @@ func encodeSQLiteV4RollupBlock(records []sqliteV4RollupRecord) (sqliteV4EncodedR
 	if err != nil {
 		return sqliteV4EncodedRollupBlock{}, err
 	}
-	digestPayload, err := compressSQLiteV4RollupSection(digests.Bytes(), flate.BestCompression)
+	digestPayload, err := compressSQLiteV4RollupSection(digests.Bytes(), sqliteV4RollupDigestLevel)
 	if err != nil {
 		return sqliteV4EncodedRollupBlock{}, err
 	}
