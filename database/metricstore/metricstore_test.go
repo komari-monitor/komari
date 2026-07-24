@@ -629,6 +629,40 @@ func TestCompactStepDefersCleanupAndCheckpointUntilCycleEnd(t *testing.T) {
 	}
 }
 
+func TestRetryMetricWALCheckpointClearsPendingWAL(t *testing.T) {
+	ctx := context.Background()
+	dsn := filepath.Join(t.TempDir(), "compact-step-checkpoint-retry.db")
+	s, err := metric.Open(ctx, metric.SQLite(dsn,
+		metric.WithMaxOpenConns(1),
+		metric.WithSQLiteWALAutoCheckpoint(1_000_000),
+	))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	defer s.Close()
+	if err := s.UpsertMetric(ctx, metric.Definition{Name: "a.metric", Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatalf("upsert metric: %v", err)
+	}
+	now := time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)
+	if err := s.Write(ctx, metric.Point{MetricName: "a.metric", EntityID: "node", Timestamp: now, Value: 1}); err != nil {
+		t.Fatalf("write metric: %v", err)
+	}
+	previousPending := checkpointPending
+	checkpointPending = true
+	t.Cleanup(func() { checkpointPending = previousPending })
+
+	if size := fileSize(t, dsn+"-wal"); size == 0 {
+		t.Fatal("expected WAL content before retry")
+	}
+	retryMetricWALCheckpoint(ctx, s)
+	if checkpointPending {
+		t.Fatal("successful deferred WAL checkpoint remained pending")
+	}
+	if size := fileSize(t, dsn+"-wal"); size != 0 {
+		t.Fatalf("SQLite WAL size after deferred retry = %d, want 0", size)
+	}
+}
+
 func TestCompactStepAdvancesAfterMetricFailure(t *testing.T) {
 	ctx := context.Background()
 	dsn := filepath.Join(t.TempDir(), "compact-step-failure.db")

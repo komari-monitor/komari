@@ -23,6 +23,7 @@ var (
 	storeOperations   = newStoreOperationGate()
 	compactOperations = newStoreOperationGate()
 	compactAt         int
+	checkpointPending bool
 )
 
 var ErrCompactInProgress = errors.New("metric store compact already in progress")
@@ -32,6 +33,7 @@ const (
 	// served from rollups after compaction.
 	DefaultRollupRawRetention = 15 * time.Minute
 	DefaultRollupFinestTier   = time.Minute
+	checkpointRetryTimeout    = 250 * time.Millisecond
 )
 
 // MetricStoreConfig 保存 metric store 配置。
@@ -574,6 +576,7 @@ func CompactStep(ctx context.Context, now time.Time) (written int, cycleComplete
 	if activeStore == nil {
 		return 0, false, fmt.Errorf("metric store not initialized")
 	}
+	retryMetricWALCheckpoint(ctx, activeStore)
 
 	defs, err := activeStore.ListMetrics(ctx)
 	if err != nil {
@@ -608,11 +611,30 @@ func finishCompactCycle(ctx context.Context, activeStore *metric.Store, now time
 	if activeStore.Driver() == metric.DriverSQLite {
 		checkpointCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		if err := activeStore.CheckpointWAL(checkpointCtx); err != nil {
+			checkpointPending = true
 			logger.Warnf("metricstore", "Failed to truncate metric WAL after compaction: %v", err)
+		} else {
+			checkpointPending = false
 		}
 		cancel()
 	}
 	return errors.Join(compactErrors...)
+}
+
+func retryMetricWALCheckpoint(ctx context.Context, activeStore *metric.Store) {
+	if !checkpointPending {
+		return
+	}
+	if activeStore.Driver() != metric.DriverSQLite {
+		checkpointPending = false
+		return
+	}
+	retryCtx, cancel := context.WithTimeout(ctx, checkpointRetryTimeout)
+	err := activeStore.CheckpointWAL(retryCtx)
+	cancel()
+	if err == nil {
+		checkpointPending = false
+	}
 }
 
 // CloseStoreContext stops the asynchronous store migration before taking the
