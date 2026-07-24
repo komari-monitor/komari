@@ -531,31 +531,89 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 	}
 
 	servicingTier := bestRollupTier(policy, query.Interval, q.Start, now)
-	if q.Start.Before(rawCutoff) && !q.End.Before(rawCutoff) && servicingTier != nil {
-		if hasWatermark {
-			boundary := rawCutoff
-			if watermark.Before(boundary) {
-				boundary = watermark
-			}
-			if !q.Start.Before(boundary) {
-				return s.Aggregate(ctx, query)
-			}
-			return s.seriesHybrid(ctx, query, boundary, servicingTier)
-		}
-
-		// Existing stores may have rollups but no watermark yet. Read all raw
-		// data from the requested start and use the dynamic cutoff only as the
-		// rollup scan's upper bound. Compaction's raw/rollup invariant makes
-		// these two ranges disjoint; the next successful compact persists the
-		// precise boundary for subsequent queries.
-		return s.seriesHybridWithRollupEnd(ctx, query, q.Start, rawCutoff, servicingTier)
-	}
-
 	if servicingTier == nil {
 		return s.Aggregate(ctx, query)
 	}
+	if hasWatermark {
+		boundary := rawCutoff
+		if watermark.Before(boundary) {
+			boundary = watermark
+		}
+		if !q.Start.Before(boundary) {
+			return s.Aggregate(ctx, query)
+		}
+		if !q.End.Before(boundary) {
+			return s.seriesHybrid(ctx, query, boundary, servicingTier)
+		}
+		return s.AggregateRollup(ctx, query, servicingTier.Interval)
+	}
 
-	return s.AggregateRollup(ctx, query, servicingTier.Interval)
+	// Upgraded stores can have rollups but no watermark until their first V4
+	// compaction. Legacy layouts may also retain raw points already represented
+	// by those rollups, so the fallback must merge per-series without counting
+	// that overlap twice.
+	return s.seriesWithoutWatermark(ctx, query, servicingTier)
+}
+
+func (s *Store) seriesWithoutWatermark(ctx context.Context, query AggregateQuery, tier *RollupTier) ([]AggregatePoint, error) {
+	q := query.Query.normalized()
+	comp := s.cfg.RollupPolicy.compression()
+	needDigest := isPercentile(query.Aggregation)
+	resNano := tier.Interval.Nanoseconds()
+
+	rows, err := s.scanRollupRowsContained(ctx, q.MetricName, q.EntityID, q.Tags, tier.Interval, q.Start, q.End, needDigest)
+	if err != nil {
+		return nil, err
+	}
+	groups := foldRollupRows(nil, rows, query.Interval, comp, query.PreserveSeries, needDigest)
+
+	type coveredBucketKey struct {
+		entityID string
+		tagsHash string
+		bucket   int64
+	}
+	coveredBuckets := make(map[coveredBucketKey]struct{}, len(rows))
+	for _, row := range rows {
+		coveredBuckets[coveredBucketKey{
+			entityID: row.entityID,
+			tagsHash: row.bucketData.tagsHash,
+			bucket:   row.bucket,
+		}] = struct{}{}
+	}
+
+	rawQuery := q
+	rawQuery.Limit = 0
+	rawQuery.Offset = 0
+	points, err := s.Query(ctx, rawQuery)
+	if err != nil {
+		return nil, err
+	}
+	remaining := points[:0]
+	for _, point := range points {
+		point = point.normalized()
+		tagsHash, _, err := tagsFingerprint(point.Tags)
+		if err != nil {
+			return nil, err
+		}
+		key := coveredBucketKey{
+			entityID: point.EntityID,
+			tagsHash: tagsHash,
+			bucket:   floorDivNano(point.Timestamp.UnixNano(), resNano),
+		}
+		if _, covered := coveredBuckets[key]; covered {
+			continue
+		}
+		remaining = append(remaining, point)
+	}
+	if _, err := foldRawPoints(groups, remaining, query.Interval, comp, query.PreserveSeries, needDigest); err != nil {
+		return nil, err
+	}
+
+	out, err := rollupGroupsToPoints(groups, query)
+	if err != nil {
+		return nil, err
+	}
+	return pageBuckets(out, query.BucketLimit, query.BucketOffset), nil
 }
 
 // seriesHybrid answers a query that spans the raw-retention boundary by reading

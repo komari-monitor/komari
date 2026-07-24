@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func TestSQLiteStorageV3MigratesLegacyDataAndPreservesQueries(t *testing.T) {
+func TestSQLiteStorageV4MigratesUpstreamLegacyDataAndPreservesQueries(t *testing.T) {
 	ctx := context.Background()
 	dsn := sqliteFileDSN(filepath.Join(t.TempDir(), "metrics.db"))
 	base := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
@@ -71,8 +71,8 @@ func TestSQLiteStorageV3MigratesLegacyDataAndPreservesQueries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open and migrate legacy SQLite database: %v", err)
 	}
-	if store.readDB == nil || !store.sqliteStorageV3 {
-		t.Fatal("SQLite V3/read pool was not enabled after migration")
+	if store.readDB == nil || !store.sqliteStorageV3 || !store.sqliteStorageV4 {
+		t.Fatal("SQLite V3 compatibility, V4 storage, or read pool was not enabled after upstream migration")
 	}
 	assertSQLiteV3Schema(t, ctx, store.db)
 	assertSQLiteQueryPlanUses(t, sqliteQueryPlan(t, ctx, store.db,

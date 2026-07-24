@@ -182,3 +182,232 @@ func TestSeriesHybridUsesLastCompactionWatermark(t *testing.T) {
 		t.Fatalf("watermark = %v, found=%v, want %v", watermark, found, policy.rawCutoff(compactAt))
 	}
 }
+
+func TestSeriesUsesWatermarkWhenWindowEndsBeforeDynamicCutoff(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 30 * time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "lagging-watermark", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	compactAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	if err := s.WriteBatch(ctx, []Point{
+		{MetricName: "lagging-watermark", EntityID: "n1", Timestamp: time.Date(2026, 6, 18, 11, 20, 0, 0, time.UTC), Value: 10},
+		{MetricName: "lagging-watermark", EntityID: "n1", Timestamp: time.Date(2026, 6, 18, 11, 32, 0, 0, time.UTC), Value: 100},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, compactAt); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+
+	queryAt := compactAt.Add(4 * time.Minute)
+	got, err := s.Series(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "lagging-watermark",
+			EntityID:   "n1",
+			Start:      time.Date(2026, 6, 18, 11, 0, 0, 0, time.UTC),
+			End:        time.Date(2026, 6, 18, 11, 33, 0, 0, time.UTC),
+		},
+		Aggregation: AggCount,
+		Interval:    time.Hour,
+	}, queryAt)
+	if err != nil {
+		t.Fatalf("series: %v", err)
+	}
+	if len(got) != 1 || got[0].Count != 2 {
+		t.Fatalf("lagging watermark should keep rolled-up and raw points visible, got %#v", got)
+	}
+}
+
+func TestSeriesWithoutWatermarkMergesUpgradeData(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 30 * time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "upgrade-no-watermark", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	compactAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	if err := s.WriteBatch(ctx, []Point{
+		{MetricName: "upgrade-no-watermark", EntityID: "n1", Timestamp: time.Date(2026, 6, 18, 11, 20, 0, 0, time.UTC), Value: 10},
+		{MetricName: "upgrade-no-watermark", EntityID: "n1", Timestamp: time.Date(2026, 6, 18, 11, 32, 0, 0, time.UTC), Value: 100},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, compactAt); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM `+s.tables.watermarks+` WHERE metric_name = ?`, "upgrade-no-watermark"); err != nil {
+		t.Fatalf("remove watermark: %v", err)
+	}
+
+	queryAt := compactAt.Add(4 * time.Minute)
+	got, err := s.Series(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "upgrade-no-watermark",
+			EntityID:   "n1",
+			Start:      time.Date(2026, 6, 18, 11, 0, 0, 0, time.UTC),
+			End:        time.Date(2026, 6, 18, 11, 33, 0, 0, time.UTC),
+		},
+		Aggregation: AggCount,
+		Interval:    time.Hour,
+	}, queryAt)
+	if err != nil {
+		t.Fatalf("series: %v", err)
+	}
+	if len(got) != 1 || got[0].Count != 2 {
+		t.Fatalf("upgrade data without a watermark should merge rollup and raw points, got %#v", got)
+	}
+}
+
+func TestSeriesWithoutWatermarkDoesNotDoubleCountLegacyOverlap(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 30 * time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "upgrade-overlap", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	compactAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	oldTime := time.Date(2026, 6, 18, 11, 20, 0, 0, time.UTC)
+	recentTime := time.Date(2026, 6, 18, 11, 32, 0, 0, time.UTC)
+	if err := s.WriteBatch(ctx, []Point{
+		{MetricName: "upgrade-overlap", EntityID: "n1", Timestamp: oldTime, Value: 10},
+		{MetricName: "upgrade-overlap", EntityID: "n1", Timestamp: recentTime, Value: 100},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, compactAt); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if err := s.Write(ctx, Point{MetricName: "upgrade-overlap", EntityID: "n1", Timestamp: oldTime, Value: 10}); err != nil {
+		t.Fatalf("restore overlapping legacy raw point: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM `+s.tables.watermarks+` WHERE metric_name = ?`, "upgrade-overlap"); err != nil {
+		t.Fatalf("remove watermark: %v", err)
+	}
+
+	queryAt := compactAt.Add(4 * time.Minute)
+	got, err := s.Series(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "upgrade-overlap",
+			EntityID:   "n1",
+			Start:      time.Date(2026, 6, 18, 11, 0, 0, 0, time.UTC),
+			End:        recentTime,
+		},
+		Aggregation: AggCount,
+		Interval:    time.Hour,
+	}, queryAt)
+	if err != nil {
+		t.Fatalf("series: %v", err)
+	}
+	if len(got) != 1 || got[0].Count != 2 {
+		t.Fatalf("legacy overlap should not be counted twice, got %#v", got)
+	}
+}
+
+func TestSeriesWithoutWatermarkKeepsRawPointsInRollupGaps(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 30 * time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "upgrade-gap", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	compactAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	if err := s.WriteBatch(ctx, []Point{
+		{MetricName: "upgrade-gap", EntityID: "n1", Timestamp: time.Date(2026, 6, 18, 11, 20, 10, 0, time.UTC), Value: 10},
+		{MetricName: "upgrade-gap", EntityID: "n1", Timestamp: time.Date(2026, 6, 18, 11, 22, 10, 0, time.UTC), Value: 30},
+		{MetricName: "upgrade-gap", EntityID: "n1", Timestamp: time.Date(2026, 6, 18, 11, 32, 10, 0, time.UTC), Value: 100},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, compactAt); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if err := s.Write(ctx, Point{
+		MetricName: "upgrade-gap",
+		EntityID:   "n1",
+		Timestamp:  time.Date(2026, 6, 18, 11, 21, 10, 0, time.UTC),
+		Value:      20,
+	}); err != nil {
+		t.Fatalf("restore raw point in rollup gap: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM `+s.tables.watermarks+` WHERE metric_name = ?`, "upgrade-gap"); err != nil {
+		t.Fatalf("remove watermark: %v", err)
+	}
+
+	got, err := s.Series(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "upgrade-gap",
+			EntityID:   "n1",
+			Start:      time.Date(2026, 6, 18, 11, 0, 0, 0, time.UTC),
+			End:        time.Date(2026, 6, 18, 11, 33, 0, 0, time.UTC),
+		},
+		Aggregation: AggCount,
+		Interval:    time.Hour,
+	}, compactAt.Add(4*time.Minute))
+	if err != nil {
+		t.Fatalf("series: %v", err)
+	}
+	if len(got) != 1 || got[0].Count != 4 {
+		t.Fatalf("raw point in a rollup gap should remain visible, got %#v", got)
+	}
+}
+
+func TestSeriesWithoutWatermarkDoesNotIncludePartialRollupBucket(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 30 * time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "upgrade-partial", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	compactAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	if err := s.WriteBatch(ctx, []Point{
+		{MetricName: "upgrade-partial", EntityID: "n1", Timestamp: time.Date(2026, 6, 18, 11, 20, 10, 0, time.UTC), Value: 10},
+		{MetricName: "upgrade-partial", EntityID: "n1", Timestamp: time.Date(2026, 6, 18, 11, 20, 50, 0, time.UTC), Value: 50},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.Compact(ctx, compactAt); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM `+s.tables.watermarks+` WHERE metric_name = ?`, "upgrade-partial"); err != nil {
+		t.Fatalf("remove watermark: %v", err)
+	}
+
+	got, err := s.Series(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "upgrade-partial",
+			EntityID:   "n1",
+			Start:      time.Date(2026, 6, 18, 11, 20, 0, 0, time.UTC),
+			End:        time.Date(2026, 6, 18, 11, 20, 20, 0, time.UTC),
+		},
+		Aggregation: AggCount,
+		Interval:    time.Minute,
+	}, compactAt.Add(4*time.Minute))
+	if err != nil {
+		t.Fatalf("series: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("partial rollup bucket leaked out-of-window points: %#v", got)
+	}
+}
