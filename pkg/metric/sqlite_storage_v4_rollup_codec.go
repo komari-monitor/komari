@@ -12,11 +12,12 @@ import (
 )
 
 const (
-	sqliteV4RollupBlockCodec      = 1
-	sqliteV4RollupBlockLimit      = 512
-	sqliteV4RollupBlockMagic      = "KMR4"
-	sqliteV4MaxDecodedRollupRows  = 1 << 20
-	sqliteV4RollupFloatFieldCount = 6
+	sqliteV4LegacyRollupBlockCodec = 1
+	sqliteV4RollupBlockCodec       = 2
+	sqliteV4RollupBlockLimit       = 512
+	sqliteV4RollupBlockMagic       = "KMR4"
+	sqliteV4MaxDecodedRollupRows   = 1 << 20
+	sqliteV4RollupFloatFieldCount  = 6
 )
 
 type sqliteV4RollupRecord struct {
@@ -35,15 +36,18 @@ type sqliteV4RollupRecord struct {
 }
 
 type sqliteV4EncodedRollupBlock struct {
-	startNano int64
-	endNano   int64
-	count     int
-	codec     int
-	checksum  uint32
-	payload   []byte
+	startNano      int64
+	endNano        int64
+	count          int
+	codec          int
+	checksum       uint32
+	payload        []byte
+	digestCodec    int
+	digestChecksum uint32
+	digestPayload  []byte
 }
 
-func encodeSQLiteV4RollupBlock(records []sqliteV4RollupRecord) (sqliteV4EncodedRollupBlock, error) {
+func encodeSQLiteV4LegacyRollupBlock(records []sqliteV4RollupRecord) (sqliteV4EncodedRollupBlock, error) {
 	if len(records) == 0 {
 		return sqliteV4EncodedRollupBlock{}, fmt.Errorf("metric: cannot encode an empty SQLite V4 rollup block")
 	}
@@ -135,14 +139,14 @@ func encodeSQLiteV4RollupBlock(records []sqliteV4RollupRecord) (sqliteV4EncodedR
 		startNano: records[0].bucketNano,
 		endNano:   records[len(records)-1].bucketNano,
 		count:     len(records),
-		codec:     sqliteV4RollupBlockCodec,
+		codec:     sqliteV4LegacyRollupBlockCodec,
 		checksum:  crc32.ChecksumIEEE(payload),
 		payload:   append([]byte(nil), payload...),
 	}, nil
 }
 
-func decodeSQLiteV4RollupBlock(codec, expectedCount int, expectedChecksum uint32, payload []byte) ([]sqliteV4RollupRecord, error) {
-	if codec != sqliteV4RollupBlockCodec {
+func decodeSQLiteV4LegacyRollupBlock(codec, expectedCount int, expectedChecksum uint32, payload []byte) ([]sqliteV4RollupRecord, error) {
+	if codec != sqliteV4LegacyRollupBlockCodec {
 		return nil, fmt.Errorf("metric: unsupported SQLite V4 rollup block codec %d", codec)
 	}
 	if len(payload) < 2 {
@@ -415,7 +419,7 @@ func sqliteV4RollupRecordsEqual(left, right []sqliteV4RollupRecord) bool {
 			left[i].minBits != right[i].minBits || left[i].maxBits != right[i].maxBits ||
 			left[i].firstBits != right[i].firstBits || left[i].firstTS != right[i].firstTS ||
 			left[i].lastBits != right[i].lastBits || left[i].lastTS != right[i].lastTS ||
-			left[i].createdAt != right[i].createdAt || !bytes.Equal(left[i].digest, right[i].digest) {
+			left[i].createdAt != right[i].createdAt || !sqliteV4TDigestsEqual(left[i].digest, right[i].digest) {
 			return false
 		}
 	}

@@ -143,6 +143,16 @@ func (s *Store) ensureSQLiteStorageV4(ctx context.Context) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("metric: commit SQLite V4 verification: %w", err)
 	}
+	migratedBlocks, migratedBuckets, err := s.migrateSQLiteV4RollupBlocksToSplit(ctx)
+	if err != nil {
+		return err
+	}
+	if migratedBlocks > 0 {
+		if err := s.fullSQLiteVacuum(ctx); err != nil {
+			return fmt.Errorf("metric: vacuum split SQLite V4 rollup storage: %w", err)
+		}
+		log.Printf("metric: migrated %d SQLite V4 rollup blocks (%d buckets) to split summary/digest storage and reclaimed database space", migratedBlocks, migratedBuckets)
+	}
 	return nil
 }
 

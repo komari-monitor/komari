@@ -1,6 +1,7 @@
 package metric
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -118,8 +119,15 @@ func TestSQLiteStorageV3MigratesLegacyDataAndPreservesQueries(t *testing.T) {
 		t.Fatalf("read migrated rollup block: count=%d err=%v", len(rollupRecords), err)
 	}
 	migratedDigest := rollupRecords[0].digest
-	if len(migratedDigest) >= len(legacyDigest) || migratedDigest[1] != tdigestCompressedMagic1 {
-		t.Fatalf("legacy digest was not compressed: old=%d new=%d", len(legacyDigest), len(migratedDigest))
+	if !bytes.Equal(migratedDigest, legacyDigest) {
+		t.Fatal("legacy digest centroid bits changed during migration")
+	}
+	var storedDigestBytes int
+	if err := store.db.QueryRowContext(ctx, `SELECT length(digest_payload) FROM metric_rollup_blocks`).Scan(&storedDigestBytes); err != nil {
+		t.Fatalf("read split digest payload size: %v", err)
+	}
+	if storedDigestBytes >= len(legacyDigest) {
+		t.Fatalf("split digest section was not compressed: raw=%d stored=%d", len(legacyDigest), storedDigestBytes)
 	}
 
 	rootPage := sqliteRootPage(t, ctx, store.db, "metric_series")

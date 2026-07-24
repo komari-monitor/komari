@@ -13,7 +13,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   VERSION: 2.1.7
-  VERSION_HASH: 3b6df3e
+  VERSION_HASH: 5ab39ac
 
 jobs:
   build-frontend:
@@ -108,4 +108,4 @@ jobs:
           output="$(docker run --rm --platform linux/amd64 "$image" /app/komari version --json)"
           echo "$output"
           grep -F '"version":"2.1.7"' <<<"$output"
-          grep -F '"hash":"3b6df3e"' <<<"$output"
+          grep -F '"hash":"5ab39ac"' <<<"$output"

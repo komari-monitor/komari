@@ -329,6 +329,96 @@ func TestSQLiteStorageV4UpgradesEarlyV4RollupsLosslessly(t *testing.T) {
 	}
 }
 
+func TestSQLiteStorageV4MigratesLegacyRollupBlocksToSplitStorage(t *testing.T) {
+	ctx := context.Background()
+	dsn := sqliteFileDSN(filepath.Join(t.TempDir(), "metrics.db"))
+	store := createSQLiteV3OnlyStore(t, ctx, dsn)
+	if err := store.CreateMetric(ctx, Definition{Name: "legacy-split", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC)
+	if err := store.Write(ctx, Point{MetricName: "legacy-split", EntityID: "node-a", Timestamp: base, Value: 1, Tags: map[string]string{"task": "117"}}); err != nil {
+		t.Fatal(err)
+	}
+	series, err := store.sqliteV4MatchingSeries(ctx, store.db, "legacy-split", "node-a", map[string]string{"task": "117"})
+	if err != nil || len(series) != 1 {
+		t.Fatalf("find legacy series: count=%d err=%v", len(series), err)
+	}
+	digest := NewTDigest(100)
+	for i := 0; i < 5000; i++ {
+		digest.Add(float64((i*37)%1009)/11, 1)
+	}
+	records := make([]sqliteV4RollupRecord, 120)
+	for i := range records {
+		bucket := base.Add(time.Duration(i) * time.Minute).UnixNano()
+		records[i] = sqliteV4RollupRecord{
+			bucketNano: bucket, count: 5000,
+			sumBits: math.Float64bits(float64(i) + 100.25), sumSqBits: math.Float64bits(float64(i*i) + 200.5),
+			minBits: math.Float64bits(float64(i)), maxBits: math.Float64bits(float64(i) + 100),
+			firstBits: math.Float64bits(float64(i) + 0.25), firstTS: bucket,
+			lastBits: math.Float64bits(float64(i) + 0.75), lastTS: bucket + 59*time.Second.Nanoseconds(),
+			digest: digest.Encode(), createdAt: bucket + time.Hour.Nanoseconds(),
+		}
+	}
+	legacy, err := encodeSQLiteV4LegacyRollupBlock(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.createSQLiteV4PointBlocks(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE %s (
+		series_id INTEGER NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
+		resolution_nano BIGINT NOT NULL, start_nano BIGINT NOT NULL, end_nano BIGINT NOT NULL,
+		bucket_count INTEGER NOT NULL, codec INTEGER NOT NULL, checksum INTEGER NOT NULL, payload BLOB NOT NULL,
+		PRIMARY KEY(series_id, resolution_nano, start_nano)
+	) WITHOUT ROWID`, store.tables.rollupBlocks, store.tables.series)); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s
+		(series_id, resolution_nano, start_nano, end_nano, bucket_count, codec, checksum, payload)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, store.tables.rollupBlocks), series[0].id, time.Minute.Nanoseconds(),
+		legacy.startNano, legacy.endNano, legacy.count, legacy.codec, int64(legacy.checksum), legacy.payload); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(ctx, SQLite(dsn, WithSQLiteReadPool(4)))
+	if err != nil {
+		t.Fatalf("migrate legacy rollup blocks to split storage: %v", err)
+	}
+	defer store.Close()
+	var codec, digestCodec int
+	var digestBytes int64
+	if err := store.db.QueryRowContext(ctx, `SELECT codec, digest_codec, length(digest_payload) FROM metric_rollup_blocks`).Scan(&codec, &digestCodec, &digestBytes); err != nil {
+		t.Fatal(err)
+	}
+	if codec != sqliteV4RollupBlockCodec || digestCodec != sqliteV4RollupDigestCodec || digestBytes == 0 {
+		t.Fatalf("legacy block was not split: codec=%d digest_codec=%d digest_bytes=%d", codec, digestCodec, digestBytes)
+	}
+	got, err := store.loadAllSQLiteV4RollupBlockRecords(ctx, store.db, series[0].id, time.Minute.Nanoseconds())
+	if err != nil || !sqliteV4RollupRecordsEqual(records, got) {
+		t.Fatalf("split migration changed rollup values: count=%d err=%v", len(got), err)
+	}
+	rows, err := store.scanRollupRowsBetween(ctx, "legacy-split", "node-a", map[string]string{"task": "117"},
+		time.Minute.Nanoseconds(), records[0].bucketNano, records[len(records)-1].bucketNano, false)
+	if err != nil || len(rows) != len(records) || rows[0].bucketData.digest != nil {
+		t.Fatalf("summary-only query after migration: count=%d err=%v", len(rows), err)
+	}
+}
+
 func TestSQLiteStorageV4ReducesRollupDominatedDatabase(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "metrics.db")
