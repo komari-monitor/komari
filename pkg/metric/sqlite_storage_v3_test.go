@@ -255,7 +255,7 @@ func TestSQLiteStorageV3IncrementalVacuumReclaimsDeletedPages(t *testing.T) {
 	}
 	afterPages := sqlitePragmaInt(t, ctx, store.db, "page_count")
 	afterFree := sqlitePragmaInt(t, ctx, store.db, "freelist_count")
-	if afterPages > beforePages || afterFree >= beforeFree {
+	if afterPages > beforePages || afterFree != 0 {
 		t.Fatalf("incremental vacuum did not reclaim pages: pages %d->%d free %d->%d", beforePages, afterPages, beforeFree, afterFree)
 	}
 }

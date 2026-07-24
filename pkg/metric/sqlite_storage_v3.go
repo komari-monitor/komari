@@ -403,8 +403,17 @@ func (s *Store) incrementalSQLiteVacuum(ctx context.Context, pages int) error {
 	if s.cfg.Driver != DriverSQLite || !s.sqliteStorageV3 || pages <= 0 {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`PRAGMA incremental_vacuum(%d)`, pages)); err != nil {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA incremental_vacuum(%d)`, pages))
+	if err != nil {
 		return fmt.Errorf("metric: incremental SQLite vacuum: %w", err)
 	}
-	return nil
+	defer rows.Close()
+	// SQLite yields one empty result row per reclaimed page. Iterating the full
+	// result is required; Exec only advances the PRAGMA once with some drivers.
+	for rows.Next() {
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("metric: incremental SQLite vacuum: %w", err)
+	}
+	return rows.Close()
 }

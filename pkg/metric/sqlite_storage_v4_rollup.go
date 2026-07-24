@@ -364,6 +364,111 @@ func (s *Store) writeSQLiteV4RollupBlocksTx(ctx context.Context, tx *sql.Tx, ser
 	return nil
 }
 
+func sqliteV4RollupFlushMinimum(resolution int64) int {
+	if resolution <= 0 {
+		return 1
+	}
+	eligibleWindow := sqliteV4RollupFlushWindow - sqliteV4HotWindow
+	minimum := int(eligibleWindow.Nanoseconds() / resolution)
+	if minimum < 1 {
+		return 1
+	}
+	if minimum > sqliteV4RollupBlockLimit {
+		return sqliteV4RollupBlockLimit
+	}
+	return minimum
+}
+
+// appendSQLiteV4RollupTailTx moves eligible hot rows into the last compressed
+// block. A partial tail is replaced in place, so frequent sealing does not
+// create more long-term blocks or make historical reads touch smaller chunks.
+func (s *Store) appendSQLiteV4RollupTailTx(ctx context.Context, tx *sql.Tx, seriesID, resolution, beforeNano int64) (int, error) {
+	sealed := 0
+	for {
+		var startNano, endNano, checksum, digestChecksum int64
+		var count, codec, digestCodec int
+		var payload, digestPayload []byte
+		err := tx.QueryRowContext(ctx, fmt.Sprintf(
+			`SELECT start_nano, end_nano, bucket_count, codec, checksum, payload,
+			        digest_codec, digest_checksum, digest_payload FROM %s
+			 WHERE series_id = ? AND resolution_nano = ? ORDER BY start_nano DESC LIMIT 1`,
+			s.tables.rollupBlocks,
+		), seriesID, resolution).Scan(&startNano, &endNano, &count, &codec, &checksum, &payload,
+			&digestCodec, &digestChecksum, &digestPayload)
+
+		var tail []sqliteV4RollupRecord
+		lower := int64(math.MinInt64)
+		limit := sqliteV4RollupBlockLimit
+		replaceTail := false
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+		case err != nil:
+			return sealed, err
+		default:
+			records, decodeErr := decodeSQLiteV4RollupBlock(codec, count, uint32(checksum), payload,
+				digestCodec, uint32(digestChecksum), digestPayload, true)
+			if decodeErr != nil {
+				return sealed, fmt.Errorf("metric: decode SQLite V4 rollup tail series=%d resolution=%d start=%d: %w", seriesID, resolution, startNano, decodeErr)
+			}
+			if len(records) == 0 || records[0].bucketNano != startNano || records[len(records)-1].bucketNano != endNano {
+				return sealed, fmt.Errorf("metric: SQLite V4 rollup tail boundary mismatch for series=%d resolution=%d start=%d", seriesID, resolution, startNano)
+			}
+			lower = endNano
+			if len(records) < sqliteV4RollupBlockLimit {
+				tail = records
+				limit = sqliteV4RollupBlockLimit - len(records)
+				replaceTail = true
+			}
+		}
+
+		hotRows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts,
+			        last_val, last_ts, digest, created_at FROM %s
+			 WHERE series_id = ? AND resolution_nano = ? AND bucket_nano > ? AND bucket_nano < ?
+			 ORDER BY bucket_nano LIMIT ?`, s.tables.rollupValues,
+		), seriesID, resolution, lower, beforeNano, limit)
+		if err != nil {
+			return sealed, err
+		}
+		var hot []sqliteV4RollupRecord
+		for hotRows.Next() {
+			record, scanErr := scanSQLiteV4RollupRecord(hotRows)
+			if scanErr != nil {
+				_ = hotRows.Close()
+				return sealed, scanErr
+			}
+			hot = append(hot, record)
+		}
+		if err := hotRows.Err(); err != nil {
+			_ = hotRows.Close()
+			return sealed, err
+		}
+		if err := hotRows.Close(); err != nil {
+			return sealed, err
+		}
+		if len(hot) == 0 {
+			return sealed, nil
+		}
+
+		if replaceTail {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupBlocks+` WHERE series_id = ? AND resolution_nano = ? AND start_nano = ?`, seriesID, resolution, startNano); err != nil {
+				return sealed, err
+			}
+		}
+		merged := make([]sqliteV4RollupRecord, 0, len(tail)+len(hot))
+		merged = append(merged, tail...)
+		merged = append(merged, hot...)
+		if err := s.writeSQLiteV4RollupBlocksTx(ctx, tx, seriesID, resolution, merged); err != nil {
+			return sealed, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ? AND bucket_nano >= ? AND bucket_nano <= ?`,
+			seriesID, resolution, hot[0].bucketNano, hot[len(hot)-1].bucketNano); err != nil {
+			return sealed, err
+		}
+		sealed += len(hot)
+	}
+}
+
 func (s *Store) querySQLiteV4Rollups(ctx context.Context, q querier, metricName, entityID string, tags map[string]string, resolution, lower, upper int64, needDigest bool) ([]storedRollup, error) {
 	series, err := s.sqliteV4MatchingSeries(ctx, q, metricName, entityID, tags)
 	if err != nil {
@@ -788,16 +893,7 @@ func (s *Store) sealSQLiteV4RollupHotTx(ctx context.Context, tx *sql.Tx, metricN
 					continue
 				}
 			}
-			minimum := sqliteV4RollupBlockLimit
-			if resolution > 0 {
-				perDay := int((24 * time.Hour).Nanoseconds() / resolution)
-				if perDay < 16 {
-					perDay = 16
-				}
-				if perDay < minimum {
-					minimum = perDay
-				}
-			}
+			minimum := sqliteV4RollupFlushMinimum(resolution)
 			lower := int64(math.MinInt64)
 			if maxEnd.Valid {
 				lower = maxEnd.Int64
@@ -809,40 +905,7 @@ func (s *Store) sealSQLiteV4RollupHotTx(ctx context.Context, tx *sql.Tx, metricN
 			if count < minimum {
 				continue
 			}
-			limit := count
-			if limit > sqliteV4RollupBlockLimit {
-				limit = sqliteV4RollupBlockLimit
-			}
-			hotRows, err := tx.QueryContext(ctx, fmt.Sprintf(
-				`SELECT bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts,
-				        last_val, last_ts, digest, created_at FROM %s
-				 WHERE series_id = ? AND resolution_nano = ? AND bucket_nano > ? AND bucket_nano < ?
-				 ORDER BY bucket_nano LIMIT ?`, s.tables.rollupValues,
-			), item.id, resolution, lower, beforeNano, limit)
-			if err != nil {
-				return err
-			}
-			var records []sqliteV4RollupRecord
-			for hotRows.Next() {
-				record, err := scanSQLiteV4RollupRecord(hotRows)
-				if err != nil {
-					_ = hotRows.Close()
-					return err
-				}
-				records = append(records, record)
-			}
-			if err := hotRows.Err(); err != nil {
-				_ = hotRows.Close()
-				return err
-			}
-			_ = hotRows.Close()
-			if len(records) == 0 {
-				continue
-			}
-			if err := s.writeSQLiteV4RollupBlocksTx(ctx, tx, item.id, resolution, records); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ? AND bucket_nano >= ? AND bucket_nano <= ?`, item.id, resolution, records[0].bucketNano, records[len(records)-1].bucketNano); err != nil {
+			if _, err := s.appendSQLiteV4RollupTailTx(ctx, tx, item.id, resolution, beforeNano); err != nil {
 				return err
 			}
 		}

@@ -589,6 +589,146 @@ func TestSQLiteStorageV4PartiallyDeletesAndMergesLateRollups(t *testing.T) {
 	}
 }
 
+func TestSQLiteStorageV4RollupTailFlushPreservesLargeBlocks(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{RawRetention: 15 * time.Minute, Tiers: []RollupTier{{Interval: time.Minute, Retention: 30 * 24 * time.Hour}}}
+	store, err := Open(ctx, SQLiteInDir(t.TempDir(), WithRollupPolicy(policy)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateMetric(ctx, Definition{Name: "tail", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	writeRange := func(start, count int) {
+		t.Helper()
+		buckets := make(map[rollupKey]*rollupBucket, count)
+		for index := start; index < start+count; index++ {
+			bucketNano := base.Add(time.Duration(index) * time.Minute).UnixNano()
+			bucket := newRollupBucket(policy.compression())
+			bucket.addPoint(math.Float64frombits(math.Float64bits(100.25)+uint64(index%97)), bucketNano+int64(index%53))
+			buckets[rollupKey{entityID: "node-a", bucket: bucketNano}] = bucket
+		}
+		tx, err := store.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.writeRollupBucketsTx(ctx, "tail", time.Minute, buckets, tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seal := func(before time.Time) {
+		t.Helper()
+		tx, err := store.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.sealSQLiteV4RollupHotTx(ctx, tx, "tail", before.UnixNano()); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertBlockLayout := func(wantCounts ...int) {
+		t.Helper()
+		rows, err := store.db.QueryContext(ctx, `SELECT bucket_count FROM metric_rollup_blocks ORDER BY start_nano`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var got []int
+		for rows.Next() {
+			var count int
+			if err := rows.Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, count)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(wantCounts) {
+			t.Fatalf("rollup block layout = %v, want %v", got, wantCounts)
+		}
+	}
+
+	writeRange(0, 600)
+	if err := store.ReclaimSpace(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertBlockLayout(512, 88)
+
+	writeRange(600, sqliteV4RollupFlushMinimum(time.Minute.Nanoseconds())-1)
+	seal(base.Add(700 * time.Minute))
+	var hotRows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_rollup_values`).Scan(&hotRows); err != nil {
+		t.Fatal(err)
+	}
+	if hotRows != 24 {
+		t.Fatalf("sub-threshold hot rows = %d, want 24", hotRows)
+	}
+	assertBlockLayout(512, 88)
+
+	writeRange(624, 1)
+	before, err := store.scanRollupRows(ctx, store.db, "tail", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seal(base.Add(700 * time.Minute))
+	after, err := store.scanRollupRows(ctx, store.db, "tail", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStoredRollupsExact(t, before, after)
+	assertBlockLayout(512, 113)
+
+	writeRange(625, 416)
+	before, err = store.scanRollupRows(ctx, store.db, "tail", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seal(base.Add(1100 * time.Minute))
+	after, err = store.scanRollupRows(ctx, store.db, "tail", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStoredRollupsExact(t, before, after)
+	assertBlockLayout(512, 512, 17)
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_rollup_values`).Scan(&hotRows); err != nil {
+		t.Fatal(err)
+	}
+	if hotRows != 0 {
+		t.Fatalf("tail flush left %d hot rows", hotRows)
+	}
+}
+
+func assertStoredRollupsExact(t *testing.T, before, after []storedRollup) {
+	t.Helper()
+	if len(before) != len(after) {
+		t.Fatalf("rollup count changed: before=%d after=%d", len(before), len(after))
+	}
+	for index := range before {
+		left, right := before[index], after[index]
+		leftBucket, rightBucket := left.bucketData, right.bucketData
+		if left.entityID != right.entityID || left.bucket != right.bucket ||
+			leftBucket.count != rightBucket.count || math.Float64bits(leftBucket.sum) != math.Float64bits(rightBucket.sum) ||
+			math.Float64bits(leftBucket.sumSq) != math.Float64bits(rightBucket.sumSq) || math.Float64bits(leftBucket.min) != math.Float64bits(rightBucket.min) ||
+			math.Float64bits(leftBucket.max) != math.Float64bits(rightBucket.max) || math.Float64bits(leftBucket.firstVal) != math.Float64bits(rightBucket.firstVal) ||
+			leftBucket.firstTS != rightBucket.firstTS || math.Float64bits(leftBucket.lastVal) != math.Float64bits(rightBucket.lastVal) ||
+			leftBucket.lastTS != rightBucket.lastTS || leftBucket.tagsHash != rightBucket.tagsHash || leftBucket.tagsJSON != rightBucket.tagsJSON ||
+			!bytes.Equal(leftBucket.digest.Encode(), rightBucket.digest.Encode()) {
+			t.Fatalf("rollup %d changed during tail flush", index)
+		}
+	}
+}
+
 func TestSQLiteStorageV4ConcurrentReadWriteAndSeal(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{RawRetention: 15 * time.Minute, Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}}}

@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	sqliteStorageVersionV4 = 4
-	sqliteV4HotWindow      = 5 * time.Minute
+	sqliteStorageVersionV4    = 4
+	sqliteV4HotWindow         = 5 * time.Minute
+	sqliteV4RollupFlushWindow = 30 * time.Minute
 )
 
 // migrateSQLiteStorageV4 first brings legacy layouts to the normalized V3
