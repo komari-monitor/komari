@@ -212,6 +212,7 @@ func publicGetPublicPingTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *r
 	}
 	type publicPingTask struct {
 		Id        uint     `json:"id"`
+		Weight    int      `json:"weight"`
 		Name      string   `json:"name"`
 		Clients   []string `json:"clients"`
 		DefaultOn bool     `json:"default_on"`
@@ -222,6 +223,7 @@ func publicGetPublicPingTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *r
 	for i, task := range pingTasks {
 		out[i] = publicPingTask{
 			Id:        task.Id,
+			Weight:    task.Weight,
 			Name:      task.Name,
 			Clients:   task.Clients,
 			DefaultOn: task.DefaultOn,
