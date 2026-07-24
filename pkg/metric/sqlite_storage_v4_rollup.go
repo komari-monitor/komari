@@ -1,0 +1,742 @@
+package metric
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"math"
+	"sort"
+	"strings"
+	"time"
+)
+
+func (s *Store) createSQLiteV4RollupBlocks(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+			series_id INTEGER NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
+			resolution_nano BIGINT NOT NULL,
+			start_nano BIGINT NOT NULL,
+			end_nano BIGINT NOT NULL,
+			bucket_count INTEGER NOT NULL,
+			codec INTEGER NOT NULL,
+			checksum INTEGER NOT NULL,
+			payload BLOB NOT NULL,
+			PRIMARY KEY(series_id, resolution_nano, start_nano),
+			CHECK(end_nano >= start_nano),
+			CHECK(bucket_count > 0)
+		) WITHOUT ROWID`, s.tables.rollupBlocks, s.tables.series),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_rollup_blocks_time_idx ON %s (resolution_nano, start_nano, end_nano)`,
+			s.cfg.TablePrefix, s.tables.rollupBlocks),
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("metric: create SQLite V4 rollup block table: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) validateSQLiteV4RollupBlocks(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+s.tables.rollupBlocks+`)`)
+	if err != nil {
+		return fmt.Errorf("metric: inspect SQLite V4 rollup block table: %w", err)
+	}
+	defer rows.Close()
+	found := make(map[string]bool)
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		found[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, name := range []string{"series_id", "resolution_nano", "start_nano", "end_nano", "bucket_count", "codec", "checksum", "payload"} {
+		if !found[name] {
+			return fmt.Errorf("metric: SQLite V4 rollup block table is missing column %s", name)
+		}
+	}
+	return nil
+}
+
+func (s *Store) sealAllSQLiteV4RollupsTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+		`SELECT DISTINCT series_id, resolution_nano FROM %s ORDER BY series_id, resolution_nano`,
+		s.tables.rollupValues,
+	))
+	if err != nil {
+		return 0, err
+	}
+	type group struct{ seriesID, resolution int64 }
+	var groups []group
+	for rows.Next() {
+		var item group
+		if err := rows.Scan(&item.seriesID, &item.resolution); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		groups = append(groups, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+
+	var sealed int64
+	for _, item := range groups {
+		records, err := s.loadAllSQLiteV4RollupBlockRecords(ctx, tx, item.seriesID, item.resolution)
+		if err != nil {
+			return sealed, err
+		}
+		byBucket := make(map[int64]sqliteV4RollupRecord, len(records))
+		for _, record := range records {
+			byBucket[record.bucketNano] = record
+		}
+		hotRows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts,
+			        last_val, last_ts, digest, created_at
+			 FROM %s WHERE series_id = ? AND resolution_nano = ? ORDER BY bucket_nano`,
+			s.tables.rollupValues,
+		), item.seriesID, item.resolution)
+		if err != nil {
+			return sealed, err
+		}
+		for hotRows.Next() {
+			record, err := scanSQLiteV4RollupRecord(hotRows)
+			if err != nil {
+				_ = hotRows.Close()
+				return sealed, err
+			}
+			byBucket[record.bucketNano] = record
+			sealed++
+		}
+		if err := hotRows.Err(); err != nil {
+			_ = hotRows.Close()
+			return sealed, err
+		}
+		if err := hotRows.Close(); err != nil {
+			return sealed, err
+		}
+		merged := make([]sqliteV4RollupRecord, 0, len(byBucket))
+		for _, record := range byBucket {
+			merged = append(merged, record)
+		}
+		sort.Slice(merged, func(i, j int) bool { return merged[i].bucketNano < merged[j].bucketNano })
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupBlocks+` WHERE series_id = ? AND resolution_nano = ?`, item.seriesID, item.resolution); err != nil {
+			return sealed, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ?`, item.seriesID, item.resolution); err != nil {
+			return sealed, err
+		}
+		if err := s.writeSQLiteV4RollupBlocksTx(ctx, tx, item.seriesID, item.resolution, merged); err != nil {
+			return sealed, err
+		}
+	}
+	return sealed, nil
+}
+
+func scanSQLiteV4RollupRecord(scanner interface{ Scan(dest ...any) error }) (sqliteV4RollupRecord, error) {
+	var record sqliteV4RollupRecord
+	var sum, sumSq, minValue, maxValue, firstValue, lastValue float64
+	if err := scanner.Scan(
+		&record.bucketNano, &record.count, &sum, &sumSq, &minValue, &maxValue,
+		&firstValue, &record.firstTS, &lastValue, &record.lastTS, &record.digest, &record.createdAt,
+	); err != nil {
+		return sqliteV4RollupRecord{}, err
+	}
+	record.sumBits = math.Float64bits(sum)
+	record.sumSqBits = math.Float64bits(sumSq)
+	record.minBits = math.Float64bits(minValue)
+	record.maxBits = math.Float64bits(maxValue)
+	record.firstBits = math.Float64bits(firstValue)
+	record.lastBits = math.Float64bits(lastValue)
+	record.digest = append([]byte(nil), record.digest...)
+	return record, nil
+}
+
+func (s *Store) loadAllSQLiteV4RollupBlockRecords(ctx context.Context, q querier, seriesID, resolution int64) ([]sqliteV4RollupRecord, error) {
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(
+		`SELECT start_nano, end_nano, bucket_count, codec, checksum, payload FROM %s
+		 WHERE series_id = ? AND resolution_nano = ? ORDER BY start_nano`,
+		s.tables.rollupBlocks,
+	), seriesID, resolution)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []sqliteV4RollupRecord
+	for rows.Next() {
+		var startNano, endNano, checksum int64
+		var count, codec int
+		var payload []byte
+		if err := rows.Scan(&startNano, &endNano, &count, &codec, &checksum, &payload); err != nil {
+			return nil, err
+		}
+		records, err := decodeSQLiteV4RollupBlock(codec, count, uint32(checksum), payload)
+		if err != nil {
+			return nil, fmt.Errorf("metric: decode SQLite V4 rollup block series=%d resolution=%d start=%d: %w", seriesID, resolution, startNano, err)
+		}
+		if len(records) == 0 || records[0].bucketNano != startNano || records[len(records)-1].bucketNano != endNano {
+			return nil, fmt.Errorf("metric: SQLite V4 rollup block boundary mismatch for series=%d resolution=%d start=%d", seriesID, resolution, startNano)
+		}
+		result = append(result, records...)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) writeSQLiteV4RollupBlocksTx(ctx context.Context, tx *sql.Tx, seriesID, resolution int64, records []sqliteV4RollupRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].bucketNano < records[j].bucketNano })
+	for start := 0; start < len(records); start += sqliteV4RollupBlockLimit {
+		end := min(start+sqliteV4RollupBlockLimit, len(records))
+		encoded, err := encodeSQLiteV4RollupBlock(records[start:end])
+		if err != nil {
+			return err
+		}
+		decoded, err := decodeSQLiteV4RollupBlock(encoded.codec, encoded.count, encoded.checksum, encoded.payload)
+		if err != nil || !sqliteV4RollupRecordsEqual(records[start:end], decoded) {
+			if err == nil {
+				err = errors.New("round-trip validation changed data")
+			}
+			return fmt.Errorf("metric: validate SQLite V4 rollup block: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+			`INSERT INTO %s (series_id, resolution_nano, start_nano, end_nano, bucket_count, codec, checksum, payload)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, s.tables.rollupBlocks,
+		), seriesID, resolution, encoded.startNano, encoded.endNano, encoded.count, encoded.codec, int64(encoded.checksum), encoded.payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) querySQLiteV4Rollups(ctx context.Context, q querier, metricName, entityID string, tags map[string]string, resolution, lower, upper int64, needDigest bool) ([]storedRollup, error) {
+	series, err := s.sqliteV4MatchingSeries(ctx, q, metricName, entityID, tags)
+	if err != nil {
+		return nil, err
+	}
+	var result []storedRollup
+	for _, item := range series {
+		byBucket := make(map[int64]sqliteV4RollupRecord)
+		blockRows, err := q.QueryContext(ctx, fmt.Sprintf(
+			`SELECT start_nano, end_nano, bucket_count, codec, checksum, payload FROM %s
+			 WHERE series_id = ? AND resolution_nano = ? AND end_nano >= ? AND start_nano <= ? ORDER BY start_nano`,
+			s.tables.rollupBlocks,
+		), item.id, resolution, lower, upper)
+		if err != nil {
+			return nil, err
+		}
+		for blockRows.Next() {
+			var startNano, endNano, checksum int64
+			var count, codec int
+			var payload []byte
+			if err := blockRows.Scan(&startNano, &endNano, &count, &codec, &checksum, &payload); err != nil {
+				_ = blockRows.Close()
+				return nil, err
+			}
+			records, err := decodeSQLiteV4RollupBlock(codec, count, uint32(checksum), payload)
+			if err != nil {
+				_ = blockRows.Close()
+				return nil, fmt.Errorf("metric: decode SQLite V4 rollup block series=%d start=%d: %w", item.id, startNano, err)
+			}
+			if len(records) == 0 || records[0].bucketNano != startNano || records[len(records)-1].bucketNano != endNano {
+				_ = blockRows.Close()
+				return nil, fmt.Errorf("metric: SQLite V4 rollup block boundary mismatch for series=%d start=%d", item.id, startNano)
+			}
+			for _, record := range records {
+				if record.bucketNano >= lower && record.bucketNano <= upper {
+					byBucket[record.bucketNano] = record
+				}
+			}
+		}
+		if err := blockRows.Err(); err != nil {
+			_ = blockRows.Close()
+			return nil, err
+		}
+		if err := blockRows.Close(); err != nil {
+			return nil, err
+		}
+		hotRows, err := q.QueryContext(ctx, fmt.Sprintf(
+			`SELECT bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts,
+			        last_val, last_ts, digest, created_at
+			 FROM %s WHERE series_id = ? AND resolution_nano = ? AND bucket_nano >= ? AND bucket_nano <= ?`,
+			s.tables.rollupValues,
+		), item.id, resolution, lower, upper)
+		if err != nil {
+			return nil, err
+		}
+		for hotRows.Next() {
+			record, err := scanSQLiteV4RollupRecord(hotRows)
+			if err != nil {
+				_ = hotRows.Close()
+				return nil, err
+			}
+			byBucket[record.bucketNano] = record
+		}
+		if err := hotRows.Err(); err != nil {
+			_ = hotRows.Close()
+			return nil, err
+		}
+		if err := hotRows.Close(); err != nil {
+			return nil, err
+		}
+		buckets := make([]int64, 0, len(byBucket))
+		for bucket := range byBucket {
+			buckets = append(buckets, bucket)
+		}
+		sort.Slice(buckets, func(i, j int) bool { return buckets[i] < buckets[j] })
+		for _, bucket := range buckets {
+			record := byBucket[bucket]
+			var digest *TDigest
+			if needDigest {
+				digest, err = DecodeTDigest(record.digest)
+				if err != nil {
+					return nil, err
+				}
+			}
+			result = append(result, storedRollup{
+				entityID: item.entityID,
+				bucket:   record.bucketNano,
+				bucketData: &rollupBucket{
+					count: record.count,
+					sum:   math.Float64frombits(record.sumBits), sumSq: math.Float64frombits(record.sumSqBits),
+					min: math.Float64frombits(record.minBits), max: math.Float64frombits(record.maxBits),
+					firstVal: math.Float64frombits(record.firstBits), firstTS: record.firstTS,
+					lastVal: math.Float64frombits(record.lastBits), lastTS: record.lastTS,
+					digest: digest, tagsHash: item.tagsHash, tagsJSON: item.tagsJSON,
+				},
+			})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].bucket != result[j].bucket {
+			return result[i].bucket < result[j].bucket
+		}
+		if result[i].entityID != result[j].entityID {
+			return result[i].entityID < result[j].entityID
+		}
+		return result[i].bucketData.tagsHash < result[j].bucketData.tagsHash
+	})
+	return result, nil
+}
+
+func (s *Store) readSQLiteV4RollupBucketTx(ctx context.Context, tx *sql.Tx, metricName, entityID, tagsHash string, resolution, bucketNano int64) (*rollupBucket, error) {
+	series, err := s.sqliteV4MatchingSeries(ctx, tx, metricName, entityID, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range series {
+		if item.tagsHash != tagsHash {
+			continue
+		}
+		rows, err := s.querySQLiteV4Rollups(ctx, tx, metricName, entityID, item.tags, resolution, bucketNano, bucketNano, true)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) > 0 {
+			return rows[0].bucketData, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *Store) sqliteV4SeriesHasRollupBetween(ctx context.Context, q querier, seriesID, lower, upper int64) (bool, error) {
+	var hotExists int
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT EXISTS(SELECT 1 FROM %s WHERE series_id = ? AND bucket_nano >= ? AND bucket_nano <= ?)`,
+		s.tables.rollupValues,
+	), seriesID, lower, upper).Scan(&hotExists); err != nil {
+		return false, err
+	}
+	if hotExists != 0 {
+		return true, nil
+	}
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(
+		`SELECT start_nano, end_nano, bucket_count, codec, checksum, payload FROM %s
+		 WHERE series_id = ? AND end_nano >= ? AND start_nano <= ? ORDER BY start_nano`,
+		s.tables.rollupBlocks,
+	), seriesID, lower, upper)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var startNano, endNano, checksum int64
+		var count, codec int
+		var payload []byte
+		if err := rows.Scan(&startNano, &endNano, &count, &codec, &checksum, &payload); err != nil {
+			return false, err
+		}
+		records, err := decodeSQLiteV4RollupBlock(codec, count, uint32(checksum), payload)
+		if err != nil {
+			return false, fmt.Errorf("metric: decode SQLite V4 rollup block series=%d start=%d: %w", seriesID, startNano, err)
+		}
+		if len(records) == 0 || records[0].bucketNano != startNano || records[len(records)-1].bucketNano != endNano {
+			return false, fmt.Errorf("metric: SQLite V4 rollup block boundary mismatch for series=%d start=%d", seriesID, startNano)
+		}
+		for _, record := range records {
+			if record.bucketNano >= lower && record.bucketNano <= upper {
+				return true, nil
+			}
+		}
+	}
+	return false, rows.Err()
+}
+
+func (s *Store) latestSQLiteV4RollupBefore(ctx context.Context, q querier, metricName, entityID string, resolution, beforeNano int64) (Point, bool, error) {
+	series, err := s.sqliteV4MatchingSeries(ctx, q, metricName, entityID, nil)
+	if err != nil {
+		return Point{}, false, err
+	}
+	var latest Point
+	found := false
+	for _, item := range series {
+		var hotValue float64
+		var hotTimestamp int64
+		err := q.QueryRowContext(ctx, fmt.Sprintf(
+			`SELECT last_val, last_ts FROM %s WHERE series_id = ? AND resolution_nano = ? AND last_ts < ?
+			 ORDER BY last_ts DESC LIMIT 1`, s.tables.rollupValues,
+		), item.id, resolution, beforeNano).Scan(&hotValue, &hotTimestamp)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return Point{}, false, err
+		}
+		if err == nil && (!found || hotTimestamp > latest.Timestamp.UnixNano()) {
+			latest = Point{MetricName: metricName, EntityID: entityID, Timestamp: time.Unix(0, hotTimestamp).UTC(), Value: hotValue, Tags: cloneStringMap(item.tags)}
+			found = true
+		}
+
+		rows, err := q.QueryContext(ctx, fmt.Sprintf(
+			`SELECT start_nano, end_nano, bucket_count, codec, checksum, payload FROM %s
+			 WHERE series_id = ? AND resolution_nano = ? AND start_nano < ? ORDER BY start_nano DESC`,
+			s.tables.rollupBlocks,
+		), item.id, resolution, beforeNano)
+		if err != nil {
+			return Point{}, false, err
+		}
+		matchedSeries := false
+		for rows.Next() {
+			var startNano, endNano, checksum int64
+			var count, codec int
+			var payload []byte
+			if err := rows.Scan(&startNano, &endNano, &count, &codec, &checksum, &payload); err != nil {
+				_ = rows.Close()
+				return Point{}, false, err
+			}
+			records, err := decodeSQLiteV4RollupBlock(codec, count, uint32(checksum), payload)
+			if err != nil {
+				_ = rows.Close()
+				return Point{}, false, fmt.Errorf("metric: decode SQLite V4 rollup block series=%d start=%d: %w", item.id, startNano, err)
+			}
+			if len(records) == 0 || records[0].bucketNano != startNano || records[len(records)-1].bucketNano != endNano {
+				_ = rows.Close()
+				return Point{}, false, fmt.Errorf("metric: SQLite V4 rollup block boundary mismatch for series=%d start=%d", item.id, startNano)
+			}
+			for index := len(records) - 1; index >= 0; index-- {
+				record := records[index]
+				if record.lastTS >= beforeNano {
+					continue
+				}
+				if !found || record.lastTS > latest.Timestamp.UnixNano() {
+					latest = Point{
+						MetricName: metricName,
+						EntityID:   entityID,
+						Timestamp:  time.Unix(0, record.lastTS).UTC(),
+						Value:      math.Float64frombits(record.lastBits),
+						Tags:       cloneStringMap(item.tags),
+					}
+					found = true
+				}
+				matchedSeries = true
+				break
+			}
+			if matchedSeries {
+				break
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return Point{}, false, err
+		}
+		if err := rows.Close(); err != nil {
+			return Point{}, false, err
+		}
+	}
+	return latest, found, nil
+}
+
+func (s *Store) deleteSQLiteV4RollupsTx(ctx context.Context, tx *sql.Tx, filter Query, resolutions []int64, beforeNano *int64) (int64, error) {
+	series, err := s.sqliteV4MatchingSeries(ctx, tx, filter.MetricName, filter.EntityID, filter.Tags)
+	if err != nil {
+		return 0, err
+	}
+	resolutionSet := make(map[int64]struct{}, len(resolutions))
+	for _, resolution := range resolutions {
+		resolutionSet[resolution] = struct{}{}
+	}
+	var total int64
+	for _, item := range series {
+		type rollupKey struct{ resolution, bucket int64 }
+		deleted := make(map[rollupKey]struct{})
+		args := []any{item.id}
+		where := "series_id = ?"
+		if len(resolutionSet) > 0 {
+			placeholders := make([]string, 0, len(resolutionSet))
+			for resolution := range resolutionSet {
+				placeholders = append(placeholders, "?")
+				args = append(args, resolution)
+			}
+			where += " AND resolution_nano IN (" + strings.Join(placeholders, ",") + ")"
+		}
+		blockWhere := where
+		blockArgs := append([]any(nil), args...)
+		if beforeNano != nil {
+			blockWhere += " AND start_nano < ?"
+			blockArgs = append(blockArgs, *beforeNano)
+		}
+		blockRows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT resolution_nano, start_nano, end_nano, bucket_count, codec, checksum, payload FROM %s WHERE %s`,
+			s.tables.rollupBlocks, blockWhere,
+		), blockArgs...)
+		if err != nil {
+			return total, err
+		}
+		type block struct {
+			resolution, start, end, checksum int64
+			count, codec                     int
+			payload                          []byte
+		}
+		var blocks []block
+		for blockRows.Next() {
+			var value block
+			if err := blockRows.Scan(&value.resolution, &value.start, &value.end, &value.count, &value.codec, &value.checksum, &value.payload); err != nil {
+				_ = blockRows.Close()
+				return total, err
+			}
+			value.payload = append([]byte(nil), value.payload...)
+			blocks = append(blocks, value)
+		}
+		if err := blockRows.Err(); err != nil {
+			_ = blockRows.Close()
+			return total, err
+		}
+		if err := blockRows.Close(); err != nil {
+			return total, err
+		}
+		for _, value := range blocks {
+			records, err := decodeSQLiteV4RollupBlock(value.codec, value.count, uint32(value.checksum), value.payload)
+			if err != nil {
+				return total, err
+			}
+			if len(records) == 0 || records[0].bucketNano != value.start || records[len(records)-1].bucketNano != value.end {
+				return total, fmt.Errorf("metric: SQLite V4 rollup block boundary mismatch for series=%d start=%d", item.id, value.start)
+			}
+			kept := make([]sqliteV4RollupRecord, 0, len(records))
+			for _, record := range records {
+				if beforeNano == nil || record.bucketNano < *beforeNano {
+					deleted[rollupKey{resolution: value.resolution, bucket: record.bucketNano}] = struct{}{}
+				} else {
+					kept = append(kept, record)
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupBlocks+` WHERE series_id = ? AND resolution_nano = ? AND start_nano = ?`, item.id, value.resolution, value.start); err != nil {
+				return total, err
+			}
+			if err := s.writeSQLiteV4RollupBlocksTx(ctx, tx, item.id, value.resolution, kept); err != nil {
+				return total, err
+			}
+		}
+		hotWhere := where
+		hotArgs := append([]any(nil), args...)
+		if beforeNano != nil {
+			hotWhere += " AND bucket_nano < ?"
+			hotArgs = append(hotArgs, *beforeNano)
+		}
+		hotRows, err := tx.QueryContext(ctx, `SELECT resolution_nano, bucket_nano FROM `+s.tables.rollupValues+` WHERE `+hotWhere, hotArgs...)
+		if err != nil {
+			return total, err
+		}
+		for hotRows.Next() {
+			var key rollupKey
+			if err := hotRows.Scan(&key.resolution, &key.bucket); err != nil {
+				_ = hotRows.Close()
+				return total, err
+			}
+			deleted[key] = struct{}{}
+		}
+		if err := hotRows.Err(); err != nil {
+			_ = hotRows.Close()
+			return total, err
+		}
+		if err := hotRows.Close(); err != nil {
+			return total, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupValues+` WHERE `+hotWhere, hotArgs...); err != nil {
+			return total, err
+		}
+		total += int64(len(deleted))
+	}
+	return total, nil
+}
+
+func (s *Store) sealSQLiteV4RollupHotTx(ctx context.Context, tx *sql.Tx, metricName string, beforeNano int64) error {
+	series, err := s.sqliteV4MatchingSeries(ctx, tx, metricName, "", nil)
+	if err != nil {
+		return err
+	}
+	for _, item := range series {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT DISTINCT resolution_nano FROM %s WHERE series_id = ? AND bucket_nano < ?`,
+			s.tables.rollupValues,
+		), item.id, beforeNano)
+		if err != nil {
+			return err
+		}
+		var resolutions []int64
+		for rows.Next() {
+			var resolution int64
+			if err := rows.Scan(&resolution); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			resolutions = append(resolutions, resolution)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
+		for _, resolution := range resolutions {
+			var maxEnd sql.NullInt64
+			if err := tx.QueryRowContext(ctx, `SELECT MAX(end_nano) FROM `+s.tables.rollupBlocks+` WHERE series_id = ? AND resolution_nano = ?`, item.id, resolution).Scan(&maxEnd); err != nil {
+				return err
+			}
+			if maxEnd.Valid {
+				var lateCount int
+				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ? AND bucket_nano <= ? AND bucket_nano < ?`, item.id, resolution, maxEnd.Int64, beforeNano).Scan(&lateCount); err != nil {
+					return err
+				}
+				if lateCount > 0 {
+					if err := s.rewriteSQLiteV4RollupGroupTx(ctx, tx, item.id, resolution, beforeNano); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			minimum := sqliteV4RollupBlockLimit
+			if resolution > 0 {
+				perDay := int((24 * time.Hour).Nanoseconds() / resolution)
+				if perDay < 16 {
+					perDay = 16
+				}
+				if perDay < minimum {
+					minimum = perDay
+				}
+			}
+			lower := int64(math.MinInt64)
+			if maxEnd.Valid {
+				lower = maxEnd.Int64
+			}
+			var count int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ? AND bucket_nano > ? AND bucket_nano < ?`, item.id, resolution, lower, beforeNano).Scan(&count); err != nil {
+				return err
+			}
+			if count < minimum {
+				continue
+			}
+			limit := count
+			if limit > sqliteV4RollupBlockLimit {
+				limit = sqliteV4RollupBlockLimit
+			}
+			hotRows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				`SELECT bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts,
+				        last_val, last_ts, digest, created_at FROM %s
+				 WHERE series_id = ? AND resolution_nano = ? AND bucket_nano > ? AND bucket_nano < ?
+				 ORDER BY bucket_nano LIMIT ?`, s.tables.rollupValues,
+			), item.id, resolution, lower, beforeNano, limit)
+			if err != nil {
+				return err
+			}
+			var records []sqliteV4RollupRecord
+			for hotRows.Next() {
+				record, err := scanSQLiteV4RollupRecord(hotRows)
+				if err != nil {
+					_ = hotRows.Close()
+					return err
+				}
+				records = append(records, record)
+			}
+			if err := hotRows.Err(); err != nil {
+				_ = hotRows.Close()
+				return err
+			}
+			_ = hotRows.Close()
+			if len(records) == 0 {
+				continue
+			}
+			if err := s.writeSQLiteV4RollupBlocksTx(ctx, tx, item.id, resolution, records); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ? AND bucket_nano >= ? AND bucket_nano <= ?`, item.id, resolution, records[0].bucketNano, records[len(records)-1].bucketNano); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) rewriteSQLiteV4RollupGroupTx(ctx context.Context, tx *sql.Tx, seriesID, resolution, beforeNano int64) error {
+	records, err := s.loadAllSQLiteV4RollupBlockRecords(ctx, tx, seriesID, resolution)
+	if err != nil {
+		return err
+	}
+	byBucket := make(map[int64]sqliteV4RollupRecord, len(records))
+	for _, record := range records {
+		byBucket[record.bucketNano] = record
+	}
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+		`SELECT bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts,
+		        last_val, last_ts, digest, created_at FROM %s
+		 WHERE series_id = ? AND resolution_nano = ? AND bucket_nano < ? ORDER BY bucket_nano`,
+		s.tables.rollupValues,
+	), seriesID, resolution, beforeNano)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		record, err := scanSQLiteV4RollupRecord(rows)
+		if err != nil {
+			_ = rows.Close()
+			return err
+		}
+		byBucket[record.bucketNano] = record
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	merged := make([]sqliteV4RollupRecord, 0, len(byBucket))
+	for _, record := range byBucket {
+		merged = append(merged, record)
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].bucketNano < merged[j].bucketNano })
+	if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupBlocks+` WHERE series_id = ? AND resolution_nano = ?`, seriesID, resolution); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ? AND bucket_nano < ?`, seriesID, resolution, beforeNano); err != nil {
+		return err
+	}
+	return s.writeSQLiteV4RollupBlocksTx(ctx, tx, seriesID, resolution, merged)
+}

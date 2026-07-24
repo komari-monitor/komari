@@ -197,6 +197,9 @@ func (s *Store) scanRollupRowsContained(ctx context.Context, metricName, entityI
 // [lowerBucket, upperBucket] 内的 rollup 行，并可把实体和标签过滤下推到 SQL。
 // 它是包含扫描和混合扫描共用的 SQL 原语；桶窗口语义由调用方通过传入的边界决定。
 func (s *Store) scanRollupRowsBetween(ctx context.Context, metricName, entityID string, tags map[string]string, resNano, lowerBucket, upperBucket int64, needDigest bool) ([]storedRollup, error) {
+	if s.sqliteStorageV4 {
+		return s.querySQLiteV4Rollups(ctx, s.reader(), metricName, entityID, tags, resNano, lowerBucket, upperBucket, needDigest)
+	}
 	args := []any{metricName, resNano, lowerBucket, upperBucket}
 	parts := []string{
 		"metric_name = " + s.dialect.placeholder(1),

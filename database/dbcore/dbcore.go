@@ -409,6 +409,8 @@ func doInitialize() error {
 		}
 		instance.Exec("PRAGMA synchronous = NORMAL;")
 		instance.Exec("PRAGMA busy_timeout = 5000;")
+		instance.Exec("PRAGMA wal_autocheckpoint = 256;")
+		instance.Exec("PRAGMA journal_size_limit = 1048576;")
 		instance.Exec("PRAGMA cache_size = -65536;")
 		instance.Exec("PRAGMA temp_store = MEMORY;")
 		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")

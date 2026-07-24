@@ -18,23 +18,31 @@ const (
 )
 
 // migrateSQLiteStorageV4 first brings legacy layouts to the normalized V3
-// schema, then atomically moves raw values into verified lossless point blocks.
-// Rollups remain normalized rows because their t-digests are already compressed
-// and are queried efficiently by SQLite.
+// schema, then atomically moves raw values and long-term rollups into verified
+// lossless blocks. Databases created by the first V4 test build have point
+// blocks but no rollup blocks; they are upgraded in place without re-encoding
+// the already migrated points.
 func (s *Store) migrateSQLiteStorageV4(ctx context.Context) error {
 	if err := s.migrateSQLiteStorageV3(ctx); err != nil {
 		return err
 	}
-	kind, err := sqliteObjectType(ctx, s.db, s.tables.pointBlocks)
+	pointKind, err := sqliteObjectType(ctx, s.db, s.tables.pointBlocks)
 	if err != nil {
 		return err
 	}
-	if kind == "table" {
+	rollupKind, err := sqliteObjectType(ctx, s.db, s.tables.rollupBlocks)
+	if err != nil {
+		return err
+	}
+	if pointKind != "" && pointKind != "table" {
+		return fmt.Errorf("metric: SQLite V4 object %s has unexpected type %q", s.tables.pointBlocks, pointKind)
+	}
+	if rollupKind != "" && rollupKind != "table" {
+		return fmt.Errorf("metric: SQLite V4 object %s has unexpected type %q", s.tables.rollupBlocks, rollupKind)
+	}
+	if pointKind == "table" && rollupKind == "table" {
 		s.sqliteStorageV4 = true
 		return s.ensureSQLiteStorageV4(ctx)
-	}
-	if kind != "" {
-		return fmt.Errorf("metric: SQLite V4 object %s has unexpected type %q", s.tables.pointBlocks, kind)
 	}
 
 	log.Printf("metric: migrating SQLite metric storage to V%d", sqliteStorageVersionV4)
@@ -46,26 +54,60 @@ func (s *Store) migrateSQLiteStorageV4(ctx context.Context) error {
 	if err := s.createSQLiteV4PointBlocks(ctx, tx); err != nil {
 		return err
 	}
-	sourceCount, err := sqliteTableRowCountTx(ctx, tx, s.tables.pointValues)
-	if err != nil {
+	if err := s.createSQLiteV4RollupBlocks(ctx, tx); err != nil {
 		return err
 	}
-	sealed, err := s.sealSQLiteV4PointsTx(ctx, tx, "", math.MaxInt64)
-	if err != nil {
-		return fmt.Errorf("metric: encode SQLite V4 point blocks: %w", err)
+	if err := s.validateSQLiteV4PointBlocks(ctx, tx); err != nil {
+		return err
 	}
-	if sealed != sourceCount {
-		return fmt.Errorf("metric: SQLite V4 point count mismatch: source=%d encoded=%d", sourceCount, sealed)
+	if err := s.validateSQLiteV4RollupBlocks(ctx, tx); err != nil {
+		return err
 	}
-	var hotCount, blockCount int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+s.tables.pointValues).Scan(&hotCount); err != nil {
+	var pointSourceCount, rollupSourceCount int64
+	if pointKind == "" {
+		pointSourceCount, err = sqliteTableRowCountTx(ctx, tx, s.tables.pointValues)
+		if err != nil {
+			return err
+		}
+		sealed, err := s.sealSQLiteV4PointsTx(ctx, tx, "", math.MaxInt64)
+		if err != nil {
+			return fmt.Errorf("metric: encode SQLite V4 point blocks: %w", err)
+		}
+		if sealed != pointSourceCount {
+			return fmt.Errorf("metric: SQLite V4 point count mismatch: source=%d encoded=%d", pointSourceCount, sealed)
+		}
+	}
+	if rollupKind == "" {
+		rollupSourceCount, err = sqliteTableRowCountTx(ctx, tx, s.tables.rollupValues)
+		if err != nil {
+			return err
+		}
+		sealed, err := s.sealAllSQLiteV4RollupsTx(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("metric: encode SQLite V4 rollup blocks: %w", err)
+		}
+		if sealed != rollupSourceCount {
+			return fmt.Errorf("metric: SQLite V4 rollup count mismatch: source=%d encoded=%d", rollupSourceCount, sealed)
+		}
+	}
+	var pointHotCount, pointBlockCount, rollupHotCount, rollupBlockCount int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+s.tables.pointValues).Scan(&pointHotCount); err != nil {
 		return fmt.Errorf("metric: validate SQLite V4 hot points: %w", err)
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(point_count), 0) FROM `+s.tables.pointBlocks).Scan(&blockCount); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(point_count), 0) FROM `+s.tables.pointBlocks).Scan(&pointBlockCount); err != nil {
 		return fmt.Errorf("metric: validate SQLite V4 point blocks: %w", err)
 	}
-	if hotCount != 0 || blockCount != sourceCount {
-		return fmt.Errorf("metric: SQLite V4 validation failed: source=%d hot=%d blocks=%d", sourceCount, hotCount, blockCount)
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+s.tables.rollupValues).Scan(&rollupHotCount); err != nil {
+		return fmt.Errorf("metric: validate SQLite V4 hot rollups: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(bucket_count), 0) FROM `+s.tables.rollupBlocks).Scan(&rollupBlockCount); err != nil {
+		return fmt.Errorf("metric: validate SQLite V4 rollup blocks: %w", err)
+	}
+	if pointKind == "" && (pointHotCount != 0 || pointBlockCount != pointSourceCount) {
+		return fmt.Errorf("metric: SQLite V4 point validation failed: source=%d hot=%d blocks=%d", pointSourceCount, pointHotCount, pointBlockCount)
+	}
+	if rollupKind == "" && (rollupHotCount != 0 || rollupBlockCount != rollupSourceCount) {
+		return fmt.Errorf("metric: SQLite V4 rollup validation failed: source=%d hot=%d blocks=%d", rollupSourceCount, rollupHotCount, rollupBlockCount)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("metric: commit SQLite V4 migration: %w", err)
@@ -76,7 +118,7 @@ func (s *Store) migrateSQLiteStorageV4(ctx context.Context) error {
 		// physical rewrite does not invalidate the logical migration.
 		log.Printf("metric: SQLite V4 post-migration vacuum skipped: %v", err)
 	}
-	log.Printf("metric: migrated SQLite metric storage to V%d (%d raw points preserved bit-for-bit)", sqliteStorageVersionV4, sourceCount)
+	log.Printf("metric: migrated SQLite metric storage to V%d (%d raw points and %d rollups preserved bit-for-bit)", sqliteStorageVersionV4, pointSourceCount, rollupSourceCount)
 	return nil
 }
 
@@ -89,7 +131,13 @@ func (s *Store) ensureSQLiteStorageV4(ctx context.Context) error {
 	if err := s.createSQLiteV4PointBlocks(ctx, tx); err != nil {
 		return err
 	}
+	if err := s.createSQLiteV4RollupBlocks(ctx, tx); err != nil {
+		return err
+	}
 	if err := s.validateSQLiteV4PointBlocks(ctx, tx); err != nil {
+		return err
+	}
+	if err := s.validateSQLiteV4RollupBlocks(ctx, tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -153,6 +201,7 @@ type sqliteV4Series struct {
 	id         int64
 	metricName string
 	entityID   string
+	tagsHash   string
 	tagsJSON   string
 	tags       map[string]string
 }
@@ -336,7 +385,7 @@ func (s *Store) sqliteV4MatchingSeries(ctx context.Context, q querier, metricNam
 		where = strings.Join(parts, " AND ")
 	}
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(
-		`SELECT id, metric_name, entity_id, tags FROM %s WHERE %s ORDER BY id`,
+		`SELECT id, metric_name, entity_id, tags_hash, tags FROM %s WHERE %s ORDER BY id`,
 		s.tables.series, where,
 	), args...)
 	if err != nil {
@@ -347,7 +396,7 @@ func (s *Store) sqliteV4MatchingSeries(ctx context.Context, q querier, metricNam
 	for rows.Next() {
 		var item sqliteV4Series
 		var rawTags any
-		if err := rows.Scan(&item.id, &item.metricName, &item.entityID, &rawTags); err != nil {
+		if err := rows.Scan(&item.id, &item.metricName, &item.entityID, &item.tagsHash, &rawTags); err != nil {
 			return nil, err
 		}
 		item.tagsJSON, err = rawTagsToJSON(rawTags)
@@ -616,36 +665,17 @@ func (s *Store) sqliteV4EntityIDs(ctx context.Context, query Query) ([]string, e
 			entities[item.entityID] = struct{}{}
 		}
 	}
-	rollupArgs := []any{query.MetricName, query.Start.UnixNano(), query.End.UnixNano()}
-	parts := []string{"metric_name = ?", "bucket_nano >= ?", "bucket_nano <= ?"}
-	if strings.TrimSpace(query.EntityID) != "" {
-		rollupArgs = append(rollupArgs, query.EntityID)
-		parts = append(parts, "entity_id = ?")
-	}
-	for _, key := range sortedKeys(query.Tags) {
-		rollupArgs = append(rollupArgs, query.Tags[key])
-		parts = append(parts, s.dialect.jsonExtractEquals("tags", key, "?"))
-	}
-	rows, err := s.reader().QueryContext(ctx, fmt.Sprintf(
-		`SELECT DISTINCT entity_id FROM %s WHERE %s`, s.tables.rollups, strings.Join(parts, " AND "),
-	), rollupArgs...)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var entityID string
-		if err := rows.Scan(&entityID); err != nil {
-			_ = rows.Close()
+	for _, item := range series {
+		if _, exists := entities[item.entityID]; exists {
+			continue
+		}
+		hasRollup, err := s.sqliteV4SeriesHasRollupBetween(ctx, s.reader(), item.id, query.Start.UnixNano(), query.End.UnixNano())
+		if err != nil {
 			return nil, err
 		}
-		entities[entityID] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
+		if hasRollup {
+			entities[item.entityID] = struct{}{}
+		}
 	}
 	result := make([]string, 0, len(entities))
 	for entityID := range entities {

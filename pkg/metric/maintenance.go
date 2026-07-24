@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 )
@@ -94,6 +95,22 @@ func (s *Store) ReclaimSpace(ctx context.Context) error {
 	if _, err := s.cleanupOrphanedMetricData(ctx); err != nil {
 		return err
 	}
+	if s.sqliteStorageV4 {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("metric: begin SQLite V4 reclaim seal: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := s.sealSQLiteV4PointsTx(ctx, tx, "", math.MaxInt64); err != nil {
+			return fmt.Errorf("metric: seal SQLite V4 points before reclaim: %w", err)
+		}
+		if _, err := s.sealAllSQLiteV4RollupsTx(ctx, tx); err != nil {
+			return fmt.Errorf("metric: seal SQLite V4 rollups before reclaim: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("metric: commit SQLite V4 reclaim seal: %w", err)
+		}
+	}
 
 	switch s.cfg.Driver {
 	case DriverSQLite:
@@ -168,8 +185,13 @@ func (s *Store) cleanupOrphanedMetricData(ctx context.Context) (int64, error) {
 				return deleted, err
 			}
 			deleted += count
+			count, err = s.deleteSQLiteV4RollupsTx(ctx, tx, Query{MetricName: metricName}, nil, nil)
+			if err != nil {
+				return deleted, err
+			}
+			deleted += count
 		}
-		for _, table := range []string{s.tables.rollups, s.tables.watermarks} {
+		for _, table := range []string{s.tables.watermarks} {
 			where := fmt.Sprintf(`NOT EXISTS (SELECT 1 FROM %s WHERE %s.name = %s.metric_name)`,
 				s.tables.definitions, s.tables.definitions, table)
 			count, err := s.deleteRows(ctx, tx, table, where)

@@ -109,10 +109,15 @@ func TestSQLiteStorageV3MigratesLegacyDataAndPreservesQueries(t *testing.T) {
 		t.Fatalf("migrated percentile rollup changed: %#v", series)
 	}
 
-	var migratedDigest []byte
-	if err := store.db.QueryRowContext(ctx, `SELECT digest FROM metric_rollup_values LIMIT 1`).Scan(&migratedDigest); err != nil {
-		t.Fatalf("read migrated digest: %v", err)
+	matchedSeries, err := store.sqliteV4MatchingSeries(ctx, store.db, "latency", "node-a", tags)
+	if err != nil || len(matchedSeries) != 1 {
+		t.Fatalf("find migrated rollup series: count=%d err=%v", len(matchedSeries), err)
 	}
+	rollupRecords, err := store.loadAllSQLiteV4RollupBlockRecords(ctx, store.db, matchedSeries[0].id, time.Minute.Nanoseconds())
+	if err != nil || len(rollupRecords) != 1 {
+		t.Fatalf("read migrated rollup block: count=%d err=%v", len(rollupRecords), err)
+	}
+	migratedDigest := rollupRecords[0].digest
 	if len(migratedDigest) >= len(legacyDigest) || migratedDigest[1] != tdigestCompressedMagic1 {
 		t.Fatalf("legacy digest was not compressed: old=%d new=%d", len(legacyDigest), len(migratedDigest))
 	}

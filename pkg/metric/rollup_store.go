@@ -154,6 +154,11 @@ func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now ti
 	if err := s.persistCompactionWatermarkTx(ctx, metricName, policy.rawCutoff(now), tx); err != nil {
 		return written, err
 	}
+	if s.sqliteStorageV4 {
+		if err := s.sealSQLiteV4RollupHotTx(ctx, tx, metricName, now.Add(-sqliteV4HotWindow).UnixNano()); err != nil {
+			return written, err
+		}
+	}
 	if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
 		return written, err
 	}
@@ -352,6 +357,14 @@ func (s *Store) enforceRetentionWithinTx(ctx context.Context, metricName string,
 func (s *Store) deleteRollupsForIntervalsTx(ctx context.Context, metricName string, intervals []time.Duration, tx *sql.Tx) error {
 	if len(intervals) == 0 {
 		return nil
+	}
+	if s.sqliteStorageV4 {
+		resolutions := make([]int64, len(intervals))
+		for index, interval := range intervals {
+			resolutions[index] = interval.Nanoseconds()
+		}
+		_, err := s.deleteSQLiteV4RollupsTx(ctx, tx, Query{MetricName: metricName}, resolutions, nil)
+		return err
 	}
 	args := make([]any, 1, len(intervals)+1)
 	args[0] = metricName
@@ -569,6 +582,9 @@ type storedRollup struct {
 // scanRollupRows 读取某指标在给定分辨率下的所有 rollup 行，并还原它们的
 // 内存累加器（包括标签身份和解码后的 t-digest）。
 func (s *Store) scanRollupRows(ctx context.Context, q querier, metricName string, interval time.Duration) ([]storedRollup, error) {
+	if s.sqliteStorageV4 {
+		return s.querySQLiteV4Rollups(ctx, q, metricName, "", nil, interval.Nanoseconds(), math.MinInt64, math.MaxInt64, true)
+	}
 	sqlText := fmt.Sprintf(
 		`SELECT entity_id, tags_hash, tags, bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts, last_val, last_ts, digest
 		 FROM %s WHERE metric_name = %s AND resolution_nano = %s ORDER BY bucket_nano ASC`,
@@ -726,6 +742,11 @@ func (s *Store) writeRollupBucketsWithMergePointTx(ctx context.Context, metricNa
 
 // deleteRollupsBeforeTx deletes stored rollup rows within a transaction.
 func (s *Store) deleteRollupsBeforeTx(ctx context.Context, metricName string, interval time.Duration, before time.Time, tx *sql.Tx) error {
+	if s.sqliteStorageV4 {
+		beforeNano := before.UTC().UnixNano()
+		_, err := s.deleteSQLiteV4RollupsTx(ctx, tx, Query{MetricName: metricName}, []int64{interval.Nanoseconds()}, &beforeNano)
+		return err
+	}
 	sqlText := fmt.Sprintf(
 		`DELETE FROM %s WHERE metric_name = %s AND resolution_nano = %s AND bucket_nano < %s`,
 		s.tables.rollups, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3),
@@ -757,6 +778,9 @@ func floorDivNano(ts, size int64) int64 {
 
 // readRollupBucketTx reads a single rollup bucket from a transaction.
 func (s *Store) readRollupBucketTx(ctx context.Context, metricName, entityID, tagsHash string, interval time.Duration, bucketNano int64, tx *sql.Tx) (*rollupBucket, error) {
+	if s.sqliteStorageV4 {
+		return s.readSQLiteV4RollupBucketTx(ctx, tx, metricName, entityID, tagsHash, interval.Nanoseconds(), bucketNano)
+	}
 	sqlText := fmt.Sprintf(
 		`SELECT count, sum, sum_sq, min_val, max_val, first_val, first_ts, last_val, last_ts, digest, tags
 		 FROM %s WHERE metric_name = %s AND resolution_nano = %s AND entity_id = %s

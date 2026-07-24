@@ -107,6 +107,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 			pointValues:  tableName(cfg.TablePrefix, "point_values"),
 			pointBlocks:  tableName(cfg.TablePrefix, "point_blocks"),
 			rollupValues: tableName(cfg.TablePrefix, "rollup_values"),
+			rollupBlocks: tableName(cfg.TablePrefix, "rollup_blocks"),
 		},
 	}
 
@@ -172,7 +173,16 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 				s.closeDBs()
 				return nil, err
 			}
-			s.sqliteStorageV4 = blockType == "table"
+			rollupBlockType, err := sqliteObjectType(ctx, s.db, s.tables.rollupBlocks)
+			if err != nil {
+				s.closeDBs()
+				return nil, err
+			}
+			if (blockType == "table") != (rollupBlockType == "table") {
+				s.closeDBs()
+				return nil, fmt.Errorf("metric: incomplete SQLite V4 schema requires automatic migration")
+			}
+			s.sqliteStorageV4 = blockType == "table" && rollupBlockType == "table"
 		}
 	}
 
@@ -255,7 +265,10 @@ func prepareSQLiteConfig(cfg Config) (Config, error) {
 		cfg.SQLite.MMapSizeBytes = 256 * 1024 * 1024
 	}
 	if cfg.SQLite.WALAutoCheckpoint == 0 {
-		cfg.SQLite.WALAutoCheckpoint = 1000
+		cfg.SQLite.WALAutoCheckpoint = 256
+	}
+	if cfg.SQLite.JournalSizeLimitBytes == 0 {
+		cfg.SQLite.JournalSizeLimitBytes = 1024 * 1024
 	}
 
 	if cfg.DB == nil {
@@ -325,6 +338,7 @@ func (s *Store) configureSQLite(ctx context.Context, db *sql.DB) error {
 		fmt.Sprintf("PRAGMA cache_size = -%d", s.cfg.SQLite.CacheSizeKB),
 		fmt.Sprintf("PRAGMA mmap_size = %d", s.cfg.SQLite.MMapSizeBytes),
 		fmt.Sprintf("PRAGMA wal_autocheckpoint = %d", s.cfg.SQLite.WALAutoCheckpoint),
+		fmt.Sprintf("PRAGMA journal_size_limit = %d", s.cfg.SQLite.JournalSizeLimitBytes),
 	}
 	if s.cfg.SQLite.TempStoreMemory {
 		pragmas = append(pragmas, "PRAGMA temp_store = MEMORY")
@@ -566,11 +580,13 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 		if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
 			return err
 		}
-	}
-	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.rollups, s.dialect.placeholder(1)), name); err != nil {
-		return err
-	}
-	if !s.sqliteStorageV4 {
+		if _, err := s.deleteSQLiteV4RollupsTx(ctx, tx, Query{MetricName: name}, nil, nil); err != nil {
+			return err
+		}
+	} else {
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.rollups, s.dialect.placeholder(1)), name); err != nil {
+			return err
+		}
 		_, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.points, s.dialect.placeholder(1)), name)
 	}
 	if err != nil {
@@ -679,10 +695,13 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 			if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
 				return Definition{}, err
 			}
+			if _, err := s.deleteSQLiteV4RollupsTx(ctx, tx, Query{MetricName: name}, nil, nil); err != nil {
+				return Definition{}, err
+			}
 		}
-		tables := []string{s.tables.rollups, s.tables.watermarks}
+		tables := []string{s.tables.watermarks}
 		if !s.sqliteStorageV4 {
-			tables = append(tables, s.tables.points)
+			tables = append(tables, s.tables.points, s.tables.rollups)
 		}
 		for _, table := range tables {
 			if _, err := tx.ExecContext(ctx,
@@ -723,10 +742,13 @@ func (s *Store) DeleteMetricData(ctx context.Context, name string) error {
 		if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
 			return err
 		}
+		if _, err := s.deleteSQLiteV4RollupsTx(ctx, tx, Query{MetricName: name}, nil, nil); err != nil {
+			return err
+		}
 	}
-	tables := []string{s.tables.rollups, s.tables.watermarks}
+	tables := []string{s.tables.watermarks}
 	if !s.sqliteStorageV4 {
-		tables = append(tables, s.tables.points)
+		tables = append(tables, s.tables.points, s.tables.rollups)
 	}
 	for _, table := range tables {
 		if _, err := tx.ExecContext(ctx,
@@ -779,10 +801,13 @@ func (s *Store) DeleteMetricDataIfDisabled(ctx context.Context, name string) (bo
 		if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
 			return false, err
 		}
+		if _, err := s.deleteSQLiteV4RollupsTx(ctx, tx, Query{MetricName: name}, nil, nil); err != nil {
+			return false, err
+		}
 	}
-	tables := []string{s.tables.rollups, s.tables.watermarks}
+	tables := []string{s.tables.watermarks}
 	if !s.sqliteStorageV4 {
-		tables = append(tables, s.tables.points)
+		tables = append(tables, s.tables.points, s.tables.rollups)
 	}
 	for _, table := range tables {
 		if _, err := tx.ExecContext(ctx,
@@ -823,10 +848,15 @@ func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error
 			return total, err
 		}
 		total += n
+		n, err = s.deleteSQLiteV4RollupsTx(ctx, tx, Query{EntityID: entityID}, nil, nil)
+		if err != nil {
+			return total, err
+		}
+		total += n
 	}
-	tables := []string{s.tables.rollups}
+	var tables []string
 	if !s.sqliteStorageV4 {
-		tables = append(tables, s.tables.points)
+		tables = append(tables, s.tables.points, s.tables.rollups)
 	}
 	for _, table := range tables {
 		where := "entity_id = " + s.dialect.placeholder(1)
@@ -872,10 +902,15 @@ func (s *Store) DeleteSeries(ctx context.Context, filter Query) (int64, error) {
 			return total, err
 		}
 		total += n
+		n, err = s.deleteSQLiteV4RollupsTx(ctx, tx, filter, nil, nil)
+		if err != nil {
+			return total, err
+		}
+		total += n
 	}
-	tables := []string{s.tables.rollups}
+	var tables []string
 	if !s.sqliteStorageV4 {
-		tables = append(tables, s.tables.points)
+		tables = append(tables, s.tables.points, s.tables.rollups)
 	}
 	for _, table := range tables {
 		args := []any{filter.MetricName}
@@ -1009,6 +1044,7 @@ type execer interface {
 // 发起读取会永远等待事务已占用的那个连接，造成死锁。
 type querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 type queryExecer interface {
@@ -1044,8 +1080,11 @@ func (s *Store) pruneUnusedSQLiteSeries(ctx context.Context, q queryExecer) erro
 	}
 	blockPredicate := ""
 	if s.sqliteStorageV4 {
-		blockPredicate = fmt.Sprintf(" AND NOT EXISTS (SELECT 1 FROM %s WHERE %s.series_id = %s.id)",
-			s.tables.pointBlocks, s.tables.pointBlocks, s.tables.series)
+		blockPredicate = fmt.Sprintf(
+			" AND NOT EXISTS (SELECT 1 FROM %s WHERE %s.series_id = %s.id) AND NOT EXISTS (SELECT 1 FROM %s WHERE %s.series_id = %s.id)",
+			s.tables.pointBlocks, s.tables.pointBlocks, s.tables.series,
+			s.tables.rollupBlocks, s.tables.rollupBlocks, s.tables.series,
+		)
 	}
 	_, err := q.ExecContext(ctx, fmt.Sprintf(
 		`DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s WHERE %s.series_id = %s.id)
@@ -1353,6 +1392,17 @@ func (s *Store) LatestBefore(ctx context.Context, metricName, entityID string, b
 	}
 
 	for _, tier := range s.cfg.RollupPolicy.Tiers {
+		if s.sqliteStorageV4 {
+			candidate, ok, queryErr := s.latestSQLiteV4RollupBefore(ctx, s.reader(), metricName, entityID, tier.Interval.Nanoseconds(), beforeNano)
+			if queryErr != nil {
+				return Point{}, false, queryErr
+			}
+			if ok && (!found || candidate.Timestamp.After(latest.Timestamp)) {
+				latest = candidate
+				found = true
+			}
+			continue
+		}
 		rollupSQL := fmt.Sprintf(
 			`SELECT tags, last_val, last_ts FROM %s
 			 WHERE metric_name = %s AND entity_id = %s AND resolution_nano = %s AND last_ts < %s

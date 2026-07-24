@@ -99,6 +99,10 @@ type SQLiteOptions struct {
 	//
 	// WALAutoCheckpoint 设置 SQLite WAL 自动 checkpoint 页数。
 	WALAutoCheckpoint int
+	// JournalSizeLimitBytes caps the WAL file retained after checkpoints.
+	//
+	// JournalSizeLimitBytes 限制 checkpoint 后保留的 SQLite WAL 文件大小。
+	JournalSizeLimitBytes int64
 	// ReadPoolSize, when > 0, opens a second read-only connection pool with
 	// this many connections for SELECT-style calls. SQLite serializes writes,
 	// but WAL lets readers run concurrently, so a read pool lifts read
@@ -156,12 +160,13 @@ func DefaultConfig(driver Driver, dsn string) Config {
 		ConnMaxLifetime: time.Hour,
 		ConnectTimeout:  10 * time.Second,
 		SQLite: SQLiteOptions{
-			PerformanceProfile: SQLiteProfileBalanced,
-			BusyTimeout:        5 * time.Second,
-			CacheSizeKB:        64 * 1024,
-			TempStoreMemory:    true,
-			MMapSizeBytes:      256 * 1024 * 1024,
-			WALAutoCheckpoint:  1000,
+			PerformanceProfile:    SQLiteProfileBalanced,
+			BusyTimeout:           5 * time.Second,
+			CacheSizeKB:           64 * 1024,
+			TempStoreMemory:       true,
+			MMapSizeBytes:         256 * 1024 * 1024,
+			WALAutoCheckpoint:     256,
+			JournalSizeLimitBytes: 1024 * 1024,
 		},
 	}
 }
@@ -368,6 +373,13 @@ func WithSQLiteTempStoreMemory(enabled bool) Option {
 func WithSQLiteWALAutoCheckpoint(pages int) Option {
 	return func(c *Config) {
 		c.SQLite.WALAutoCheckpoint = pages
+	}
+}
+
+// WithSQLiteJournalSizeLimit sets the WAL size retained after checkpoints.
+func WithSQLiteJournalSizeLimit(bytes int64) Option {
+	return func(c *Config) {
+		c.SQLite.JournalSizeLimitBytes = bytes
 	}
 }
 

@@ -1,6 +1,7 @@
 package metric
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -224,6 +225,277 @@ func TestSQLiteStorageV4ReducesV3FileSize(t *testing.T) {
 	t.Logf("SQLite V4 size: V3=%d V4=%d ratio=%.3f", v3Size, v4Size, float64(v4Size)/float64(v3Size))
 	if v4Size*100 >= v3Size*70 {
 		t.Fatalf("SQLite V4 size=%d, want at least 30%% below V3 size=%d", v4Size, v3Size)
+	}
+}
+
+func TestSQLiteStorageV4UpgradesEarlyV4RollupsLosslessly(t *testing.T) {
+	ctx := context.Background()
+	dsn := sqliteFileDSN(filepath.Join(t.TempDir(), "metrics.db"))
+	policy := RollupPolicy{RawRetention: 15 * time.Minute, Tiers: []RollupTier{{Interval: time.Minute, Retention: 30 * 24 * time.Hour}}}
+	store := createSQLiteV3OnlyStore(t, ctx, dsn)
+	store.cfg.RollupPolicy = policy
+	if err := store.CreateMetric(ctx, Definition{Name: "latency", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	tags := map[string]string{"task": "117"}
+	tagsHash, tagsJSON, err := tagsFingerprint(tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 1, 0, 0, 0, 123, time.UTC)
+	bucket := newRollupBucket(policy.compression())
+	bucket.tagsHash, bucket.tagsJSON = tagsHash, tagsJSON
+	for index, value := range []float64{math.Float64frombits(0x3ff0000000000001), 9.25, 17.75} {
+		bucket.addPoint(value, base.Add(time.Duration(index)*20*time.Second).UnixNano())
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writeRollupBucketsTx(ctx, "latency", time.Minute, map[rollupKey]*rollupBucket{
+		{entityID: "node-a", tagsHash: tagsHash, bucket: base.UnixNano()}: bucket,
+	}, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var sourceDigest []byte
+	if err := store.db.QueryRowContext(ctx, `SELECT digest FROM metric_rollup_values`).Scan(&sourceDigest); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.createSQLiteV4PointBlocks(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(ctx, SQLite(dsn, WithRollupPolicy(policy), WithSQLiteReadPool(4)))
+	if err != nil {
+		t.Fatalf("upgrade early V4 database: %v", err)
+	}
+	defer store.Close()
+	var hotRows, blockRows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_rollup_values`).Scan(&hotRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(bucket_count), 0) FROM metric_rollup_blocks`).Scan(&blockRows); err != nil {
+		t.Fatal(err)
+	}
+	if hotRows != 0 || blockRows != 1 {
+		t.Fatalf("early V4 rollup migration counts: hot=%d block=%d", hotRows, blockRows)
+	}
+	series, err := store.sqliteV4MatchingSeries(ctx, store.db, "latency", "node-a", tags)
+	if err != nil || len(series) != 1 {
+		t.Fatalf("find migrated series: count=%d err=%v", len(series), err)
+	}
+	records, err := store.loadAllSQLiteV4RollupBlockRecords(ctx, store.db, series[0].id, time.Minute.Nanoseconds())
+	if err != nil || len(records) != 1 {
+		t.Fatalf("load migrated rollup: count=%d err=%v", len(records), err)
+	}
+	if !bytes.Equal(records[0].digest, sourceDigest) || records[0].sumBits != math.Float64bits(bucket.sum) ||
+		records[0].sumSqBits != math.Float64bits(bucket.sumSq) || records[0].lastTS != bucket.lastTS {
+		t.Fatalf("early V4 rollup changed during migration: %#v", records[0])
+	}
+	rows, err := store.scanRollupRowsBetween(ctx, "latency", "node-a", tags, time.Minute.Nanoseconds(), base.UnixNano(), base.UnixNano(), true)
+	if err != nil || len(rows) != 1 || rows[0].bucketData.count != bucket.count {
+		t.Fatalf("query migrated rollup: count=%d err=%v", len(rows), err)
+	}
+	entities, err := store.EntityIDs(ctx, Query{MetricName: "latency", Start: base, End: base})
+	if err != nil || len(entities) != 1 || entities[0] != "node-a" {
+		t.Fatalf("entity lookup through rollup blocks: entities=%v err=%v", entities, err)
+	}
+	latest, found, err := store.LatestBefore(ctx, "latency", "node-a", base.Add(time.Minute))
+	if err != nil || !found || latest.Timestamp.UnixNano() != bucket.lastTS || math.Float64bits(latest.Value) != math.Float64bits(bucket.lastVal) {
+		t.Fatalf("latest through rollup blocks: point=%#v found=%v err=%v", latest, found, err)
+	}
+	deleted, err := store.DeleteSeries(ctx, Query{MetricName: "latency", EntityID: "node-a", Tags: tags})
+	if err != nil || deleted != 1 {
+		t.Fatalf("delete compressed rollup series: deleted=%d err=%v", deleted, err)
+	}
+	rows, err = store.scanRollupRowsBetween(ctx, "latency", "node-a", tags, time.Minute.Nanoseconds(), base.UnixNano(), base.UnixNano(), true)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("compressed rollup remained after delete: count=%d err=%v", len(rows), err)
+	}
+}
+
+func TestSQLiteStorageV4ReducesRollupDominatedDatabase(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "metrics.db")
+	dsn := sqliteFileDSN(path)
+	store := createSQLiteV3OnlyStore(t, ctx, dsn)
+	if err := store.CreateMetric(ctx, Definition{Name: "history", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	tagsHash, tagsJSON, err := tagsFingerprint(map[string]string{"task": "public"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := NewTDigest(100)
+	for _, value := range []float64{20.125, 20.5, 21.0, 22.75} {
+		digest.Add(value, 15)
+	}
+	digestBlob := digest.Encode()
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	createdAt := base.Add(31 * 24 * time.Hour).UnixNano()
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement, err := tx.PrepareContext(ctx, store.rollupUpsertSQL())
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	const entities = 20
+	const bucketsPerEntity = 1440
+	for entity := 0; entity < entities; entity++ {
+		entityID := fmt.Sprintf("node-%02d", entity)
+		for bucketIndex := 0; bucketIndex < bucketsPerEntity; bucketIndex++ {
+			bucketNano := base.Add(time.Duration(bucketIndex) * time.Minute).UnixNano()
+			value := 20.125 + float64((entity+bucketIndex)%17)/8
+			if _, err := statement.ExecContext(ctx,
+				"history", entityID, tagsHash, tagsJSON, time.Minute.Nanoseconds(), bucketNano,
+				60, value*60, value*value*60, value, value, value, bucketNano,
+				value, bucketNano+59*time.Second.Nanoseconds(), digestBlob, createdAt,
+			); err != nil {
+				_ = statement.Close()
+				_ = tx.Rollback()
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := statement.Close(); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.fullSQLiteVacuum(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	v3Size := mustFileSize(t, path)
+
+	store, err = Open(ctx, SQLite(dsn, WithRollupPolicy(RollupPolicy{Tiers: []RollupTier{{Interval: time.Minute, Retention: 30 * 24 * time.Hour}}})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.scanRollupRowsBetween(ctx, "history", "node-00", map[string]string{"task": "public"}, time.Minute.Nanoseconds(), base.UnixNano(), base.Add(24*time.Hour-time.Minute).UnixNano(), true)
+	if err != nil || len(rows) != bucketsPerEntity {
+		t.Fatalf("query rollup-dominated V4 database: count=%d err=%v", len(rows), err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	v4Size := mustFileSize(t, path)
+	t.Logf("SQLite V4 rollup-dominated size: V3=%d V4=%d ratio=%.3f", v3Size, v4Size, float64(v4Size)/float64(v3Size))
+	if v4Size*100 >= v3Size*70 {
+		t.Fatalf("SQLite V4 rollup-dominated size=%d, want at least 30%% below V3 size=%d", v4Size, v3Size)
+	}
+}
+
+func TestSQLiteStorageV4PartiallyDeletesAndMergesLateRollups(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{RawRetention: 15 * time.Minute, Tiers: []RollupTier{{Interval: time.Minute, Retention: 30 * 24 * time.Hour}}}
+	store, err := Open(ctx, SQLiteInDir(t.TempDir(), WithRollupPolicy(policy)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateMetric(ctx, Definition{Name: "late", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	buckets := make(map[rollupKey]*rollupBucket, 700)
+	for index := 0; index < 700; index++ {
+		bucketNano := base.Add(time.Duration(index) * time.Minute).UnixNano()
+		bucket := newRollupBucket(policy.compression())
+		bucket.addPoint(float64(index), bucketNano)
+		buckets[rollupKey{entityID: "node-a", bucket: bucketNano}] = bucket
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writeRollupBucketsTx(ctx, "late", time.Minute, buckets, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReclaimSpace(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	cutoff := base.Add(350 * time.Minute)
+	tx, err = store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.deleteRollupsBeforeTx(ctx, "late", time.Minute, cutoff, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.scanRollupRows(ctx, store.db, "late", time.Minute)
+	if err != nil || len(rows) != 350 || rows[0].bucket != cutoff.UnixNano() {
+		t.Fatalf("partial compressed-rollup delete: count=%d first=%d err=%v", len(rows), rows[0].bucket, err)
+	}
+
+	lateBucketNano := base.Add(400 * time.Minute).UnixNano()
+	delta := newRollupBucket(policy.compression())
+	delta.addPoint(999, lateBucketNano+30*time.Second.Nanoseconds())
+	tx, err = store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.mergeRollupBucketsTx(ctx, "late", time.Minute, map[rollupKey]*rollupBucket{
+		{entityID: "node-a", bucket: lateBucketNano}: delta,
+	}, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sealSQLiteV4RollupHotTx(ctx, tx, "late", base.Add(701*time.Minute).UnixNano()); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = store.scanRollupRowsBetween(ctx, "late", "node-a", nil, time.Minute.Nanoseconds(), lateBucketNano, lateBucketNano, true)
+	if err != nil || len(rows) != 1 || rows[0].bucketData.count != 2 || rows[0].bucketData.lastVal != 999 {
+		t.Fatalf("late rollup merge through compressed block: rows=%#v err=%v", rows, err)
+	}
+	var hotRows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_rollup_values`).Scan(&hotRows); err != nil {
+		t.Fatal(err)
+	}
+	if hotRows != 0 {
+		t.Fatalf("late merged rollup remained unsealed: %d", hotRows)
 	}
 }
 
