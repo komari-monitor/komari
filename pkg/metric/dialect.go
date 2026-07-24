@@ -82,6 +82,7 @@ type tables struct {
 	// values in narrow tables. Other backends leave these names unused.
 	series       string
 	pointValues  string
+	pointBlocks  string
 	rollupValues string
 }
 

@@ -58,7 +58,7 @@ func TestSQLiteInDirBuildsFileConfig(t *testing.T) {
 	if cfg.SQLite.CacheSizeKB != 128*1024 {
 		t.Fatalf("sqlite cache option was not applied: %d", cfg.SQLite.CacheSizeKB)
 	}
-	if cfg.DSN != "file:data/metrics/metrics.db?cache=shared&mode=rwc" {
+	if cfg.DSN != "file:data/metrics/metrics.db?mode=rwc&_txlock=immediate" {
 		t.Fatalf("unexpected sqlite dir dsn: %q", cfg.DSN)
 	}
 }

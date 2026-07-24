@@ -69,6 +69,9 @@ type Store struct {
 	// sqliteStorageV3 reports that points/rollups are compatibility views over
 	// the normalized SQLite series/value tables.
 	sqliteStorageV3 bool
+	// sqliteStorageV4 reports that sealed raw points are stored in lossless
+	// compressed blocks in addition to the V3-compatible hot table.
+	sqliteStorageV4 bool
 }
 
 // Open initializes a Store from a Config.
@@ -102,6 +105,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 			watermarks:   tableName(cfg.TablePrefix, "compaction_watermarks"),
 			series:       tableName(cfg.TablePrefix, "series"),
 			pointValues:  tableName(cfg.TablePrefix, "point_values"),
+			pointBlocks:  tableName(cfg.TablePrefix, "point_blocks"),
 			rollupValues: tableName(cfg.TablePrefix, "rollup_values"),
 		},
 	}
@@ -162,13 +166,25 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 			return nil, err
 		}
 		s.sqliteStorageV3 = pointType == "view" && rollupType == "view"
+		if s.sqliteStorageV3 {
+			blockType, err := sqliteObjectType(ctx, s.db, s.tables.pointBlocks)
+			if err != nil {
+				s.closeDBs()
+				return nil, err
+			}
+			s.sqliteStorageV4 = blockType == "table"
+		}
 	}
 
 	// Open the optional read pool only after migrations finish. This keeps a
 	// second SQLite connection from holding stale schema state or read locks
 	// while an existing database is upgraded atomically.
 	if cfg.Driver == DriverSQLite && cfg.SQLite.ReadPoolSize > 1 && cfg.DB == nil && !isMemoryDSN(cfg.DSN) {
-		readDB, err := sql.Open(cfg.driverName(), cfg.DSN)
+		// The primary connection uses BEGIN IMMEDIATE to serialize writers. Reads
+		// need a deferred transaction so a V4 hot/block snapshot does not reserve
+		// the write lock while it is being decoded.
+		readDSN := setSQLiteDSNParam(cfg.DSN, "_txlock", "deferred")
+		readDB, err := sql.Open(cfg.driverName(), readDSN)
 		if err != nil {
 			if s.ownedDB {
 				_ = s.db.Close()
@@ -546,10 +562,18 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if s.sqliteStorageV4 {
+		if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
+			return err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.rollups, s.dialect.placeholder(1)), name); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.points, s.dialect.placeholder(1)), name); err != nil {
+	if !s.sqliteStorageV4 {
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.points, s.dialect.placeholder(1)), name)
+	}
+	if err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.watermarks, s.dialect.placeholder(1)), name); err != nil {
@@ -651,7 +675,16 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 		return Definition{}, fmt.Errorf("%w: metric %q", ErrNotFound, name)
 	}
 	if retentionDays == 0 {
-		for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.watermarks} {
+		if s.sqliteStorageV4 {
+			if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
+				return Definition{}, err
+			}
+		}
+		tables := []string{s.tables.rollups, s.tables.watermarks}
+		if !s.sqliteStorageV4 {
+			tables = append(tables, s.tables.points)
+		}
+		for _, table := range tables {
 			if _, err := tx.ExecContext(ctx,
 				fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, table, s.dialect.placeholder(1)), name,
 			); err != nil {
@@ -686,7 +719,16 @@ func (s *Store) DeleteMetricData(ctx context.Context, name string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.watermarks} {
+	if s.sqliteStorageV4 {
+		if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
+			return err
+		}
+	}
+	tables := []string{s.tables.rollups, s.tables.watermarks}
+	if !s.sqliteStorageV4 {
+		tables = append(tables, s.tables.points)
+	}
+	for _, table := range tables {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, table, s.dialect.placeholder(1)), name,
 		); err != nil {
@@ -733,7 +775,16 @@ func (s *Store) DeleteMetricDataIfDisabled(ctx context.Context, name string) (bo
 	if retentionDays != 0 {
 		return false, nil
 	}
-	for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.watermarks} {
+	if s.sqliteStorageV4 {
+		if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
+			return false, err
+		}
+	}
+	tables := []string{s.tables.rollups, s.tables.watermarks}
+	if !s.sqliteStorageV4 {
+		tables = append(tables, s.tables.points)
+	}
+	for _, table := range tables {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, table, s.dialect.placeholder(1)), name,
 		); err != nil {
@@ -766,7 +817,18 @@ func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error
 	defer func() { _ = tx.Rollback() }()
 
 	var total int64
-	for _, table := range []string{s.tables.points, s.tables.rollups} {
+	if s.sqliteStorageV4 {
+		n, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{EntityID: entityID}, nil)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	tables := []string{s.tables.rollups}
+	if !s.sqliteStorageV4 {
+		tables = append(tables, s.tables.points)
+	}
+	for _, table := range tables {
 		where := "entity_id = " + s.dialect.placeholder(1)
 		n, err := s.deleteRows(ctx, tx, table, where, entityID)
 		if err != nil {
@@ -804,7 +866,18 @@ func (s *Store) DeleteSeries(ctx context.Context, filter Query) (int64, error) {
 	defer func() { _ = tx.Rollback() }()
 
 	var total int64
-	for _, table := range []string{s.tables.points, s.tables.rollups} {
+	if s.sqliteStorageV4 {
+		n, err := s.deleteSQLiteV4PointsTx(ctx, tx, filter, nil)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	tables := []string{s.tables.rollups}
+	if !s.sqliteStorageV4 {
+		tables = append(tables, s.tables.points)
+	}
+	for _, table := range tables {
 		args := []any{filter.MetricName}
 		parts := []string{"metric_name = " + s.dialect.placeholder(1)}
 		if strings.TrimSpace(filter.EntityID) != "" {
@@ -969,11 +1042,16 @@ func (s *Store) pruneUnusedSQLiteSeries(ctx context.Context, q queryExecer) erro
 	if s.cfg.Driver != DriverSQLite || !s.sqliteStorageV3 {
 		return nil
 	}
+	blockPredicate := ""
+	if s.sqliteStorageV4 {
+		blockPredicate = fmt.Sprintf(" AND NOT EXISTS (SELECT 1 FROM %s WHERE %s.series_id = %s.id)",
+			s.tables.pointBlocks, s.tables.pointBlocks, s.tables.series)
+	}
 	_, err := q.ExecContext(ctx, fmt.Sprintf(
 		`DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s WHERE %s.series_id = %s.id)
-		 AND NOT EXISTS (SELECT 1 FROM %s WHERE %s.series_id = %s.id)`,
+		 AND NOT EXISTS (SELECT 1 FROM %s WHERE %s.series_id = %s.id)%s`,
 		s.tables.series, s.tables.pointValues, s.tables.pointValues, s.tables.series,
-		s.tables.rollupValues, s.tables.rollupValues, s.tables.series,
+		s.tables.rollupValues, s.tables.rollupValues, s.tables.series, blockPredicate,
 	))
 	return err
 }
@@ -1030,6 +1108,9 @@ func (s *Store) Query(ctx context.Context, query Query) ([]Point, error) {
 		return nil, err
 	}
 	query = query.normalized()
+	if s.sqliteStorageV4 {
+		return s.querySQLiteV4Snapshot(ctx, query)
+	}
 	where, args := s.buildWhere(query)
 	order := "ASC"
 	if query.Order == OrderDesc {
@@ -1090,6 +1171,9 @@ func (s *Store) EntityIDs(ctx context.Context, query Query) ([]string, error) {
 		return nil, err
 	}
 	query = query.normalized()
+	if s.sqliteStorageV4 {
+		return s.sqliteV4EntityIDs(ctx, query)
+	}
 
 	pointsWhere, args := s.buildWhere(query)
 	rollupArgsStart := len(args)
@@ -1152,6 +1236,16 @@ func (s *Store) Latest(ctx context.Context, metricName, entityID string, limit i
 	if limit <= 0 {
 		limit = 1
 	}
+	if s.sqliteStorageV4 {
+		return s.querySQLiteV4Snapshot(ctx, Query{
+			MetricName: metricName,
+			EntityID:   entityID,
+			Start:      time.Unix(0, math.MinInt64).UTC(),
+			End:        time.Unix(0, math.MaxInt64).UTC(),
+			Order:      OrderDesc,
+			Limit:      limit,
+		})
+	}
 	// Dedicated query rather than a full-range Query: no synthetic time bounds,
 	// and the index on (metric_name, entity_id, ts_nano) serves the ORDER BY.
 	sqlText := fmt.Sprintf(
@@ -1205,31 +1299,51 @@ func (s *Store) LatestBefore(ctx context.Context, metricName, entityID string, b
 
 	beforeNano := before.UTC().UnixNano()
 	var latest Point
+	var err error
 	found := false
-	rawSQL := fmt.Sprintf(
-		`SELECT metric_name, entity_id, ts_nano, value, tags, labels FROM %s
+	if s.sqliteStorageV4 && beforeNano > math.MinInt64 {
+		points, queryErr := s.querySQLiteV4Snapshot(ctx, Query{
+			MetricName: metricName,
+			EntityID:   entityID,
+			Start:      time.Unix(0, math.MinInt64).UTC(),
+			End:        time.Unix(0, beforeNano-1).UTC(),
+			Order:      OrderDesc,
+			Limit:      1,
+		})
+		if queryErr != nil {
+			return Point{}, false, queryErr
+		}
+		if len(points) > 0 {
+			latest = points[0]
+			found = true
+		}
+	}
+	if !s.sqliteStorageV4 {
+		rawSQL := fmt.Sprintf(
+			`SELECT metric_name, entity_id, ts_nano, value, tags, labels FROM %s
 		 WHERE metric_name = %s AND entity_id = %s AND ts_nano < %s
 		 ORDER BY ts_nano DESC LIMIT 1`,
-		s.tables.points, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3),
-	)
-	var rawTags, rawLabels any
-	var rawNano int64
-	err := s.reader().QueryRowContext(ctx, rawSQL, metricName, entityID, beforeNano).Scan(
-		&latest.MetricName, &latest.EntityID, &rawNano, &latest.Value, &rawTags, &rawLabels,
-	)
-	if err == nil {
-		latest.Timestamp = time.Unix(0, rawNano).UTC()
-		latest.Tags, err = decodeMap(rawTags)
-		if err != nil {
+			s.tables.points, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3),
+		)
+		var rawTags, rawLabels any
+		var rawNano int64
+		err = s.reader().QueryRowContext(ctx, rawSQL, metricName, entityID, beforeNano).Scan(
+			&latest.MetricName, &latest.EntityID, &rawNano, &latest.Value, &rawTags, &rawLabels,
+		)
+		if err == nil {
+			latest.Timestamp = time.Unix(0, rawNano).UTC()
+			latest.Tags, err = decodeMap(rawTags)
+			if err != nil {
+				return Point{}, false, err
+			}
+			latest.Labels, err = decodeMap(rawLabels)
+			if err != nil {
+				return Point{}, false, err
+			}
+			found = true
+		} else if !errors.Is(err, sql.ErrNoRows) {
 			return Point{}, false, err
 		}
-		latest.Labels, err = decodeMap(rawLabels)
-		if err != nil {
-			return Point{}, false, err
-		}
-		found = true
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return Point{}, false, err
 	}
 	if found {
 		rawCutoff := s.cfg.RollupPolicy.rawCutoff(before)
@@ -1291,7 +1405,7 @@ func (s *Store) Aggregate(ctx context.Context, query AggregateQuery) ([]Aggregat
 	// a time bucket so large ranges don't pull every raw point into memory.
 	// Percentiles, first/last and rate need the ordered raw series, so those fall
 	// back to the in-memory aggregator.
-	if valueExpr, ok := sqlAggValueExpr(s.cfg.Driver, query.Aggregation); ok {
+	if valueExpr, ok := sqlAggValueExpr(s.cfg.Driver, query.Aggregation); ok && !s.sqliteStorageV4 {
 		return s.aggregateInSQL(ctx, query, valueExpr)
 	}
 	// In-memory fallback. Strip the embedded raw-point Limit/Offset so the full
@@ -1427,6 +1541,25 @@ func (s *Store) DeleteBefore(ctx context.Context, metricName string, before time
 	}
 	if before.IsZero() {
 		return 0, fmt.Errorf("%w: before time is required", ErrInvalidArgument)
+	}
+	if s.sqliteStorageV4 {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		defer func() { _ = tx.Rollback() }()
+		beforeNano := before.UTC().UnixNano()
+		deleted, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: metricName}, &beforeNano)
+		if err != nil {
+			return deleted, err
+		}
+		if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+			return deleted, err
+		}
+		if err := tx.Commit(); err != nil {
+			return deleted, err
+		}
+		return deleted, nil
 	}
 	args := []any{before.UTC().UnixNano()}
 	where := "ts_nano < " + s.dialect.placeholder(1)

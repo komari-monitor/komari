@@ -1,0 +1,315 @@
+package metric
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestSQLiteStorageV4MigratesV3AndPreservesExactPoints(t *testing.T) {
+	ctx := context.Background()
+	dsn := sqliteFileDSN(filepath.Join(t.TempDir(), "metrics.db"))
+	base := time.Date(2026, 7, 24, 8, 0, 0, 123, time.UTC)
+	store := createSQLiteV3OnlyStore(t, ctx, dsn)
+	if err := store.CreateMetric(ctx, Definition{Name: "exact", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	points := make([]Point, 1200)
+	for i := range points {
+		points[i] = Point{
+			MetricName: "exact",
+			EntityID:   "node-a",
+			Timestamp:  base.Add(time.Duration(i)*3*time.Second + time.Duration(i%17)),
+			Value:      math.Float64frombits(math.Float64bits(1000.25) + uint64(i%97)),
+			Tags:       map[string]string{"iface": "eth0"},
+			Labels:     map[string]string{"source": []string{"agent", "restore"}[i%2]},
+		}
+	}
+	if err := store.WriteBatch(ctx, points); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(ctx, SQLite(dsn, WithSQLiteReadPool(4)))
+	if err != nil {
+		t.Fatalf("migrate V3 to V4: %v", err)
+	}
+	defer store.Close()
+	if !store.sqliteStorageV4 {
+		t.Fatal("SQLite V4 storage was not enabled")
+	}
+	var hotCount, blockPointCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_point_values`).Scan(&hotCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(point_count), 0) FROM metric_point_blocks`).Scan(&blockPointCount); err != nil {
+		t.Fatal(err)
+	}
+	if hotCount != 0 || blockPointCount != len(points) {
+		t.Fatalf("unexpected V4 physical counts: hot=%d blocks=%d want=%d", hotCount, blockPointCount, len(points))
+	}
+	got, err := store.Query(ctx, Query{
+		MetricName: "exact", EntityID: "node-a", Start: points[0].Timestamp, End: points[len(points)-1].Timestamp,
+		Tags: map[string]string{"iface": "eth0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(points) {
+		t.Fatalf("migrated point count=%d want=%d", len(got), len(points))
+	}
+	for i := range points {
+		if !got[i].Timestamp.Equal(points[i].Timestamp) || math.Float64bits(got[i].Value) != math.Float64bits(points[i].Value) ||
+			got[i].Tags["iface"] != "eth0" || got[i].Labels["source"] != points[i].Labels["source"] {
+			t.Fatalf("point %d changed during V4 migration: got=%#v want=%#v", i, got[i], points[i])
+		}
+	}
+
+	updated := points[100]
+	updated.Value = 999999.125
+	updated.Labels = map[string]string{"source": "hot-update"}
+	if err := store.Write(ctx, updated); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.Query(ctx, Query{MetricName: "exact", EntityID: "node-a", Start: updated.Timestamp, End: updated.Timestamp})
+	if err != nil || len(got) != 1 || math.Float64bits(got[0].Value) != math.Float64bits(updated.Value) || got[0].Labels["source"] != "hot-update" {
+		t.Fatalf("hot point did not override the sealed value: points=%#v err=%v", got, err)
+	}
+}
+
+func TestSQLiteStorageV4SealsQueriesAndPartiallyDeletesBlocks(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 15 * time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	store, err := Open(ctx, SQLiteInDir(t.TempDir(), WithRollupPolicy(policy), WithSQLiteReadPool(4)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateMetric(ctx, Definition{Name: "seal", Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	base := now.Add(-10 * time.Minute)
+	points := make([]Point, 100)
+	for i := range points {
+		points[i] = Point{MetricName: "seal", EntityID: "node-a", Timestamp: base.Add(time.Duration(i) * time.Second), Value: float64(i), Tags: map[string]string{"task": "1"}}
+	}
+	if err := store.WriteBatch(ctx, points); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompactMetric(ctx, "seal", now); err != nil {
+		t.Fatal(err)
+	}
+	var hot, blocks int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_point_values`).Scan(&hot); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_point_blocks`).Scan(&blocks); err != nil {
+		t.Fatal(err)
+	}
+	if hot != 0 || blocks == 0 {
+		t.Fatalf("points were not sealed: hot=%d blocks=%d", hot, blocks)
+	}
+	got, err := store.Query(ctx, Query{MetricName: "seal", EntityID: "node-a", Start: points[0].Timestamp, End: points[len(points)-1].Timestamp})
+	if err != nil || len(got) != len(points) {
+		t.Fatalf("query sealed points: count=%d err=%v", len(got), err)
+	}
+	latest, err := store.Latest(ctx, "seal", "node-a", 1)
+	if err != nil || len(latest) != 1 || latest[0].Value != 99 {
+		t.Fatalf("latest sealed point: %#v err=%v", latest, err)
+	}
+	gap := points[10].Timestamp.Add(time.Nanosecond)
+	entities, err := store.EntityIDs(ctx, Query{MetricName: "seal", Start: gap, End: gap})
+	if err != nil || len(entities) != 0 {
+		t.Fatalf("EntityIDs returned a block whose range overlaps but contains no point: %v err=%v", entities, err)
+	}
+
+	cutoff := points[50].Timestamp
+	deleted, err := store.DeleteBefore(ctx, "seal", cutoff)
+	if err != nil || deleted != 50 {
+		t.Fatalf("partial block delete=%d want=50 err=%v", deleted, err)
+	}
+	got, err = store.Query(ctx, Query{MetricName: "seal", EntityID: "node-a", Start: points[0].Timestamp, End: points[len(points)-1].Timestamp})
+	if err != nil || len(got) != 50 || !got[0].Timestamp.Equal(cutoff) || got[0].Value != 50 {
+		t.Fatalf("query after partial block delete: points=%d first=%#v err=%v", len(got), got[0], err)
+	}
+}
+
+func TestSQLiteStorageV4MigrationFailureRollsBackToV3(t *testing.T) {
+	ctx := context.Background()
+	dsn := sqliteFileDSN(filepath.Join(t.TempDir(), "metrics.db"))
+	store := createSQLiteV3OnlyStore(t, ctx, dsn)
+	if err := store.CreateMetric(ctx, Definition{Name: "overflow", Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	points := []Point{
+		{MetricName: "overflow", EntityID: "node-a", Timestamp: time.Unix(0, math.MinInt64).UTC(), Value: 1},
+		{MetricName: "overflow", EntityID: "node-a", Timestamp: time.Unix(0, math.MaxInt64).UTC(), Value: 2},
+	}
+	if err := store.WriteBatch(ctx, points); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if migrated, err := Open(ctx, SQLite(dsn)); err == nil {
+		_ = migrated.Close()
+		t.Fatal("V4 migration unexpectedly accepted an overflowing timestamp delta")
+	}
+
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	kind, err := sqliteObjectType(ctx, db, "metric_point_blocks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_point_values`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "" || count != 2 {
+		t.Fatalf("failed V4 migration changed V3 storage: block_kind=%q point_count=%d", kind, count)
+	}
+}
+
+func TestSQLiteStorageV4ReducesV3FileSize(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "metrics.db")
+	dsn := sqliteFileDSN(path)
+	store := createSQLiteV3OnlyStore(t, ctx, dsn)
+	if err := store.CreateMetric(ctx, Definition{Name: "size", Type: TypeCounter, RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	points := make([]Point, 20000)
+	for i := range points {
+		points[i] = Point{
+			MetricName: "size", EntityID: fmt.Sprintf("node-%02d", i%20),
+			Timestamp: base.Add(time.Duration(i/20) * 3 * time.Second), Value: float64(1_000_000 + i*128),
+			Labels: map[string]string{"source": "agent"},
+		}
+	}
+	if err := store.WriteBatch(ctx, points); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.fullSQLiteVacuum(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	v3Size := mustFileSize(t, path)
+	store, err := Open(ctx, SQLite(dsn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	v4Size := mustFileSize(t, path)
+	t.Logf("SQLite V4 size: V3=%d V4=%d ratio=%.3f", v3Size, v4Size, float64(v4Size)/float64(v3Size))
+	if v4Size*100 >= v3Size*70 {
+		t.Fatalf("SQLite V4 size=%d, want at least 30%% below V3 size=%d", v4Size, v3Size)
+	}
+}
+
+func TestSQLiteStorageV4ConcurrentReadWriteAndSeal(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{RawRetention: 15 * time.Minute, Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}}}
+	store, err := Open(ctx, SQLiteInDir(t.TempDir(), WithRollupPolicy(policy), WithSQLiteReadPool(4)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateMetric(ctx, Definition{Name: "concurrent", Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	base := now.Add(-10 * time.Minute)
+	initial := make([]Point, 600)
+	for i := range initial {
+		initial[i] = Point{MetricName: "concurrent", EntityID: "node-a", Timestamp: base.Add(time.Duration(i) * time.Millisecond), Value: float64(i)}
+	}
+	if err := store.WriteBatch(ctx, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 3)
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			points, err := store.Query(ctx, Query{MetricName: "concurrent", EntityID: "node-a", Start: base, End: now.Add(time.Minute)})
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if len(points) != 600 && len(points) != 700 {
+				errCh <- fmt.Errorf("V4 snapshot exposed a partial hot/block transition: %d points", len(points))
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		points := make([]Point, 100)
+		for i := range points {
+			points[i] = Point{MetricName: "concurrent", EntityID: "node-a", Timestamp: now.Add(time.Duration(i) * time.Millisecond), Value: float64(1000 + i)}
+		}
+		if err := store.WriteBatch(ctx, points); err != nil {
+			errCh <- err
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, err := store.CompactMetric(ctx, "concurrent", now); err != nil {
+			errCh <- err
+		}
+	}()
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent V4 operation failed: %v", err)
+	}
+	got, err := store.Query(ctx, Query{MetricName: "concurrent", EntityID: "node-a", Start: base, End: now.Add(time.Minute)})
+	if err != nil || len(got) != 700 {
+		t.Fatalf("concurrent V4 point count=%d want=700 err=%v", len(got), err)
+	}
+}
+
+func createSQLiteV3OnlyStore(t *testing.T, ctx context.Context, dsn string) *Store {
+	t.Helper()
+	store, err := Open(ctx, SQLite(dsn, WithAutoMigrate(false)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateSQLiteStorageV3(ctx); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	return store
+}
+
+func mustFileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
+}

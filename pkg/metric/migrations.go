@@ -13,7 +13,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if s.cfg.Driver == DriverSQLite {
-		return s.migrateSQLiteStorageV3(ctx)
+		return s.migrateSQLiteStorageV4(ctx)
 	}
 	d := s.dialect
 	jsonType := d.jsonType()

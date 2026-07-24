@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -136,6 +137,12 @@ func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now ti
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if s.sqliteStorageV4 {
+		sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
+		if _, err := s.sealSQLiteV4PointsTx(ctx, tx, metricName, sealBefore); err != nil {
+			return 0, err
+		}
+	}
 
 	if err := s.deleteRollupsForIntervalsTx(ctx, metricName, obsoleteIntervals, tx); err != nil {
 		return 0, err
@@ -403,6 +410,42 @@ func (s *Store) buildFinestTier(ctx context.Context, q querier, metricName strin
 func (s *Store) buildFinestTierBefore(ctx context.Context, q querier, metricName string, interval time.Duration, comp float64, before time.Time) (map[rollupKey]*rollupBucket, error) {
 	size := interval.Nanoseconds()
 	out := make(map[rollupKey]*rollupBucket)
+	if s.sqliteStorageV4 {
+		endNano := int64(math.MaxInt64)
+		if !before.IsZero() {
+			beforeNano := before.UTC().UnixNano()
+			if beforeNano == math.MinInt64 {
+				return out, nil
+			}
+			endNano = beforeNano - 1
+		}
+		points, err := s.querySQLiteV4(ctx, q, Query{
+			MetricName: metricName,
+			Start:      time.Unix(0, math.MinInt64).UTC(),
+			End:        time.Unix(0, endNano).UTC(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, point := range points {
+			hash, canonical, err := tagsFingerprint(point.Tags)
+			if err != nil {
+				return nil, err
+			}
+			ts := point.Timestamp.UnixNano()
+			bucket := floorDivNano(ts, size)
+			key := rollupKey{entityID: point.EntityID, tagsHash: hash, bucket: bucket}
+			stored := out[key]
+			if stored == nil {
+				stored = newRollupBucket(comp)
+				stored.tagsHash = hash
+				stored.tagsJSON = canonical
+				out[key] = stored
+			}
+			stored.addPoint(point.Value, ts)
+		}
+		return out, nil
+	}
 	args := []any{metricName}
 	where := "metric_name = " + s.dialect.placeholder(1)
 	if !before.IsZero() {
@@ -693,6 +736,10 @@ func (s *Store) deleteRollupsBeforeTx(ctx context.Context, metricName string, in
 
 // DeleteBeforeTx deletes raw points before a cutoff within a transaction.
 func (s *Store) DeleteBeforeTx(ctx context.Context, metricName string, before time.Time, tx *sql.Tx) (int64, error) {
+	if s.sqliteStorageV4 {
+		beforeNano := before.UTC().UnixNano()
+		return s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: metricName}, &beforeNano)
+	}
 	where := fmt.Sprintf(`metric_name = %s AND ts_nano < %s`, s.dialect.placeholder(1), s.dialect.placeholder(2))
 	return s.deleteRows(ctx, tx, s.tables.points, where, metricName, before.UTC().UnixNano())
 }

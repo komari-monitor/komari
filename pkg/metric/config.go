@@ -454,7 +454,11 @@ func (c Config) driverName() string {
 //
 // sqliteFileDSN 将文件路径转换为 SQLite file: DSN。
 func sqliteFileDSN(path string) string {
-	return "file:" + filepath.ToSlash(path) + "?cache=shared&mode=rwc"
+	// WAL already lets independent connection caches read concurrently with the
+	// single writer. SQLite shared-cache mode adds table-level locks for which
+	// busy_timeout is ineffective, causing avoidable SQLITE_LOCKED errors while
+	// V4 blocks are sealed.
+	return "file:" + filepath.ToSlash(path) + "?mode=rwc&_txlock=immediate"
 }
 
 // appendSQLiteDSNParam appends a query parameter to a SQLite DSN.
@@ -465,4 +469,17 @@ func appendSQLiteDSNParam(dsn, key, value string) string {
 		return dsn + "&" + url.QueryEscape(key) + "=" + url.QueryEscape(value)
 	}
 	return dsn + "?" + url.QueryEscape(key) + "=" + url.QueryEscape(value)
+}
+
+func setSQLiteDSNParam(dsn, key, value string) string {
+	base, rawQuery, found := strings.Cut(dsn, "?")
+	if !found {
+		return base + "?" + url.QueryEscape(key) + "=" + url.QueryEscape(value)
+	}
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return appendSQLiteDSNParam(dsn, key, value)
+	}
+	query.Set(key, value)
+	return base + "?" + query.Encode()
 }

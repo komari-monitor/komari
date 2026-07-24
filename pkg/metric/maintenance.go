@@ -131,6 +131,61 @@ func (s *Store) ReclaimSpace(ctx context.Context) error {
 // the physical rewrite returns the freed pages to the filesystem in the same
 // maintenance window.
 func (s *Store) cleanupOrphanedMetricData(ctx context.Context) (int64, error) {
+	if s.sqliteStorageV4 {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		defer func() { _ = tx.Rollback() }()
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT DISTINCT s.metric_name FROM %s s
+			 WHERE NOT EXISTS (SELECT 1 FROM %s d WHERE d.name = s.metric_name)`,
+			s.tables.series, s.tables.definitions,
+		))
+		if err != nil {
+			return 0, err
+		}
+		var orphanMetrics []string
+		for rows.Next() {
+			var metricName string
+			if err := rows.Scan(&metricName); err != nil {
+				_ = rows.Close()
+				return 0, err
+			}
+			orphanMetrics = append(orphanMetrics, metricName)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		if err := rows.Close(); err != nil {
+			return 0, err
+		}
+		var deleted int64
+		for _, metricName := range orphanMetrics {
+			count, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: metricName}, nil)
+			if err != nil {
+				return deleted, err
+			}
+			deleted += count
+		}
+		for _, table := range []string{s.tables.rollups, s.tables.watermarks} {
+			where := fmt.Sprintf(`NOT EXISTS (SELECT 1 FROM %s WHERE %s.name = %s.metric_name)`,
+				s.tables.definitions, s.tables.definitions, table)
+			count, err := s.deleteRows(ctx, tx, table, where)
+			if err != nil {
+				return deleted, fmt.Errorf("metric: delete orphaned rows from %s: %w", table, err)
+			}
+			deleted += count
+		}
+		if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+			return deleted, fmt.Errorf("metric: delete orphaned SQLite series: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return deleted, err
+		}
+		return deleted, nil
+	}
 	var deleted int64
 	for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.watermarks} {
 		if table == "" {
