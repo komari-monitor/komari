@@ -43,7 +43,12 @@ curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/install-
 chmod +x install-komari.sh
 sudo ./install-komari.sh
 ```
-
+Installation script for users in mainland China
+```bash
+curl -fsSL https://github.fryfries13.cn/https://raw.githubusercontent.com/komari-monitor/komari/main/cn-install-komari.sh -o cn-install-komari.sh
+chmod +x cn-install-komari.sh
+sudo ./cn-install-komari.sh
+```
 ### 2. Docker Deployment
 
 1. Create a data directory:
