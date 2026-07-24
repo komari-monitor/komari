@@ -77,6 +77,24 @@ func (s *Store) StorageSize(ctx context.Context) (int64, error) {
 	return size, nil
 }
 
+// CheckpointWAL copies committed SQLite WAL pages into the main database and
+// truncates the sidecar without rewriting the database. Other backends have no
+// local WAL sidecar, so this is a no-op for them.
+func (s *Store) CheckpointWAL(ctx context.Context) error {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed || s.db == nil {
+		return ErrClosed
+	}
+	if s.cfg.Driver != DriverSQLite {
+		return nil
+	}
+	return sqliteCheckpoint(ctx, s.db)
+}
+
 // ReclaimSpace performs the backend-specific blocking operation that returns
 // unused database pages to the filesystem. It serializes against other
 // maintenance calls and keeps Close from closing the pool mid-operation.

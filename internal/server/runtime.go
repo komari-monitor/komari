@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -155,7 +156,7 @@ func registerScheduledWork() {
 	if err := scheduler.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
 		logger.ErrorArgs("server", "Failed to add cleanup scheduled task:", err)
 	}
-	if err := scheduler.AddContextFunc("metrics:compact", "@every 5m", true, compactMetricStore); err != nil {
+	if err := scheduler.AddContextFunc("metrics:compact", "@every 10s", true, compactMetricStore); err != nil {
 		logger.ErrorArgs("server", "Failed to add metric compact scheduled task:", err)
 	}
 	if err := scheduler.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
@@ -179,17 +180,49 @@ func cleanupScheduledData() {
 }
 
 func compactMetricStore(ctx context.Context) {
-	compactCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	compactCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	written, err := metricstore.Compact(compactCtx, time.Now().UTC())
+	written, cycleCompleted, err := metricstore.CompactStep(compactCtx, time.Now().UTC())
 	if errors.Is(err, metricstore.ErrCompactInProgress) {
 		return
 	}
-	if err != nil {
-		logger.Errorf("server", "Failed to compact metric store after writing %d rollup buckets: %v", written, err)
+	metricCompactCycle.add(written, err)
+	if !cycleCompleted {
 		return
 	}
-	if written > 0 {
-		logger.Infof("server", "Metric store compacted %d rollup buckets", written)
+	cycleWritten, cycleErr := metricCompactCycle.finish()
+	if cycleErr != nil {
+		logger.Errorf("server", "Metric store compact cycle finished after writing %d rollup buckets: %v", cycleWritten, cycleErr)
+		return
 	}
+	if cycleWritten > 0 {
+		logger.Infof("server", "Metric store compacted %d rollup buckets", cycleWritten)
+	}
+}
+
+type metricCompactCycleState struct {
+	sync.Mutex
+	written int
+	errors  []error
+}
+
+var metricCompactCycle metricCompactCycleState
+
+func (s *metricCompactCycleState) add(written int, err error) {
+	s.Lock()
+	defer s.Unlock()
+	s.written += written
+	if err != nil {
+		s.errors = append(s.errors, err)
+	}
+}
+
+func (s *metricCompactCycleState) finish() (int, error) {
+	s.Lock()
+	defer s.Unlock()
+	written := s.written
+	err := errors.Join(s.errors...)
+	s.written = 0
+	s.errors = nil
+	return written, err
 }

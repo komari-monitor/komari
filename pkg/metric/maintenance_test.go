@@ -73,6 +73,51 @@ func TestSQLiteStorageSizeAndReclaimSpace(t *testing.T) {
 	if err := store.ReclaimSpace(ctx); !errors.Is(err, ErrClosed) {
 		t.Fatalf("ReclaimSpace() after Close error = %v, want ErrClosed", err)
 	}
+	if err := store.CheckpointWAL(ctx); !errors.Is(err, ErrClosed) {
+		t.Fatalf("CheckpointWAL() after Close error = %v, want ErrClosed", err)
+	}
+}
+
+func TestSQLiteCheckpointWALTruncatesSidecarWithoutVacuum(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := Open(ctx, SQLiteInDir(dir, WithSQLiteWALAutoCheckpoint(1_000_000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.db.ExecContext(ctx, `CREATE TABLE checkpoint_fixture (payload BLOB NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO checkpoint_fixture (payload) VALUES (zeroblob(4194304))`); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "metrics.db")
+	walPath := path + "-wal"
+	before, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Size() < 4*1024*1024 {
+		t.Fatalf("WAL size before checkpoint = %d, want at least 4 MiB", before.Size())
+	}
+	if err := store.CheckpointWAL(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(walPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if err == nil && after.Size() != 0 {
+		t.Fatalf("WAL size after checkpoint = %d, want 0", after.Size())
+	}
+	var payloadBytes int
+	if err := store.db.QueryRowContext(ctx, `SELECT length(payload) FROM checkpoint_fixture`).Scan(&payloadBytes); err != nil {
+		t.Fatal(err)
+	}
+	if payloadBytes != 4194304 {
+		t.Fatalf("checkpoint payload bytes = %d, want 4194304", payloadBytes)
+	}
 }
 
 func TestCleanupOrphanedMetricData(t *testing.T) {

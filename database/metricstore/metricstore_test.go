@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -508,6 +509,207 @@ func TestCompactKeepsRotatingCursorAfterFullCycle(t *testing.T) {
 	if compactAt != 1 {
 		t.Fatalf("compact cursor = %d, want 1 after a complete rotated cycle", compactAt)
 	}
+}
+
+func TestCompactStepProcessesOnlyOneMetric(t *testing.T) {
+	ctx := context.Background()
+	dsn := filepath.Join(t.TempDir(), "compact-step.db")
+	s, err := metric.Open(ctx, metric.SQLite(dsn,
+		metric.WithMaxOpenConns(1),
+		metric.WithRollupPolicy(defaultRollupPolicy()),
+	))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	for _, name := range []string{"a.metric", "b.metric", "c.metric"} {
+		if err := s.UpsertMetric(ctx, metric.Definition{Name: name, Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
+			t.Fatalf("upsert metric %s: %v", name, err)
+		}
+	}
+
+	now := time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)
+	for i, name := range []string{"a.metric", "b.metric", "c.metric"} {
+		if err := s.Write(ctx, metric.Point{MetricName: name, EntityID: "node", Timestamp: now.Add(-time.Hour), Value: float64(i + 1)}); err != nil {
+			t.Fatalf("write metric %s: %v", name, err)
+		}
+	}
+	installCompactStepTestStore(t, s, 0)
+
+	written, completed, err := CompactStep(ctx, now)
+	if err != nil {
+		t.Fatalf("first compact step: %v", err)
+	}
+	if written == 0 || completed {
+		t.Fatalf("first compact step = written %d, completed %v; want a partial cycle with rollups", written, completed)
+	}
+	assertRawMetricCount(t, dsn, "a.metric", 0)
+	assertRawMetricCount(t, dsn, "b.metric", 1)
+	assertRawMetricCount(t, dsn, "c.metric", 1)
+
+	if _, completed, err = CompactStep(ctx, now); err != nil || completed {
+		t.Fatalf("second compact step = completed %v, err %v; want partial cycle", completed, err)
+	}
+	assertRawMetricCount(t, dsn, "b.metric", 0)
+	assertRawMetricCount(t, dsn, "c.metric", 1)
+
+	if _, completed, err = CompactStep(ctx, now); err != nil || !completed {
+		t.Fatalf("third compact step = completed %v, err %v; want completed cycle", completed, err)
+	}
+	assertRawMetricCount(t, dsn, "c.metric", 0)
+}
+
+func TestCompactStepCompletesBuiltinMetricCycleAfterTwentyOneCalls(t *testing.T) {
+	ctx := context.Background()
+	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1)))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	for i := 0; i < 21; i++ {
+		name := fmt.Sprintf("metric.%02d", i)
+		if err := s.UpsertMetric(ctx, metric.Definition{Name: name, Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
+			t.Fatalf("upsert metric %s: %v", name, err)
+		}
+	}
+	installCompactStepTestStore(t, s, 0)
+
+	for i := 0; i < 21; i++ {
+		_, completed, err := CompactStep(ctx, time.Date(2026, 7, 25, 0, 0, i, 0, time.UTC))
+		if err != nil {
+			t.Fatalf("compact step %d: %v", i+1, err)
+		}
+		wantCompleted := i == 20
+		if completed != wantCompleted {
+			t.Fatalf("compact step %d completed = %v, want %v", i+1, completed, wantCompleted)
+		}
+		wantCursor := (i + 1) % 21
+		if compactAt != wantCursor {
+			t.Fatalf("compact step %d cursor = %d, want %d", i+1, compactAt, wantCursor)
+		}
+	}
+}
+
+func TestCompactStepDefersCleanupAndCheckpointUntilCycleEnd(t *testing.T) {
+	ctx := context.Background()
+	dsn := filepath.Join(t.TempDir(), "compact-step-maintenance.db")
+	s, err := metric.Open(ctx, metric.SQLite(dsn, metric.WithMaxOpenConns(1)))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	for _, name := range []string{"a.metric", "b.metric"} {
+		if err := s.UpsertMetric(ctx, metric.Definition{Name: name, Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
+			t.Fatalf("upsert metric %s: %v", name, err)
+		}
+	}
+	now := time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)
+	for _, name := range []string{"a.metric", "b.metric"} {
+		if err := s.Write(ctx, metric.Point{MetricName: name, EntityID: "node", Timestamp: now.Add(-48 * time.Hour), Value: 1}); err != nil {
+			t.Fatalf("write metric %s: %v", name, err)
+		}
+	}
+	installCompactStepTestStore(t, s, 0)
+
+	written, completed, err := CompactStep(ctx, now)
+	if err != nil || written != 0 || completed {
+		t.Fatalf("first compact step = written %d, completed %v, err %v", written, completed, err)
+	}
+	assertRawMetricCount(t, dsn, "a.metric", 1)
+	assertRawMetricCount(t, dsn, "b.metric", 1)
+	if size := fileSize(t, dsn+"-wal"); size == 0 {
+		t.Fatal("SQLite WAL was truncated before the compact cycle completed")
+	}
+
+	written, completed, err = CompactStep(ctx, now)
+	if err != nil || written != 0 || !completed {
+		t.Fatalf("second compact step = written %d, completed %v, err %v", written, completed, err)
+	}
+	assertRawMetricCount(t, dsn, "a.metric", 0)
+	assertRawMetricCount(t, dsn, "b.metric", 0)
+	if size := fileSize(t, dsn+"-wal"); size != 0 {
+		t.Fatalf("SQLite WAL size after completed compact cycle = %d, want 0", size)
+	}
+}
+
+func TestCompactStepAdvancesAfterMetricFailure(t *testing.T) {
+	ctx := context.Background()
+	dsn := filepath.Join(t.TempDir(), "compact-step-failure.db")
+	s, err := metric.Open(ctx, metric.SQLite(dsn,
+		metric.WithMaxOpenConns(1),
+		metric.WithRollupPolicy(defaultRollupPolicy()),
+	))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	for _, name := range []string{"a.invalid", "b.healthy"} {
+		if err := s.CreateMetric(ctx, metric.Definition{Name: name, Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
+			t.Fatalf("create metric %s: %v", name, err)
+		}
+	}
+	now := time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Hour)
+	if err := s.Write(ctx, metric.Point{MetricName: "b.healthy", EntityID: "node", Timestamp: old, Value: 2}); err != nil {
+		t.Fatalf("write healthy point: %v", err)
+	}
+	rawDB, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open raw sqlite connection: %v", err)
+	}
+	_, err = rawDB.ExecContext(ctx, `INSERT INTO metric_points
+		(metric_name, entity_id, tags_hash, ts_nano, value, tags, labels, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"a.invalid", "node", "invalid", old.UnixNano(), 1, "not-json", "{}", now.UnixNano(),
+	)
+	_ = rawDB.Close()
+	if err != nil {
+		t.Fatalf("insert malformed point: %v", err)
+	}
+	installCompactStepTestStore(t, s, 0)
+
+	if _, completed, err := CompactStep(ctx, now); err == nil || completed {
+		t.Fatalf("failed metric step = completed %v, err %v; want failure in partial cycle", completed, err)
+	}
+	if compactAt != 1 {
+		t.Fatalf("cursor after failed metric = %d, want 1", compactAt)
+	}
+	if _, completed, err := CompactStep(ctx, now); err == nil || !completed {
+		t.Fatalf("healthy metric step = completed %v, err %v; want completed cycle retaining cleanup error", completed, err)
+	}
+	assertRawMetricCount(t, dsn, "b.healthy", 0)
+}
+
+func installCompactStepTestStore(t *testing.T, s *metric.Store, cursor int) {
+	t.Helper()
+	installTestStore(t, s)
+	previousCursor := compactAt
+	compactAt = cursor
+	t.Cleanup(func() { compactAt = previousCursor })
+}
+
+func assertRawMetricCount(t *testing.T, dsn, metricName string, want int) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open raw sqlite connection: %v", err)
+	}
+	defer db.Close()
+	var got int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM metric_points WHERE metric_name = ?`, metricName).Scan(&got); err != nil {
+		t.Fatalf("count raw metric %s: %v", metricName, err)
+	}
+	if got != want {
+		t.Fatalf("raw metric %s count = %d, want %d", metricName, got, want)
+	}
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Size()
 }
 
 func TestGetRecordsByClientAndTimeReadsRollupsAfterRawCompaction(t *testing.T) {

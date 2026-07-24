@@ -543,8 +543,8 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 		}
 		total += n
 	}
-	if _, err := activeStore.CleanupExpired(ctx, now); err != nil {
-		compactErrors = append(compactErrors, fmt.Errorf("clean up expired raw metrics: %w", err))
+	if err := finishCompactCycle(ctx, activeStore, now); err != nil {
+		compactErrors = append(compactErrors, err)
 	}
 	if failedAt >= 0 {
 		compactAt = failedAt
@@ -552,6 +552,67 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 		compactAt = start
 	}
 	return total, errors.Join(compactErrors...)
+}
+
+// CompactStep compacts one metric and advances the rotating cursor. Cleanup
+// and the SQLite WAL checkpoint run only after the cursor completes a cycle,
+// keeping scheduled maintenance work short on low-performance single-core
+// servers. A failed metric still advances so it cannot block the other metrics.
+func CompactStep(ctx context.Context, now time.Time) (written int, cycleCompleted bool, err error) {
+	if !compactOperations.TryAcquire() {
+		return 0, false, ErrCompactInProgress
+	}
+	defer compactOperations.Release()
+	if err := storeOperations.AcquireShared(ctx); err != nil {
+		return 0, false, fmt.Errorf("wait for metric store operation before compaction: %w", err)
+	}
+	defer storeOperations.ReleaseShared()
+
+	storeMu.RLock()
+	defer storeMu.RUnlock()
+	activeStore := store
+	if activeStore == nil {
+		return 0, false, fmt.Errorf("metric store not initialized")
+	}
+
+	defs, err := activeStore.ListMetrics(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(defs) == 0 {
+		compactAt = 0
+		return 0, true, finishCompactCycle(ctx, activeStore, now)
+	}
+	if compactAt < 0 || compactAt >= len(defs) {
+		compactAt = 0
+	}
+
+	idx := compactAt
+	compactAt = (compactAt + 1) % len(defs)
+	cycleCompleted = compactAt == 0
+	written, compactErr := activeStore.CompactMetric(ctx, defs[idx].Name, now)
+	if compactErr != nil {
+		compactErr = fmt.Errorf("compact metric %q: %w", defs[idx].Name, compactErr)
+	}
+	if !cycleCompleted {
+		return written, false, compactErr
+	}
+	return written, true, errors.Join(compactErr, finishCompactCycle(ctx, activeStore, now))
+}
+
+func finishCompactCycle(ctx context.Context, activeStore *metric.Store, now time.Time) error {
+	var compactErrors []error
+	if _, err := activeStore.CleanupExpired(ctx, now); err != nil {
+		compactErrors = append(compactErrors, fmt.Errorf("clean up expired raw metrics: %w", err))
+	}
+	if activeStore.Driver() == metric.DriverSQLite {
+		checkpointCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		if err := activeStore.CheckpointWAL(checkpointCtx); err != nil {
+			logger.Warnf("metricstore", "Failed to truncate metric WAL after compaction: %v", err)
+		}
+		cancel()
+	}
+	return errors.Join(compactErrors...)
 }
 
 // CloseStoreContext stops the asynchronous store migration before taking the

@@ -74,6 +74,9 @@ func TestReclaimSpaceReportsBusyStore(t *testing.T) {
 	if _, err := Compact(context.Background(), time.Now()); !errors.Is(err, ErrCompactInProgress) {
 		t.Fatalf("overlapping compact error = %v, want %v", err, ErrCompactInProgress)
 	}
+	if _, _, err := CompactStep(context.Background(), time.Now()); !errors.Is(err, ErrCompactInProgress) {
+		t.Fatalf("overlapping compact step error = %v, want %v", err, ErrCompactInProgress)
+	}
 }
 
 func TestInspectStorageRequiresInitializedStore(t *testing.T) {
