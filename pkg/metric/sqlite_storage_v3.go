@@ -12,7 +12,7 @@ const sqliteStorageVersion = 3
 // migrateSQLiteStorageV3 normalizes repeated series identity into one compact
 // dictionary. Compatibility views retain the original points/rollups columns,
 // so every existing query and API response remains unchanged.
-func (s *Store) migrateSQLiteStorageV3(ctx context.Context) error {
+func (s *Store) migrateSQLiteStorageV3(ctx context.Context, reclaim bool) error {
 	pointType, err := sqliteObjectType(ctx, s.db, s.tables.points)
 	if err != nil {
 		return err
@@ -31,7 +31,7 @@ func (s *Store) migrateSQLiteStorageV3(ctx context.Context) error {
 			return err
 		}
 	case pointType == "table" && rollupType == "table":
-		if err := s.migrateLegacySQLiteStorage(ctx); err != nil {
+		if err := s.migrateLegacySQLiteStorage(ctx, reclaim); err != nil {
 			return err
 		}
 	case pointType == "view" && rollupType == "view":
@@ -50,7 +50,7 @@ func (s *Store) migrateSQLiteStorageV3(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {
 		return fmt.Errorf("metric: inspect SQLite auto-vacuum mode: %w", err)
 	}
-	if autoVacuum != 2 {
+	if reclaim && autoVacuum != 2 {
 		if err := s.fullSQLiteVacuum(ctx); err != nil {
 			return err
 		}
@@ -106,7 +106,7 @@ func (s *Store) ensureSQLiteStorageV3(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) migrateLegacySQLiteStorage(ctx context.Context) error {
+func (s *Store) migrateLegacySQLiteStorage(ctx context.Context, reclaim bool) error {
 	log.Printf("metric: migrating SQLite metric storage to V%d", sqliteStorageVersion)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -125,6 +125,16 @@ func (s *Store) migrateLegacySQLiteStorage(ctx context.Context) error {
 	if err := s.createSQLiteV3PhysicalTables(ctx, tx); err != nil {
 		return err
 	}
+	pointSourceRows, err := sqliteTableRowCountTx(ctx, tx, s.tables.points)
+	if err != nil {
+		return err
+	}
+	rollupSourceRows, err := sqliteTableRowCountTx(ctx, tx, s.tables.rollups)
+	if err != nil {
+		return err
+	}
+	seriesSourceRows := pointSourceRows + rollupSourceRows
+	s.reportMigrationProgress(MigrationPhaseNormalizingSeries, 0, seriesSourceRows, 0)
 
 	for _, source := range []string{s.tables.points, s.tables.rollups} {
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(
@@ -135,11 +145,9 @@ func (s *Store) migrateLegacySQLiteStorage(ctx context.Context) error {
 			return fmt.Errorf("metric: build SQLite series dictionary from %s: %w", source, err)
 		}
 	}
+	s.reportMigrationProgress(MigrationPhaseNormalizingSeries, seriesSourceRows, seriesSourceRows, 0)
 
-	pointSourceRows, err := sqliteTableRowCountTx(ctx, tx, s.tables.points)
-	if err != nil {
-		return err
-	}
+	s.reportMigrationProgress(MigrationPhaseNormalizingPoints, 0, pointSourceRows, 0)
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
 		`INSERT INTO %s (series_id, ts_nano, value, labels, created_at)
 		 SELECT s.id, p.ts_nano, p.value, p.labels, p.created_at
@@ -156,12 +164,10 @@ func (s *Store) migrateLegacySQLiteStorage(ctx context.Context) error {
 	if pointSourceRows != pointTargetRows {
 		return fmt.Errorf("metric: SQLite V3 point count mismatch: source=%d target=%d", pointSourceRows, pointTargetRows)
 	}
+	s.reportMigrationProgress(MigrationPhaseNormalizingPoints, pointTargetRows, pointSourceRows, pointTargetRows)
 
-	rollupSourceRows, err := sqliteTableRowCountTx(ctx, tx, s.tables.rollups)
-	if err != nil {
-		return err
-	}
-	if err := s.copySQLiteRollupsV3(ctx, tx); err != nil {
+	s.reportMigrationProgress(MigrationPhaseNormalizingRollups, 0, rollupSourceRows, pointTargetRows)
+	if err := s.copySQLiteRollupsV3(ctx, tx, rollupSourceRows, pointTargetRows); err != nil {
 		return err
 	}
 	rollupTargetRows, err := sqliteTableRowCountTx(ctx, tx, s.tables.rollupValues)
@@ -171,6 +177,7 @@ func (s *Store) migrateLegacySQLiteStorage(ctx context.Context) error {
 	if rollupSourceRows != rollupTargetRows {
 		return fmt.Errorf("metric: SQLite V3 rollup count mismatch: source=%d target=%d", rollupSourceRows, rollupTargetRows)
 	}
+	s.reportMigrationProgress(MigrationPhaseNormalizingRollups, rollupTargetRows, rollupSourceRows, pointTargetRows+rollupTargetRows)
 
 	if _, err := tx.ExecContext(ctx, `DROP TABLE `+s.tables.points); err != nil {
 		return fmt.Errorf("metric: replace legacy SQLite points table: %w", err)
@@ -185,8 +192,12 @@ func (s *Store) migrateLegacySQLiteStorage(ctx context.Context) error {
 		return fmt.Errorf("metric: commit SQLite V3 migration: %w", err)
 	}
 
-	if err := s.fullSQLiteVacuum(ctx); err != nil {
-		return err
+	if reclaim {
+		s.reportMigrationProgress(MigrationPhaseReclaiming, 0, 1, pointTargetRows+rollupTargetRows)
+		if err := s.fullSQLiteVacuum(ctx); err != nil {
+			return err
+		}
+		s.reportMigrationProgress(MigrationPhaseReclaiming, 1, 1, pointTargetRows+rollupTargetRows)
 	}
 	log.Printf(
 		"metric: migrated SQLite metric storage to V%d (%d points, %d rollups preserved)",
@@ -195,7 +206,7 @@ func (s *Store) migrateLegacySQLiteStorage(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) copySQLiteRollupsV3(ctx context.Context, tx *sql.Tx) error {
+func (s *Store) copySQLiteRollupsV3(ctx context.Context, tx *sql.Tx, total, preservedBase int64) error {
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
 		`SELECT s.id, r.resolution_nano, r.bucket_nano, r.count, r.sum, r.sum_sq,
 		        r.min_val, r.max_val, r.first_val, r.first_ts, r.last_val, r.last_ts,
@@ -219,6 +230,7 @@ func (s *Store) copySQLiteRollupsV3(ctx context.Context, tx *sql.Tx) error {
 		return fmt.Errorf("metric: prepare SQLite V3 rollup copy: %w", err)
 	}
 	defer stmt.Close()
+	var copied int64
 	for rows.Next() {
 		var seriesID, resolution, bucket, count, firstTS, lastTS, createdAt int64
 		var sum, sumSq, minVal, maxVal, firstVal, lastVal float64
@@ -234,6 +246,10 @@ func (s *Store) copySQLiteRollupsV3(ctx context.Context, tx *sql.Tx) error {
 			firstVal, firstTS, lastVal, lastTS, compressTDigestBlob(digest), createdAt,
 		); err != nil {
 			return fmt.Errorf("metric: copy legacy SQLite rollup: %w", err)
+		}
+		copied++
+		if copied%256 == 0 || copied == total {
+			s.reportMigrationProgress(MigrationPhaseNormalizingRollups, copied, total, preservedBase+copied)
 		}
 	}
 	if err := rows.Err(); err != nil {

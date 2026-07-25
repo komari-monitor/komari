@@ -139,7 +139,7 @@ func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now ti
 	defer func() { _ = tx.Rollback() }()
 	if s.sqliteStorageV4 {
 		sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
-		if _, err := s.sealSQLiteV4PointsTx(ctx, tx, metricName, sealBefore); err != nil {
+		if _, err := s.sealSQLiteV4PointsTx(ctx, tx, metricName, sealBefore, 0, 0); err != nil {
 			return 0, err
 		}
 	}

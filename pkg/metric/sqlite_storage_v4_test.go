@@ -967,7 +967,7 @@ func createSQLiteV3OnlyStore(t *testing.T, ctx context.Context, dsn string) *Sto
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.migrateSQLiteStorageV3(ctx); err != nil {
+	if err := store.migrateSQLiteStorageV3(ctx, true); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
 	}

@@ -119,10 +119,10 @@ func (s *Store) ReclaimSpace(ctx context.Context) error {
 			return fmt.Errorf("metric: begin SQLite V4 reclaim seal: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
-		if _, err := s.sealSQLiteV4PointsTx(ctx, tx, "", math.MaxInt64); err != nil {
+		if _, err := s.sealSQLiteV4PointsTx(ctx, tx, "", math.MaxInt64, 0, 0); err != nil {
 			return fmt.Errorf("metric: seal SQLite V4 points before reclaim: %w", err)
 		}
-		if _, err := s.sealAllSQLiteV4RollupsTx(ctx, tx); err != nil {
+		if _, err := s.sealAllSQLiteV4RollupsTx(ctx, tx, 0, 0); err != nil {
 			return fmt.Errorf("metric: seal SQLite V4 rollups before reclaim: %w", err)
 		}
 		if err := tx.Commit(); err != nil {

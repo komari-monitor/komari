@@ -65,6 +65,11 @@ type Config struct {
 	// RollupPolicy 配置降采样层级和分层保留时间；定义层级后，
 	// Store.Compact 会生成 rollup 并执行保留策略。零值表示禁用 rollup。
 	RollupPolicy RollupPolicy
+
+	// MigrationProgress receives best-effort progress snapshots while an
+	// automatic schema migration is running. Callbacks must return quickly and
+	// must not call back into the Store being opened.
+	MigrationProgress MigrationProgressFunc
 }
 
 // SQLiteOptions contains SQLite-specific performance and read-concurrency settings.
@@ -274,6 +279,13 @@ func WithTablePrefix(prefix string) Option {
 func WithAutoMigrate(enabled bool) Option {
 	return func(c *Config) {
 		c.AutoMigrate = enabled
+	}
+}
+
+// WithMigrationProgress observes automatic schema migration progress.
+func WithMigrationProgress(progress MigrationProgressFunc) Option {
+	return func(c *Config) {
+		c.MigrationProgress = progress
 	}
 }
 

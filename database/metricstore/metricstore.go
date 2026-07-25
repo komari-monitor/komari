@@ -43,7 +43,7 @@ const (
 type MetricStoreConfig struct {
 	Driver          string `json:"metric_db_driver" default:"sqlite"`         // 数据库类型: sqlite, mysql, postgresql
 	DSN             string `json:"metric_db_dsn" default:"./data/metrics.db"` // 数据库连接串
-	LowResourceMode bool   `json:"low_resource_mode"`                         // 低资源模式由首次探测或后台设置决定
+	LowResourceMode bool   `json:"low_resource_mode"`                         // 低资源模式默认关闭，可在监控数据库设置中启用
 	TablePrefix     string `json:"metric_table_prefix" default:"metric_"`     // 表名前缀
 	MaxOpenConns    int    `json:"metric_max_open_conns" default:"25"`        // 最大连接数
 	MaxIdleConns    int    `json:"metric_max_idle_conns" default:"5"`         // 最大空闲连接数
@@ -269,10 +269,15 @@ func openStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, erro
 }
 
 func openStoreWithDefaultRetention(ctx context.Context, cfg *MetricStoreConfig, defaultRetentionDays int) (*metric.Store, error) {
+	return openStoreWithDefaultRetentionAndProgress(ctx, cfg, defaultRetentionDays, nil)
+}
+
+func openStoreWithDefaultRetentionAndProgress(ctx context.Context, cfg *MetricStoreConfig, defaultRetentionDays int, progress metric.MigrationProgressFunc) (*metric.Store, error) {
 	metricCfg, err := buildMetricConfig(cfg, true)
 	if err != nil {
 		return nil, err
 	}
+	metricCfg.MigrationProgress = progress
 
 	s, err := metric.Open(ctx, metricCfg)
 	if err != nil {
@@ -298,10 +303,40 @@ func OpenStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, erro
 // as the initial retention for definitions that do not exist yet. Existing
 // definitions keep their configured retention, including an explicit zero.
 func OpenStoreForMigration(ctx context.Context, cfg *MetricStoreConfig, legacyRetentionDays int) (*metric.Store, error) {
+	return OpenStoreForMigrationWithProgress(ctx, cfg, legacyRetentionDays, nil)
+}
+
+// OpenStoreForMigrationWithProgress is OpenStoreForMigration with observable
+// SQLite schema migration progress.
+func OpenStoreForMigrationWithProgress(ctx context.Context, cfg *MetricStoreConfig, legacyRetentionDays int, progress metric.MigrationProgressFunc) (*metric.Store, error) {
 	if legacyRetentionDays < defaultBuiltinMetricRetentionDays {
 		legacyRetentionDays = defaultBuiltinMetricRetentionDays
 	}
-	return openStoreWithDefaultRetention(ctx, cfg, legacyRetentionDays)
+	return openStoreWithDefaultRetentionAndProgress(ctx, cfg, legacyRetentionDays, progress)
+}
+
+// InspectSQLiteStorageMigration checks whether the configured metric store
+// needs a potentially long local SQLite schema migration. It is read-only.
+func InspectSQLiteStorageMigration(ctx context.Context) (metric.SQLiteMigrationSummary, error) {
+	cfg, err := config.GetManyAs[MetricStoreConfig]()
+	if err != nil {
+		return metric.SQLiteMigrationSummary{}, fmt.Errorf("failed to load metric store config: %w", err)
+	}
+	metricCfg, err := buildMetricConfig(cfg, false)
+	if err != nil {
+		return metric.SQLiteMigrationSummary{}, err
+	}
+	return metric.InspectSQLiteMigration(ctx, metricCfg)
+}
+
+// OpenConfiguredStoreForMigration runs the configured store's automatic
+// schema migration without activating it as the process-wide store.
+func OpenConfiguredStoreForMigration(ctx context.Context, progress metric.MigrationProgressFunc) (*metric.Store, error) {
+	cfg, err := config.GetManyAs[MetricStoreConfig]()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load metric store config: %w", err)
+	}
+	return openStoreWithDefaultRetentionAndProgress(ctx, cfg, defaultBuiltinMetricRetentionDays, progress)
 }
 
 // TestConnection 使用给定配置尝试连接 metrics 数据库（不影响当前运行的 store）。

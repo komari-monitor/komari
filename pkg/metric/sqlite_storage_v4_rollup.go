@@ -20,6 +20,7 @@ func (s *Store) migrateSQLiteV4RollupBlocksToSplit(ctx context.Context) (int64, 
 	if blockCount == 0 {
 		return 0, 0, nil
 	}
+	s.reportMigrationProgress(MigrationPhaseUpgradingRollupBlocks, 0, blockCount, 0)
 	log.Printf("metric: migrating %d SQLite V4 rollup blocks to split summary/digest storage", blockCount)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -100,6 +101,7 @@ func (s *Store) migrateSQLiteV4RollupBlocksToSplit(ctx context.Context) (int64, 
 		}
 		migratedBlocks++
 		migratedBuckets += int64(len(records))
+		s.reportMigrationProgress(MigrationPhaseUpgradingRollupBlocks, migratedBlocks, blockCount, migratedBuckets)
 	}
 	if err := tx.Commit(); err != nil {
 		return migratedBlocks, migratedBuckets, fmt.Errorf("metric: commit split SQLite V4 rollup migration: %w", err)
@@ -205,7 +207,7 @@ func (s *Store) validateSQLiteV4RollupBlocks(ctx context.Context, tx *sql.Tx) er
 	return nil
 }
 
-func (s *Store) sealAllSQLiteV4RollupsTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+func (s *Store) sealAllSQLiteV4RollupsTx(ctx context.Context, tx *sql.Tx, migrationTotal, preservedBase int64) (int64, error) {
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
 		`SELECT DISTINCT series_id, resolution_nano FROM %s ORDER BY series_id, resolution_nano`,
 		s.tables.rollupValues,
@@ -279,6 +281,9 @@ func (s *Store) sealAllSQLiteV4RollupsTx(ctx context.Context, tx *sql.Tx) (int64
 		}
 		if err := s.writeSQLiteV4RollupBlocksTx(ctx, tx, item.seriesID, item.resolution, merged); err != nil {
 			return sealed, err
+		}
+		if migrationTotal > 0 {
+			s.reportMigrationProgress(MigrationPhaseEncodingRollups, sealed, migrationTotal, preservedBase+sealed)
 		}
 	}
 	return sealed, nil

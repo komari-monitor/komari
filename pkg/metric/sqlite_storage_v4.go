@@ -24,7 +24,11 @@ const (
 // blocks but no rollup blocks; they are upgraded in place without re-encoding
 // the already migrated points.
 func (s *Store) migrateSQLiteStorageV4(ctx context.Context) error {
-	if err := s.migrateSQLiteStorageV3(ctx); err != nil {
+	s.reportMigrationProgress(MigrationPhasePreparing, 0, 1, 0)
+	// V3 is an internal normalization step here. Defer its physical rewrite
+	// until V4 has been validated and committed so an upgrade performs only one
+	// full-database vacuum.
+	if err := s.migrateSQLiteStorageV3(ctx, false); err != nil {
 		return err
 	}
 	pointKind, err := sqliteObjectType(ctx, s.db, s.tables.pointBlocks)
@@ -43,7 +47,11 @@ func (s *Store) migrateSQLiteStorageV4(ctx context.Context) error {
 	}
 	if pointKind == "table" && rollupKind == "table" {
 		s.sqliteStorageV4 = true
-		return s.ensureSQLiteStorageV4(ctx)
+		if err := s.ensureSQLiteStorageV4(ctx); err != nil {
+			return err
+		}
+		s.reportMigrationProgress(MigrationPhaseCompleted, 1, 1, 0)
+		return nil
 	}
 
 	log.Printf("metric: migrating SQLite metric storage to V%d", sqliteStorageVersionV4)
@@ -70,27 +78,32 @@ func (s *Store) migrateSQLiteStorageV4(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		sealed, err := s.sealSQLiteV4PointsTx(ctx, tx, "", math.MaxInt64)
+		s.reportMigrationProgress(MigrationPhaseEncodingPoints, 0, pointSourceCount, 0)
+		sealed, err := s.sealSQLiteV4PointsTx(ctx, tx, "", math.MaxInt64, pointSourceCount, 0)
 		if err != nil {
 			return fmt.Errorf("metric: encode SQLite V4 point blocks: %w", err)
 		}
 		if sealed != pointSourceCount {
 			return fmt.Errorf("metric: SQLite V4 point count mismatch: source=%d encoded=%d", pointSourceCount, sealed)
 		}
+		s.reportMigrationProgress(MigrationPhaseEncodingPoints, sealed, pointSourceCount, sealed)
 	}
 	if rollupKind == "" {
 		rollupSourceCount, err = sqliteTableRowCountTx(ctx, tx, s.tables.rollupValues)
 		if err != nil {
 			return err
 		}
-		sealed, err := s.sealAllSQLiteV4RollupsTx(ctx, tx)
+		s.reportMigrationProgress(MigrationPhaseEncodingRollups, 0, rollupSourceCount, pointSourceCount)
+		sealed, err := s.sealAllSQLiteV4RollupsTx(ctx, tx, rollupSourceCount, pointSourceCount)
 		if err != nil {
 			return fmt.Errorf("metric: encode SQLite V4 rollup blocks: %w", err)
 		}
 		if sealed != rollupSourceCount {
 			return fmt.Errorf("metric: SQLite V4 rollup count mismatch: source=%d encoded=%d", rollupSourceCount, sealed)
 		}
+		s.reportMigrationProgress(MigrationPhaseEncodingRollups, sealed, rollupSourceCount, pointSourceCount+sealed)
 	}
+	s.reportMigrationProgress(MigrationPhaseValidating, 0, pointSourceCount+rollupSourceCount, pointSourceCount+rollupSourceCount)
 	var pointHotCount, pointBlockCount, rollupHotCount, rollupBlockCount int64
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+s.tables.pointValues).Scan(&pointHotCount); err != nil {
 		return fmt.Errorf("metric: validate SQLite V4 hot points: %w", err)
@@ -110,15 +123,21 @@ func (s *Store) migrateSQLiteStorageV4(ctx context.Context) error {
 	if rollupKind == "" && (rollupHotCount != 0 || rollupBlockCount != rollupSourceCount) {
 		return fmt.Errorf("metric: SQLite V4 rollup validation failed: source=%d hot=%d blocks=%d", rollupSourceCount, rollupHotCount, rollupBlockCount)
 	}
+	s.reportMigrationProgress(MigrationPhaseValidating, pointSourceCount+rollupSourceCount, pointSourceCount+rollupSourceCount, pointSourceCount+rollupSourceCount)
+	s.reportMigrationProgress(MigrationPhaseCommitting, 0, 1, pointSourceCount+rollupSourceCount)
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("metric: commit SQLite V4 migration: %w", err)
 	}
+	s.reportMigrationProgress(MigrationPhaseCommitting, 1, 1, pointSourceCount+rollupSourceCount)
 	s.sqliteStorageV4 = true
+	s.reportMigrationProgress(MigrationPhaseReclaiming, 0, 1, pointSourceCount+rollupSourceCount)
 	if err := s.fullSQLiteVacuum(ctx); err != nil {
 		// The V4 transaction is already fully validated and committed. A failed
 		// physical rewrite does not invalidate the logical migration.
 		log.Printf("metric: SQLite V4 post-migration vacuum skipped: %v", err)
 	}
+	s.reportMigrationProgress(MigrationPhaseReclaiming, 1, 1, pointSourceCount+rollupSourceCount)
+	s.reportMigrationProgress(MigrationPhaseCompleted, 1, 1, pointSourceCount+rollupSourceCount)
 	log.Printf("metric: migrated SQLite metric storage to V%d (%d raw points and %d rollups preserved bit-for-bit)", sqliteStorageVersionV4, pointSourceCount, rollupSourceCount)
 	return nil
 }
@@ -433,7 +452,7 @@ func sqliteV4SeriesIDClause(series []sqliteV4Series) (string, []any) {
 	return strings.Join(placeholders, ","), args
 }
 
-func (s *Store) sealSQLiteV4PointsTx(ctx context.Context, tx *sql.Tx, metricName string, beforeNano int64) (int64, error) {
+func (s *Store) sealSQLiteV4PointsTx(ctx context.Context, tx *sql.Tx, metricName string, beforeNano, migrationTotal, preservedBase int64) (int64, error) {
 	comparison := "<"
 	if beforeNano == math.MaxInt64 {
 		comparison = "<="
@@ -526,6 +545,9 @@ func (s *Store) sealSQLiteV4PointsTx(ctx context.Context, tx *sql.Tx, metricName
 			return total, err
 		}
 		total += hotCount
+		if migrationTotal > 0 {
+			s.reportMigrationProgress(MigrationPhaseEncodingPoints, total, migrationTotal, preservedBase+total)
+		}
 	}
 	return total, nil
 }
