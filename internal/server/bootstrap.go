@@ -4,14 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/internal/config"
-	"github.com/komari-monitor/komari/pkg/resourceprobe"
 	"github.com/komari-monitor/komari/utils"
-	logger "github.com/komari-monitor/komari/utils/log"
 )
 
 // Bootstrap initializes the data directory, primary database, and settings.
@@ -57,12 +54,9 @@ func ensureLowResourceModeDefault() (bool, error) {
 		return enabled, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
-	defer cancel()
-	result := resourceprobe.Detect(ctx, "./data")
-	if err := config.Set(config.LowResourceModeKey, result.LowResource); err != nil {
+	const defaultLowResourceMode = false
+	if err := config.Set(config.LowResourceModeKey, defaultLowResourceMode); err != nil {
 		return false, err
 	}
-	logger.Infof("server", "Low resource mode auto-detection: enabled=%t memory=%dMiB disk_free=%dMiB cpu=%.0fops/s random_write=%.2fMiB/s iops=%.0f reasons=%v", result.LowResource, result.MemoryBytes/(1024*1024), result.DiskFreeBytes/(1024*1024), result.CPUOpsPerSecond, result.WriteBytesPerSecond/(1024*1024), result.WriteIOPS, result.Reasons)
-	return result.LowResource, nil
+	return defaultLowResourceMode, nil
 }

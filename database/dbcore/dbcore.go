@@ -473,25 +473,28 @@ func ConfigureLowResourceMode(enabled bool) error {
 	if instance == nil || flags.ApplyDatabaseTypeNormalization() != flags.DatabaseTypeSQLite {
 		return nil
 	}
-	pragmas := []string{
-		"PRAGMA synchronous = NORMAL;",
-		"PRAGMA mmap_size = 0;",
-	}
-	if enabled {
-		pragmas = append(pragmas,
-			"PRAGMA cache_size = -8192;",
-			"PRAGMA temp_store = FILE;",
-		)
-	} else {
-		pragmas = append(pragmas,
-			"PRAGMA cache_size = -65536;",
-			"PRAGMA temp_store = MEMORY;",
-		)
-	}
-	for _, pragma := range pragmas {
+	for _, pragma := range sqliteResourcePragmas(enabled) {
 		if err := instance.Exec(pragma).Error; err != nil {
 			return fmt.Errorf("apply SQLite resource setting %q: %w", pragma, err)
 		}
 	}
 	return nil
+}
+
+func sqliteResourcePragmas(enabled bool) []string {
+	pragmas := []string{"PRAGMA synchronous = NORMAL;"}
+	if enabled {
+		pragmas = append(pragmas,
+			"PRAGMA mmap_size = 0;",
+			"PRAGMA cache_size = -8192;",
+			"PRAGMA temp_store = FILE;",
+		)
+	} else {
+		pragmas = append(pragmas,
+			"PRAGMA mmap_size = 268435456;",
+			"PRAGMA cache_size = -65536;",
+			"PRAGMA temp_store = MEMORY;",
+		)
+	}
+	return pragmas
 }
