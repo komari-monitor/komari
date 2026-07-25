@@ -1,11 +1,16 @@
 package server
 
 import (
+	"context"
+
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/migrations"
+	"github.com/komari-monitor/komari/pkg/metric"
 	installweb "github.com/komari-monitor/komari/web/install"
 	recoveryweb "github.com/komari-monitor/komari/web/recovery"
+	storageupdateweb "github.com/komari-monitor/komari/web/storageupdate"
 	upgradeweb "github.com/komari-monitor/komari/web/update"
 )
 
@@ -20,6 +25,11 @@ func (a *App) InstallRequired() (bool, error) {
 
 func (a *App) LegacyUpgradeRequired() (bool, migrations.LegacyMonitoringSummary, error) {
 	return migrations.LegacyMonitoringMigrationRequired(dbcore.GetDBInstance())
+}
+
+func (a *App) MetricStorageUpgradeRequired() (bool, metric.SQLiteMigrationSummary, error) {
+	summary, err := metricstore.InspectSQLiteStorageMigration(context.Background())
+	return summary.Required, summary, err
 }
 
 // RunInstallGuide exposes only first-run installation APIs. It intentionally
@@ -52,6 +62,18 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 		pagePath:        upgradeweb.PagePath,
 		missingAPI:      "Not found in upgrade mode",
 		logMessage:      "Legacy monitoring data requires the 1.2.7 upgrade wizard on %s",
+		requireIdentity: true,
+	})
+}
+
+// RunMetricStorageUpgrade exposes only authentication and SQLite migration
+// progress while the configured metric database is upgraded.
+func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bool, error) {
+	a.initOAuth()
+	return a.runGuideServer(storageupdateweb.NewController(summary), guideServerConfig{
+		pagePath:        storageupdateweb.PagePath,
+		missingAPI:      "Not found in metric storage upgrade mode",
+		logMessage:      "Metric storage upgrade progress is available on %s",
 		requireIdentity: true,
 	})
 }

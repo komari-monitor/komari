@@ -30,16 +30,20 @@ const (
 const largeDatasetThreshold int64 = 300_000
 
 type Status struct {
-	State           string                             `json:"state"`
-	Phase           string                             `json:"phase"`
-	Table           string                             `json:"table,omitempty"`
-	Summary         migrations.LegacyMonitoringSummary `json:"summary"`
-	SourceRowsDone  int64                              `json:"source_rows_done"`
-	SourceRowsTotal int64                              `json:"source_rows_total"`
-	WrittenPoints   int64                              `json:"written_points"`
-	Progress        float64                            `json:"progress"`
-	TargetDriver    string                             `json:"target_driver,omitempty"`
-	Error           string                             `json:"error,omitempty"`
+	State            string                             `json:"state"`
+	Phase            string                             `json:"phase"`
+	Table            string                             `json:"table,omitempty"`
+	Summary          migrations.LegacyMonitoringSummary `json:"summary"`
+	SourceRowsDone   int64                              `json:"source_rows_done"`
+	SourceRowsTotal  int64                              `json:"source_rows_total"`
+	WrittenPoints    int64                              `json:"written_points"`
+	Progress         float64                            `json:"progress"`
+	StorageCurrent   int64                              `json:"storage_current"`
+	StorageTotal     int64                              `json:"storage_total"`
+	StoragePreserved int64                              `json:"storage_preserved"`
+	StorageProgress  float64                            `json:"storage_progress"`
+	TargetDriver     string                             `json:"target_driver,omitempty"`
+	Error            string                             `json:"error,omitempty"`
 }
 
 type Controller struct {
@@ -230,7 +234,17 @@ func (c *Controller) start(ctx *gin.Context) {
 
 func (c *Controller) runMigration(cfg metricstore.MetricStoreConfig, legacyRetentionDays int) {
 	ctx := context.Background()
-	store, err := metricstore.OpenStoreForMigration(ctx, &cfg, legacyRetentionDays)
+	store, err := metricstore.OpenStoreForMigrationWithProgress(ctx, &cfg, legacyRetentionDays, func(progress metric.MigrationProgress) {
+		c.mu.Lock()
+		c.status.Phase = "storage_" + progress.Phase
+		c.status.StorageCurrent = progress.Current
+		c.status.StorageTotal = progress.Total
+		c.status.StoragePreserved = progress.Preserved
+		if progress.Total > 0 {
+			c.status.StorageProgress = float64(progress.Current) / float64(progress.Total) * 100
+		}
+		c.mu.Unlock()
+	})
 	if err != nil {
 		c.failTarget(err, cfg.DSN, "connecting")
 		return

@@ -69,6 +69,22 @@ func RunServer() {
 
 	// Metric store 是唯一允许进入恢复向导的启动阶段：主库已经在
 	// Bootstrap 中就绪，因此可以保留登录能力并让管理员修正 DSN。
+	storageUpgradeRequired, storageSummary, err := app.MetricStorageUpgradeRequired()
+	if err != nil {
+		_ = app.Shutdown()
+		logger.Fatalf("server", "server startup failed at %q: %v", "detect-metric-storage-upgrade", err)
+	}
+	if storageUpgradeRequired {
+		completed, err := app.RunMetricStorageUpgrade(storageSummary)
+		if err != nil {
+			_ = app.Shutdown()
+			logger.Fatalf("server", "server startup failed at %q: %v", "run-metric-storage-upgrade", err)
+		}
+		if !completed {
+			return
+		}
+	}
+
 	if err := app.ConnectMetricStoreWithRetry(); err != nil {
 		completed, recoveryErr := app.RunMetricStoreRecovery(err)
 		if recoveryErr != nil {
