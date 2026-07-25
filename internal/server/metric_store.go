@@ -1,11 +1,14 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/config"
 	logger "github.com/komari-monitor/komari/utils/log"
 )
@@ -81,7 +84,36 @@ func (a *App) InitStores() error {
 		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize metric store: %v", err))
 		return err
 	}
+	orphanResult, err := cleanupOrphanedMetricData(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to clean orphaned metrics: %w", err)
+	}
+	if orphanResult.Entities > 0 || orphanResult.PingTasks > 0 {
+		logger.Infof("server", "Removed orphaned metric data (entities=%d ping_tasks=%d)", orphanResult.Entities, orphanResult.PingTasks)
+	}
 	metricstore.StartReportBatcher()
 	a.addCleanup("metric-report-batcher", metricstore.StopReportBatcher)
 	return nil
+}
+
+func cleanupOrphanedMetricData(ctx context.Context) (metricstore.OrphanCleanupResult, error) {
+	db := dbcore.GetDBInstance()
+	var registeredClients []models.Client
+	if err := db.Select("uuid").Find(&registeredClients).Error; err != nil {
+		return metricstore.OrphanCleanupResult{}, fmt.Errorf("list clients: %w", err)
+	}
+	validEntities := make(map[string]struct{}, len(registeredClients))
+	for _, client := range registeredClients {
+		validEntities[client.UUID] = struct{}{}
+	}
+
+	var pingTasks []models.PingTask
+	if err := db.Select("id").Find(&pingTasks).Error; err != nil {
+		return metricstore.OrphanCleanupResult{}, fmt.Errorf("list ping tasks: %w", err)
+	}
+	validPingTasks := make(map[uint]struct{}, len(pingTasks))
+	for _, task := range pingTasks {
+		validPingTasks[task.Id] = struct{}{}
+	}
+	return metricstore.CleanupOrphanedData(ctx, validEntities, validPingTasks)
 }

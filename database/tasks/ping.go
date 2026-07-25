@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -47,6 +48,16 @@ func AddPingTask(clients []string, defaultOn bool, name string, target, task_typ
 }
 
 func DeletePingTask(id []uint) error {
+	if len(id) == 0 {
+		return fmt.Errorf("ping task id is required")
+	}
+	metricstore.BlockPingTaskWrites(id)
+	deleted := false
+	defer func() {
+		if !deleted {
+			metricstore.UnblockPingTaskWrites(id)
+		}
+	}()
 	// The metric store is independent from the main database, so clean it first
 	// to avoid leaving history that can no longer be addressed through the task.
 	if err := DeletePingRecords(id); err != nil {
@@ -54,12 +65,29 @@ func DeletePingTask(id []uint) error {
 	}
 
 	db := dbcore.GetDBInstance()
-	result := db.Where("id IN ?", id).Delete(&models.PingTask{})
-	if result.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
+	if err := deletePingTaskRows(db, id); err != nil {
+		return err
 	}
-	ReloadPingSchedule()
-	return result.Error
+	deleted = true
+	return ReloadPingSchedule()
+}
+
+func deletePingTaskRows(db *gorm.DB, ids []uint) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if tx.Migrator().HasTable("ping_records") {
+			if err := tx.Exec("DELETE FROM ping_records WHERE task_id IN ?", ids).Error; err != nil {
+				return fmt.Errorf("delete legacy ping records: %w", err)
+			}
+		}
+		result := tx.Where("id IN ?", ids).Delete(&models.PingTask{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	})
 }
 
 // EditPingTask 批量更新延迟监测任务配置。
@@ -137,6 +165,9 @@ func UpdatePingTaskOrder(order map[uint]int) error {
 // metric store，旧 ping_records 表不再参与。
 
 func SavePingRecord(record models.PingRecord) error {
+	if !utils.IsPingTaskAssigned(record.TaskId, record.Client) {
+		return fmt.Errorf("ping task %d is not assigned to client %s", record.TaskId, record.Client)
+	}
 	return metricstore.WritePingRecord(context.Background(), record)
 }
 

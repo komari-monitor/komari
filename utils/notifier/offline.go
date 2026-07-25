@@ -29,6 +29,19 @@ type notificationState struct {
 // 映射关系：clientID (string) -> *notificationState
 var clientStates sync.Map
 
+func ForgetClient(clientID string) {
+	value, exists := clientStates.LoadAndDelete(clientID)
+	if !exists {
+		return
+	}
+	state := value.(*notificationState)
+	state.mu.Lock()
+	state.pendingOfflineSince = time.Time{}
+	state.isConnExist = false
+	state.connectionID++
+	state.mu.Unlock()
+}
+
 // getNotificationConfig 获取指定客户端的通知配置。
 // 返回配置对象和一个布尔值，指示全局和该客户端是否启用通知。
 func getNotificationConfig(clientID string) (*models.OfflineNotification, bool) {

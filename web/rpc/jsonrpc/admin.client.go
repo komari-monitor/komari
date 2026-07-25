@@ -6,9 +6,12 @@ import (
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/metricstore"
+	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/utils/notifier"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
+	terminal_api "github.com/komari-monitor/komari/web/api/terminal"
 )
 
 // admin.client.go
@@ -127,14 +130,23 @@ func adminRemoveClient(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if params.UUID == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing UUID", nil)
 	}
+	metricstore.BlockEntityWrites(params.UUID)
+	terminal_api.CloseClientSessions(params.UUID)
+	agent_runtime.DeleteConnectedClients(params.UUID)
+	notifier.ForgetClient(params.UUID)
 	if err := clients.DeleteClient(params.UUID); err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to delete client"+err.Error(), nil)
+		metricstore.UnblockEntityWrites(params.UUID)
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to delete client: "+err.Error(), nil)
 	}
 	metricstore.DeleteEntityAsync(params.UUID)
+	terminal_api.CloseClientSessions(params.UUID)
+	agent_runtime.DeleteConnectedClients(params.UUID)
+	if err := d_notification.ReloadLoadNotificationSchedule(); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Client deleted but failed to reload load notification schedule: "+err.Error(), nil)
+	}
+	notifier.ForgetClient(params.UUID)
 	actor, ip := auditActor(ctx)
 	auditlog.Log(ip, actor, "delete client:"+params.UUID, "warn")
-	agent_runtime.DeleteConnectedClients(params.UUID)
-	agent_runtime.DeleteLatestReport(params.UUID)
 	return nil, nil
 }
 

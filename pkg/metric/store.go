@@ -1259,6 +1259,100 @@ SELECT entity_id FROM %s WHERE %s
 	return out, rows.Err()
 }
 
+// AllEntityIDs returns every entity that still owns raw or rollup data.
+func (s *Store) AllEntityIDs(ctx context.Context) ([]string, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
+	var sqlText string
+	if s.sqliteStorageV3 {
+		sqlText = fmt.Sprintf(`SELECT DISTINCT entity_id FROM %s ORDER BY entity_id ASC`, s.tables.series)
+	} else {
+		sqlText = fmt.Sprintf(`SELECT entity_id FROM (
+			SELECT entity_id FROM %s
+			UNION
+			SELECT entity_id FROM %s
+		) AS metric_entities ORDER BY entity_id ASC`, s.tables.points, s.tables.rollups)
+	}
+	rows, err := s.reader().QueryContext(ctx, sqlText)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []string
+	for rows.Next() {
+		var entityID string
+		if err := rows.Scan(&entityID); err != nil {
+			return nil, err
+		}
+		if entityID != "" {
+			result = append(result, entityID)
+		}
+	}
+	return result, rows.Err()
+}
+
+// MetricTagValues returns the distinct non-empty values of one tag on a metric.
+func (s *Store) MetricTagValues(ctx context.Context, metricName, tagName string) ([]string, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(metricName) == "" || strings.TrimSpace(tagName) == "" {
+		return nil, fmt.Errorf("%w: metric and tag names are required", ErrInvalidArgument)
+	}
+	for _, r := range tagName {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return nil, fmt.Errorf("%w: invalid tag name", ErrInvalidArgument)
+		}
+	}
+
+	var expression string
+	switch s.cfg.Driver {
+	case DriverSQLite:
+		expression = fmt.Sprintf("json_extract(tags, '$.%s')", tagName)
+	case DriverMySQL:
+		expression = fmt.Sprintf("JSON_UNQUOTE(JSON_EXTRACT(tags, '$.%s'))", tagName)
+	case DriverPostgreSQL:
+		expression = fmt.Sprintf("tags ->> '%s'", tagName)
+	default:
+		return nil, fmt.Errorf("%w: unsupported driver %q", ErrInvalidArgument, s.cfg.Driver)
+	}
+
+	placeholder := s.dialect.placeholder(1)
+	var sqlText string
+	var args []any
+	if s.sqliteStorageV3 {
+		sqlText = fmt.Sprintf(`SELECT DISTINCT %s AS tag_value FROM %s
+			WHERE metric_name = %s AND %s IS NOT NULL AND %s <> ''
+			ORDER BY tag_value ASC`, expression, s.tables.series, placeholder, expression, expression)
+		args = []any{metricName}
+	} else {
+		secondPlaceholder := s.dialect.placeholder(2)
+		sqlText = fmt.Sprintf(`SELECT DISTINCT tag_value FROM (
+			SELECT %s AS tag_value FROM %s WHERE metric_name = %s
+			UNION
+			SELECT %s AS tag_value FROM %s WHERE metric_name = %s
+		) AS metric_tags WHERE tag_value IS NOT NULL AND tag_value <> '' ORDER BY tag_value ASC`,
+			expression, s.tables.points, placeholder,
+			expression, s.tables.rollups, secondPlaceholder)
+		args = []any{metricName, metricName}
+	}
+	rows, err := s.reader().QueryContext(ctx, sqlText, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, rows.Err()
+}
+
 // Latest loads the newest points for a metric and entity.
 //
 // Latest 查询某指标和实体的最新采样点。

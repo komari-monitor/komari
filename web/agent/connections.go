@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/database/metricstore"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/web/connection"
 )
@@ -36,14 +37,29 @@ func GetConnectedClients() map[string]*connection.SafeConn {
 }
 
 func SetConnectedClients(uuid string, conn *connection.SafeConn) {
+	if metricstore.EntityWritesBlocked(uuid) {
+		_ = conn.Close()
+		return
+	}
 	mu.Lock()
-	defer mu.Unlock()
+	if metricstore.EntityWritesBlocked(uuid) {
+		mu.Unlock()
+		_ = conn.Close()
+		return
+	}
 	connectedClients[uuid] = conn
+	mu.Unlock()
 }
 
 func SetClientProtocolVersion(uuid string, version int) {
+	if metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
 	mu.Lock()
 	defer mu.Unlock()
+	if metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
 	connectedClientV2[uuid] = version >= 2
 }
 
@@ -65,18 +81,31 @@ func DeleteClientConditionally(uuid string, connToRemove *connection.SafeConn) {
 }
 func DeleteConnectedClients(uuid string) {
 	mu.Lock()
-	defer mu.Unlock()
-	// 只从 map 中删除，不再负责关闭连接
+	conn := connectedClients[uuid]
 	delete(connectedClients, uuid)
 	delete(connectedClientV2, uuid)
+	delete(presenceOnly, uuid)
+	delete(latestReport, uuid)
+	delete(recentReports, uuid)
+	mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	RemoveV2EventQueue(uuid)
 }
 
 // SetPresence sets or clears presence for non-WebSocket agents.
 // When present=false, it only clears if the connectionID matches current one.
 // KeepAlivePresence sets presence with TTL for non-WebSocket agents.
 func KeepAlivePresence(uuid string, connectionID int64, ttl time.Duration) {
+	if metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
 	mu.Lock()
 	defer mu.Unlock()
+	if metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
 	presenceOnly[uuid] = struct {
 		id     int64
 		expire time.Time
@@ -87,8 +116,14 @@ var defaultPresenceTTL = 20 * time.Second
 
 // SetPresence keeps compatibility with existing callers.
 func SetPresence(uuid string, connectionID int64, present bool) {
+	if present && metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
 	mu.Lock()
 	defer mu.Unlock()
+	if present && metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
 	if present {
 		presenceOnly[uuid] = struct {
 			id     int64
@@ -141,6 +176,9 @@ func RecordReport(report v1.Report) {
 	if report.UUID == "" {
 		return
 	}
+	if metricstore.EntityWritesBlocked(report.UUID) {
+		return
+	}
 	if report.UpdatedAt.IsZero() {
 		report.UpdatedAt = time.Now().UTC()
 	} else {
@@ -148,6 +186,9 @@ func RecordReport(report v1.Report) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if metricstore.EntityWritesBlocked(report.UUID) {
+		return
+	}
 	if latest := latestReport[report.UUID]; latest == nil || !report.UpdatedAt.Before(latest.UpdatedAt) {
 		item := report
 		latestReport[report.UUID] = &item

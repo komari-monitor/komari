@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/utils"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
@@ -43,6 +44,11 @@ func RequestTerminal(c *gin.Context) {
 	}
 
 	TerminalSessionsMutex.Lock()
+	if metricstore.EntityWritesBlocked(uuid) {
+		TerminalSessionsMutex.Unlock()
+		conn.Close()
+		return
+	}
 	TerminalSessions[id] = session
 	TerminalSessionsMutex.Unlock()
 	conn.SetCloseHandler(func(code int, text string) error {

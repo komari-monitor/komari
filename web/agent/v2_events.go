@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/database/metricstore"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 )
 
@@ -75,6 +76,9 @@ func IsAgentOnline(uuid string) bool {
 }
 
 func EnqueueV2Event(uuid, method string, params any) v2.Event {
+	if metricstore.EntityWritesBlocked(uuid) {
+		return v2.Event{}
+	}
 	now := time.Now().UTC()
 	ttl := v2EventTTL
 	if method == v2.MethodAgentPing {
@@ -89,6 +93,10 @@ func EnqueueV2Event(uuid, method string, params any) v2.Event {
 	}
 
 	v2EventMu.Lock()
+	if metricstore.EntityWritesBlocked(uuid) {
+		v2EventMu.Unlock()
+		return v2.Event{}
+	}
 	q := getV2EventQueueLocked(uuid)
 	pruneExpiredV2EventsLocked(q)
 	coalesceV2EventLocked(q, event)
@@ -183,10 +191,23 @@ func TakeV2Events(uuid string, ackIDs []string, limit int) []v2.Event {
 	v2EventMu.Lock()
 	defer v2EventMu.Unlock()
 
-	q := getV2EventQueueLocked(uuid)
+	q := v2EventQueues[uuid]
+	if q == nil {
+		return nil
+	}
 	ackV2EventsLocked(q, ackIDs)
 	pruneExpiredV2EventsLocked(q)
 	return takeV2EventsLocked(q, limit)
+}
+
+func RemoveV2EventQueue(uuid string) {
+	v2EventMu.Lock()
+	q := v2EventQueues[uuid]
+	delete(v2EventQueues, uuid)
+	if q != nil {
+		close(q.signal)
+	}
+	v2EventMu.Unlock()
 }
 
 func AckV2Events(uuid string, ackIDs []string) {
@@ -213,7 +234,14 @@ func takeV2EventsLocked(q *v2EventQueue, limit int) []v2.Event {
 }
 
 func WaitV2Events(uuid string, ackIDs []string, timeout time.Duration) []v2.Event {
+	if metricstore.EntityWritesBlocked(uuid) {
+		return nil
+	}
 	v2EventMu.Lock()
+	if metricstore.EntityWritesBlocked(uuid) {
+		v2EventMu.Unlock()
+		return nil
+	}
 	q := getV2EventQueueLocked(uuid)
 	ackV2EventsLocked(q, ackIDs)
 	pruneExpiredV2EventsLocked(q)

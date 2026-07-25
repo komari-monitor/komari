@@ -14,8 +14,24 @@ import (
 
 // PingTaskManager 管理定时器和任务
 type PingTaskManager struct {
-	mu    sync.Mutex
+	mu    sync.RWMutex
 	tasks map[int][]models.PingTask
+}
+
+func IsPingTaskAssigned(taskID uint, clientUUID string) bool {
+	if taskID == 0 || clientUUID == "" {
+		return false
+	}
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	for _, tasks := range manager.tasks {
+		for _, task := range tasks {
+			if task.Id == taskID && task.AppliesToClient(clientUUID) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var manager = &PingTaskManager{

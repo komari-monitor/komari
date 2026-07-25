@@ -462,8 +462,129 @@ func doInitialize() error {
 	); err != nil {
 		logger.Errorf("dbcore", "Failed to create Task and TaskResult table, it may already exist: %v", err)
 	}
+	if err := cleanupOrphanedClientData(instance); err != nil {
+		return fmt.Errorf("failed to clean orphaned client data: %w", err)
+	}
 
 	return nil
+}
+
+func cleanupOrphanedClientData(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		for label, model := range map[string]any{
+			"offline notifications":        &models.OfflineNotification{},
+			"traffic report notifications": &models.TrafficReportNotification{},
+		} {
+			if err := tx.Where(`NOT EXISTS (
+				SELECT 1 FROM clients WHERE clients.uuid = client
+			)`).Delete(model).Error; err != nil {
+				return fmt.Errorf("delete orphaned %s: %w", label, err)
+			}
+		}
+		if err := tx.Where(`
+			NOT EXISTS (SELECT 1 FROM clients WHERE clients.uuid = task_results.client)
+			OR NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.task_id = task_results.task_id)
+		`).Delete(&models.TaskResult{}).Error; err != nil {
+			return fmt.Errorf("delete orphaned task results: %w", err)
+		}
+
+		var clients []models.Client
+		if err := tx.Select("uuid").Find(&clients).Error; err != nil {
+			return fmt.Errorf("list clients for orphan cleanup: %w", err)
+		}
+		validClients := make(map[string]struct{}, len(clients))
+		for _, client := range clients {
+			validClients[client.UUID] = struct{}{}
+		}
+
+		var pingTasks []models.PingTask
+		if err := tx.Select("id", "clients").Find(&pingTasks).Error; err != nil {
+			return fmt.Errorf("list ping tasks for orphan cleanup: %w", err)
+		}
+		for _, task := range pingTasks {
+			remaining, changed := keepKnownClients(task.Clients, validClients)
+			if !changed {
+				continue
+			}
+			if err := tx.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("clients", remaining).Error; err != nil {
+				return fmt.Errorf("clean ping task %d clients: %w", task.Id, err)
+			}
+		}
+
+		var loadNotifications []models.LoadNotification
+		if err := tx.Select("id", "clients").Find(&loadNotifications).Error; err != nil {
+			return fmt.Errorf("list load notifications for orphan cleanup: %w", err)
+		}
+		for _, notification := range loadNotifications {
+			remaining, changed := keepKnownClients(notification.Clients, validClients)
+			if len(remaining) == 0 {
+				if err := tx.Delete(&models.LoadNotification{}, notification.Id).Error; err != nil {
+					return fmt.Errorf("delete empty load notification %d: %w", notification.Id, err)
+				}
+				continue
+			}
+			if !changed {
+				continue
+			}
+			if err := tx.Model(&models.LoadNotification{}).Where("id = ?", notification.Id).Update("clients", remaining).Error; err != nil {
+				return fmt.Errorf("clean load notification %d clients: %w", notification.Id, err)
+			}
+		}
+
+		var commandTasks []models.Task
+		if err := tx.Select("task_id", "clients").Find(&commandTasks).Error; err != nil {
+			return fmt.Errorf("list command tasks for orphan cleanup: %w", err)
+		}
+		for _, task := range commandTasks {
+			remaining, changed := keepKnownClients(task.Clients, validClients)
+			if len(remaining) == 0 {
+				if err := tx.Where("task_id = ?", task.TaskId).Delete(&models.TaskResult{}).Error; err != nil {
+					return fmt.Errorf("delete empty command task %s results: %w", task.TaskId, err)
+				}
+				if err := tx.Where("task_id = ?", task.TaskId).Delete(&models.Task{}).Error; err != nil {
+					return fmt.Errorf("delete empty command task %s: %w", task.TaskId, err)
+				}
+				continue
+			}
+			if !changed {
+				continue
+			}
+			if err := tx.Model(&models.Task{}).Where("task_id = ?", task.TaskId).Update("clients", remaining).Error; err != nil {
+				return fmt.Errorf("clean command task %s clients: %w", task.TaskId, err)
+			}
+		}
+
+		for _, table := range []string{"records", "records_long_term", "gpu_records", "ping_records"} {
+			if !tx.Migrator().HasTable(table) {
+				continue
+			}
+			predicate := fmt.Sprintf(`NOT EXISTS (
+				SELECT 1 FROM clients WHERE clients.uuid = %s.client
+			)`, table)
+			if table == "ping_records" {
+				predicate += ` OR NOT EXISTS (
+					SELECT 1 FROM ping_tasks WHERE ping_tasks.id = ping_records.task_id
+				)`
+			}
+			if err := tx.Exec("DELETE FROM " + table + " WHERE " + predicate).Error; err != nil {
+				return fmt.Errorf("delete orphaned rows from legacy table %s: %w", table, err)
+			}
+		}
+		return nil
+	})
+}
+
+func keepKnownClients(clients models.StringArray, valid map[string]struct{}) (models.StringArray, bool) {
+	remaining := make(models.StringArray, 0, len(clients))
+	changed := false
+	for _, client := range clients {
+		if _, ok := valid[client]; !ok {
+			changed = true
+			continue
+		}
+		remaining = append(remaining, client)
+	}
+	return remaining, changed
 }
 
 // ConfigureLowResourceMode updates connection-local SQLite memory settings.
