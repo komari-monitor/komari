@@ -81,6 +81,11 @@ func TestCleanupOrphanedMetricData(t *testing.T) {
 	if err := store.CreateMetric(ctx, Definition{Name: "known", Type: TypeGauge, RetentionDays: 1}); err != nil {
 		t.Fatalf("create known definition: %v", err)
 	}
+	// Simulate a pre-constraint store containing orphaned rows. New stores
+	// reject this state through their database foreign keys.
+	if _, err := store.db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		t.Fatalf("disable foreign keys for legacy fixture: %v", err)
+	}
 	now := time.Now().UTC().UnixMilli()
 	if _, err := store.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (metric_name, entity_id, tags_hash, tags) VALUES (?, ?, ?, ?)`, store.tables.series), "orphan", "node-1", "hash", "{}"); err != nil {
 		t.Fatalf("seed orphan series: %v", err)
@@ -97,6 +102,9 @@ func TestCleanupOrphanedMetricData(t *testing.T) {
 		store.tables.rollups, store.tables.series, store.tables.resolutions, store.tables.labels,
 	), now, now, now, now, "orphan"); err != nil {
 		t.Fatalf("seed orphan rollup: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("restore foreign keys after legacy fixture: %v", err)
 	}
 
 	deleted, err := store.cleanupOrphanedMetricData(ctx)

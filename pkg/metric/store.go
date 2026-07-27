@@ -64,8 +64,8 @@ type Store struct {
 	// rawMu protects the compact exact-sample window used by Store.Query.
 	rawMu sync.RWMutex
 	raw   map[rawSeriesKey]*rawSeries
-	// hotMu protects minute buckets that have not closed yet. These summaries
-	// feed the rollup ladder without persisting exact samples.
+	// hotMu protects minute summaries that may still receive an exact upsert.
+	// They feed the rollup ladder without persisting exact samples.
 	hotMu sync.RWMutex
 	hot   map[hotRollupKey]*rollupBucket
 	// mu protects closed state.
@@ -249,6 +249,7 @@ func prepareSQLiteConfig(cfg Config) (Config, error) {
 			return cfg, err
 		}
 		cfg.DSN = appendSQLiteDSNParam(cfg.DSN, "_busy_timeout", fmt.Sprintf("%d", durationMillis(cfg.SQLite.BusyTimeout)))
+		cfg.DSN = appendSQLiteDSNParam(cfg.DSN, "_foreign_keys", "on")
 	}
 	return cfg, nil
 }
@@ -293,9 +294,10 @@ func isMemoryDSN(dsn string) bool {
 	return sqliteFilePath(dsn) == ":memory:"
 }
 
-// configureSQLite applies SQLite PRAGMA settings.
+// configureSQLite applies SQLite PRAGMA settings, including foreign-key
+// enforcement for caller-owned connections.
 //
-// configureSQLite 对 SQLite 连接执行 WAL、busy_timeout、cache 等 PRAGMA。
+// configureSQLite 对 SQLite 连接执行外键、WAL、busy_timeout、cache 等 PRAGMA。
 func (s *Store) configureSQLite(ctx context.Context, db *sql.DB) error {
 	if s.cfg.SQLite.PageSize > 0 {
 		if _, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA page_size = %d", s.cfg.SQLite.PageSize)); err != nil {
@@ -304,6 +306,7 @@ func (s *Store) configureSQLite(ctx context.Context, db *sql.DB) error {
 	}
 
 	pragmas := []string{
+		"PRAGMA foreign_keys = ON",
 		"PRAGMA journal_mode = WAL",
 		sqliteSynchronousPragma(s.cfg.SQLite.PerformanceProfile),
 		fmt.Sprintf("PRAGMA busy_timeout = %d", durationMillis(s.cfg.SQLite.BusyTimeout)),

@@ -79,7 +79,11 @@ func (s *Store) rebuildHotRollupsLocked(keys map[hotRollupKey]struct{}, compress
 }
 
 func (s *Store) flushClosedHotRollups(ctx context.Context, now time.Time) (int, error) {
-	closed := s.takeClosedHotRollups(bucketStartMillis(now.UTC().UnixMilli(), time.Minute.Milliseconds()))
+	// Keep a closed minute hot while any exact sample in it can still be
+	// overwritten. Persisting it at the minute boundary would make a late
+	// upsert additive because a t-digest cannot remove the old observation.
+	flushBefore := bucketStartMillis(now.UTC().Add(-exactRawRetention).UnixMilli(), time.Minute.Milliseconds())
+	closed := s.takeClosedHotRollups(flushBefore)
 	if len(closed) == 0 {
 		return 0, nil
 	}

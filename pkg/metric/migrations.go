@@ -16,10 +16,19 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
+	for _, statement := range s.normalizedSchemaStatements() {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return s.createNormalizedIndexes(ctx)
+}
+
+func (s *Store) normalizedSchemaStatements() []string {
 	d := s.dialect
 	jsonType := d.jsonType()
 	pk := d.autoIncrementPrimaryKey()
-	statements := []string{
+	return []string{
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 			name VARCHAR(191) PRIMARY KEY, type VARCHAR(32) NOT NULL,
 			unit VARCHAR(64) NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
@@ -33,8 +42,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 			id %s, metric_name VARCHAR(191) NOT NULL, entity_id VARCHAR(191) NOT NULL,
 			tags_hash VARCHAR(64) NOT NULL, tags %s NOT NULL,
-			UNIQUE(metric_name, entity_id, tags_hash)
-		)`, s.tables.series, pk, jsonType),
+			UNIQUE(metric_name, entity_id, tags_hash),
+			FOREIGN KEY (metric_name) REFERENCES %s(name) ON DELETE CASCADE
+		)`, s.tables.series, pk, jsonType, s.tables.definitions),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 			id %s, resolution_milli BIGINT NOT NULL, UNIQUE(resolution_milli)
 		)`, s.tables.resolutions, pk),
@@ -45,15 +55,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 			first_val DOUBLE PRECISION NOT NULL, first_ts_milli BIGINT NOT NULL,
 			last_val DOUBLE PRECISION NOT NULL, last_ts_milli BIGINT NOT NULL,
 			digest %s, created_at_milli BIGINT NOT NULL,
-			UNIQUE(series_id, resolution_id, label_id, bucket_milli)
-		)`, s.tables.rollups, d.blobType()),
+			UNIQUE(series_id, resolution_id, label_id, bucket_milli),
+			FOREIGN KEY (series_id) REFERENCES %s(id) ON DELETE CASCADE,
+			FOREIGN KEY (resolution_id) REFERENCES %s(id) ON DELETE CASCADE,
+			FOREIGN KEY (label_id) REFERENCES %s(id) ON DELETE CASCADE
+		)`, s.tables.rollups, d.blobType(), s.tables.series, s.tables.resolutions, s.tables.labels),
 	}
-	for _, statement := range statements {
-		if _, err := s.db.ExecContext(ctx, statement); err != nil {
-			return err
-		}
-	}
-	return s.createNormalizedIndexes(ctx)
 }
 
 type normalizedIndex struct {

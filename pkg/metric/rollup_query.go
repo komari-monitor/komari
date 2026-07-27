@@ -264,15 +264,16 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
-	if tier := bestRollupTier(s.cfg.RollupPolicy, query.Interval, query.Start.UTC(), now.UTC()); tier != nil {
-		return s.AggregateRollup(ctx, query, tier.Interval)
-	}
 	preferred := s.cfg.RollupPolicy.Tiers[0].Interval
-	for i := len(s.cfg.RollupPolicy.Tiers) - 1; i >= 0; i-- {
-		tier := s.cfg.RollupPolicy.Tiers[i]
-		if query.Interval >= tier.Interval && query.Interval%tier.Interval == 0 {
-			preferred = tier.Interval
-			break
+	if tier := bestRollupTier(s.cfg.RollupPolicy, query.Interval, query.Start.UTC(), now.UTC()); tier != nil {
+		preferred = tier.Interval
+	} else {
+		for i := len(s.cfg.RollupPolicy.Tiers) - 1; i >= 0; i-- {
+			tier := s.cfg.RollupPolicy.Tiers[i]
+			if query.Interval >= tier.Interval && query.Interval%tier.Interval == 0 {
+				preferred = tier.Interval
+				break
+			}
 		}
 	}
 	resolution, err := s.coveringSeriesResolution(ctx, query.Query.normalized(), preferred)
@@ -290,36 +291,38 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 func (s *Store) coveringSeriesResolution(ctx context.Context, query Query, preferred time.Duration) (time.Duration, error) {
 	policy := s.cfg.RollupPolicy
 	selected := preferred
-	earliest, found, err := s.earliestRollupTimestamp(ctx, query, preferred)
+	earliest, latest, found, err := s.rollupTimeBounds(ctx, query, preferred)
 	if err != nil {
 		return 0, err
 	}
 	startMilli := query.Start.UTC().UnixMilli()
-	if found && earliest <= startMilli {
+	endMilli := query.End.UTC().UnixMilli()
+	if found && earliest <= startMilli && latest >= startMilli {
 		return selected, nil
 	}
+	selectedFound := found && earliest <= endMilli && latest >= startMilli
 	for _, tier := range policy.Tiers {
 		if tier.Interval <= preferred {
 			continue
 		}
-		candidate, candidateFound, err := s.earliestRollupTimestamp(ctx, query, tier.Interval)
+		candidateEarliest, candidateLatest, candidateFound, err := s.rollupTimeBounds(ctx, query, tier.Interval)
 		if err != nil {
 			return 0, err
 		}
-		if !candidateFound {
+		if !candidateFound || candidateEarliest > endMilli || candidateLatest < startMilli {
 			continue
 		}
-		if candidate <= startMilli {
+		if candidateEarliest <= startMilli && candidateLatest >= startMilli {
 			return tier.Interval, nil
 		}
-		if !found || candidate < earliest {
-			selected, earliest, found = tier.Interval, candidate, true
+		if !selectedFound || candidateEarliest < earliest {
+			selected, earliest, selectedFound = tier.Interval, candidateEarliest, true
 		}
 	}
 	return selected, nil
 }
 
-func (s *Store) earliestRollupTimestamp(ctx context.Context, query Query, interval time.Duration) (int64, bool, error) {
+func (s *Store) rollupTimeBounds(ctx context.Context, query Query, interval time.Duration) (int64, int64, bool, error) {
 	args := []any{query.MetricName, interval.Milliseconds(), query.End.UTC().UnixMilli()}
 	parts := []string{
 		"s.metric_name = " + s.dialect.placeholder(1),
@@ -334,14 +337,14 @@ func (s *Store) earliestRollupTimestamp(ctx context.Context, query Query, interv
 		args = append(args, query.Tags[key])
 		parts = append(parts, s.dialect.jsonExtractEquals("s.tags", key, s.dialect.placeholder(len(args))))
 	}
-	var value sql.NullInt64
-	err := s.reader().QueryRowContext(ctx, fmt.Sprintf(`SELECT MIN(r.first_ts_milli) FROM %s r
+	var earliest, latest sql.NullInt64
+	err := s.reader().QueryRowContext(ctx, fmt.Sprintf(`SELECT MIN(r.first_ts_milli), MAX(r.last_ts_milli) FROM %s r
 		JOIN %s s ON s.id = r.series_id
 		JOIN %s d ON d.id = r.resolution_id
 		WHERE %s`, s.tables.rollups, s.tables.series, s.tables.resolutions, joinSQLWith(parts, " AND ")),
-		args...).Scan(&value)
+		args...).Scan(&earliest, &latest)
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
-	return value.Int64, value.Valid, nil
+	return earliest.Int64, latest.Int64, earliest.Valid && latest.Valid, nil
 }

@@ -54,6 +54,64 @@ func TestWriteBatchKeepsRawInMemoryAndBuildsMinuteRollup(t *testing.T) {
 	}
 }
 
+func TestClosedMinuteWaitsForExactUpsertWindow(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, SQLite(":memory:", WithRollupPolicy(RollupPolicy{
+		RawRetention: time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: time.Hour}},
+		Compression:  30,
+	})))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if err := s.CreateMetric(ctx, Definition{Name: "late-upsert", RetentionDays: 1}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+
+	now := time.Date(2026, 7, 27, 12, 0, 10, 0, time.UTC)
+	at := now.Add(-20 * time.Second)
+	for _, value := range []float64{1, 2} {
+		prepared, err := prepareMetricPoints([]Point{{MetricName: "late-upsert", EntityID: "n1", Timestamp: at, Value: value}})
+		if err != nil {
+			t.Fatalf("prepare point: %v", err)
+		}
+		rebuild := s.writeRawPointsAt(prepared, now)
+		if err := s.writePreparedHotRollups(ctx, prepared, now, rebuild); err != nil {
+			t.Fatalf("write hot rollup: %v", err)
+		}
+	}
+
+	var persisted int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+s.tables.rollups).Scan(&persisted); err != nil {
+		t.Fatalf("count early persisted rollups: %v", err)
+	}
+	if persisted != 0 {
+		t.Fatalf("persisted rollups before exact window elapsed = %d, want 0", persisted)
+	}
+	series, err := s.Series(ctx, AggregateQuery{
+		Query:       Query{MetricName: "late-upsert", EntityID: "n1", Start: at.Add(-time.Minute), End: now},
+		Aggregation: AggCount, Interval: time.Minute, PreserveSeries: true,
+	}, now)
+	if err != nil {
+		t.Fatalf("query hot rollup: %v", err)
+	}
+	if len(series) != 1 || series[0].Count != 1 || series[0].Value != 1 {
+		t.Fatalf("late upsert was counted twice: %#v", series)
+	}
+
+	if _, err := s.Flush(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatalf("flush expired exact window: %v", err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, "SELECT count FROM "+s.tables.rollups).Scan(&count); err != nil {
+		t.Fatalf("read persisted rollup: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("persisted rollup count = %d, want 1", count)
+	}
+}
+
 func TestExactRawWindowKeepsOnlyRecentMinute(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -209,6 +267,7 @@ func TestCoveringSeriesResolutionUsesFinestTierCoveringStart(t *testing.T) {
 	}{
 		{interval: time.Minute, at: now.Add(-30 * time.Minute)},
 		{interval: 5 * time.Minute, at: now.Add(-7 * time.Hour)},
+		{interval: 5 * time.Minute, at: now.Add(-5 * time.Hour)},
 		{interval: time.Hour, at: now.Add(-30 * 24 * time.Hour)},
 	} {
 		bucket := newRollupBucket(policy.compression())
@@ -231,6 +290,59 @@ func TestCoveringSeriesResolutionUsesFinestTierCoveringStart(t *testing.T) {
 	}
 	if resolution != 5*time.Minute {
 		t.Fatalf("covering tier = %s, want 5m", resolution)
+	}
+}
+
+func TestSeriesFallsBackWhenPreferredPolicyTierHasNoRows(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 10 * time.Hour},
+			{Interval: time.Hour, Retention: 25 * 24 * time.Hour},
+		},
+		Compression: 30,
+	}
+	s, err := Open(ctx, SQLite(":memory:", WithRollupPolicy(policy)))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if err := s.CreateMetric(ctx, Definition{Name: "missing-fine-tier", RetentionDays: 60}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+	now := time.Date(2026, 7, 24, 12, 30, 0, 0, time.UTC)
+	at := now.Add(-30 * time.Minute)
+	tagsHash, tagsJSON, err := tagsFingerprint(nil)
+	if err != nil {
+		t.Fatalf("fingerprint tags: %v", err)
+	}
+	bucket := newRollupBucket(policy.compression())
+	bucket.tagsHash, bucket.tagsJSON = tagsHash, tagsJSON
+	bucket.labelsHash, bucket.labelsJSON = emptyLabelsHash, "{}"
+	bucket.addPoint(42, at.UnixMilli())
+	key := rollupKey{entityID: "n1", tagsHash: tagsHash, labelsHash: emptyLabelsHash, bucket: bucketStartMillis(at.UnixMilli(), time.Hour.Milliseconds())}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin seed transaction: %v", err)
+	}
+	if _, err := s.writeRollupBucketsTx(ctx, "missing-fine-tier", time.Hour, map[rollupKey]*rollupBucket{key: bucket}, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("seed hourly tier: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit hourly tier: %v", err)
+	}
+
+	got, err := s.Series(ctx, AggregateQuery{
+		Query:       Query{MetricName: "missing-fine-tier", EntityID: "n1", Start: now.Add(-time.Hour), End: now},
+		Aggregation: AggAvg,
+		Interval:    time.Minute,
+	}, now)
+	if err != nil {
+		t.Fatalf("query series: %v", err)
+	}
+	if len(got) != 1 || got[0].Value != 42 || got[0].Count != 1 {
+		t.Fatalf("series did not fall back to existing hourly tier: %#v", got)
 	}
 }
 

@@ -23,7 +23,8 @@ type storedRollup struct {
 	bucketData *rollupBucket
 }
 
-// Compact seals elapsed minute buckets and enforces raw and rollup retention.
+// Compact seals minute buckets whose exact-update window has elapsed and
+// enforces raw and rollup retention.
 func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
@@ -44,9 +45,10 @@ func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 	return written, nil
 }
 
-// Flush seals elapsed in-memory minute buckets without running retention.
+// Flush seals in-memory minute buckets after their exact-update window expires,
+// without running retention.
 // It is used by the scheduled compactor so a series that stops reporting is
-// still persisted after its final minute closes.
+// still persisted after its exact-update window expires.
 func (s *Store) Flush(ctx context.Context, now time.Time) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
@@ -89,11 +91,12 @@ func (s *Store) writeTierCascadeTx(ctx context.Context, metricName string, minut
 	}
 	current := minute
 	written := 0
+	cache := newRollupDictionaryCache()
 	for i, tier := range policy.Tiers {
 		if i > 0 {
 			current = buildCoarserBucketsFromDelta(current, tier.Interval, policy.compression())
 		}
-		n, err := s.mergeRollupBucketsTx(ctx, metricName, tier.Interval, current, tx)
+		n, err := s.mergeRollupBucketsWithDictionaryTx(ctx, metricName, tier.Interval, current, cache, tx)
 		if err != nil {
 			return written, err
 		}
@@ -121,7 +124,7 @@ func buildCoarserBucketsFromDelta(delta map[rollupKey]*rollupBucket, interval ti
 	return out
 }
 
-func (s *Store) mergeRollupBucketsTx(ctx context.Context, metricName string, interval time.Duration, buckets map[rollupKey]*rollupBucket, tx *sql.Tx) (int, error) {
+func (s *Store) mergeRollupBucketsWithDictionaryTx(ctx context.Context, metricName string, interval time.Duration, buckets map[rollupKey]*rollupBucket, cache *rollupDictionaryCache, tx *sql.Tx) (int, error) {
 	if len(buckets) == 0 {
 		return 0, nil
 	}
@@ -141,7 +144,7 @@ func (s *Store) mergeRollupBucketsTx(ctx context.Context, metricName string, int
 			existing.mergeStored(bucket)
 			bucket = existing
 		}
-		if err := s.upsertRollupTx(ctx, metricName, interval, key, bucket, tx); err != nil {
+		if err := s.upsertRollupWithDictionaryTx(ctx, metricName, interval, key, bucket, cache, tx); err != nil {
 			return 0, err
 		}
 	}
@@ -151,7 +154,7 @@ func (s *Store) mergeRollupBucketsTx(ctx context.Context, metricName string, int
 // writeRollupBucketsTx is retained for package callers and tests. It uses the
 // same merge-safe path as normal sealed-minute writes.
 func (s *Store) writeRollupBucketsTx(ctx context.Context, metricName string, interval time.Duration, buckets map[rollupKey]*rollupBucket, tx *sql.Tx) (int, error) {
-	return s.mergeRollupBucketsTx(ctx, metricName, interval, buckets, tx)
+	return s.mergeRollupBucketsWithDictionaryTx(ctx, metricName, interval, buckets, newRollupDictionaryCache(), tx)
 }
 
 func (s *Store) readRollupBucketTx(ctx context.Context, metricName string, key rollupKey, interval time.Duration, tx *sql.Tx) (*rollupBucket, error) {

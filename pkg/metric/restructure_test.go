@@ -2,6 +2,7 @@ package metric
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -133,13 +134,100 @@ func TestRestructureRebuildsLegacyPointsIntoNormalizedSchema(t *testing.T) {
 	}
 }
 
+func TestRestructureBulkCopiesRollupsAcrossBatches(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, SQLite(":memory:", WithAutoMigrate(false), WithRollupPolicy(RollupPolicy{
+		RawRetention: time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 30 * 24 * time.Hour}},
+		Compression:  30,
+	})))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	legacy := []string{
+		fmt.Sprintf(`CREATE TABLE %s (name TEXT PRIMARY KEY, type TEXT NOT NULL, unit TEXT NOT NULL, description TEXT NOT NULL, retention_days INTEGER NOT NULL, metadata TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`, s.tables.definitions),
+		fmt.Sprintf(`CREATE TABLE %s (id INTEGER PRIMARY KEY, metric_name TEXT NOT NULL, entity_id TEXT NOT NULL, tags_hash TEXT NOT NULL, ts_nano INTEGER NOT NULL, value REAL NOT NULL, tags TEXT NOT NULL, labels TEXT NOT NULL, created_at INTEGER NOT NULL)`, s.tables.points),
+		fmt.Sprintf(`CREATE TABLE %s (id INTEGER PRIMARY KEY, metric_name TEXT NOT NULL, entity_id TEXT NOT NULL, tags_hash TEXT NOT NULL, tags TEXT NOT NULL, resolution_nano INTEGER NOT NULL, bucket_nano INTEGER NOT NULL, count INTEGER NOT NULL, sum REAL NOT NULL, sum_sq REAL NOT NULL, min_val REAL NOT NULL, max_val REAL NOT NULL, first_val REAL NOT NULL, first_ts INTEGER NOT NULL, last_val REAL NOT NULL, last_ts INTEGER NOT NULL, digest BLOB, created_at INTEGER NOT NULL)`, s.tables.rollups),
+		fmt.Sprintf(`CREATE TABLE %s (metric_name TEXT PRIMARY KEY, watermark_nano INTEGER NOT NULL, updated_at INTEGER NOT NULL)`, s.tables.watermarks),
+	}
+	for _, statement := range legacy {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("create legacy: %v", err)
+		}
+	}
+	const rowCount = restructureRollupReadBatchSize + 1
+	base := time.Now().UTC().Truncate(time.Minute).Add(-rowCount * time.Minute)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, s.tables.definitions), "cpu", "gauge", "%", "", 30, "{}", base.UnixNano(), base.UnixNano()); err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin seed transaction: %v", err)
+	}
+	stmt, err := tx.PrepareContext(ctx, fmt.Sprintf(`INSERT INTO %s VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, s.tables.rollups))
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("prepare seed: %v", err)
+	}
+	for i := 0; i < rowCount; i++ {
+		at := base.Add(time.Duration(i) * time.Minute)
+		value := float64(i % 100)
+		if _, err := stmt.ExecContext(ctx,
+			i+1, "cpu", "node-a", "hash", `{"host":"a"}`, time.Minute.Nanoseconds(), at.UnixNano(),
+			1, value, value*value, value, value, value, at.UnixNano(), value, at.UnixNano(), nil, at.UnixNano(),
+		); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			t.Fatalf("seed rollup %d: %v", i, err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("close seed statement: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+	result, err := s.Restructure(ctx, nil)
+	if err != nil {
+		t.Fatalf("restructure: %v", err)
+	}
+	if result.RowsCopied != rowCount {
+		t.Fatalf("rows copied = %d, want %d", result.RowsCopied, rowCount)
+	}
+	var rollups int
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s r JOIN %s d ON d.id = r.resolution_id WHERE d.resolution_milli = ?`, s.tables.rollups, s.tables.resolutions), time.Minute.Milliseconds()).Scan(&rollups); err != nil {
+		t.Fatalf("count rollups: %v", err)
+	}
+	if rollups != rowCount {
+		t.Fatalf("rollups = %d, want %d", rollups, rowCount)
+	}
+	for table, want := range map[string]int{s.tables.series: 1, s.tables.labels: 1, s.tables.resolutions: 1} {
+		var got int
+		if err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&got); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if got != want {
+			t.Fatalf("%s rows = %d, want %d", table, got, want)
+		}
+	}
+	var digestRows int
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE digest IS NOT NULL", s.tables.rollups)).Scan(&digestRows); err != nil {
+		t.Fatalf("count digests: %v", err)
+	}
+	if digestRows != 0 {
+		t.Fatalf("constant rollup digests = %d, want 0", digestRows)
+	}
+}
+
 func TestRestructureDropsObsoleteRawTableFromMillisecondSchema(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
 	if err := s.CreateMetric(ctx, Definition{Name: "normalized", Type: TypeGauge, RetentionDays: 1}); err != nil {
 		t.Fatal(err)
 	}
-	at := time.Now().UTC().Add(-2 * time.Minute)
+	at := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
 	if err := s.WriteBatch(ctx, []Point{
 		{MetricName: "normalized", EntityID: "n1", Timestamp: at, Value: 1},
 		{MetricName: "normalized", EntityID: "n1", Timestamp: at.Add(10 * time.Second), Value: 2},
@@ -235,6 +323,17 @@ func TestValidateNormalizedRestructureRejectsWrongDigestCompression(t *testing.T
 	err := s.validateNormalizedRestructure(ctx, 1)
 	if err == nil || !strings.Contains(err.Error(), "compression = 100") {
 		t.Fatalf("validation error = %v", err)
+	}
+}
+
+func TestPostgreSQLMissingSchemaErrorsAreDistinguished(t *testing.T) {
+	missingTable := errors.New(`ERROR: relation "metric_definitions" does not exist (SQLSTATE 42P01)`)
+	if !isMissingTableError(missingTable) || isMissingColumnError(missingTable) {
+		t.Fatalf("missing PostgreSQL relation classified incorrectly")
+	}
+	missingColumn := errors.New(`ERROR: column "created_at_milli" does not exist (SQLSTATE 42703)`)
+	if !isMissingColumnError(missingColumn) || isMissingTableError(missingColumn) {
+		t.Fatalf("missing PostgreSQL column classified incorrectly")
 	}
 }
 

@@ -78,6 +78,7 @@ func (s *Store) ReplaceRollupPoints(ctx context.Context, interval time.Duration,
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	cache := newRollupDictionaryCache()
 	for _, groupKey := range groupKeys {
 		group := groups[groupKey]
 		keys := make([]rollupKey, 0, len(group.buckets))
@@ -86,7 +87,7 @@ func (s *Store) ReplaceRollupPoints(ctx context.Context, interval time.Duration,
 		}
 		sortRollupKeys(keys)
 		for _, key := range keys {
-			if err := s.upsertRollupTx(ctx, group.metricName, group.interval, key, group.buckets[key], tx); err != nil {
+			if err := s.upsertRollupWithDictionaryTx(ctx, group.metricName, group.interval, key, group.buckets[key], cache, tx); err != nil {
 				return err
 			}
 		}
@@ -125,6 +126,7 @@ func (s *Store) RebuildCoarserRollups(ctx context.Context, source time.Duration)
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	cache := newRollupDictionaryCache()
 	for _, def := range defs {
 		rows, err := s.scanRollupRows(ctx, tx, def.Name, source)
 		if err != nil {
@@ -146,7 +148,7 @@ func (s *Store) RebuildCoarserRollups(ctx context.Context, source time.Duration)
 			}
 			sortRollupKeys(keys)
 			for _, key := range keys {
-				if err := s.upsertRollupTx(ctx, def.Name, tier.Interval, key, current[key], tx); err != nil {
+				if err := s.upsertRollupWithDictionaryTx(ctx, def.Name, tier.Interval, key, current[key], cache, tx); err != nil {
 					return err
 				}
 			}

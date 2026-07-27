@@ -2,9 +2,16 @@ package metric
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
+)
+
+const (
+	restructureRollupReadBatchSize  = 5000
+	restructureRollupWriteBatchSize = 500
 )
 
 // RestructureProgress is emitted after each bounded import batch.
@@ -23,6 +30,12 @@ type RestructureProgress struct {
 type RestructureResult struct {
 	RowsCopied int64
 	Metrics    int
+}
+
+type restructureRollupGroup struct {
+	name     string
+	interval time.Duration
+	buckets  map[rollupKey]*rollupBucket
 }
 
 // LegacyStorageSize measures the pre-rebuild tables. It is intentionally kept
@@ -247,6 +260,14 @@ func (s *Store) validateNormalizedRestructure(ctx context.Context, expectedDefin
 		return fmt.Errorf("definition count = %d, want %d", definitions, expectedDefinitions)
 	}
 	var invalid int64
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s s
+		LEFT JOIN %s d ON d.name = s.metric_name
+		WHERE d.name IS NULL`, s.tables.series, s.tables.definitions)).Scan(&invalid); err != nil {
+		return err
+	}
+	if invalid != 0 {
+		return fmt.Errorf("series contain %d missing metric definition references", invalid)
+	}
 	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s r
 		LEFT JOIN %s s ON s.id = r.series_id
 		LEFT JOIN %s d ON d.id = r.resolution_id
@@ -492,19 +513,14 @@ func (s *Store) copyLegacyPoints(ctx context.Context, shadow *Store, definitions
 }
 
 func (s *Store) copyLegacyRollups(ctx context.Context, shadow *Store, remaining map[string]int64, progress *RestructureProgress, report func(RestructureProgress)) (int64, error) {
-	type group struct {
-		name     string
-		interval time.Duration
-		buckets  map[rollupKey]*rollupBucket
-	}
-	const batchSize = 1000
+	cache := newRollupDictionaryCache()
 	var after, copied int64
 	for {
-		rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT id, metric_name, entity_id, tags_hash, tags, resolution_nano, bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts, last_val, last_ts, digest FROM %s WHERE id > %s ORDER BY id ASC LIMIT %s`, s.tables.rollups, s.dialect.placeholder(1), s.dialect.placeholder(2)), after, batchSize)
+		rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT id, metric_name, entity_id, tags_hash, tags, resolution_nano, bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts, last_val, last_ts, digest FROM %s WHERE id > %s ORDER BY id ASC LIMIT %s`, s.tables.rollups, s.dialect.placeholder(1), s.dialect.placeholder(2)), after, restructureRollupReadBatchSize)
 		if err != nil {
 			return copied, err
 		}
-		groups := make(map[string]*group)
+		groups := make(map[string]*restructureRollupGroup)
 		batchScanned := int64(0)
 		for rows.Next() {
 			var id, resolution, bucket, count, firstTS, lastTS int64
@@ -539,7 +555,7 @@ func (s *Store) copyLegacyRollups(ctx context.Context, shadow *Store, remaining 
 			groupKey := name + "\x00" + fmt.Sprint(resolution)
 			item := groups[groupKey]
 			if item == nil {
-				item = &group{name: name, interval: time.Duration(resolution), buckets: make(map[rollupKey]*rollupBucket)}
+				item = &restructureRollupGroup{name: name, interval: time.Duration(resolution), buckets: make(map[rollupKey]*rollupBucket)}
 				groups[groupKey] = item
 			}
 			item.buckets[key] = bucketData
@@ -560,8 +576,14 @@ func (s *Store) copyLegacyRollups(ctx context.Context, shadow *Store, remaining 
 			if err != nil {
 				return copied, err
 			}
-			for _, item := range groups {
-				if _, err := shadow.writeRollupBucketsTx(ctx, item.name, item.interval, item.buckets, tx); err != nil {
+			groupKeys := make([]string, 0, len(groups))
+			for key := range groups {
+				groupKeys = append(groupKeys, key)
+			}
+			sort.Strings(groupKeys)
+			for _, key := range groupKeys {
+				item := groups[key]
+				if _, err := shadow.writeRestructureRollupGroupTx(ctx, item, cache, tx); err != nil {
 					_ = tx.Rollback()
 					return copied, err
 				}
@@ -580,11 +602,64 @@ func (s *Store) copyLegacyRollups(ctx context.Context, shadow *Store, remaining 
 		if report != nil {
 			report(*progress)
 		}
-		if batchScanned < batchSize {
+		if batchScanned < restructureRollupReadBatchSize {
 			break
 		}
 	}
 	return copied, nil
+}
+
+func (s *Store) writeRestructureRollupGroupTx(ctx context.Context, group *restructureRollupGroup, cache *rollupDictionaryCache, tx *sql.Tx) (int, error) {
+	resolutionID, err := cache.resolutionID(ctx, s, tx, group.interval)
+	if err != nil {
+		return 0, err
+	}
+	keys := make([]rollupKey, 0, len(group.buckets))
+	for key := range group.buckets {
+		keys = append(keys, key)
+	}
+	sortRollupKeys(keys)
+	createdAt := timeMillis(time.Now())
+	written := 0
+	batch := make([]normalizedRollupRow, 0, min(restructureRollupWriteBatchSize, len(keys)))
+	flush := func() error {
+		if err := s.upsertNormalizedRollupRowsTx(ctx, batch, tx); err != nil {
+			return err
+		}
+		written += len(batch)
+		batch = batch[:0]
+		return nil
+	}
+	for _, key := range keys {
+		bucket := group.buckets[key]
+		key.bucket = normalizeBucketMillis(key.bucket)
+		seriesID, err := cache.seriesID(ctx, s, tx, group.name, key, bucket.tagsJSON)
+		if err != nil {
+			return written, err
+		}
+		labelID, err := cache.labelID(ctx, s, tx, key.labelsHash, bucket.labelsJSON)
+		if err != nil {
+			return written, err
+		}
+		batch = append(batch, normalizedRollupRow{
+			seriesID: seriesID, resolutionID: resolutionID, labelID: labelID,
+			bucketMilli: key.bucket, count: bucket.count, sum: bucket.sum, sumSq: bucket.sumSq,
+			min: bucket.min, max: bucket.max, firstVal: bucket.firstVal, firstTSMilli: bucket.firstTS,
+			lastVal: bucket.lastVal, lastTSMilli: bucket.lastTS, digest: bucket.encodedDigest(),
+			createdAtMilli: createdAt,
+		})
+		if len(batch) == restructureRollupWriteBatchSize {
+			if err := flush(); err != nil {
+				return written, err
+			}
+		}
+	}
+	if len(batch) > 0 {
+		if err := flush(); err != nil {
+			return written, err
+		}
+	}
+	return written, nil
 }
 
 func (s *Store) rebuildDailyRollups(ctx context.Context) error {
@@ -609,6 +684,7 @@ func (s *Store) rebuildDailyRollups(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	cache := newRollupDictionaryCache()
 	for _, def := range defs {
 		rows, err := s.scanRollupRows(ctx, tx, def.Name, hourly)
 		if err != nil {
@@ -636,7 +712,7 @@ func (s *Store) rebuildDailyRollups(ctx context.Context) error {
 		}
 		sortRollupKeys(keys)
 		for _, key := range keys {
-			if err := s.upsertRollupTx(ctx, def.Name, daily, key, buckets[key], tx); err != nil {
+			if err := s.upsertRollupWithDictionaryTx(ctx, def.Name, daily, key, buckets[key], cache, tx); err != nil {
 				return err
 			}
 		}
@@ -654,11 +730,11 @@ func dropNormalizedTables(ctx context.Context, s *Store) error {
 }
 
 func (s *Store) replaceLegacyTables(ctx context.Context, shadow *Store) error {
-	if err := shadow.dropNormalizedIndexes(ctx); err != nil {
-		return err
-	}
 	if s.cfg.Driver == DriverMySQL {
 		return s.replaceLegacyMySQLTables(ctx, shadow)
+	}
+	if err := shadow.dropNormalizedIndexes(ctx); err != nil {
+		return err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -720,7 +796,30 @@ func (s *Store) replaceLegacyMySQLTables(ctx context.Context, shadow *Store) err
 			return err
 		}
 	}
+	if err := s.renameMySQLRebuildIndexes(ctx, shadow); err != nil {
+		return err
+	}
 	return s.createNormalizedIndexes(ctx)
+}
+
+func (s *Store) renameMySQLRebuildIndexes(ctx context.Context, shadow *Store) error {
+	current, rebuild := s.normalizedIndexes(), shadow.normalizedIndexes()
+	for i := range current {
+		if current[i].name == rebuild[i].name {
+			continue
+		}
+		exists, err := s.mysqlIndexExists(ctx, current[i].table, rebuild[i].name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME INDEX %s TO %s", current[i].table, rebuild[i].name, current[i].name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) tableExists(ctx context.Context, name string) (bool, error) {
@@ -745,10 +844,14 @@ var emptyLabelsHash = func() string { hash, _, _ := tagsFingerprint(map[string]s
 
 func isMissingTableError(err error) bool {
 	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "no such table") || strings.Contains(text, "doesn't exist") || strings.Contains(text, "does not exist")
+	return strings.Contains(text, "no such table") || strings.Contains(text, "doesn't exist") ||
+		(strings.Contains(text, "relation ") && strings.Contains(text, "does not exist")) ||
+		strings.Contains(text, "sqlstate 42p01")
 }
 
 func isMissingColumnError(err error) bool {
 	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "no such column") || strings.Contains(text, "unknown column") || strings.Contains(text, "does not exist")
+	return strings.Contains(text, "no such column") || strings.Contains(text, "unknown column") ||
+		(strings.Contains(text, "column ") && strings.Contains(text, "does not exist")) ||
+		strings.Contains(text, "sqlstate 42703")
 }
