@@ -39,9 +39,10 @@ type RollupTier struct {
 // RollupPolicy 描述逐级变粗的 rollup 层；Compact 会物化这些层并执行保留窗口。
 type RollupPolicy struct {
 	// RawRetention is retained for configuration compatibility. Exact samples
-	// always live in memory for one minute and are never persisted.
+	// always live in memory for ten minutes and are never persisted; samples
+	// older than one minute use lossless byte encoding to reduce memory use.
 	//
-	// RawRetention 仅为配置兼容保留；精确样本固定在内存中保留一分钟且不持久化。
+	// RawRetention 仅为配置兼容保留；精确样本固定在内存中保留十分钟，超过一分钟的样本使用无损字节编码降低内存占用。
 	RawRetention time.Duration `json:"raw_retention"`
 	// Tiers are ordered finest-first. Each Interval must be a positive integer
 	// multiple of the previous tier's Interval (so a coarse bucket is composed
@@ -222,6 +223,19 @@ func newRollupBucketWithDigest(compression float64, includeDigest bool) *rollupB
 		bucket.digest = NewTDigest(compression)
 	}
 	return bucket
+}
+
+func (b *rollupBucket) clone(includeDigest bool) *rollupBucket {
+	if b == nil {
+		return nil
+	}
+	cloned := *b
+	if includeDigest {
+		cloned.digest = b.digest.clone()
+	} else {
+		cloned.digest = nil
+	}
+	return &cloned
 }
 
 // addPoint folds a raw observation into the bucket.

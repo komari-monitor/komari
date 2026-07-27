@@ -8,7 +8,7 @@ import (
 
 // Migrate creates the normalized metric schema. Series, labels, and
 // resolutions are interned once and every stored timestamp is Unix
-// milliseconds. Exact samples live only in the Store's one-minute memory
+// milliseconds. Exact samples live only in the Store's ten-minute memory
 // window and are never persisted.
 // Existing installations are rebuilt explicitly by the administrator guide,
 // rather than being changed during startup.
@@ -31,7 +31,7 @@ func (s *Store) normalizedSchemaStatements() []string {
 	return []string{
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 			name VARCHAR(191) PRIMARY KEY, type VARCHAR(32) NOT NULL,
-			unit VARCHAR(64) NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+			unit VARCHAR(64) NOT NULL DEFAULT '', description TEXT NOT NULL,
 			retention_days INTEGER NOT NULL DEFAULT 0, metadata %s NOT NULL,
 			created_at_milli BIGINT NOT NULL, updated_at_milli BIGINT NOT NULL
 		)`, s.tables.definitions, jsonType),
@@ -69,16 +69,24 @@ type normalizedIndex struct {
 	columns string
 }
 
+type sqlExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 func (s *Store) normalizedIndexes() []normalizedIndex {
+	return normalizedIndexesFor(s.cfg.TablePrefix, s.tables)
+}
+
+func normalizedIndexesFor(prefix string, tables tables) []normalizedIndex {
 	return []normalizedIndex{
-		{name: s.cfg.TablePrefix + "series_metric_entity_idx", table: s.tables.series, columns: "metric_name, entity_id"},
-		{name: s.cfg.TablePrefix + "rollups_resolution_bucket_idx", table: s.tables.rollups, columns: "resolution_id, bucket_milli"},
+		{name: prefix + "series_metric_entity_idx", table: tables.series, columns: "metric_name, entity_id"},
+		{name: prefix + "rollups_resolution_bucket_idx", table: tables.rollups, columns: "resolution_id, bucket_milli"},
 	}
 }
 
 func (s *Store) createNormalizedIndexes(ctx context.Context) error {
-	for _, index := range s.normalizedIndexes() {
-		if s.cfg.Driver == DriverMySQL {
+	if s.cfg.Driver == DriverMySQL {
+		for _, index := range s.normalizedIndexes() {
 			exists, err := s.mysqlIndexExists(ctx, index.table, index.name)
 			if err != nil {
 				return err
@@ -89,9 +97,15 @@ func (s *Store) createNormalizedIndexes(ctx context.Context) error {
 			if _, err := s.db.ExecContext(ctx, fmt.Sprintf("CREATE INDEX %s ON %s (%s)", index.name, index.table, index.columns)); err != nil {
 				return err
 			}
-			continue
 		}
-		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s)", index.name, index.table, index.columns)); err != nil {
+		return nil
+	}
+	return s.createPortableNormalizedIndexes(ctx, s.db)
+}
+
+func (s *Store) createPortableNormalizedIndexes(ctx context.Context, exec sqlExecer) error {
+	for _, index := range s.normalizedIndexes() {
+		if _, err := exec.ExecContext(ctx, fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s)", index.name, index.table, index.columns)); err != nil {
 			return err
 		}
 	}

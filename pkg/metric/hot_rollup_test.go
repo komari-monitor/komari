@@ -3,6 +3,7 @@ package metric
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -54,7 +55,7 @@ func TestWriteBatchKeepsRawInMemoryAndBuildsMinuteRollup(t *testing.T) {
 	}
 }
 
-func TestClosedMinuteWaitsForExactUpsertWindow(t *testing.T) {
+func TestClosedMinutePersistsAndAcceptsExactUpsert(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, SQLite(":memory:", WithRollupPolicy(RollupPolicy{
 		RawRetention: time.Minute,
@@ -86,8 +87,8 @@ func TestClosedMinuteWaitsForExactUpsertWindow(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+s.tables.rollups).Scan(&persisted); err != nil {
 		t.Fatalf("count early persisted rollups: %v", err)
 	}
-	if persisted != 0 {
-		t.Fatalf("persisted rollups before exact window elapsed = %d, want 0", persisted)
+	if persisted != 1 {
+		t.Fatalf("persisted closed-minute rollups = %d, want 1", persisted)
 	}
 	series, err := s.Series(ctx, AggregateQuery{
 		Query:       Query{MetricName: "late-upsert", EntityID: "n1", Start: at.Add(-time.Minute), End: now},
@@ -100,9 +101,6 @@ func TestClosedMinuteWaitsForExactUpsertWindow(t *testing.T) {
 		t.Fatalf("late upsert was counted twice: %#v", series)
 	}
 
-	if _, err := s.Flush(ctx, now.Add(time.Minute)); err != nil {
-		t.Fatalf("flush expired exact window: %v", err)
-	}
 	var count int
 	if err := s.db.QueryRowContext(ctx, "SELECT count FROM "+s.tables.rollups).Scan(&count); err != nil {
 		t.Fatalf("read persisted rollup: %v", err)
@@ -112,7 +110,7 @@ func TestClosedMinuteWaitsForExactUpsertWindow(t *testing.T) {
 	}
 }
 
-func TestExactRawWindowKeepsOnlyRecentMinute(t *testing.T) {
+func TestRawWindowKeepsCompressedAndDirectSamples(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	s, err := Open(ctx, SQLite(":memory:", WithRollupPolicy(RollupPolicy{
@@ -141,8 +139,8 @@ func TestExactRawWindowKeepsOnlyRecentMinute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query raw: %v", err)
 	}
-	if len(raw) != 2 || raw[0].Value != 2 || raw[1].Value != 3 {
-		t.Fatalf("retained raw = %#v, want the two recent samples", raw)
+	if len(raw) != 3 || raw[0].Value != 1 || raw[1].Value != 2 || raw[2].Value != 3 {
+		t.Fatalf("retained raw = %#v, want all ten-minute samples", raw)
 	}
 	series, err := s.Series(ctx, AggregateQuery{
 		Query:       Query{MetricName: "raw-window", EntityID: "n1", Start: now.Add(-time.Hour), End: now},
@@ -157,6 +155,230 @@ func TestExactRawWindowKeepsOnlyRecentMinute(t *testing.T) {
 	}
 	if count != 3 {
 		t.Fatalf("rollups lost samples after raw cleanup: %#v", series)
+	}
+}
+
+func TestOldestRawMinuteRebuildKeepsHiddenPrefix(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: rawMemoryRetention,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: time.Hour}},
+		Compression:  30,
+	}
+	s, err := Open(ctx, SQLite(":memory:", WithRollupPolicy(policy)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.CreateMetric(ctx, Definition{Name: "oldest-minute", RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 27, 12, 10, 30, 0, time.UTC)
+	oldestMinute := now.Add(-rawMemoryRetention).Truncate(time.Minute)
+	write := func(points ...Point) {
+		t.Helper()
+		prepared, err := prepareMetricPoints(points)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebuild := s.writeRawPointsAt(prepared, now)
+		if err := s.writePreparedHotRollups(ctx, prepared, now, rebuild); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(
+		Point{MetricName: "oldest-minute", EntityID: "n1", Timestamp: oldestMinute.Add(5 * time.Second), Value: 1},
+		Point{MetricName: "oldest-minute", EntityID: "n1", Timestamp: oldestMinute.Add(40 * time.Second), Value: 2},
+	)
+	write(Point{MetricName: "oldest-minute", EntityID: "n1", Timestamp: oldestMinute.Add(40 * time.Second), Value: 4})
+
+	rows, err := s.scanRollupRowsBetween(ctx, "oldest-minute", "n1", nil, time.Minute.Milliseconds(), oldestMinute.UnixMilli(), oldestMinute.UnixMilli(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].bucketData.count != 2 || rows[0].bucketData.sum != 5 {
+		t.Fatalf("rebuilt oldest minute = %#v, want count=2 sum=5", rows)
+	}
+}
+
+func TestLateLabelReplacementRebuildsPersistedCascade(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: rawMemoryRetention,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 24 * time.Hour},
+			{Interval: 5 * time.Minute, Retention: 7 * 24 * time.Hour},
+			{Interval: time.Hour, Retention: 30 * 24 * time.Hour},
+			{Interval: 24 * time.Hour, Retention: 365 * 24 * time.Hour},
+		},
+		Compression: 30,
+	}
+	s, err := Open(ctx, SQLite(":memory:", WithRollupPolicy(policy)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.CreateMetric(ctx, Definition{Name: "cascade-replace", RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 27, 12, 2, 10, 0, time.UTC)
+	at := now.Add(-90 * time.Second)
+	write := func(point Point) {
+		t.Helper()
+		prepared, err := prepareMetricPoints([]Point{point})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebuild := s.writeRawPointsAt(prepared, now)
+		if err := s.writePreparedHotRollups(ctx, prepared, now, rebuild); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(Point{MetricName: "cascade-replace", EntityID: "n1", Timestamp: at, Value: 1, Labels: map[string]string{"source": "old"}})
+	write(Point{MetricName: "cascade-replace", EntityID: "n1", Timestamp: at, Value: 7, Labels: map[string]string{"source": "new"}})
+
+	for _, tier := range policy.Tiers {
+		start := bucketStartMillis(at.UnixMilli(), tier.Interval.Milliseconds())
+		rows, err := s.scanRollupRowsBetween(ctx, "cascade-replace", "n1", nil, tier.Interval.Milliseconds(), start, start, true)
+		if err != nil {
+			t.Fatalf("scan %s tier: %v", tier.Interval, err)
+		}
+		if len(rows) != 1 || rows[0].bucketData.count != 1 || rows[0].bucketData.sum != 7 {
+			t.Fatalf("%s replacement rows = %#v, want one count=1 sum=7 row", tier.Interval, rows)
+		}
+		labels, err := decodeMapString(rows[0].bucketData.labelsJSON)
+		if err != nil || labels["source"] != "new" {
+			t.Fatalf("%s replacement labels = %#v, %v", tier.Interval, labels, err)
+		}
+	}
+}
+
+func TestFlushTrimsInactiveRawWindow(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	if err := s.CreateMetric(ctx, Definition{Name: "idle-raw", RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	prepared, err := prepareMetricPoints([]Point{{MetricName: "idle-raw", EntityID: "n1", Timestamp: now.Add(-time.Minute), Value: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuild := s.writeRawPointsAt(prepared, now)
+	if err := s.writePreparedHotRollups(ctx, prepared, now, rebuild); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Flush(ctx, now.Add(12*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	s.rawMu.RLock()
+	defer s.rawMu.RUnlock()
+	if len(s.raw) != 0 {
+		t.Fatalf("inactive raw series retained after scheduled flush: %#v", s.raw)
+	}
+}
+
+func TestConcurrentHotPercentileQueriesUseDigestSnapshots(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	if err := s.CreateMetric(ctx, Definition{Name: "hot-percentile", RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC()
+	if err := s.Write(ctx, Point{MetricName: "hot-percentile", EntityID: "n1", Timestamp: base, Value: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 2)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		for i := 1; i <= 200; i++ {
+			if err := s.Write(ctx, Point{MetricName: "hot-percentile", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Millisecond), Value: float64(i)}); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for i := 0; i < 200; i++ {
+			points, err := s.Series(ctx, AggregateQuery{
+				Query:       Query{MetricName: "hot-percentile", EntityID: "n1", Start: base.Add(-time.Minute), End: base.Add(time.Minute)},
+				Aggregation: AggP95, Interval: time.Minute, PreserveSeries: true,
+			}, base)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if len(points) == 0 {
+				errCh <- fmt.Errorf("percentile query returned no points")
+				return
+			}
+		}
+	}()
+	workers.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+}
+
+func TestConcurrentPersistedReplacementQueriesStayConsistent(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: rawMemoryRetention,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: time.Hour}},
+		Compression:  30,
+	}
+	s, err := Open(ctx, SQLite(":memory:", WithRollupPolicy(policy)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.CreateMetric(ctx, Definition{Name: "replacement-view", RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	at := now.Add(-90 * time.Second)
+	if err := s.Write(ctx, Point{MetricName: "replacement-view", EntityID: "n1", Timestamp: at, Value: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 2)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		for i := 2; i <= 100; i++ {
+			if err := s.Write(ctx, Point{MetricName: "replacement-view", EntityID: "n1", Timestamp: at, Value: float64(i)}); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for i := 0; i < 300; i++ {
+			points, err := s.Series(ctx, AggregateQuery{
+				Query:       Query{MetricName: "replacement-view", EntityID: "n1", Start: at.Add(-time.Minute), End: now},
+				Aggregation: AggCount, Interval: time.Minute, PreserveSeries: true,
+			}, now)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if len(points) != 1 || points[0].Count != 1 || points[0].Value != 1 {
+				errCh <- fmt.Errorf("replacement query observed a split view: %#v", points)
+				return
+			}
+		}
+	}()
+	workers.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
 	}
 }
 
@@ -539,6 +761,11 @@ func TestSeriesHasNoTrailingEmptyBucketAcrossDashboardRanges(t *testing.T) {
 		}
 		if series[len(series)-1].Count == 0 {
 			t.Fatalf("query %s ended with an empty bucket: %#v", duration, series[len(series)-1])
+		}
+		for i := 1; i < len(series); i++ {
+			if delta := series[i].Bucket.Sub(series[i-1].Bucket); delta != interval {
+				t.Fatalf("query %s has a break between %s and %s: got %s, want %s", duration, series[i-1].Bucket, series[i].Bucket, delta, interval)
+			}
 		}
 	}
 }

@@ -159,7 +159,8 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		return nil, rpc.MakeError(rpc.InvalidParams, "metric_keys is required", nil)
 	}
 
-	end := metricQueryTimeOrDefault(firstMetricQueryTime(params.End, params.EndTime), time.Now().UTC())
+	queryNow := time.Now().UTC()
+	end := metricQueryTimeOrDefault(firstMetricQueryTime(params.End, params.EndTime), queryNow)
 	startFallback := end.Add(-metricQueryHours(params.Hours))
 	start := metricQueryTimeOrDefault(firstMetricQueryTime(params.Start, params.StartTime), startFallback)
 	if !end.After(start) {
@@ -213,33 +214,19 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				Unit:          def.Unit,
 				RetentionDays: def.RetentionDays,
 				Tags:          params.Tags,
-				Downsampled:   true,
 				FillEmpty:     metricFillEmpty,
 				MaxPoints:     maxPoints,
 			}
 
-			item.DownsampleAlgorithm = string(algorithm)
-			now := time.Now().UTC()
-			interval := metricDownsampleInterval(end.Sub(start), maxPoints)
-			interval = store.CompatibleSeriesInterval(start, now, interval)
-			item.IntervalSeconds = interval.Seconds()
-			points, err := store.Series(ctx, metric.AggregateQuery{
-				Query:          query,
-				Aggregation:    algorithm,
-				Interval:       interval,
-				PreserveSeries: true,
-			}, now)
+			loaded, err := loadPublicMetricPoints(ctx, store, query, algorithm, maxPoints, metricFillEmpty, queryNow)
 			if err != nil {
 				return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metric "+metricKey+": "+err.Error(), nil)
 			}
-			item.Points = make([]publicMetricPoint, 0, len(points))
-			for _, point := range points {
-				item.Points = append(item.Points, publicMetricPoint{
-					Time:  point.Bucket.UTC(),
-					Value: publicRawMetricValue(point.MetricName, point.Value, metricFillEmpty),
-					Count: point.Count,
-					Tags:  point.Tags,
-				})
+			item.Downsampled = loaded.downsampled
+			item.Points = loaded.points
+			if loaded.downsampled {
+				item.DownsampleAlgorithm = string(algorithm)
+				item.IntervalSeconds = loaded.interval.Seconds()
 			}
 			for _, split := range splitPublicMetricSeries(item) {
 				if metricFillEmpty {
@@ -258,6 +245,118 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		"series":                    series,
 		"count":                     len(series),
 	}, nil
+}
+
+type publicMetricPointResult struct {
+	points      []publicMetricPoint
+	downsampled bool
+	interval    time.Duration
+}
+
+func loadPublicMetricPoints(
+	ctx context.Context,
+	store *metric.Store,
+	query metric.Query,
+	algorithm metric.Aggregation,
+	maxPoints int,
+	fillEmpty bool,
+	now time.Time,
+) (publicMetricPointResult, error) {
+	if publicMetricUsesRawWindow(query.Start, query.End, now) {
+		fallbackInterval := store.CompatibleSeriesInterval(query.Start, now, time.Minute)
+		// Read rollups first so a concurrent write is observed by the later raw
+		// read and suppresses the older summary for that bucket.
+		fallback, err := store.Series(ctx, metric.AggregateQuery{
+			Query:          query,
+			Aggregation:    algorithm,
+			Interval:       fallbackInterval,
+			PreserveSeries: true,
+		}, now)
+		if err != nil {
+			return publicMetricPointResult{}, err
+		}
+		points, err := store.Query(ctx, query)
+		if err != nil {
+			return publicMetricPointResult{}, err
+		}
+		result := publicMetricPointResult{points: make([]publicMetricPoint, 0, len(points))}
+		rawBuckets := make(map[string]struct{}, len(points))
+		for _, point := range points {
+			publicPoint := publicMetricPoint{
+				Time:   point.Timestamp.UTC(),
+				Value:  publicRawMetricValue(point.MetricName, point.Value, fillEmpty),
+				Count:  1,
+				Tags:   point.Tags,
+				Labels: point.Labels,
+			}
+			result.points = append(result.points, publicPoint)
+			rawBuckets[publicMetricBucketKey(publicPoint, fallbackInterval)] = struct{}{}
+		}
+
+		// Exact samples disappear on restart, while the minute summaries remain
+		// persisted. Fill only buckets that have no exact sample so a restart does
+		// not create a false gap or duplicate a bucket that is still in memory.
+		for _, point := range fallback {
+			publicPoint := publicMetricPoint{
+				Time:  point.Bucket.UTC(),
+				Value: publicRawMetricValue(point.MetricName, point.Value, fillEmpty),
+				Count: point.Count,
+				Tags:  point.Tags,
+			}
+			if publicPoint.Time.Before(query.Start) || publicPoint.Time.Add(fallbackInterval).After(query.End) {
+				continue
+			}
+			if _, exact := rawBuckets[publicMetricBucketKey(publicPoint, fallbackInterval)]; exact {
+				continue
+			}
+			result.points = append(result.points, publicPoint)
+			result.downsampled = true
+			result.interval = fallbackInterval
+		}
+		sort.SliceStable(result.points, func(i, j int) bool {
+			if result.points[i].Time.Equal(result.points[j].Time) {
+				return publicMetricTagsKey(result.points[i].Tags) < publicMetricTagsKey(result.points[j].Tags)
+			}
+			return result.points[i].Time.Before(result.points[j].Time)
+		})
+		return result, nil
+	}
+
+	interval := metricDownsampleInterval(query.End.Sub(query.Start), maxPoints)
+	interval = store.CompatibleSeriesInterval(query.Start, now, interval)
+	points, err := store.Series(ctx, metric.AggregateQuery{
+		Query:          query,
+		Aggregation:    algorithm,
+		Interval:       interval,
+		PreserveSeries: true,
+	}, now)
+	if err != nil {
+		return publicMetricPointResult{}, err
+	}
+	result := publicMetricPointResult{
+		points:      make([]publicMetricPoint, 0, len(points)),
+		downsampled: true,
+		interval:    interval,
+	}
+	for _, point := range points {
+		result.points = append(result.points, publicMetricPoint{
+			Time:  point.Bucket.UTC(),
+			Value: publicRawMetricValue(point.MetricName, point.Value, fillEmpty),
+			Count: point.Count,
+			Tags:  point.Tags,
+		})
+	}
+	return result, nil
+}
+
+func publicMetricUsesRawWindow(start, end, now time.Time) bool {
+	retention := metricstore.DefaultRollupRawRetention
+	return end.Sub(start) <= retention && end.After(now.UTC().Add(-retention))
+}
+
+func publicMetricBucketKey(point publicMetricPoint, interval time.Duration) string {
+	bucket := point.Time.UTC().Truncate(interval).UnixMilli()
+	return strconv.FormatInt(bucket, 10) + "\x00" + publicMetricTagsKey(point.Tags)
 }
 
 func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {

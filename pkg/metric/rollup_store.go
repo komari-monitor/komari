@@ -23,8 +23,7 @@ type storedRollup struct {
 	bucketData *rollupBucket
 }
 
-// Compact seals minute buckets whose exact-update window has elapsed and
-// enforces raw and rollup retention.
+// Compact seals closed minute buckets and enforces raw and rollup retention.
 func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
@@ -45,10 +44,10 @@ func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 	return written, nil
 }
 
-// Flush seals in-memory minute buckets after their exact-update window expires,
-// without running retention.
+// Flush seals closed in-memory minute buckets and trims the exact raw window,
+// without running persisted retention.
 // It is used by the scheduled compactor so a series that stops reporting is
-// still persisted after its exact-update window expires.
+// still persisted even when no later report arrives to close its last minute.
 func (s *Store) Flush(ctx context.Context, now time.Time) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
@@ -58,7 +57,11 @@ func (s *Store) Flush(ctx context.Context, now time.Time) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
 	}
-	return s.flushClosedHotRollups(ctx, now.UTC())
+	s.ingestMu.Lock()
+	defer s.ingestMu.Unlock()
+	now = now.UTC()
+	s.trimRawWindow(now)
+	return s.flushClosedHotRollups(ctx, now)
 }
 
 func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.Time) (int, error) {
@@ -103,6 +106,116 @@ func (s *Store) writeTierCascadeTx(ctx context.Context, metricName string, minut
 		written += n
 	}
 	return written, nil
+}
+
+// replaceMinuteRollupsTx overwrites rebuilt minute buckets, then recomputes
+// only their affected ancestors from the stored finer tier. This keeps late
+// raw upserts idempotent even though t-digests cannot remove observations.
+func (s *Store) replaceMinuteRollupsTx(ctx context.Context, metricName string, replacements map[rollupKey]*rollupBucket, tx *sql.Tx) error {
+	if len(replacements) == 0 || len(s.cfg.RollupPolicy.Tiers) == 0 {
+		return nil
+	}
+	policy := s.cfg.RollupPolicy
+	cache := newRollupDictionaryCache()
+	keys := make([]rollupKey, 0, len(replacements))
+	for key := range replacements {
+		keys = append(keys, key)
+	}
+	sortRollupKeys(keys)
+	for _, key := range keys {
+		bucket := replacements[key]
+		if bucket == nil || bucket.count == 0 {
+			if err := s.deleteRollupBucketTx(ctx, metricName, policy.Tiers[0].Interval, key, tx); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := s.upsertRollupWithDictionaryTx(ctx, metricName, policy.Tiers[0].Interval, key, bucket, cache, tx); err != nil {
+			return err
+		}
+	}
+
+	affected := keys
+	for i := 1; i < len(policy.Tiers); i++ {
+		fine, coarse := policy.Tiers[i-1], policy.Tiers[i]
+		parents := make(map[rollupKey]struct{}, len(affected))
+		for _, key := range affected {
+			key.bucket = bucketStartMillis(key.bucket, coarse.Interval.Milliseconds())
+			parents[key] = struct{}{}
+		}
+		affected = affected[:0]
+		for key := range parents {
+			affected = append(affected, key)
+		}
+		sortRollupKeys(affected)
+		for _, key := range affected {
+			bucket, err := s.rebuildRollupBucketTx(ctx, metricName, fine.Interval, coarse.Interval, key, tx)
+			if err != nil {
+				return err
+			}
+			if bucket == nil {
+				if err := s.deleteRollupBucketTx(ctx, metricName, coarse.Interval, key, tx); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := s.upsertRollupWithDictionaryTx(ctx, metricName, coarse.Interval, key, bucket, cache, tx); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) rebuildRollupBucketTx(ctx context.Context, metricName string, fineInterval, coarseInterval time.Duration, key rollupKey, tx *sql.Tx) (*rollupBucket, error) {
+	start := key.bucket
+	end := start + coarseInterval.Milliseconds()
+	columns := "s.entity_id, s.tags_hash, s.tags, l.labels_hash, l.labels, r.bucket_milli, r.count, r.sum, r.sum_sq, r.min_val, r.max_val, r.first_val, r.first_ts_milli, r.last_val, r.last_ts_milli, r.digest"
+	query := fmt.Sprintf(`SELECT %s FROM %s r
+		JOIN %s s ON s.id = r.series_id
+		JOIN %s d ON d.id = r.resolution_id
+		JOIN %s l ON l.id = r.label_id
+		WHERE s.metric_name = %s AND s.entity_id = %s AND s.tags_hash = %s
+			AND l.labels_hash = %s AND d.resolution_milli = %s
+			AND r.bucket_milli >= %s AND r.bucket_milli < %s
+		ORDER BY r.bucket_milli ASC`,
+		columns, s.tables.rollups, s.tables.series, s.tables.resolutions, s.tables.labels,
+		s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3),
+		s.dialect.placeholder(4), s.dialect.placeholder(5), s.dialect.placeholder(6), s.dialect.placeholder(7))
+	rows, err := tx.QueryContext(ctx, query, metricName, key.entityID, key.tagsHash, key.labelsHash, fineInterval.Milliseconds(), start, end)
+	if err != nil {
+		return nil, err
+	}
+	stored, err := scanStoredRollups(rows, true, s.cfg.RollupPolicy.compression())
+	_ = rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(stored) == 0 {
+		return nil, nil
+	}
+	bucket := newRollupBucket(s.cfg.RollupPolicy.compression())
+	for _, row := range stored {
+		if bucket.count == 0 {
+			bucket.tagsHash, bucket.tagsJSON = row.bucketData.tagsHash, row.bucketData.tagsJSON
+			bucket.labelsHash, bucket.labelsJSON = row.bucketData.labelsHash, row.bucketData.labelsJSON
+		}
+		bucket.mergeStored(row.bucketData)
+	}
+	return bucket, nil
+}
+
+func (s *Store) deleteRollupBucketTx(ctx context.Context, metricName string, interval time.Duration, key rollupKey, tx *sql.Tx) error {
+	query := fmt.Sprintf(`DELETE FROM %s WHERE bucket_milli = %s
+		AND resolution_id IN (SELECT id FROM %s WHERE resolution_milli = %s)
+		AND series_id IN (SELECT id FROM %s WHERE metric_name = %s AND entity_id = %s AND tags_hash = %s)
+		AND label_id IN (SELECT id FROM %s WHERE labels_hash = %s)`,
+		s.tables.rollups, s.dialect.placeholder(1),
+		s.tables.resolutions, s.dialect.placeholder(2),
+		s.tables.series, s.dialect.placeholder(3), s.dialect.placeholder(4), s.dialect.placeholder(5),
+		s.tables.labels, s.dialect.placeholder(6))
+	_, err := tx.ExecContext(ctx, query, key.bucket, interval.Milliseconds(), metricName, key.entityID, key.tagsHash, key.labelsHash)
+	return err
 }
 
 func buildCoarserBucketsFromDelta(delta map[rollupKey]*rollupBucket, interval time.Duration, compression float64) map[rollupKey]*rollupBucket {

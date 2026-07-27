@@ -58,9 +58,10 @@ func TestRestrictedControllersRegisterUnifiedAndCompatibilityRoutes(t *testing.T
 		name       string
 		controller *Controller
 		alias      string
+		discard    bool
 	}{
 		{name: "legacy", controller: NewLegacyController(setupConfigDB(t), migrations.LegacyMonitoringSummary{}), alias: LegacyAPIPath},
-		{name: "structure", controller: NewStructureController(), alias: StructureAPIPath},
+		{name: "structure", controller: NewStructureController(), alias: StructureAPIPath, discard: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
@@ -81,6 +82,9 @@ func TestRestrictedControllersRegisterUnifiedAndCompatibilityRoutes(t *testing.T
 				}
 				if routes["POST "+base+"/cleanup"] {
 					t.Fatalf("full-history migration unexpectedly exposes cleanup: %s", base)
+				}
+				if routes["POST "+base+"/discard"] != test.discard {
+					t.Fatalf("POST %s/discard presence = %v, want %v", base, routes["POST "+base+"/discard"], test.discard)
 				}
 			}
 			if routes["GET /api/public"] || routes["GET /api/rpc2"] || routes["POST /api/clients/report"] {

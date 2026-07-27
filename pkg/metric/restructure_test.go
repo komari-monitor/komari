@@ -134,6 +134,545 @@ func TestRestructureRebuildsLegacyPointsIntoNormalizedSchema(t *testing.T) {
 	}
 }
 
+func TestDiscardHistoryPreservesDefinitionsAndCreatesEmptyNormalizedSchema(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, SQLite(":memory:", WithAutoMigrate(false), WithRollupPolicy(RollupPolicy{
+		RawRetention: time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+		Compression:  30,
+	})))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	for _, statement := range []string{
+		fmt.Sprintf(`CREATE TABLE %s (name TEXT PRIMARY KEY, type TEXT NOT NULL, unit TEXT NOT NULL, description TEXT NOT NULL, retention_days INTEGER NOT NULL, metadata TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`, s.tables.definitions),
+		fmt.Sprintf(`CREATE TABLE %s (id INTEGER PRIMARY KEY, metric_name TEXT NOT NULL, entity_id TEXT NOT NULL, tags_hash TEXT NOT NULL, ts_nano INTEGER NOT NULL, value REAL NOT NULL, tags TEXT NOT NULL, labels TEXT NOT NULL, created_at INTEGER NOT NULL)`, s.tables.points),
+		fmt.Sprintf(`CREATE TABLE %s (id INTEGER PRIMARY KEY, metric_name TEXT NOT NULL, entity_id TEXT NOT NULL, tags_hash TEXT NOT NULL, tags TEXT NOT NULL, resolution_nano INTEGER NOT NULL, bucket_nano INTEGER NOT NULL, count INTEGER NOT NULL, sum REAL NOT NULL, sum_sq REAL NOT NULL, min_val REAL NOT NULL, max_val REAL NOT NULL, first_val REAL NOT NULL, first_ts INTEGER NOT NULL, last_val REAL NOT NULL, last_ts INTEGER NOT NULL, digest BLOB, created_at INTEGER NOT NULL)`, s.tables.rollups),
+	} {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("create legacy schema: %v", err)
+		}
+	}
+	at := time.Now().UTC().Add(-time.Hour)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, s.tables.definitions), "cpu", "gauge", "%", "CPU", 30, "{}", at.UnixNano(), at.UnixNano()); err != nil {
+		t.Fatalf("insert definition: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, s.tables.points), 1, "cpu", "node-a", "hash", at.UnixNano(), 42.0, "{}", "{}", at.UnixNano()); err != nil {
+		t.Fatalf("insert point: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, s.tables.rollups),
+		1, "cpu", "node-a", "hash", "{}", time.Hour.Nanoseconds(), at.Truncate(time.Hour).UnixNano(),
+		1, 42.0, 1764.0, 42.0, 42.0, 42.0, at.UnixNano(), 42.0, at.UnixNano(), nil, at.UnixNano()); err != nil {
+		t.Fatalf("insert rollup: %v", err)
+	}
+
+	result, err := s.DiscardHistory(ctx, nil)
+	if err != nil {
+		t.Fatalf("discard history: %v", err)
+	}
+	if result.RowsCopied != 2 || result.Metrics != 1 {
+		t.Fatalf("discard result = %#v", result)
+	}
+	if needs, err := s.NeedsRestructure(ctx); err != nil || needs {
+		t.Fatalf("needs restructure after discard = %v, %v", needs, err)
+	}
+	definition, err := s.GetMetric(ctx, "cpu")
+	if err != nil {
+		t.Fatalf("get preserved definition: %v", err)
+	}
+	if definition.RetentionDays != 30 || definition.Description != "CPU" {
+		t.Fatalf("preserved definition = %#v", definition)
+	}
+	for _, table := range []string{s.tables.series, s.tables.labels, s.tables.resolutions, s.tables.rollups} {
+		var count int
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows = %d, want 0", table, count)
+		}
+	}
+	if exists, err := s.tableExists(ctx, s.tables.points); err != nil || exists {
+		t.Fatalf("obsolete point table exists = %v, err = %v", exists, err)
+	}
+}
+
+func TestNeedsRestructureRejectsPartialNormalizedSchema(t *testing.T) {
+	t.Run("missing dictionary table", func(t *testing.T) {
+		ctx := context.Background()
+		s := newMemStore(t)
+		if _, err := s.db.ExecContext(ctx, "DROP TABLE "+s.tables.labels); err != nil {
+			t.Fatalf("drop labels table: %v", err)
+		}
+		needs, err := s.NeedsRestructure(ctx)
+		if err != nil || !needs {
+			t.Fatalf("NeedsRestructure() = %v, %v, want true", needs, err)
+		}
+	})
+
+	t.Run("legacy rollup columns", func(t *testing.T) {
+		ctx := context.Background()
+		s := newMemStore(t)
+		if _, err := s.db.ExecContext(ctx, "DROP TABLE "+s.tables.rollups); err != nil {
+			t.Fatalf("drop rollup table: %v", err)
+		}
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE %s (resolution_nano BIGINT NOT NULL)", s.tables.rollups)); err != nil {
+			t.Fatalf("create partial rollup table: %v", err)
+		}
+		needs, err := s.NeedsRestructure(ctx)
+		if err != nil || !needs {
+			t.Fatalf("NeedsRestructure() = %v, %v, want true", needs, err)
+		}
+	})
+}
+
+func TestRestructureMigratesPartialMillisecondSchemaWithoutPoints(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	definition := Definition{Name: "partial.millis", Type: TypeGauge, Unit: "%", Description: "preserved", RetentionDays: 30}
+	if err := s.CreateMetric(ctx, definition); err != nil {
+		t.Fatalf("create definition: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "DROP TABLE "+s.tables.rollups); err != nil {
+		t.Fatalf("drop normalized rollups: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE %s (
+		id INTEGER PRIMARY KEY, metric_name TEXT NOT NULL, entity_id TEXT NOT NULL,
+		tags_hash TEXT NOT NULL, tags TEXT NOT NULL, resolution_nano INTEGER NOT NULL,
+		bucket_nano INTEGER NOT NULL, count INTEGER NOT NULL, sum REAL NOT NULL,
+		sum_sq REAL NOT NULL, min_val REAL NOT NULL, max_val REAL NOT NULL,
+		first_val REAL NOT NULL, first_ts INTEGER NOT NULL, last_val REAL NOT NULL,
+		last_ts INTEGER NOT NULL, digest BLOB, created_at INTEGER NOT NULL
+	)`, s.tables.rollups)); err != nil {
+		t.Fatalf("create legacy rollups: %v", err)
+	}
+	at := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, s.tables.rollups),
+		1, definition.Name, "node-a", "hash", `{"host":"a"}`, time.Minute.Nanoseconds(), at.UnixNano(),
+		1, 42.0, 1764.0, 42.0, 42.0, 42.0, at.UnixNano(), 42.0, at.UnixNano(), nil, at.UnixNano()); err != nil {
+		t.Fatalf("seed legacy rollup: %v", err)
+	}
+	if exists, err := s.tableExists(ctx, s.tables.points); err != nil || exists {
+		t.Fatalf("points table before restructure = %v, err = %v", exists, err)
+	}
+	seedIncompleteRebuildRollups(t, ctx, s)
+
+	result, err := s.Restructure(ctx, nil)
+	if err != nil {
+		t.Fatalf("restructure partial millisecond schema: %v", err)
+	}
+	if result.RowsCopied != 1 || result.Metrics != 1 {
+		t.Fatalf("restructure result = %#v", result)
+	}
+	if needs, err := s.NeedsRestructure(ctx); err != nil || needs {
+		t.Fatalf("needs restructure after repair = %v, %v", needs, err)
+	}
+	preserved, err := s.GetMetric(ctx, definition.Name)
+	if err != nil {
+		t.Fatalf("get preserved definition: %v", err)
+	}
+	if preserved.Description != definition.Description || preserved.RetentionDays != definition.RetentionDays {
+		t.Fatalf("preserved definition = %#v", preserved)
+	}
+	series, err := s.Series(ctx, AggregateQuery{
+		Query:       Query{MetricName: definition.Name, EntityID: "node-a", Start: at.Add(-time.Minute), End: at.Add(time.Minute)},
+		Aggregation: AggAvg, Interval: time.Minute, PreserveSeries: true,
+	}, at.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("query migrated rollup: %v", err)
+	}
+	if len(series) != 1 || series[0].Count != 1 || series[0].Value != 42 || series[0].Tags["host"] != "a" {
+		t.Fatalf("migrated rollup = %#v", series)
+	}
+}
+
+func TestRestructureRebuildsNormalizedSchemaWithoutForeignKeys(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, SQLite(":memory:", WithAutoMigrate(false)))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	for _, statement := range []string{
+		fmt.Sprintf(`CREATE TABLE %s (
+			name TEXT PRIMARY KEY, type TEXT NOT NULL, unit TEXT NOT NULL, description TEXT NOT NULL,
+			retention_days INTEGER NOT NULL, metadata TEXT NOT NULL, created_at_milli INTEGER NOT NULL, updated_at_milli INTEGER NOT NULL
+		)`, s.tables.definitions),
+		fmt.Sprintf(`CREATE TABLE %s (id INTEGER PRIMARY KEY AUTOINCREMENT, labels_hash TEXT NOT NULL UNIQUE, labels TEXT NOT NULL)`, s.tables.labels),
+		fmt.Sprintf(`CREATE TABLE %s (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, metric_name TEXT NOT NULL, entity_id TEXT NOT NULL,
+			tags_hash TEXT NOT NULL, tags TEXT NOT NULL, UNIQUE(metric_name, entity_id, tags_hash)
+		)`, s.tables.series),
+		fmt.Sprintf(`CREATE TABLE %s (id INTEGER PRIMARY KEY AUTOINCREMENT, resolution_milli INTEGER NOT NULL UNIQUE)`, s.tables.resolutions),
+		fmt.Sprintf(`CREATE TABLE %s (
+			series_id INTEGER NOT NULL, resolution_id INTEGER NOT NULL, label_id INTEGER NOT NULL, bucket_milli INTEGER NOT NULL,
+			count INTEGER NOT NULL, sum REAL NOT NULL, sum_sq REAL NOT NULL, min_val REAL NOT NULL, max_val REAL NOT NULL,
+			first_val REAL NOT NULL, first_ts_milli INTEGER NOT NULL, last_val REAL NOT NULL, last_ts_milli INTEGER NOT NULL,
+			digest BLOB, created_at_milli INTEGER NOT NULL, UNIQUE(series_id, resolution_id, label_id, bucket_milli)
+		)`, s.tables.rollups),
+	} {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("create normalized table without foreign keys: %v", err)
+		}
+	}
+	at := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO "+s.tables.definitions+" VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		"normalized.no-fk", TypeGauge, "%", "preserved", 30, "{}", at.UnixMilli(), at.UnixMilli()); err != nil {
+		t.Fatalf("seed definition: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO "+s.tables.labels+" (labels_hash, labels) VALUES (?, ?)", "labels", "{}"); err != nil {
+		t.Fatalf("seed labels: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO "+s.tables.series+" (metric_name, entity_id, tags_hash, tags) VALUES (?, ?, ?, ?)", "normalized.no-fk", "node-a", "tags", `{"host":"a"}`); err != nil {
+		t.Fatalf("seed series: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO "+s.tables.resolutions+" (resolution_milli) VALUES (?)", time.Minute.Milliseconds()); err != nil {
+		t.Fatalf("seed resolution: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO "+s.tables.rollups+" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		1, 1, 1, at.UnixMilli(), 1, 7.0, 49.0, 7.0, 7.0, 7.0, at.UnixMilli(), 7.0, at.UnixMilli(), nil, at.UnixMilli()); err != nil {
+		t.Fatalf("seed rollup: %v", err)
+	}
+	if needs, err := s.NeedsRestructure(ctx); err != nil || !needs {
+		t.Fatalf("schema without foreign keys needs restructure = %v, %v", needs, err)
+	}
+	seedIncompleteRebuildRollups(t, ctx, s)
+
+	result, err := s.Restructure(ctx, nil)
+	if err != nil {
+		t.Fatalf("rebuild normalized relationships: %v", err)
+	}
+	if result.RowsCopied != 1 || result.Metrics != 1 {
+		t.Fatalf("rebuild result = %#v", result)
+	}
+	if needs, err := s.NeedsRestructure(ctx); err != nil || needs {
+		t.Fatalf("schema still needs restructure = %v, %v", needs, err)
+	}
+	if foreignKeys, err := s.normalizedForeignKeysExist(ctx); err != nil || !foreignKeys {
+		t.Fatalf("normalized foreign keys after rebuild = %v, %v", foreignKeys, err)
+	}
+	series, err := s.Series(ctx, AggregateQuery{
+		Query:       Query{MetricName: "normalized.no-fk", EntityID: "node-a", Start: at.Add(-time.Minute), End: at.Add(time.Minute)},
+		Aggregation: AggAvg, Interval: time.Minute, PreserveSeries: true,
+	}, at.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("query rebuilt rollup: %v", err)
+	}
+	if len(series) != 1 || series[0].Value != 7 || series[0].Tags["host"] != "a" {
+		t.Fatalf("rebuilt rollup = %#v", series)
+	}
+}
+
+func TestNeedsRestructureAllowsDictionaryIDGaps(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	if err := s.CreateMetric(ctx, Definition{Name: "id.gaps", Type: TypeGauge, RetentionDays: 7}); err != nil {
+		t.Fatalf("create definition: %v", err)
+	}
+	at := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
+	if err := s.Write(ctx, Point{MetricName: "id.gaps", EntityID: "removed", Timestamp: at, Value: 1}); err != nil {
+		t.Fatalf("write removed series: %v", err)
+	}
+	if err := s.flushAllHotRollups(ctx); err != nil {
+		t.Fatalf("flush removed series: %v", err)
+	}
+	if _, err := s.DeleteSeries(ctx, Query{MetricName: "id.gaps", EntityID: "removed"}); err != nil {
+		t.Fatalf("delete series to create id gaps: %v", err)
+	}
+	if _, err := s.cleanupOrphanedMetricData(ctx); err != nil {
+		t.Fatalf("delete orphaned dictionary rows: %v", err)
+	}
+	if err := s.Write(ctx, Point{MetricName: "id.gaps", EntityID: "retained", Timestamp: at.Add(time.Minute), Value: 2}); err != nil {
+		t.Fatalf("write retained series: %v", err)
+	}
+	if err := s.flushAllHotRollups(ctx); err != nil {
+		t.Fatalf("flush retained series: %v", err)
+	}
+
+	for _, table := range []string{s.tables.series, s.tables.labels, s.tables.resolutions} {
+		var id int64
+		if err := s.db.QueryRowContext(ctx, "SELECT id FROM "+table+" LIMIT 1").Scan(&id); err != nil {
+			t.Fatalf("read dictionary id from %s: %v", table, err)
+		}
+		if id <= 1 {
+			t.Fatalf("dictionary id in %s = %d, want a normal auto-increment gap", table, id)
+		}
+	}
+	if needs, err := s.NeedsRestructure(ctx); err != nil || needs {
+		t.Fatalf("dictionary id gap needs restructure = %v, %v", needs, err)
+	}
+	if foreignKeys, err := s.normalizedForeignKeysExist(ctx); err != nil || !foreignKeys {
+		t.Fatalf("foreign keys with id gap = %v, %v", foreignKeys, err)
+	}
+}
+
+func TestRestructureRejectsUnrecognizedPartialSchemaBeforeMutation(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	definition := Definition{Name: "partial.unknown", Type: TypeGauge, Description: "preserved", RetentionDays: 7}
+	if err := s.CreateMetric(ctx, definition); err != nil {
+		t.Fatalf("create definition: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "DROP TABLE "+s.tables.rollups); err != nil {
+		t.Fatalf("drop normalized rollups: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE %s (resolution_nano BIGINT NOT NULL)", s.tables.rollups)); err != nil {
+		t.Fatalf("create unrecognized rollups: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO "+s.tables.rollups+" VALUES (?)", time.Minute.Nanoseconds()); err != nil {
+		t.Fatalf("seed unrecognized rollups: %v", err)
+	}
+
+	_, err := s.Restructure(ctx, nil)
+	if err == nil || !strings.Contains(err.Error(), "not a recognized legacy layout") {
+		t.Fatalf("restructure error = %v", err)
+	}
+	var rows int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+s.tables.rollups).Scan(&rows); err != nil {
+		t.Fatalf("count source rollups after rejected restructure: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("source rollups after rejected restructure = %d, want 1", rows)
+	}
+	if _, err := s.GetMetric(ctx, definition.Name); err != nil {
+		t.Fatalf("definition changed by rejected restructure: %v", err)
+	}
+	if exists, err := s.tableExists(ctx, s.cfg.TablePrefix+"rebuild_definitions"); err != nil || exists {
+		t.Fatalf("rebuild schema exists after preflight rejection = %v, err = %v", exists, err)
+	}
+}
+
+func TestDiscardHistoryRepairsPartialMillisecondSchemaWithoutPoints(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	definition := Definition{Name: "partial.discard", Type: TypeGauge, Description: "preserved", RetentionDays: 14}
+	if err := s.CreateMetric(ctx, definition); err != nil {
+		t.Fatalf("create definition: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "DROP TABLE "+s.tables.rollups); err != nil {
+		t.Fatalf("drop normalized rollups: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE %s (resolution_nano BIGINT NOT NULL)", s.tables.rollups)); err != nil {
+		t.Fatalf("create partial rollups: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO "+s.tables.rollups+" VALUES (?)", time.Minute.Nanoseconds()); err != nil {
+		t.Fatalf("seed partial rollups: %v", err)
+	}
+	seedIncompleteRebuildRollups(t, ctx, s)
+
+	result, err := s.DiscardHistory(ctx, nil)
+	if err != nil {
+		t.Fatalf("discard partial millisecond history: %v", err)
+	}
+	if result.RowsCopied != 1 || result.Metrics != 1 {
+		t.Fatalf("discard result = %#v", result)
+	}
+	if needs, err := s.NeedsRestructure(ctx); err != nil || needs {
+		t.Fatalf("needs restructure after discard repair = %v, %v", needs, err)
+	}
+	preserved, err := s.GetMetric(ctx, definition.Name)
+	if err != nil {
+		t.Fatalf("get preserved definition: %v", err)
+	}
+	if preserved.Description != definition.Description || preserved.RetentionDays != definition.RetentionDays {
+		t.Fatalf("preserved definition = %#v", preserved)
+	}
+	assertNormalizedHistoryEmpty(t, ctx, s)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.Write(ctx, Point{MetricName: definition.Name, EntityID: "node-a", Timestamp: now, Value: 9}); err != nil {
+		t.Fatalf("write after discard repair: %v", err)
+	}
+	if err := s.flushAllHotRollups(ctx); err != nil {
+		t.Fatalf("flush after discard repair: %v", err)
+	}
+	var rollups int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+s.tables.rollups).Scan(&rollups); err != nil {
+		t.Fatalf("count rollups after repair write: %v", err)
+	}
+	if rollups == 0 {
+		t.Fatal("write after repair did not persist any rollups")
+	}
+}
+
+func TestDiscardHistoryClearsAlreadyNormalizedStore(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	definition := Definition{Name: "normalized.clear", Type: TypeGauge, Description: "preserved", RetentionDays: 30}
+	if err := s.CreateMetric(ctx, definition); err != nil {
+		t.Fatalf("create definition: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.WriteBatch(ctx, []Point{
+		{MetricName: definition.Name, EntityID: "node-a", Timestamp: now.Add(-20 * time.Second), Value: 1},
+		{MetricName: definition.Name, EntityID: "node-a", Timestamp: now.Add(-10 * time.Second), Value: 2},
+	}); err != nil {
+		t.Fatalf("write persisted history: %v", err)
+	}
+	if err := s.flushAllHotRollups(ctx); err != nil {
+		t.Fatalf("flush history: %v", err)
+	}
+	if err := s.Write(ctx, Point{MetricName: definition.Name, EntityID: "node-a", Timestamp: now, Value: 3}); err != nil {
+		t.Fatalf("write active history: %v", err)
+	}
+	if needs, err := s.NeedsRestructure(ctx); err != nil || needs {
+		t.Fatalf("normalized store restructure state = %v, %v", needs, err)
+	}
+
+	result, err := s.DiscardHistory(ctx, nil)
+	if err != nil {
+		t.Fatalf("discard normalized history: %v", err)
+	}
+	if result.RowsCopied == 0 || result.Metrics != 1 {
+		t.Fatalf("discard result = %#v", result)
+	}
+	assertNormalizedHistoryEmpty(t, ctx, s)
+	points, err := s.Query(ctx, Query{MetricName: definition.Name, EntityID: "node-a", Start: now.Add(-time.Minute), End: now.Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("query cleared raw history: %v", err)
+	}
+	if len(points) != 0 {
+		t.Fatalf("raw history remains after discard: %#v", points)
+	}
+	preserved, err := s.GetMetric(ctx, definition.Name)
+	if err != nil {
+		t.Fatalf("get preserved definition: %v", err)
+	}
+	if preserved.Description != definition.Description || preserved.RetentionDays != definition.RetentionDays {
+		t.Fatalf("preserved definition = %#v", preserved)
+	}
+}
+
+func TestDiscardHistoryDropsObsoletePointsBeforeDictionaries(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	definition := Definition{Name: "normalized.obsolete", Type: TypeGauge, RetentionDays: 7}
+	if err := s.CreateMetric(ctx, definition); err != nil {
+		t.Fatalf("create definition: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.Write(ctx, Point{MetricName: definition.Name, EntityID: "node-a", Timestamp: now, Value: 42}); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+	if err := s.flushAllHotRollups(ctx); err != nil {
+		t.Fatalf("flush history: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE %s (
+		series_id BIGINT NOT NULL, label_id BIGINT NOT NULL, ts_milli BIGINT NOT NULL, value DOUBLE PRECISION NOT NULL,
+		FOREIGN KEY (series_id) REFERENCES %s(id) ON DELETE CASCADE,
+		FOREIGN KEY (label_id) REFERENCES %s(id) ON DELETE CASCADE
+	)`, s.tables.points, s.tables.series, s.tables.labels)); err != nil {
+		t.Fatalf("create obsolete point table: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (series_id, label_id, ts_milli, value)
+		SELECT series_id, label_id, first_ts_milli, first_val FROM %s LIMIT 1`, s.tables.points, s.tables.rollups)); err != nil {
+		t.Fatalf("seed obsolete point: %v", err)
+	}
+
+	if _, err := s.DiscardHistory(ctx, nil); err != nil {
+		t.Fatalf("discard history with obsolete point references: %v", err)
+	}
+	if exists, err := s.tableExists(ctx, s.tables.points); err != nil || exists {
+		t.Fatalf("obsolete point table exists = %v, err = %v", exists, err)
+	}
+	assertNormalizedHistoryEmpty(t, ctx, s)
+}
+
+func TestDiscardHistoryRollsBackObsoletePointsWhenDeleteFails(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	definition := Definition{Name: "normalized.rollback", Type: TypeGauge, RetentionDays: 7}
+	if err := s.CreateMetric(ctx, definition); err != nil {
+		t.Fatalf("create definition: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
+	if err := s.Write(ctx, Point{MetricName: definition.Name, EntityID: "node-a", Timestamp: now, Value: 42}); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+	if err := s.flushAllHotRollups(ctx); err != nil {
+		t.Fatalf("flush history: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE %s (
+		series_id BIGINT NOT NULL, label_id BIGINT NOT NULL, ts_milli BIGINT NOT NULL, value DOUBLE PRECISION NOT NULL,
+		FOREIGN KEY (series_id) REFERENCES %s(id) ON DELETE CASCADE,
+		FOREIGN KEY (label_id) REFERENCES %s(id) ON DELETE CASCADE
+	)`, s.tables.points, s.tables.series, s.tables.labels)); err != nil {
+		t.Fatalf("create obsolete points: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (series_id, label_id, ts_milli, value)
+		SELECT series_id, label_id, first_ts_milli, first_val FROM %s LIMIT 1`, s.tables.points, s.tables.rollups)); err != nil {
+		t.Fatalf("seed obsolete point: %v", err)
+	}
+	before := make(map[string]int)
+	for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.series, s.tables.labels, s.tables.resolutions} {
+		var rows int
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&rows); err != nil {
+			t.Fatalf("count %s before rollback test: %v", table, err)
+		}
+		before[table] = rows
+	}
+	trigger := s.cfg.TablePrefix + "reject_rollup_delete"
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`CREATE TRIGGER %s BEFORE DELETE ON %s
+		BEGIN SELECT RAISE(ABORT, 'forced rollup delete failure'); END`, trigger, s.tables.rollups)); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	if _, err := s.DiscardHistory(ctx, nil); err == nil || !strings.Contains(err.Error(), "forced rollup delete failure") {
+		t.Fatalf("discard error = %v", err)
+	}
+	for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.series, s.tables.labels, s.tables.resolutions} {
+		var rows int
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&rows); err != nil {
+			t.Fatalf("count %s after rollback: %v", table, err)
+		}
+		if rows != before[table] {
+			t.Fatalf("%s rows after rollback = %d, want %d", table, rows, before[table])
+		}
+	}
+}
+
+func TestDiscardHistoryValidatesLegacyRebuildPrefix(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, SQLite(":memory:", WithAutoMigrate(false)))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE %s (
+		name TEXT PRIMARY KEY, type TEXT NOT NULL, unit TEXT NOT NULL, description TEXT NOT NULL,
+		retention_days INTEGER NOT NULL, metadata TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+	)`, s.tables.definitions)); err != nil {
+		t.Fatalf("create legacy definition table: %v", err)
+	}
+	s.cfg.Driver = DriverMySQL
+	s.cfg.TablePrefix = strings.Repeat("x", 28)
+	_, err = s.DiscardHistory(ctx, nil)
+	if err == nil || !strings.Contains(err.Error(), "prefix is too long for MySQL rebuild identifiers") {
+		t.Fatalf("discard prefix validation error = %v", err)
+	}
+}
+
+func assertNormalizedHistoryEmpty(t *testing.T, ctx context.Context, s *Store) {
+	t.Helper()
+	for _, table := range []string{s.tables.series, s.tables.labels, s.tables.resolutions, s.tables.rollups} {
+		var count int
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows = %d, want 0", table, count)
+		}
+	}
+}
+
+func seedIncompleteRebuildRollups(t *testing.T, ctx context.Context, s *Store) {
+	t.Helper()
+	table := s.cfg.TablePrefix + "rebuild_rollups"
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE %s (bucket_milli BIGINT NOT NULL)", table)); err != nil {
+		t.Fatalf("create interrupted rebuild rollups: %v", err)
+	}
+}
+
 func TestRestructureBulkCopiesRollupsAcrossBatches(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, SQLite(":memory:", WithAutoMigrate(false), WithRollupPolicy(RollupPolicy{

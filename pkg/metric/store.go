@@ -61,13 +61,17 @@ type Store struct {
 	// ingestMu keeps the exact-sample upsert and its hot-rollup update atomic
 	// with respect to other writers.
 	ingestMu sync.Mutex
+	// rollupViewMu keeps persisted and hot rollups as one queryable view while
+	// closed buckets move into the database or replace an earlier summary.
+	rollupViewMu sync.RWMutex
 	// rawMu protects the compact exact-sample window used by Store.Query.
 	rawMu sync.RWMutex
 	raw   map[rawSeriesKey]*rawSeries
-	// hotMu protects minute summaries that may still receive an exact upsert.
-	// They feed the rollup ladder without persisting exact samples.
-	hotMu sync.RWMutex
-	hot   map[hotRollupKey]*rollupBucket
+	// hotMu protects minute summaries that may still receive an exact upsert
+	// from the ten-minute raw window. Exact samples are never persisted.
+	hotMu      sync.RWMutex
+	hot        map[hotRollupKey]*rollupBucket
+	hotReplace map[hotRollupKey]struct{}
 	// mu protects closed state.
 	//
 	// mu 保护 closed 状态。
@@ -111,8 +115,9 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 			rollups:     tableName(cfg.TablePrefix, "rollups"),
 			watermarks:  tableName(cfg.TablePrefix, "compaction_watermarks"),
 		},
-		raw: make(map[rawSeriesKey]*rawSeries),
-		hot: make(map[hotRollupKey]*rollupBucket),
+		raw:        make(map[rawSeriesKey]*rawSeries),
+		hot:        make(map[hotRollupKey]*rollupBucket),
+		hotReplace: make(map[hotRollupKey]struct{}),
 	}
 
 	if cfg.DB != nil {
@@ -933,7 +938,7 @@ type querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-// Query loads exact raw samples from the configured short retention window.
+// Query loads exact raw samples from the fixed ten-minute memory window.
 func (s *Store) Query(ctx context.Context, query Query) ([]Point, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
@@ -963,6 +968,8 @@ func (s *Store) EntityIDs(ctx context.Context, query Query) ([]string, error) {
 	for _, entityID := range rawIDs {
 		seen[entityID] = struct{}{}
 	}
+	s.rollupViewMu.RLock()
+	defer s.rollupViewMu.RUnlock()
 
 	args := []any{query.MetricName, bucketStartMillis(query.Start.UnixMilli(), time.Minute.Milliseconds()), query.End.UnixMilli()}
 	parts := []string{
@@ -1126,6 +1133,8 @@ func (s *Store) Stats(ctx context.Context, query Query) (Stats, error) {
 		return Stats{}, err
 	}
 	query = query.normalized()
+	s.rollupViewMu.RLock()
+	defer s.rollupViewMu.RUnlock()
 	rows, err := s.scanRollupRowsBetween(ctx, query.MetricName, query.EntityID, query.Tags,
 		time.Minute.Milliseconds(), bucketStartMillis(query.Start.UnixMilli(), time.Minute.Milliseconds()), query.End.UnixMilli(), true)
 	if err != nil {

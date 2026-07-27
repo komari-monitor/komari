@@ -30,8 +30,9 @@ var ErrCompactInProgress = errors.New("metric store compact already in progress"
 
 const (
 	// DefaultRollupRawRetention documents the fixed in-memory exact-sample
-	// window. Older history is served by the compact rollup ladder.
-	DefaultRollupRawRetention = time.Minute
+	// window. Samples older than one minute are losslessly byte-encoded;
+	// older history is served by the persisted rollup ladder.
+	DefaultRollupRawRetention = 10 * time.Minute
 	DefaultRollupFinestTier   = time.Minute
 	defaultRollupPointLimit   = 600
 	checkpointRetryTimeout    = 250 * time.Millisecond
@@ -440,6 +441,27 @@ func Reload(ctx context.Context) error {
 	cfg, err := config.GetManyAs[MetricStoreConfig]()
 	if err != nil {
 		return fmt.Errorf("failed to load metric store config: %w", err)
+	}
+
+	// Do not let the normal hot-reload path run AutoMigrate against an old
+	// point-backed schema. That schema must go through the authenticated
+	// structure-upgrade guide first; otherwise index creation can reference
+	// columns such as resolution_id that do not exist yet.
+	checkCfg, err := buildMetricConfig(cfg, false)
+	if err != nil {
+		return err
+	}
+	checkStore, err := metric.Open(ctx, checkCfg)
+	if err != nil {
+		return err
+	}
+	needsRestructure, err := checkStore.NeedsRestructure(ctx)
+	_ = checkStore.Close()
+	if err != nil {
+		return fmt.Errorf("inspect metric store structure: %w", err)
+	}
+	if needsRestructure {
+		return fmt.Errorf("metric store structure upgrade is required before hot reload")
 	}
 
 	// 用新配置打开并建表（内部已 Ping 校验连接）。

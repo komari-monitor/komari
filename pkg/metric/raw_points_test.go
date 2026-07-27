@@ -2,7 +2,9 @@ package metric
 
 import (
 	"context"
+	"math"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -90,7 +92,7 @@ func TestConcurrentRawUpsertKeepsOneRollupObservation(t *testing.T) {
 	}
 }
 
-func TestRawMemoryExpiresAfterOneMinute(t *testing.T) {
+func TestRawMemoryKeepsTenMinutes(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
 	if err := s.CreateMetric(ctx, Definition{Name: "raw-expiry", Type: TypeGauge, RetentionDays: 1}); err != nil {
@@ -98,7 +100,8 @@ func TestRawMemoryExpiresAfterOneMinute(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	if err := s.WriteBatch(ctx, []Point{
-		{MetricName: "raw-expiry", EntityID: "n1", Timestamp: now.Add(-time.Minute - time.Millisecond), Value: 1},
+		{MetricName: "raw-expiry", EntityID: "n1", Timestamp: now.Add(-11 * time.Minute), Value: 0},
+		{MetricName: "raw-expiry", EntityID: "n1", Timestamp: now.Add(-9 * time.Minute), Value: 1},
 		{MetricName: "raw-expiry", EntityID: "n1", Timestamp: now.Add(-30 * time.Second), Value: 2},
 	}); err != nil {
 		t.Fatal(err)
@@ -107,8 +110,141 @@ func TestRawMemoryExpiresAfterOneMinute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(points) != 1 || points[0].Value != 2 {
-		t.Fatalf("exact raw window = %#v", points)
+	if len(points) != 2 || points[0].Value != 1 || points[1].Value != 2 {
+		t.Fatalf("ten-minute raw window = %#v", points)
+	}
+}
+
+func TestCompressedRawSamplesRoundTripExactly(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	samples := []rawSample{
+		{timestamp: now.Add(-9*time.Minute - 7*time.Millisecond).UnixMilli(), value: math.Pi, labelID: 1},
+		{timestamp: now.Add(-5*time.Minute - 3*time.Millisecond).UnixMilli(), value: math.Copysign(0, -1), labelID: 0},
+		{timestamp: now.Add(-time.Minute - time.Millisecond).UnixMilli(), value: math.SmallestNonzeroFloat64, labelID: 2},
+	}
+	var compressed compressedRawSamples
+	compressed.append(samples)
+	decoded := compressed.decode()
+	if len(decoded) != len(samples) {
+		t.Fatalf("decoded sample count = %d, want %d", len(decoded), len(samples))
+	}
+	for i := range samples {
+		if decoded[i].timestamp != samples[i].timestamp || decoded[i].labelID != samples[i].labelID || math.Float64bits(decoded[i].value) != math.Float64bits(samples[i].value) {
+			t.Fatalf("decoded sample %d = %#v, want %#v", i, decoded[i], samples[i])
+		}
+	}
+}
+
+func TestCompressedRawQueryAndLateReplacementPreserveSamples(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	if err := s.CreateMetric(ctx, Definition{Name: "raw-compressed", Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	older := now.Add(-5 * time.Minute)
+	recent := now.Add(-30 * time.Second)
+	for _, batch := range [][]Point{
+		{
+			{MetricName: "raw-compressed", EntityID: "n1", Timestamp: older, Value: 1.25, Labels: map[string]string{"source": "old"}},
+			{MetricName: "raw-compressed", EntityID: "n1", Timestamp: recent, Value: 2.5, Labels: map[string]string{"source": "recent"}},
+			{MetricName: "raw-compressed", EntityID: "n2", Timestamp: older.Add(time.Second), Value: 3.75},
+		},
+		{{MetricName: "raw-compressed", EntityID: "n1", Timestamp: older, Value: math.Pi, Labels: map[string]string{"source": "replacement"}}},
+	} {
+		prepared, err := prepareMetricPoints(batch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebuild := s.writeRawPointsAt(prepared, now)
+		if err := s.writePreparedHotRollups(ctx, prepared, now, rebuild); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	points, err := s.Query(ctx, Query{MetricName: "raw-compressed", EntityID: "n1", Start: now.Add(-10 * time.Minute), End: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 2 || math.Float64bits(points[0].Value) != math.Float64bits(math.Pi) || points[0].Labels["source"] != "replacement" || points[1].Value != 2.5 {
+		t.Fatalf("compressed and direct query = %#v", points)
+	}
+	series, err := s.Series(ctx, AggregateQuery{
+		Query:       Query{MetricName: "raw-compressed", EntityID: "n1", Start: older.Truncate(time.Minute), End: older.Add(time.Minute)},
+		Aggregation: AggCount, Interval: time.Minute, PreserveSeries: true,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(series) != 1 || series[0].Count != 1 || series[0].Value != 1 {
+		t.Fatalf("late compressed replacement counted twice: %#v", series)
+	}
+	latest, err := s.Latest(ctx, "raw-compressed", "n2", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(latest) != 1 || latest[0].Value != 3.75 {
+		t.Fatalf("latest compressed sample = %#v", latest)
+	}
+	ids, err := s.EntityIDs(ctx, Query{MetricName: "raw-compressed", Start: now.Add(-10 * time.Minute), End: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != "n1" || ids[1] != "n2" {
+		t.Fatalf("compressed entity ids = %#v", ids)
+	}
+	if deleted, err := s.DeleteSeries(ctx, Query{MetricName: "raw-compressed", EntityID: "n2"}); err != nil || deleted == 0 {
+		t.Fatalf("delete compressed series = %d, %v", deleted, err)
+	}
+	deletedPoints, err := s.Query(ctx, Query{MetricName: "raw-compressed", EntityID: "n2", Start: now.Add(-10 * time.Minute), End: now})
+	if err != nil || len(deletedPoints) != 0 {
+		t.Fatalf("deleted compressed points = %#v, %v", deletedPoints, err)
+	}
+}
+
+func TestRawReplacementDropsUnreferencedLabels(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	if err := s.CreateMetric(ctx, Definition{Name: "raw-label-replace", Type: TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	points := make([]Point, 100)
+	for i := range points {
+		points[i] = Point{
+			MetricName: "raw-label-replace",
+			EntityID:   "n1",
+			Timestamp:  at,
+			Value:      float64(i),
+			Labels:     map[string]string{"attempt": strconv.Itoa(i)},
+		}
+	}
+	if err := s.WriteBatch(ctx, points); err != nil {
+		t.Fatal(err)
+	}
+	tagsHash, _, err := tagsFingerprint(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.rawMu.RLock()
+	series := s.raw[rawSeriesKey{metricName: "raw-label-replace", entityID: "n1", tagsHash: tagsHash}]
+	if series == nil {
+		s.rawMu.RUnlock()
+		t.Fatal("raw series was not retained")
+	}
+	labelCount := len(series.labelsJSON)
+	s.rawMu.RUnlock()
+	if labelCount != 1 {
+		t.Fatalf("retained %d labels for one replaced sample, want 1", labelCount)
+	}
+
+	got, err := s.Query(ctx, Query{MetricName: "raw-label-replace", EntityID: "n1", Start: at.Add(-time.Minute), End: at.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Value != 99 || got[0].Labels["attempt"] != "99" {
+		t.Fatalf("replacement result = %#v", got)
 	}
 }
 

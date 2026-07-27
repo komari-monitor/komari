@@ -59,7 +59,7 @@ type Config struct {
 	SQLite SQLiteOptions
 
 	// RollupPolicy configures downsampling tiers and tiered retention. Exact raw
-	// samples use the Store's fixed one-minute in-memory window.
+	// samples use the Store's fixed ten-minute in-memory window.
 	//
 	// RollupPolicy 配置降采样层级和分层保留时间。
 	RollupPolicy RollupPolicy
@@ -165,7 +165,7 @@ func DefaultConfig(driver Driver, dsn string) Config {
 			JournalSizeLimitBytes: 1024 * 1024,
 		},
 		RollupPolicy: RollupPolicy{
-			RawRetention: time.Minute,
+			RawRetention: 10 * time.Minute,
 			Tiers: []RollupTier{
 				{Interval: time.Minute, Retention: 600 * time.Minute},
 				{Interval: 5 * time.Minute, Retention: 600 * 5 * time.Minute},

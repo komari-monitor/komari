@@ -128,6 +128,9 @@ func (c *Controller) Register(r *gin.Engine) {
 		authorized := g.Group("", api.RequireRole(api.RoleAdmin))
 		authorized.GET("/status", c.getStatusFor(route.compatibility))
 		authorized.POST("/start", c.start)
+		if c.mode == ModeMetricStructure {
+			authorized.POST("/discard", c.discard)
+		}
 	}
 }
 
@@ -193,6 +196,24 @@ func (c *Controller) start(ctx *gin.Context) {
 	c.startLegacy(ctx)
 }
 
+func (c *Controller) discard(ctx *gin.Context) {
+	if c.mode != ModeMetricStructure {
+		api.RespondError(ctx, http.StatusNotFound, "history discard is unavailable for this migration")
+		return
+	}
+	c.mu.Lock()
+	if c.operationActiveLocked() || c.status.State == "completed" {
+		c.mu.Unlock()
+		api.RespondError(ctx, http.StatusConflict, "database migration is already running or completed")
+		return
+	}
+	c.status = Status{Mode: c.mode, State: "discarding", Phase: "discarding"}
+	c.mu.Unlock()
+
+	go c.runDiscard()
+	api.RespondSuccessMessage(ctx, "historical metric data deletion started", gin.H{})
+}
+
 func (c *Controller) startStructure(ctx *gin.Context) {
 	c.mu.Lock()
 	if c.operationActiveLocked() || c.status.State == "completed" {
@@ -255,7 +276,7 @@ func (c *Controller) startLegacy(ctx *gin.Context) {
 
 func (c *Controller) operationActiveLocked() bool {
 	switch c.status.State {
-	case "cleaning", "migrating", "copying", "reclaiming":
+	case "cleaning", "discarding", "migrating", "copying", "reclaiming":
 		return true
 	default:
 		return false
@@ -436,6 +457,10 @@ func (c *Controller) runStructure() {
 		c.status.Progress = structureProgressPercent(progress)
 		if progress.Phase == "reclaiming" {
 			c.status.State = "reclaiming"
+		} else if progress.Phase == "discarding" {
+			c.status.State = "discarding"
+		} else if c.status.State == "reclaiming" || c.status.State == "discarding" {
+			c.status.State = "copying"
 		}
 		c.mu.Unlock()
 	})
@@ -444,6 +469,48 @@ func (c *Controller) runStructure() {
 		return
 	}
 
+	saved := result.BeforeBytes - result.AfterBytes
+	if saved < 0 {
+		saved = 0
+	}
+	percent := 0.0
+	if result.BeforeBytes > 0 {
+		percent = float64(saved) / float64(result.BeforeBytes) * 100
+	}
+	c.mu.Lock()
+	c.status = Status{
+		Mode: c.mode, State: "completed", Phase: "completed", Progress: 100,
+		RowsDone: result.RowsCopied, RowsTotal: result.RowsCopied,
+		MetricsDone: result.Metrics, MetricsTotal: result.Metrics,
+		BeforeBytes: result.BeforeBytes, AfterBytes: result.AfterBytes,
+		SavedBytes: saved, SavedPercent: percent,
+	}
+	c.mu.Unlock()
+	c.completeLater()
+}
+
+func (c *Controller) runDiscard() {
+	result, err := metricstore.DiscardConfiguredStoreHistory(context.Background(), func(progress metricstore.RestructureProgress) {
+		c.mu.Lock()
+		c.status.Phase = progress.Phase
+		c.status.CurrentMetric = progress.CurrentMetric
+		c.status.RowsDone = progress.RowsDone
+		c.status.RowsTotal = progress.RowsTotal
+		c.status.MetricsDone = progress.MetricsDone
+		c.status.MetricsTotal = progress.MetricsTotal
+		switch progress.Phase {
+		case "reclaiming":
+			c.status.State = "reclaiming"
+		case "discarding":
+			c.status.State = "discarding"
+		}
+		c.status.Progress = structureProgressPercent(progress)
+		c.mu.Unlock()
+	})
+	if err != nil {
+		c.fail(metricstore.RedactConnectionError(err.Error(), ""), "discarding")
+		return
+	}
 	saved := result.BeforeBytes - result.AfterBytes
 	if saved < 0 {
 		saved = 0
@@ -490,6 +557,9 @@ func (c *Controller) failTarget(err error, dsn, phase string) {
 func structureProgressPercent(progress metricstore.RestructureProgress) float64 {
 	if progress.Phase == "reclaiming" {
 		return 95
+	}
+	if progress.Phase == "discarding" && progress.RowsTotal == 0 {
+		return 1
 	}
 	if progress.RowsTotal <= 0 {
 		return 0

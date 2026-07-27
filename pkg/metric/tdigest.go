@@ -112,6 +112,15 @@ func NewTDigest(compression float64) *TDigest {
 	}
 }
 
+func (t *TDigest) clone() *TDigest {
+	if t == nil {
+		return nil
+	}
+	cloned := *t
+	cloned.centroids = append([]centroid(nil), t.centroids...)
+	return &cloned
+}
+
 // Add folds a single observation with weight w (w must be > 0) into the digest.
 //
 // Add 将一个观测值及其权重合入摘要；权重必须大于 0。

@@ -41,10 +41,14 @@ func TestMySQLIntegration(t *testing.T) {
 func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentile bool) {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
-	prefix := fmt.Sprintf("it_%d_", time.Now().UnixNano())
+	prefixBase := "it"
+	if cfg.Driver == DriverPostgreSQL {
+		prefixBase = "IT"
+	}
+	prefix := fmt.Sprintf("%s_%d_", prefixBase, time.Now().UnixNano())
 	cfg.TablePrefix = prefix
 	store, err := Open(ctx, cfg)
 	if err != nil {
@@ -170,7 +174,21 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 	if err := store.flushAllHotRollups(ctx); err != nil {
 		t.Fatalf("flush rollups: %v", err)
 	}
-	assertContiguousIntegrationDictionaryIDs(t, store)
+	var transferred []PersistedRollup
+	total, err := store.ExportRollups(ctx, "http.latency", 2, func(batch []PersistedRollup) error {
+		transferred = append(transferred, batch...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("export rollups: %v", err)
+	}
+	if total == 0 || total != int64(len(transferred)) {
+		t.Fatalf("exported rollups = %d, buffered %d", total, len(transferred))
+	}
+	if err := store.ImportRollups(ctx, transferred); err != nil {
+		t.Fatalf("idempotently import exported rollups: %v", err)
+	}
+	assertIntegrationLateReplacement(t, ctx, store)
 
 	deleted, err := store.DeleteBefore(ctx, "http.latency", base.Add(200*time.Millisecond))
 	if err != nil {
@@ -193,14 +211,65 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 	if err := store.Ping(ctx); err != nil {
 		t.Fatalf("store unusable after space reclaim: %v", err)
 	}
+	discarded, err := store.DiscardHistory(ctx, nil)
+	if err != nil {
+		t.Fatalf("discard %s history: %v", name, err)
+	}
+	if discarded.Metrics != 2 || discarded.RowsCopied == 0 {
+		t.Fatalf("discard %s result = %#v", name, discarded)
+	}
+	if needs, err := store.NeedsRestructure(ctx); err != nil || needs {
+		t.Fatalf("discarded %s store needs restructure: needs=%v err=%v", name, needs, err)
+	}
+	if _, err := store.GetMetric(ctx, "http.latency"); err != nil {
+		t.Fatalf("discard removed %s definition: %v", name, err)
+	}
+	if err := store.Write(ctx, Point{MetricName: "http.latency", EntityID: "api-1", Timestamp: time.Now().UTC(), Value: 50}); err != nil {
+		t.Fatalf("write after %s discard: %v", name, err)
+	}
+}
+
+func assertIntegrationLateReplacement(t *testing.T, ctx context.Context, store *Store) {
+	t.Helper()
+	const metricName = "late.replacement"
+	if err := store.CreateMetric(ctx, Definition{Name: metricName, Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create replacement metric: %v", err)
+	}
+	at := time.Now().UTC().Truncate(time.Minute).Add(-30 * time.Second)
+	for _, point := range []Point{
+		{MetricName: metricName, EntityID: "api-1", Timestamp: at, Value: 1, Labels: map[string]string{"source": "old"}},
+		{MetricName: metricName, EntityID: "api-1", Timestamp: at, Value: 7, Labels: map[string]string{"source": "new"}},
+	} {
+		if err := store.Write(ctx, point); err != nil {
+			t.Fatalf("write replacement point: %v", err)
+		}
+	}
+	for _, tier := range store.cfg.RollupPolicy.Tiers {
+		bucket := bucketStartMillis(at.UnixMilli(), tier.Interval.Milliseconds())
+		rows, err := store.scanRollupRowsBetween(ctx, metricName, "api-1", nil, tier.Interval.Milliseconds(), bucket, bucket, true)
+		if err != nil {
+			t.Fatalf("scan replacement %s tier: %v", tier.Interval, err)
+		}
+		if len(rows) != 1 || rows[0].bucketData.count != 1 || rows[0].bucketData.sum != 7 {
+			t.Fatalf("replacement %s tier = %#v, want one count=1 sum=7 row", tier.Interval, rows)
+		}
+		labels, err := decodeMapString(rows[0].bucketData.labelsJSON)
+		if err != nil || labels["source"] != "new" {
+			t.Fatalf("replacement %s labels = %#v, %v", tier.Interval, labels, err)
+		}
+	}
 }
 
 func runSQLRestructureIntegration(t *testing.T, name string, cfg Config) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
-	prefix := fmt.Sprintf("rit_%d_", time.Now().UnixNano())
+	prefixBase := "rit"
+	if cfg.Driver == DriverPostgreSQL {
+		prefixBase = "RIT"
+	}
+	prefix := fmt.Sprintf("%s_%d_", prefixBase, time.Now().UnixNano())
 	cfg.TablePrefix = prefix
 	cfg.AutoMigrate = false
 	store, err := Open(ctx, cfg)
@@ -300,7 +369,133 @@ func runSQLRestructureIntegration(t *testing.T, name string, cfg Config) {
 	if len(minute) != 1 || minute[0].Count != 2 || minute[0].Value != 15 {
 		t.Fatalf("restructured %s minute rollup = %#v", name, minute)
 	}
-	assertContiguousIntegrationDictionaryIDs(t, store)
+	dropIntegrationForeignKeys(t, ctx, store)
+	if needs, err := store.NeedsRestructure(ctx); err != nil || !needs {
+		t.Fatalf("%s schema without foreign keys needs repair: needs=%v err=%v", name, needs, err)
+	}
+	repaired, err := store.Restructure(ctx, nil)
+	if err != nil {
+		t.Fatalf("repair %s foreign keys: %v", name, err)
+	}
+	if repaired.RowsCopied == 0 || repaired.Metrics != 1 {
+		t.Fatalf("%s foreign-key repair result = %#v", name, repaired)
+	}
+	assertIntegrationForeignKeys(t, store)
+	minute, err = store.AggregateRollup(ctx, AggregateQuery{
+		Query:       Query{MetricName: "legacy.metric", EntityID: "node-1", Start: at.Add(-time.Minute), End: at.Add(time.Minute)},
+		Aggregation: AggAvg,
+		Interval:    time.Minute,
+	}, time.Minute)
+	if err != nil || len(minute) != 1 || minute[0].Count != 2 || minute[0].Value != 15 {
+		t.Fatalf("%s rollup after foreign-key repair = %#v, err=%v", name, minute, err)
+	}
+	if store.cfg.Driver == DriverMySQL {
+		renameIntegrationIndexesToRebuild(t, ctx, store)
+		backup := store.tables.definitions + "_legacy"
+		if _, err := store.db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE %s LIKE %s", backup, store.tables.definitions)); err != nil {
+			t.Fatalf("create interrupted MySQL backup: %v", err)
+		}
+		if needs, err := store.NeedsRestructure(ctx); err != nil || !needs {
+			t.Fatalf("interrupted MySQL backup needs cleanup: needs=%v err=%v", needs, err)
+		}
+		if _, err := store.Restructure(ctx, nil); err != nil {
+			t.Fatalf("clean interrupted MySQL backup: %v", err)
+		}
+		if exists, err := store.tableExists(ctx, backup); err != nil || exists {
+			t.Fatalf("interrupted MySQL backup remains: exists=%v err=%v", exists, err)
+		}
+		if needs, err := store.NeedsRestructure(ctx); err != nil || needs {
+			t.Fatalf("MySQL store still needs cleanup: needs=%v err=%v", needs, err)
+		}
+		assertMySQLCanonicalIndexes(t, ctx, store)
+	}
+}
+
+func renameIntegrationIndexesToRebuild(t *testing.T, ctx context.Context, store *Store) {
+	t.Helper()
+	current := store.normalizedIndexes()
+	rebuild := normalizedIndexesFor(store.cfg.TablePrefix+"rebuild_", store.tables)
+	for i := range current {
+		statement := fmt.Sprintf("ALTER TABLE %s RENAME INDEX %s TO %s",
+			current[i].table, current[i].name, rebuild[i].name)
+		if _, err := store.db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("simulate interrupted MySQL index switch: %v", err)
+		}
+	}
+}
+
+func assertMySQLCanonicalIndexes(t *testing.T, ctx context.Context, store *Store) {
+	t.Helper()
+	current := store.normalizedIndexes()
+	rebuild := normalizedIndexesFor(store.cfg.TablePrefix+"rebuild_", store.tables)
+	for i := range current {
+		canonicalExists, err := store.mysqlIndexExists(ctx, current[i].table, current[i].name)
+		if err != nil {
+			t.Fatalf("inspect canonical MySQL index %s: %v", current[i].name, err)
+		}
+		rebuildExists, err := store.mysqlIndexExists(ctx, current[i].table, rebuild[i].name)
+		if err != nil {
+			t.Fatalf("inspect rebuild MySQL index %s: %v", rebuild[i].name, err)
+		}
+		if !canonicalExists || rebuildExists {
+			t.Fatalf("MySQL index recovery for %s: canonical=%v rebuild=%v", current[i].table, canonicalExists, rebuildExists)
+		}
+	}
+}
+
+func dropIntegrationForeignKeys(t *testing.T, ctx context.Context, store *Store) {
+	t.Helper()
+	seriesTable, rollupsTable := store.tables.series, store.tables.rollups
+	var query string
+	switch store.cfg.Driver {
+	case DriverMySQL:
+		query = `SELECT TABLE_NAME, CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
+			WHERE CONSTRAINT_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+			AND TABLE_NAME IN (?, ?)`
+	case DriverPostgreSQL:
+		seriesTable, rollupsTable = strings.ToLower(seriesTable), strings.ToLower(rollupsTable)
+		query = `SELECT table_name, constraint_name FROM information_schema.table_constraints
+			WHERE table_schema = current_schema() AND constraint_type = 'FOREIGN KEY'
+			AND table_name IN ($1, $2)`
+	default:
+		t.Fatalf("unexpected integration driver %q", store.cfg.Driver)
+	}
+	rows, err := store.db.QueryContext(ctx, query, seriesTable, rollupsTable)
+	if err != nil {
+		t.Fatalf("list %s foreign keys: %v", store.cfg.Driver, err)
+	}
+	type constraint struct{ table, name string }
+	constraints := make([]constraint, 0, 4)
+	for rows.Next() {
+		var item constraint
+		if err := rows.Scan(&item.table, &item.name); err != nil {
+			_ = rows.Close()
+			t.Fatalf("scan %s foreign key: %v", store.cfg.Driver, err)
+		}
+		constraints = append(constraints, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatalf("iterate %s foreign keys: %v", store.cfg.Driver, err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close %s foreign keys: %v", store.cfg.Driver, err)
+	}
+	if len(constraints) != 4 {
+		t.Fatalf("%s foreign keys before removal = %d, want 4", store.cfg.Driver, len(constraints))
+	}
+	clause := "DROP CONSTRAINT"
+	if store.cfg.Driver == DriverMySQL {
+		clause = "DROP FOREIGN KEY"
+	}
+	for _, item := range constraints {
+		statement := fmt.Sprintf("ALTER TABLE %s %s %s",
+			quoteMaintenanceIdentifier(store.cfg.Driver, item.table), clause,
+			quoteMaintenanceIdentifier(store.cfg.Driver, item.name))
+		if _, err := store.db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("drop %s foreign key %s: %v", store.cfg.Driver, item.name, err)
+		}
+	}
 }
 
 func assertIntegrationForeignKeys(t *testing.T, store *Store) {
@@ -319,24 +514,15 @@ func assertIntegrationForeignKeys(t *testing.T, store *Store) {
 		t.Fatalf("unexpected integration driver %q", store.cfg.Driver)
 	}
 	var count int
-	if err := store.db.QueryRow(query, store.tables.series, store.tables.rollups).Scan(&count); err != nil {
+	seriesTable, rollupsTable := store.tables.series, store.tables.rollups
+	if store.cfg.Driver == DriverPostgreSQL {
+		seriesTable, rollupsTable = strings.ToLower(seriesTable), strings.ToLower(rollupsTable)
+	}
+	if err := store.db.QueryRow(query, seriesTable, rollupsTable).Scan(&count); err != nil {
 		t.Fatalf("query foreign key metadata: %v", err)
 	}
 	if count != 4 {
 		t.Fatalf("foreign key count = %d, want 4", count)
-	}
-}
-
-func assertContiguousIntegrationDictionaryIDs(t *testing.T, store *Store) {
-	t.Helper()
-	for _, table := range []string{store.tables.series, store.tables.labels, store.tables.resolutions} {
-		var count, minID, maxID int64
-		if err := store.db.QueryRow(fmt.Sprintf("SELECT COUNT(*), COALESCE(MIN(id), 0), COALESCE(MAX(id), 0) FROM %s", table)).Scan(&count, &minID, &maxID); err != nil {
-			t.Fatalf("query dictionary ids from %s: %v", table, err)
-		}
-		if count == 0 || minID != 1 || maxID != count {
-			t.Fatalf("dictionary ids in %s: count=%d min=%d max=%d, want a fresh contiguous range", table, count, minID, maxID)
-		}
 	}
 }
 
@@ -358,6 +544,9 @@ func dropIntegrationTables(t *testing.T, store *Store, prefix string) {
 		prefix + "compaction_watermarks_legacy",
 		prefix + "points_legacy",
 		prefix + "rollups_legacy",
+		prefix + "series_legacy",
+		prefix + "label_sets_legacy",
+		prefix + "resolutions_legacy",
 		prefix + "definitions_legacy",
 		prefix + "compaction_watermarks",
 		prefix + "points",

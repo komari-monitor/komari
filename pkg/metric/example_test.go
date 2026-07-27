@@ -20,7 +20,7 @@ func Example_rollupTags() {
 	store, err := metric.Open(ctx, metric.SQLite(
 		"file:metric-example?mode=memory&cache=shared",
 		metric.WithRollupPolicy(metric.RollupPolicy{
-			RawRetention: 2 * time.Minute,
+			RawRetention: 10 * time.Minute,
 			Tiers: []metric.RollupTier{
 				{Interval: time.Minute, Retention: 24 * time.Hour},
 			},
@@ -63,8 +63,8 @@ func Example_rollupTags() {
 		log.Fatal(err)
 	}
 
-	// Compact builds one rollup series per tag set. Raw points older than the
-	// policy's RawRetention are deleted after their rollups are materialized.
+	// Compact builds one rollup series per tag set. Exact raw points stay only
+	// in the Store's fixed ten-minute memory window.
 	now := base.Add(time.Hour)
 	if _, err := store.Compact(ctx, now); err != nil {
 		log.Fatal(err)
@@ -104,7 +104,7 @@ func Example_agentFleetLifecycle() {
 	store, err := metric.Open(ctx, metric.SQLite(
 		"file:metric-agent-fleet?mode=memory&cache=shared",
 		metric.WithRollupPolicy(metric.RollupPolicy{
-			RawRetention: 2 * time.Minute,
+			RawRetention: 10 * time.Minute,
 			Tiers: []metric.RollupTier{
 				{Interval: time.Minute, Retention: 24 * time.Hour},
 				{Interval: 5 * time.Minute, Retention: 30 * 24 * time.Hour},

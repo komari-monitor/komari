@@ -368,7 +368,7 @@ func writeReportBatch(ctx context.Context, reports []v1.Report) ([]v1.Report, er
 		}
 
 		if !values.timestamp.IsZero() && !report.UpdatedAt.After(values.timestamp) {
-			report.UpdatedAt = values.timestamp.Add(time.Nanosecond)
+			report.UpdatedAt = values.timestamp.Add(time.Millisecond)
 		}
 		trafficUp := int64(0)
 		if values.hasUp {

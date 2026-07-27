@@ -153,7 +153,7 @@ func TestReportBatcherFlushesQueuedReports(t *testing.T) {
 		}
 	})
 
-	base := time.Now().UTC().Truncate(time.Second)
+	base := time.Now().UTC().Truncate(time.Minute).Add(10 * time.Second)
 	first := v1.Report{
 		UUID:      "batched-node",
 		UpdatedAt: base,
@@ -273,7 +273,7 @@ func TestReportBatchKeepsEverySample(t *testing.T) {
 	base := time.Now().UTC().Truncate(time.Second)
 	pending := []v1.Report{
 		{UUID: "node-a", UpdatedAt: base, CPU: v1.CPUReport{Usage: 10}, Network: v1.NetworkReport{TotalUp: 100}},
-		{UUID: "node-a", UpdatedAt: base.Add(time.Second), CPU: v1.CPUReport{Usage: 20}, Network: v1.NetworkReport{TotalUp: 150}},
+		{UUID: "node-a", UpdatedAt: base, CPU: v1.CPUReport{Usage: 20}, Network: v1.NetworkReport{TotalUp: 150}},
 		{UUID: "node-b", UpdatedAt: base, CPU: v1.CPUReport{Usage: 30}, Network: v1.NetworkReport{TotalUp: 200}},
 		{UUID: "node-b", UpdatedAt: base.Add(time.Second), CPU: v1.CPUReport{Usage: 40}, Network: v1.NetworkReport{TotalUp: 260}},
 	}

@@ -329,7 +329,7 @@ func TestSummarizeRetentionDefinitionsRequiresEveryMetricToBePositive(t *testing
 	}
 }
 
-func TestCompactCleansExpiredRawPointsWhenDownsamplingDisabled(t *testing.T) {
+func TestCompactCleansPointsOutsideFixedRawWindow(t *testing.T) {
 	ctx := context.Background()
 	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1), metric.WithRollupPolicy(metric.RollupPolicy{})))
 	if err != nil {
@@ -345,7 +345,7 @@ func TestCompactCleansExpiredRawPointsWhenDownsamplingDisabled(t *testing.T) {
 
 	now := time.Now().UTC()
 	if err := s.WriteBatch(ctx, []metric.Point{
-		{MetricName: "raw.metric", EntityID: "node", Timestamp: now.Add(-2 * time.Minute), Value: 1},
+		{MetricName: "raw.metric", EntityID: "node", Timestamp: now.Add(-11 * time.Minute), Value: 1},
 		{MetricName: "raw.metric", EntityID: "node", Timestamp: now.Add(-30 * time.Second), Value: 2},
 	}); err != nil {
 		t.Fatalf("write points: %v", err)

@@ -17,6 +17,8 @@ func (s *Store) AggregateRollup(ctx context.Context, query AggregateQuery, resol
 	if resolution <= 0 {
 		return nil, fmt.Errorf("%w: rollup resolution must be positive", ErrInvalidArgument)
 	}
+	s.rollupViewMu.RLock()
+	defer s.rollupViewMu.RUnlock()
 	q := query.Query.normalized()
 	needDigest := isPercentile(query.Aggregation)
 	rows, err := s.scanRollupRowsBetween(ctx, q.MetricName, q.EntityID, q.Tags, resolution.Milliseconds(), bucketStartMillis(q.Start.UnixMilli(), resolution.Milliseconds()), q.End.UnixMilli(), needDigest)

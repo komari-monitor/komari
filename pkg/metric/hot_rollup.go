@@ -17,13 +17,18 @@ type hotRollupKey struct {
 }
 
 type hotRollup struct {
-	key    hotRollupKey
-	bucket *rollupBucket
+	key     hotRollupKey
+	bucket  *rollupBucket
+	replace bool
 }
 
 func (s *Store) writePreparedHotRollups(ctx context.Context, prepared []preparedMetricPoint, now time.Time, rebuild map[hotRollupKey]struct{}) error {
 	minuteMillis := time.Minute.Milliseconds()
 	compression := s.cfg.RollupPolicy.compression()
+	if len(rebuild) > 0 {
+		s.rollupViewMu.Lock()
+		defer s.rollupViewMu.Unlock()
+	}
 	s.hotMu.Lock()
 	for _, point := range prepared {
 		key := hotRollupKey{
@@ -46,7 +51,12 @@ func (s *Store) writePreparedHotRollups(ctx context.Context, prepared []prepared
 		s.rebuildHotRollupsLocked(rebuild, compression)
 	}
 	s.hotMu.Unlock()
-	_, err := s.flushClosedHotRollups(ctx, now)
+	var err error
+	if len(rebuild) > 0 {
+		_, err = s.flushClosedHotRollupsUnderView(ctx, now)
+	} else {
+		_, err = s.flushClosedHotRollups(ctx, now)
+	}
 	return err
 }
 
@@ -56,33 +66,35 @@ func (s *Store) rebuildHotRollupsLocked(keys map[hotRollupKey]struct{}, compress
 	minuteMillis := time.Minute.Milliseconds()
 	for key := range keys {
 		series := s.raw[rawSeriesKey{metricName: key.metricName, entityID: key.entityID, tagsHash: key.tagsHash}]
-		if series == nil {
-			delete(s.hot, key)
-			continue
-		}
 		bucket := newRollupBucket(compression)
-		bucket.tagsHash, bucket.tagsJSON = key.tagsHash, series.tagsJSON
+		bucket.tagsHash = key.tagsHash
 		bucket.labelsHash = key.labelsHash
-		for _, sample := range series.samples {
-			if bucketStartMillis(sample.timestamp, minuteMillis) != key.bucket || series.labelHashes[sample.labelID] != key.labelsHash {
-				continue
+		if series != nil {
+			bucket.tagsJSON = series.tagsJSON
+			if labelID, ok := series.labelIDs[key.labelsHash]; ok {
+				bucket.labelsJSON = series.labelsJSON[labelID]
 			}
-			bucket.labelsJSON = series.labelsJSON[sample.labelID]
-			bucket.addPoint(sample.value, sample.timestamp)
-		}
-		if bucket.count == 0 {
-			delete(s.hot, key)
-			continue
+			for _, sample := range series.allSamples() {
+				if bucketStartMillis(sample.timestamp, minuteMillis) != key.bucket || series.labelHashes[sample.labelID] != key.labelsHash {
+					continue
+				}
+				bucket.labelsJSON = series.labelsJSON[sample.labelID]
+				bucket.addPoint(sample.value, sample.timestamp)
+			}
 		}
 		s.hot[key] = bucket
+		s.hotReplace[key] = struct{}{}
 	}
 }
 
 func (s *Store) flushClosedHotRollups(ctx context.Context, now time.Time) (int, error) {
-	// Keep a closed minute hot while any exact sample in it can still be
-	// overwritten. Persisting it at the minute boundary would make a late
-	// upsert additive because a t-digest cannot remove the old observation.
-	flushBefore := bucketStartMillis(now.UTC().Add(-exactRawRetention).UnixMilli(), time.Minute.Milliseconds())
+	s.rollupViewMu.Lock()
+	defer s.rollupViewMu.Unlock()
+	return s.flushClosedHotRollupsUnderView(ctx, now)
+}
+
+func (s *Store) flushClosedHotRollupsUnderView(ctx context.Context, now time.Time) (int, error) {
+	flushBefore := bucketStartMillis(now.UTC().UnixMilli(), time.Minute.Milliseconds())
 	closed := s.takeClosedHotRollups(flushBefore)
 	if len(closed) == 0 {
 		return 0, nil
@@ -95,11 +107,15 @@ func (s *Store) flushClosedHotRollups(ctx context.Context, now time.Time) (int, 
 }
 
 func (s *Store) flushAllHotRollups(ctx context.Context) error {
+	s.rollupViewMu.Lock()
+	defer s.rollupViewMu.Unlock()
 	s.hotMu.Lock()
 	all := make([]hotRollup, 0, len(s.hot))
 	for key, bucket := range s.hot {
-		all = append(all, hotRollup{key: key, bucket: bucket})
+		_, replace := s.hotReplace[key]
+		all = append(all, hotRollup{key: key, bucket: bucket, replace: replace})
 		delete(s.hot, key)
+		delete(s.hotReplace, key)
 	}
 	s.hotMu.Unlock()
 	if len(all) == 0 {
@@ -118,8 +134,10 @@ func (s *Store) takeClosedHotRollups(currentBucket int64) []hotRollup {
 	closed := make([]hotRollup, 0)
 	for key, bucket := range s.hot {
 		if key.bucket < currentBucket {
-			closed = append(closed, hotRollup{key: key, bucket: bucket})
+			_, replace := s.hotReplace[key]
+			closed = append(closed, hotRollup{key: key, bucket: bucket, replace: replace})
 			delete(s.hot, key)
+			delete(s.hotReplace, key)
 		}
 	}
 	return closed
@@ -129,23 +147,46 @@ func (s *Store) restoreHotRollups(closed []hotRollup) {
 	s.hotMu.Lock()
 	defer s.hotMu.Unlock()
 	for _, item := range closed {
-		if current := s.hot[item.key]; current != nil {
-			current.mergeStored(item.bucket)
-		} else {
+		current, exists := s.hot[item.key]
+		_, currentReplaces := s.hotReplace[item.key]
+		if !exists {
 			s.hot[item.key] = item.bucket
+			if item.replace {
+				s.hotReplace[item.key] = struct{}{}
+			}
+			continue
 		}
+		if currentReplaces {
+			continue
+		}
+		if item.replace {
+			item.bucket.mergeStored(current)
+			s.hot[item.key] = item.bucket
+			s.hotReplace[item.key] = struct{}{}
+			continue
+		}
+		current.mergeStored(item.bucket)
 	}
 }
 
 func (s *Store) persistHotRollups(ctx context.Context, closed []hotRollup) error {
-	byMetric := make(map[string]map[rollupKey]*rollupBucket)
+	type metricBuckets struct {
+		merge   map[rollupKey]*rollupBucket
+		replace map[rollupKey]*rollupBucket
+	}
+	byMetric := make(map[string]*metricBuckets)
 	for _, item := range closed {
 		buckets := byMetric[item.key.metricName]
 		if buckets == nil {
-			buckets = make(map[rollupKey]*rollupBucket)
+			buckets = &metricBuckets{merge: make(map[rollupKey]*rollupBucket), replace: make(map[rollupKey]*rollupBucket)}
 			byMetric[item.key.metricName] = buckets
 		}
-		buckets[rollupKey{entityID: item.key.entityID, tagsHash: item.key.tagsHash, labelsHash: item.key.labelsHash, bucket: item.key.bucket}] = item.bucket
+		key := rollupKey{entityID: item.key.entityID, tagsHash: item.key.tagsHash, labelsHash: item.key.labelsHash, bucket: item.key.bucket}
+		if item.replace {
+			buckets.replace[key] = item.bucket
+		} else {
+			buckets.merge[key] = item.bucket
+		}
 	}
 	names := make([]string, 0, len(byMetric))
 	for name := range byMetric {
@@ -158,7 +199,11 @@ func (s *Store) persistHotRollups(ctx context.Context, closed []hotRollup) error
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, name := range names {
-		if _, err := s.writeTierCascadeTx(ctx, name, byMetric[name], tx); err != nil {
+		buckets := byMetric[name]
+		if _, err := s.writeTierCascadeTx(ctx, name, buckets.merge, tx); err != nil {
+			return err
+		}
+		if err := s.replaceMinuteRollupsTx(ctx, name, buckets.replace, tx); err != nil {
 			return err
 		}
 	}
@@ -172,6 +217,9 @@ func (s *Store) hotRollupRows(metricName, entityID string, tags map[string]strin
 	out := make([]storedRollup, 0)
 	for key, bucket := range s.hot {
 		if key.metricName != metricName || key.bucket+time.Minute.Milliseconds() <= startMilli || key.bucket > endMilli || (entityID != "" && key.entityID != entityID) {
+			continue
+		}
+		if bucket.count == 0 {
 			continue
 		}
 		bucketTags, err := rollupTagsFromJSON(bucket.tagsJSON)
@@ -188,11 +236,7 @@ func (s *Store) hotRollupRows(metricName, entityID string, tags map[string]strin
 		if !matched {
 			continue
 		}
-		copyBucket := *bucket
-		if !needDigest {
-			copyBucket.digest = nil
-		}
-		out = append(out, storedRollup{entityID: key.entityID, bucket: key.bucket, bucketData: &copyBucket})
+		out = append(out, storedRollup{entityID: key.entityID, bucket: key.bucket, bucketData: bucket.clone(needDigest)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].bucket < out[j].bucket })
 	return out, nil
@@ -240,6 +284,7 @@ func (s *Store) deleteHotRollups(metricName, entityID string, tags map[string]st
 	}
 	for _, key := range matched {
 		delete(s.hot, key)
+		delete(s.hotReplace, key)
 	}
 	return int64(len(matched)), nil
 }

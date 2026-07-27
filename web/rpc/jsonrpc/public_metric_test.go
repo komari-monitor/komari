@@ -1,8 +1,10 @@
 package jsonrpc
 
 import (
+	"context"
 	"encoding/json"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -321,5 +323,178 @@ func TestMetricDownsampleIntervalCeilsToStandardInterval(t *testing.T) {
 	got = metricDownsampleInterval(1000*24*time.Hour, 10)
 	if got != 100*24*time.Hour {
 		t.Fatalf("ranges beyond the standard table should ceil to whole days, got %s", got)
+	}
+}
+
+func TestLoadPublicMetricPointsReturnsAllRecentRawSamples(t *testing.T) {
+	ctx := context.Background()
+	store, err := metric.Open(ctx, metric.SQLite(":memory:",
+		metric.WithMaxOpenConns(1),
+		metric.WithRollupPolicy(metric.RollupPolicy{
+			RawRetention: metricstore.DefaultRollupRawRetention,
+			Tiers: []metric.RollupTier{
+				{Interval: time.Minute, Retention: 10 * time.Hour},
+			},
+			Compression: 30,
+		}),
+	))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	defer store.Close()
+
+	const metricName = "query.raw"
+	if err := store.CreateMetric(ctx, metric.Definition{
+		Name:          metricName,
+		Type:          metric.TypeGauge,
+		RetentionDays: 1,
+	}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	input := []metric.Point{
+		{MetricName: metricName, EntityID: "node-a", Timestamp: now.Add(-9 * time.Minute), Value: 1, Tags: map[string]string{"core": "0"}, Labels: map[string]string{"source": "oldest"}},
+		{MetricName: metricName, EntityID: "node-a", Timestamp: now.Add(-5 * time.Minute), Value: 2, Tags: map[string]string{"core": "0"}},
+		{MetricName: metricName, EntityID: "node-a", Timestamp: now.Add(-90 * time.Second), Value: 3, Tags: map[string]string{"core": "0"}},
+		{MetricName: metricName, EntityID: "node-a", Timestamp: now.Add(-10 * time.Second), Value: 4, Tags: map[string]string{"core": "0"}},
+	}
+	if err := store.WriteBatch(ctx, input); err != nil {
+		t.Fatalf("write raw points: %v", err)
+	}
+
+	queryEnd := now.Add(-3 * time.Second)
+	got, err := loadPublicMetricPoints(ctx, store, metric.Query{
+		MetricName: metricName,
+		EntityID:   "node-a",
+		Start:      queryEnd.Add(-10 * time.Minute),
+		End:        queryEnd,
+		Order:      metric.OrderAsc,
+	}, metric.AggAvg, 1, false, now)
+	if err != nil {
+		t.Fatalf("load public metric points: %v", err)
+	}
+	if got.downsampled || got.interval != 0 {
+		t.Fatalf("recent raw query was marked downsampled: %#v", got)
+	}
+	if len(got.points) != len(input) {
+		t.Fatalf("recent query returned %d points, want all %d: %#v", len(got.points), len(input), got.points)
+	}
+	for i, point := range got.points {
+		if !point.Time.Equal(input[i].Timestamp) || point.Value == nil || *point.Value != input[i].Value || point.Count != 1 {
+			t.Fatalf("point %d = %#v, want %#v", i, point, input[i])
+		}
+	}
+	if got.points[0].Labels["source"] != "oldest" {
+		t.Fatalf("compressed raw point lost labels: %#v", got.points[0])
+	}
+}
+
+func TestPublicMetricUsesRawWindowOnlyForCurrentlyRetainedRange(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	if !publicMetricUsesRawWindow(now.Add(-10*time.Minute), now, now) {
+		t.Fatal("exact ten-minute current range should use raw samples")
+	}
+	delayedEnd := now.Add(-3 * time.Second)
+	if !publicMetricUsesRawWindow(delayedEnd.Add(-10*time.Minute), delayedEnd, now) {
+		t.Fatal("client-side ten-minute range should tolerate transit delay while it overlaps raw retention")
+	}
+	cutoff := now.Add(-10 * time.Minute)
+	if publicMetricUsesRawWindow(cutoff.Add(-10*time.Minute), cutoff, now) {
+		t.Fatal("range ending exactly at the raw cutoff should use rollups")
+	}
+	historicalEnd := cutoff.Add(-time.Millisecond)
+	if publicMetricUsesRawWindow(historicalEnd.Add(-10*time.Minute), historicalEnd, now) {
+		t.Fatal("fully historical range should use rollups")
+	}
+	if publicMetricUsesRawWindow(now.Add(-10*time.Minute-time.Millisecond), now, now) {
+		t.Fatal("range longer than ten minutes should use rollups")
+	}
+}
+
+func TestLoadPublicMetricPointsUsesRollupsForRestartGapWithoutDuplicatingRaw(t *testing.T) {
+	ctx := context.Background()
+	dsn := filepath.Join(t.TempDir(), "metrics.db")
+	policy := metric.RollupPolicy{
+		RawRetention: metricstore.DefaultRollupRawRetention,
+		Tiers: []metric.RollupTier{
+			{Interval: time.Minute, Retention: 10 * time.Hour},
+		},
+		Compression: 30,
+	}
+	open := func() *metric.Store {
+		store, err := metric.Open(ctx, metric.SQLite(dsn,
+			metric.WithMaxOpenConns(1),
+			metric.WithRollupPolicy(policy),
+		))
+		if err != nil {
+			t.Fatalf("open metric store: %v", err)
+		}
+		return store
+	}
+
+	const metricName = "query.restart"
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	store := open()
+	if err := store.CreateMetric(ctx, metric.Definition{Name: metricName, Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+	beforeRestart := []metric.Point{
+		{MetricName: metricName, EntityID: "node-a", Timestamp: now.Add(-8 * time.Minute), Value: 1, Tags: map[string]string{"core": "0"}},
+		{MetricName: metricName, EntityID: "node-a", Timestamp: now.Add(-90 * time.Second), Value: 2, Tags: map[string]string{"core": "0"}},
+	}
+	if err := store.WriteBatch(ctx, beforeRestart); err != nil {
+		t.Fatalf("write pre-restart points: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close pre-restart store: %v", err)
+	}
+
+	store = open()
+	defer store.Close()
+	afterRestart := metric.Point{
+		MetricName: metricName,
+		EntityID:   "node-a",
+		Timestamp:  now.Add(-5 * time.Second),
+		Value:      3,
+		Tags:       map[string]string{"core": "0"},
+		Labels:     map[string]string{"source": "raw"},
+	}
+	if err := store.Write(ctx, afterRestart); err != nil {
+		t.Fatalf("write post-restart point: %v", err)
+	}
+
+	got, err := loadPublicMetricPoints(ctx, store, metric.Query{
+		MetricName: metricName,
+		EntityID:   "node-a",
+		Start:      now.Add(-10 * time.Minute),
+		End:        now,
+		Order:      metric.OrderAsc,
+	}, metric.AggAvg, 500, false, now)
+	if err != nil {
+		t.Fatalf("load mixed restart window: %v", err)
+	}
+	if !got.downsampled || got.interval != time.Minute {
+		t.Fatalf("restart fallback metadata = %#v", got)
+	}
+	if len(got.points) != 3 {
+		t.Fatalf("restart window returned %d points, want two rollups and one raw: %#v", len(got.points), got.points)
+	}
+	values := []float64{1, 2, 3}
+	for i, point := range got.points {
+		if point.Value == nil || *point.Value != values[i] {
+			t.Fatalf("point %d = %#v, want value %v", i, point, values[i])
+		}
+	}
+	if got.points[2].Count != 1 || got.points[2].Labels["source"] != "raw" {
+		t.Fatalf("post-restart exact point changed: %#v", got.points[2])
+	}
+
+	// The current hot rollup covers the same minute as the exact point. It must
+	// be omitted rather than returned as a fourth, duplicate observation.
+	currentBucket := afterRestart.Timestamp.Truncate(time.Minute)
+	for _, point := range got.points {
+		if point.Time.Equal(currentBucket) {
+			t.Fatalf("current raw minute also returned its rollup: %#v", got.points)
+		}
 	}
 }

@@ -81,7 +81,7 @@ func TestArbitraryPercentileOverRaw(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "lat", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Now().UTC().Add(-55 * time.Second)
+	base := time.Now().UTC().Truncate(time.Minute).Add(-time.Minute)
 	var batch []Point
 	for i := 1; i <= 100; i++ { // values 1..100 in one bucket
 		batch = append(batch, Point{MetricName: "lat", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * 500 * time.Millisecond), Value: float64(i)})
@@ -100,9 +100,9 @@ func TestArbitraryPercentileOverRaw(t *testing.T) {
 		{Pxx(75), percentileSortedRange(1, 100, 0.75)},
 	} {
 		res, err := s.Aggregate(ctx, AggregateQuery{
-			Query:       Query{MetricName: "lat", EntityID: "n1", Start: base, End: base.Add(time.Hour)},
+			Query:       Query{MetricName: "lat", EntityID: "n1", Start: base, End: base.Add(time.Minute)},
 			Aggregation: tc.agg,
-			Interval:    time.Hour,
+			Interval:    time.Minute,
 		})
 		if err != nil {
 			t.Fatalf("aggregate %s: %v", tc.agg, err)

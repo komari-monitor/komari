@@ -11,7 +11,7 @@ import (
 // values into the configured tiers through interval. Keeping the same
 // representative in finer retained tiers prevents a newly migrated series
 // from appearing blank while queries still prefer those tiers. Imported
-// values never enter the exact one-minute raw window.
+// values never enter the exact ten-minute raw window.
 func (s *Store) ReplaceRollupPoints(ctx context.Context, interval time.Duration, points []Point) error {
 	if err := s.ensureOpen(); err != nil {
 		return err

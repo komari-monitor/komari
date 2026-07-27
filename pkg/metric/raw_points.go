@@ -3,12 +3,19 @@ package metric
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 )
 
-const exactRawRetention = time.Minute
+const (
+	// directRawRetention keeps the newest samples in a directly searchable
+	// slice. The rest of rawMemoryRetention is losslessly byte-encoded.
+	directRawRetention = time.Minute
+	rawMemoryRetention = 10 * time.Minute
+)
 
 type rawSeriesKey struct {
 	metricName string
@@ -22,6 +29,15 @@ type rawSample struct {
 	labelID   uint32
 }
 
+// compressedRawSamples stores older raw samples without aggregating them.
+// Timestamps and label ids use varints; values remain IEEE-754 bits so the
+// raw API can return the original samples exactly.
+type compressedRawSamples struct {
+	data      []byte
+	count     int
+	lastStamp int64
+}
+
 // rawSeries stores exact samples compactly for one logical series. Tags are
 // shared by the series and labels are interned into small integer ids.
 type rawSeries struct {
@@ -30,6 +46,7 @@ type rawSeries struct {
 	labelHashes []string
 	labelsJSON  []string
 	samples     []rawSample
+	compressed  compressedRawSamples
 }
 
 // preparedMetricPoint holds the compact dictionary keys shared by the raw
@@ -74,8 +91,9 @@ func prepareMetricPoints(points []Point) ([]preparedMetricPoint, error) {
 	return prepared, nil
 }
 
-// writeRawPoints keeps the exact one-minute window in memory. Rollups are
-// persisted independently by writePreparedHotRollups.
+// writeRawPoints keeps the newest minute in a directly addressable form. The
+// surrounding nine minutes remain individual raw samples in a compact byte
+// representation; only their minute rollups are eventually persisted.
 func (s *Store) writeRawPoints(ctx context.Context, points []preparedMetricPoint) (map[hotRollupKey]struct{}, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -87,13 +105,17 @@ func (s *Store) writeRawPoints(ctx context.Context, points []preparedMetricPoint
 }
 
 func (s *Store) writeRawPointsAt(points []preparedMetricPoint, now time.Time) map[hotRollupKey]struct{} {
-	cutoff := now.UTC().Add(-exactRawRetention).UnixMilli()
+	now = now.UTC()
+	directCutoff := now.Add(-directRawRetention).UnixMilli()
+	rawCutoff := rawMemoryCutoff(now)
 	rebuild := make(map[hotRollupKey]struct{})
+	dirtyLabels := make(map[*rawSeries]struct{})
 	s.rawMu.Lock()
 	defer s.rawMu.Unlock()
-	s.pruneRawBeforeLocked("", cutoff)
+	s.compressRawBeforeLocked("", directCutoff)
+	s.pruneRawBeforeLocked("", rawCutoff)
 	for _, point := range points {
-		if point.timestamp < cutoff {
+		if point.timestamp < rawCutoff {
 			continue
 		}
 		key := rawSeriesKey{metricName: point.metricName, entityID: point.entityID, tagsHash: point.tagsHash}
@@ -109,22 +131,43 @@ func (s *Store) writeRawPointsAt(points []preparedMetricPoint, now time.Time) ma
 			series.labelHashes = append(series.labelHashes, point.labelsHash)
 			series.labelsJSON = append(series.labelsJSON, point.labelsJSON)
 		}
+		sample := rawSample{timestamp: point.timestamp, value: point.value, labelID: labelID}
+		if point.timestamp < directCutoff {
+			old, replaced := series.replaceCompressed(sample)
+			if replaced {
+				markRawRebuild(rebuild, point, series.labelHashes[old.labelID])
+				if old.labelID != sample.labelID {
+					dirtyLabels[series] = struct{}{}
+				}
+			}
+			markRawRebuild(rebuild, point, point.labelsHash)
+			continue
+		}
 		index := sort.Search(len(series.samples), func(i int) bool {
 			return series.samples[i].timestamp >= point.timestamp
 		})
-		sample := rawSample{timestamp: point.timestamp, value: point.value, labelID: labelID}
 		if index < len(series.samples) && series.samples[index].timestamp == point.timestamp {
 			old := series.samples[index]
-			rebuild[hotRollupKey{metricName: point.metricName, entityID: point.entityID, tagsHash: point.tagsHash, labelsHash: series.labelHashes[old.labelID], bucket: bucketStartMillis(point.timestamp, time.Minute.Milliseconds())}] = struct{}{}
-			rebuild[hotRollupKey{metricName: point.metricName, entityID: point.entityID, tagsHash: point.tagsHash, labelsHash: point.labelsHash, bucket: bucketStartMillis(point.timestamp, time.Minute.Milliseconds())}] = struct{}{}
+			markRawRebuild(rebuild, point, series.labelHashes[old.labelID])
+			markRawRebuild(rebuild, point, point.labelsHash)
 			series.samples[index] = sample
+			if old.labelID != sample.labelID {
+				dirtyLabels[series] = struct{}{}
+			}
 			continue
 		}
 		series.samples = append(series.samples, rawSample{})
 		copy(series.samples[index+1:], series.samples[index:])
 		series.samples[index] = sample
 	}
+	for series := range dirtyLabels {
+		compactRawLabels(series)
+	}
 	return rebuild
+}
+
+func markRawRebuild(rebuild map[hotRollupKey]struct{}, point preparedMetricPoint, labelsHash string) {
+	rebuild[hotRollupKey{metricName: point.metricName, entityID: point.entityID, tagsHash: point.tagsHash, labelsHash: labelsHash, bucket: bucketStartMillis(point.timestamp, time.Minute.Milliseconds())}] = struct{}{}
 }
 
 func (s *Store) queryRawPoints(ctx context.Context, query Query) ([]Point, error) {
@@ -134,7 +177,13 @@ func (s *Store) queryRawPoints(ctx context.Context, query Query) ([]Point, error
 	start, end := query.Start.UnixMilli(), query.End.UnixMilli()
 	s.rawMu.Lock()
 	defer s.rawMu.Unlock()
-	s.pruneRawBeforeLocked("", time.Now().UTC().Add(-exactRawRetention).UnixMilli())
+	now := time.Now().UTC()
+	visibleCutoff := now.Add(-rawMemoryRetention).UnixMilli()
+	if start < visibleCutoff {
+		start = visibleCutoff
+	}
+	s.compressRawBeforeLocked("", now.Add(-directRawRetention).UnixMilli())
+	s.pruneRawBeforeLocked("", rawMemoryCutoff(now))
 
 	type resultPoint struct {
 		point    Point
@@ -153,9 +202,10 @@ func (s *Store) queryRawPoints(ctx context.Context, query Query) ([]Point, error
 		if !ok {
 			continue
 		}
+		all := series.allSamples()
 		labels := make(map[uint32]map[string]string)
-		first := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= start })
-		for _, sample := range series.samples[first:] {
+		first := sort.Search(len(all), func(i int) bool { return all[i].timestamp >= start })
+		for _, sample := range all[first:] {
 			if sample.timestamp > end {
 				break
 			}
@@ -207,7 +257,13 @@ func (s *Store) rawEntityIDs(ctx context.Context, query Query) ([]string, error)
 	start, end := query.Start.UnixMilli(), query.End.UnixMilli()
 	s.rawMu.Lock()
 	defer s.rawMu.Unlock()
-	s.pruneRawBeforeLocked("", time.Now().UTC().Add(-exactRawRetention).UnixMilli())
+	now := time.Now().UTC()
+	visibleCutoff := now.Add(-rawMemoryRetention).UnixMilli()
+	if start < visibleCutoff {
+		start = visibleCutoff
+	}
+	s.compressRawBeforeLocked("", now.Add(-directRawRetention).UnixMilli())
+	s.pruneRawBeforeLocked("", rawMemoryCutoff(now))
 	seen := make(map[string]struct{})
 	for key, series := range s.raw {
 		if key.metricName != query.MetricName || (query.EntityID != "" && key.entityID != query.EntityID) {
@@ -220,8 +276,9 @@ func (s *Store) rawEntityIDs(ctx context.Context, query Query) ([]string, error)
 		if !ok {
 			continue
 		}
-		index := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= start })
-		if index < len(series.samples) && series.samples[index].timestamp <= end {
+		all := series.allSamples()
+		index := sort.Search(len(all), func(i int) bool { return all[i].timestamp >= start })
+		if index < len(all) && all[index].timestamp <= end {
 			seen[key.entityID] = struct{}{}
 		}
 	}
@@ -246,6 +303,21 @@ func matchRawTags(raw string, filter map[string]string) (map[string]string, bool
 	return tags, true, nil
 }
 
+// rawMemoryCutoff keeps the complete oldest minute internally so a late
+// replacement can rebuild that minute without dropping its earlier samples.
+// Query visibility is still clamped to the exact ten-minute window.
+func rawMemoryCutoff(now time.Time) int64 {
+	return bucketStartMillis(now.UTC().Add(-rawMemoryRetention).UnixMilli(), time.Minute.Milliseconds())
+}
+
+func (s *Store) trimRawWindow(now time.Time) int64 {
+	now = now.UTC()
+	s.rawMu.Lock()
+	defer s.rawMu.Unlock()
+	s.compressRawBeforeLocked("", now.Add(-directRawRetention).UnixMilli())
+	return s.pruneRawBeforeLocked("", rawMemoryCutoff(now))
+}
+
 func (s *Store) deleteRawPoints(metricName, entityID string, tags map[string]string) (int64, error) {
 	s.rawMu.Lock()
 	defer s.rawMu.Unlock()
@@ -264,7 +336,7 @@ func (s *Store) deleteRawPoints(metricName, entityID string, tags map[string]str
 		if !ok {
 			continue
 		}
-		deleted += int64(len(series.samples))
+		deleted += int64(len(series.samples) + series.compressed.count)
 		delete(s.raw, key)
 	}
 	return deleted, nil
@@ -273,6 +345,7 @@ func (s *Store) deleteRawPoints(metricName, entityID string, tags map[string]str
 func (s *Store) deleteRawBefore(metricName string, beforeMilli int64) int64 {
 	s.rawMu.Lock()
 	defer s.rawMu.Unlock()
+	s.compressRawBeforeLocked(metricName, beforeMilli)
 	return s.pruneRawBeforeLocked(metricName, beforeMilli)
 }
 
@@ -282,31 +355,188 @@ func (s *Store) pruneRawBeforeLocked(metricName string, beforeMilli int64) int64
 		if metricName != "" && key.metricName != metricName {
 			continue
 		}
+		compressed := series.decodeCompressed()
+		compressedIndex := sort.Search(len(compressed), func(i int) bool { return compressed[i].timestamp >= beforeMilli })
+		if compressedIndex > 0 {
+			compressed = compressed[compressedIndex:]
+			series.compressed.set(compressed)
+			deleted += int64(compressedIndex)
+		}
+		if len(compressed) == 0 {
+			series.compressed = compressedRawSamples{}
+		}
+		directIndex := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= beforeMilli })
+		if directIndex > 0 {
+			deleted += int64(directIndex)
+			series.samples = append([]rawSample(nil), series.samples[directIndex:]...)
+		}
+		if series.compressed.count == 0 && len(series.samples) == 0 {
+			delete(s.raw, key)
+			continue
+		}
+		if compressedIndex > 0 || directIndex > 0 {
+			compactRawLabels(series)
+		}
+	}
+	return deleted
+}
+
+func (s *Store) compressRawBeforeLocked(metricName string, beforeMilli int64) {
+	for key, series := range s.raw {
+		if metricName != "" && key.metricName != metricName {
+			continue
+		}
 		index := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= beforeMilli })
 		if index == 0 {
 			continue
 		}
-		deleted += int64(index)
-		if index == len(series.samples) {
-			delete(s.raw, key)
-			continue
-		}
-		copy(series.samples, series.samples[index:])
-		series.samples = series.samples[:len(series.samples)-index]
-		if cap(series.samples) > len(series.samples)*2+16 {
-			series.samples = append([]rawSample(nil), series.samples...)
-		}
-		compactRawLabels(series)
+		series.compressed.append(series.samples[:index])
+		series.samples = append([]rawSample(nil), series.samples[index:]...)
 	}
-	return deleted
+}
+
+func (s *rawSeries) decodeCompressed() []rawSample {
+	if s.compressed.count == 0 {
+		return nil
+	}
+	result := make([]rawSample, 0, s.compressed.count)
+	for offset, previous := 0, int64(0); offset < len(s.compressed.data); {
+		var timestamp int64
+		if len(result) == 0 {
+			first, n := binary.Varint(s.compressed.data[offset:])
+			if n <= 0 {
+				return result
+			}
+			offset += n
+			timestamp = first
+		} else {
+			delta, dn := binary.Uvarint(s.compressed.data[offset:])
+			if dn <= 0 {
+				return result
+			}
+			offset += dn
+			timestamp = previous + int64(delta)
+		}
+		if offset+8 > len(s.compressed.data) {
+			return result
+		}
+		value := math.Float64frombits(binary.LittleEndian.Uint64(s.compressed.data[offset:]))
+		offset += 8
+		labelID, ln := binary.Uvarint(s.compressed.data[offset:])
+		if ln <= 0 {
+			return result
+		}
+		offset += ln
+		result = append(result, rawSample{timestamp: timestamp, value: value, labelID: uint32(labelID)})
+		previous = timestamp
+	}
+	return result
+}
+
+func (s *rawSeries) allSamples() []rawSample {
+	compressed := s.decodeCompressed()
+	result := make([]rawSample, 0, len(compressed)+len(s.samples))
+	result = append(result, compressed...)
+	result = append(result, s.samples...)
+	return result
+}
+
+func (s *rawSeries) replaceCompressed(sample rawSample) (rawSample, bool) {
+	samples := s.decodeCompressed()
+	index := sort.Search(len(samples), func(i int) bool { return samples[i].timestamp >= sample.timestamp })
+	var old rawSample
+	replaced := index < len(samples) && samples[index].timestamp == sample.timestamp
+	if replaced {
+		old = samples[index]
+		samples[index] = sample
+	} else {
+		samples = append(samples, rawSample{})
+		copy(samples[index+1:], samples[index:])
+		samples[index] = sample
+	}
+	s.compressed.set(samples)
+	return old, replaced
+}
+
+func (c *compressedRawSamples) append(samples []rawSample) {
+	if len(samples) == 0 {
+		return
+	}
+	if c.count > 0 && samples[0].timestamp <= c.lastStamp {
+		merged := make([]rawSample, 0, c.count+len(samples))
+		merged = append(merged, c.decode()...)
+		for _, sample := range samples {
+			index := sort.Search(len(merged), func(i int) bool { return merged[i].timestamp >= sample.timestamp })
+			if index < len(merged) && merged[index].timestamp == sample.timestamp {
+				merged[index] = sample
+				continue
+			}
+			merged = append(merged, rawSample{})
+			copy(merged[index+1:], merged[index:])
+			merged[index] = sample
+		}
+		c.set(merged)
+		return
+	}
+	for _, sample := range samples {
+		if c.count == 0 {
+			c.data = appendVarint(c.data, sample.timestamp)
+		} else {
+			c.data = appendUvarint(c.data, uint64(sample.timestamp-c.lastStamp))
+		}
+		c.data = appendRawSample(c.data, sample)
+		c.count++
+		c.lastStamp = sample.timestamp
+	}
+}
+
+func (c *compressedRawSamples) decode() []rawSample {
+	series := rawSeries{compressed: *c}
+	return series.decodeCompressed()
+}
+
+func (c *compressedRawSamples) set(samples []rawSample) {
+	c.data = nil
+	c.count = 0
+	c.lastStamp = 0
+	for _, sample := range samples {
+		if c.count == 0 {
+			c.data = appendVarint(c.data, sample.timestamp)
+		} else {
+			c.data = appendUvarint(c.data, uint64(sample.timestamp-c.lastStamp))
+		}
+		c.data = appendRawSample(c.data, sample)
+		c.count++
+		c.lastStamp = sample.timestamp
+	}
+}
+
+func appendRawSample(dst []byte, sample rawSample) []byte {
+	var value [8]byte
+	binary.LittleEndian.PutUint64(value[:], math.Float64bits(sample.value))
+	dst = append(dst, value[:]...)
+	return appendUvarint(dst, uint64(sample.labelID))
+}
+
+func appendVarint(dst []byte, value int64) []byte {
+	var encoded [binary.MaxVarintLen64]byte
+	n := binary.PutVarint(encoded[:], value)
+	return append(dst, encoded[:n]...)
+}
+
+func appendUvarint(dst []byte, value uint64) []byte {
+	var encoded [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(encoded[:], value)
+	return append(dst, encoded[:n]...)
 }
 
 func compactRawLabels(series *rawSeries) {
 	if len(series.labelHashes) <= 1 {
 		return
 	}
+	all := series.allSamples()
 	used := make([]bool, len(series.labelHashes))
-	for _, sample := range series.samples {
+	for _, sample := range all {
 		used[sample.labelID] = true
 	}
 	usedCount := 0
@@ -333,6 +563,11 @@ func compactRawLabels(series *rawSeries) {
 		labelsJSON = append(labelsJSON, series.labelsJSON[oldID])
 		labelIDs[hash] = newID
 	}
+	compressed := series.decodeCompressed()
+	for i := range compressed {
+		compressed[i].labelID = remap[compressed[i].labelID]
+	}
+	series.compressed.set(compressed)
 	for i := range series.samples {
 		series.samples[i].labelID = remap[series.samples[i].labelID]
 	}
@@ -342,6 +577,8 @@ func compactRawLabels(series *rawSeries) {
 }
 
 func (s *Store) latestRollupBefore(ctx context.Context, metricName, entityID string, before time.Time) (Point, bool, error) {
+	s.rollupViewMu.RLock()
+	defer s.rollupViewMu.RUnlock()
 	end := before.Add(-time.Nanosecond)
 	endMilli := end.UnixMilli()
 	var latest Point
