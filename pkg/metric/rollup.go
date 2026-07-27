@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// RollupTier describes one downsampled resolution: raw points (or the next
+// RollupTier describes one downsampled resolution: observations (or the next
 // finer tier) are aggregated into buckets Interval wide, and those buckets are
 // kept for Retention. A policy lists tiers from finest to coarsest, e.g.
 //
@@ -16,7 +16,7 @@ import (
 // so storage shrinks with age — the "data gets sparser as it gets older"
 // behavior of a downsampling TSDB.
 //
-// RollupTier 描述一个降采样分辨率：原始点（或下一层更细的层级）会被聚合进
+// RollupTier 描述一个降采样分辨率：观测值（或下一层更细的层级）会被聚合进
 // Interval 宽的桶，而这些桶会保留 Retention。策略会按从细到粗排列层级，例如：
 //
 //	1m 保留 7d  ->  5m 保留 30d  ->  1h 保留 1y
@@ -34,19 +34,14 @@ type RollupTier struct {
 	Retention time.Duration `json:"retention"`
 }
 
-// RollupPolicy is the full retention ladder for a store: how long raw points
-// live, then a chain of progressively coarser tiers. Compact materializes the
-// tiers and enforces every retention window.
+// RollupPolicy is the retention ladder for materialized rollups.
 //
-// RollupPolicy 描述完整保留阶梯：原始点保留多久，以及后续逐级变粗的
-// rollup 层；Compact 会物化这些层并执行保留窗口。
+// RollupPolicy 描述逐级变粗的 rollup 层；Compact 会物化这些层并执行保留窗口。
 type RollupPolicy struct {
-	// RawRetention is how long raw points are kept before Compact deletes them
-	// (after they have been rolled into the finest tier). Zero means "never
-	// delete raw" — rollups are still built, but raw is retained.
+	// RawRetention is retained for configuration compatibility. Exact samples
+	// always live in memory for one minute and are never persisted.
 	//
-	// RawRetention 是 Compact 删除原始点之前保留它们的时间（在它们已进入最细
-	// rollup 层之后）。零值表示“永不删除原始点”；rollup 仍会构建，但原始点保留。
+	// RawRetention 仅为配置兼容保留；精确样本固定在内存中保留一分钟且不持久化。
 	RawRetention time.Duration `json:"raw_retention"`
 	// Tiers are ordered finest-first. Each Interval must be a positive integer
 	// multiple of the previous tier's Interval (so a coarse bucket is composed
@@ -58,10 +53,10 @@ type RollupPolicy struct {
 	// （粗数据比细数据活得更久）。
 	Tiers []RollupTier `json:"tiers"`
 	// Compression tunes the per-bucket t-digest (size vs. percentile accuracy).
-	// <=1 uses the default (100).
+	// <=1 uses the package default.
 	//
 	// Compression 调整每个桶的 t-digest（大小与百分位精度之间的取舍）。
-	// <=1 时使用默认值（100）。
+	// <=1 时使用包默认值。
 	Compression float64 `json:"compression"`
 }
 
@@ -80,15 +75,6 @@ func (p RollupPolicy) compression() float64 {
 	return p.Compression
 }
 
-func (p RollupPolicy) rawCutoff(now time.Time) time.Time {
-	if p.RawRetention <= 0 || len(p.Tiers) == 0 {
-		return time.Time{}
-	}
-	cutoff := now.UTC().Add(-p.RawRetention)
-	interval := p.Tiers[0].Interval.Nanoseconds()
-	return time.Unix(0, floorDivNano(cutoff.UnixNano(), interval)).UTC()
-}
-
 // withMetricRetention applies the metric definition's retention to a rollup
 // policy. Fine tiers keep their configured short windows, while the final tier
 // follows the metric so definitions are never capped by a store-wide setting.
@@ -102,7 +88,9 @@ func (p RollupPolicy) withMetricRetention(retention time.Duration) RollupPolicy 
 	out := p
 	out.Tiers = make([]RollupTier, 0, len(p.Tiers))
 	for i, tier := range p.Tiers {
-		if i == len(p.Tiers)-1 || tier.Retention > retention {
+		if i == len(p.Tiers)-1 {
+			tier.Retention = retention
+		} else if tier.Retention > retention {
 			tier.Retention = retention
 		}
 		if len(out.Tiers) > 0 && tier.Retention <= out.Tiers[len(out.Tiers)-1].Retention {
@@ -132,15 +120,10 @@ func (p RollupPolicy) Validate() error {
 		if tr.Retention <= 0 {
 			return fmt.Errorf("%w: tier %d retention must be positive", ErrInvalidArgument, i)
 		}
-		if i == 0 {
-			// The finest tier rolls up raw points. Require raw retention (when
-			// set) to cover at least two of its buckets so the in-progress and
-			// most-recent sealed bucket still have their raw backing when Compact
-			// runs and deletes old raw.
-			if p.RawRetention > 0 && p.RawRetention < 2*tr.Interval {
-				return fmt.Errorf("%w: raw retention must be >= 2x the finest tier interval", ErrInvalidArgument)
-			}
-		} else {
+		if i == 0 && tr.Interval != time.Minute {
+			return fmt.Errorf("%w: finest rollup tier must use a one-minute interval", ErrInvalidArgument)
+		}
+		if i > 0 {
 			if tr.Interval <= prev.Interval {
 				return fmt.Errorf("%w: tier %d interval must be larger than tier %d", ErrInvalidArgument, i, i-1)
 			}
@@ -191,17 +174,17 @@ type rollupBucket struct {
 	//
 	// firstVal 是时间戳最早的值。
 	firstVal float64
-	// firstTS is the earliest timestamp in nanoseconds.
+	// firstTS is the earliest Unix-millisecond timestamp.
 	//
-	// firstTS 是最早时间戳的纳秒值。
+	// firstTS 是最早时间戳的毫秒值。
 	firstTS int64
 	// lastVal is the value with the latest timestamp.
 	//
 	// lastVal 是时间戳最晚的值。
 	lastVal float64
-	// lastTS is the latest timestamp in nanoseconds.
+	// lastTS is the latest Unix-millisecond timestamp.
 	//
-	// lastTS 是最晚时间戳的纳秒值。
+	// lastTS 是最晚时间戳的毫秒值。
 	lastTS int64
 	// digest estimates percentiles for represented values.
 	//
@@ -214,7 +197,9 @@ type rollupBucket struct {
 	// tagsJSON carries the canonical tag map written back to the tags column.
 	//
 	// tagsJSON 携带写回 tags 列的规范标签 map。
-	tagsJSON string
+	tagsJSON   string
+	labelsHash string
+	labelsJSON string
 }
 
 // newRollupBucket creates an empty rollup accumulator.
@@ -242,11 +227,11 @@ func newRollupBucketWithDigest(compression float64, includeDigest bool) *rollupB
 // addPoint folds a raw observation into the bucket.
 //
 // addPoint 将一个原始观测值合入当前桶。
-func (b *rollupBucket) addPoint(value float64, tsNano int64) {
+func (b *rollupBucket) addPoint(value float64, tsMilli int64) {
 	if b.count == 0 {
 		b.min, b.max = value, value
-		b.firstVal, b.firstTS = value, tsNano
-		b.lastVal, b.lastTS = value, tsNano
+		b.firstVal, b.firstTS = value, tsMilli
+		b.lastVal, b.lastTS = value, tsMilli
 	} else {
 		if value < b.min {
 			b.min = value
@@ -254,11 +239,11 @@ func (b *rollupBucket) addPoint(value float64, tsNano int64) {
 		if value > b.max {
 			b.max = value
 		}
-		if tsNano < b.firstTS {
-			b.firstVal, b.firstTS = value, tsNano
+		if tsMilli < b.firstTS {
+			b.firstVal, b.firstTS = value, tsMilli
 		}
-		if tsNano > b.lastTS {
-			b.lastVal, b.lastTS = value, tsNano
+		if tsMilli > b.lastTS {
+			b.lastVal, b.lastTS = value, tsMilli
 		}
 	}
 	b.count++
@@ -305,6 +290,38 @@ func (b *rollupBucket) mergeStored(o *rollupBucket) {
 			b.digest = NewTDigest(defaultTDigestCompression)
 		}
 		b.digest.Merge(o.digest)
+	}
+}
+
+// encodedDigest omits the sketch only for a constant bucket. For any count, a
+// min/max pair exactly represents a distribution when both values are equal;
+// non-constant two-sample buckets still need their digest for percentiles.
+func (b *rollupBucket) encodedDigest() []byte {
+	if b.count == 0 || b.min == b.max {
+		return nil
+	}
+	if b.digest == nil {
+		return nil
+	}
+	return b.digest.Encode()
+}
+
+// digestFromRollup reconstructs an omitted constant-bucket sketch exactly. An
+// absent sketch for a non-constant bucket is invalid: it would make percentile
+// reads silently return a fabricated value.
+func digestFromRollup(count int64, min, max float64, blob []byte, compression float64) (*TDigest, error) {
+	if len(blob) > 0 {
+		return DecodeTDigest(blob)
+	}
+	digest := NewTDigest(compression)
+	switch {
+	case count == 0:
+		return digest, nil
+	case min == max:
+		digest.Add(min, float64(count))
+		return digest, nil
+	default:
+		return nil, fmt.Errorf("metric: missing t-digest for rollup with %d samples", count)
 	}
 }
 

@@ -1,0 +1,151 @@
+package migration
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/metricstore"
+	appconfig "github.com/komari-monitor/komari/internal/config"
+	"github.com/komari-monitor/komari/internal/migrations"
+	"github.com/komari-monitor/komari/web/api"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+func setupConfigDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "migration.db"))+"?mode=rwc"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open migration database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get migration sql database: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	appconfig.SetDb(db)
+	return db
+}
+
+func TestMetricConfigValidatesSelectedDriverAgainstDSN(t *testing.T) {
+	setupConfigDB(t)
+
+	sqliteConfig, err := metricConfig("sqlite", "")
+	if err != nil {
+		t.Fatalf("build default SQLite config: %v", err)
+	}
+	if sqliteConfig.Driver != "sqlite" || sqliteConfig.DSN != "./data/metrics.db" {
+		t.Fatalf("unexpected default SQLite config: %#v", sqliteConfig)
+	}
+	if _, err := metricConfig("mysql", "./data/metrics.db"); err == nil {
+		t.Fatal("expected mismatched MySQL/SQLite DSN to fail")
+	}
+	postgresConfig, err := metricConfig("postgresql", "host=127.0.0.1 port=5432 user=komari password=secret dbname=komari sslmode=disable")
+	if err != nil {
+		t.Fatalf("build PostgreSQL config: %v", err)
+	}
+	if postgresConfig.Driver != "postgresql" {
+		t.Fatalf("unexpected PostgreSQL driver: %q", postgresConfig.Driver)
+	}
+}
+
+func TestRestrictedControllersRegisterUnifiedAndCompatibilityRoutes(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		controller *Controller
+		alias      string
+	}{
+		{name: "legacy", controller: NewLegacyController(setupConfigDB(t), migrations.LegacyMonitoringSummary{}), alias: LegacyAPIPath},
+		{name: "structure", controller: NewStructureController(), alias: StructureAPIPath},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			r.Use(api.IdentityMiddleware())
+			test.controller.Activate()
+			test.controller.Register(r)
+
+			routes := make(map[string]bool)
+			for _, route := range r.Routes() {
+				routes[route.Method+" "+route.Path] = true
+			}
+			for _, base := range []string{APIPath, test.alias} {
+				for _, route := range []string{"GET " + base + "/auth", "GET " + base + "/status", "POST " + base + "/start"} {
+					if !routes[route] {
+						t.Fatalf("required restricted route is missing: %s", route)
+					}
+				}
+				if routes["POST "+base+"/cleanup"] {
+					t.Fatalf("full-history migration unexpectedly exposes cleanup: %s", base)
+				}
+			}
+			if routes["GET /api/public"] || routes["GET /api/rpc2"] || routes["POST /api/clients/report"] {
+				t.Fatalf("ordinary APIs leaked into restricted routes: %#v", routes)
+			}
+
+			request := httptest.NewRequest(http.MethodGet, APIPath+"/status", nil)
+			response := httptest.NewRecorder()
+			r.ServeHTTP(response, request)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("unauthenticated status code = %d, want %d", response.Code, http.StatusUnauthorized)
+			}
+		})
+	}
+}
+
+func TestCompatibilityAuthOmitsUnifiedMode(t *testing.T) {
+	db := setupConfigDB(t)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(api.IdentityMiddleware())
+	controller := NewLegacyController(db, migrations.LegacyMonitoringSummary{})
+	controller.Activate()
+	controller.Register(r)
+
+	for _, test := range []struct {
+		path     string
+		wantMode bool
+	}{
+		{path: APIPath + "/auth", wantMode: true},
+		{path: LegacyAPIPath + "/auth", wantMode: false},
+	} {
+		request := httptest.NewRequest(http.MethodGet, test.path, nil)
+		response := httptest.NewRecorder()
+		r.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", test.path, response.Code)
+		}
+		var payload struct {
+			Data map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode GET %s response: %v", test.path, err)
+		}
+		_, hasMode := payload.Data["mode"]
+		if hasMode != test.wantMode {
+			t.Fatalf("GET %s mode presence = %v, want %v", test.path, hasMode, test.wantMode)
+		}
+	}
+}
+
+func TestCompatibilityStatusShapes(t *testing.T) {
+	summary := migrations.LegacyMonitoringSummary{MonitoringRows: 7}
+	legacy := legacyCompatibilityStatus(Status{Mode: ModeLegacyMonitoring, State: "migrating", Summary: &summary, SourceRowsTotal: 7})
+	if legacy.Summary.MonitoringRows != 7 || legacy.SourceRowsTotal != 7 {
+		t.Fatalf("unexpected legacy compatibility status: %#v", legacy)
+	}
+	structure := structureCompatibilityStatus(Status{Mode: ModeMetricStructure, State: "copying", RowsDone: 3, RowsTotal: 9})
+	if structure.RowsDone != 3 || structure.RowsTotal != 9 {
+		t.Fatalf("unexpected structure compatibility status: %#v", structure)
+	}
+}
+
+func TestStructureProgressPercent(t *testing.T) {
+	if got := structureProgressPercent(metricstore.RestructureProgress{RowsDone: 50, RowsTotal: 100}); got != 47.5 {
+		t.Fatalf("copying percent = %v, want 47.5", got)
+	}
+}

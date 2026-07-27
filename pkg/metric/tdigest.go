@@ -77,7 +77,7 @@ const (
 	// defaultTDigestCompression is used when a caller supplies no useful value.
 	//
 	// defaultTDigestCompression 在调用方未提供有效值时使用。
-	defaultTDigestCompression = 100.0
+	defaultTDigestCompression = 30.0
 	// tdigestMagic0 is the first magic byte in the binary format.
 	//
 	// tdigestMagic0 是二进制格式的第一个 magic 字节。
@@ -93,12 +93,12 @@ const (
 )
 
 // NewTDigest returns an empty digest. compression trades size for accuracy;
-// higher keeps more centroids. Values <= 1 fall back to the default (100),
+// higher keeps more centroids. Values <= 1 fall back to the default (30),
 // which keeps each digest to a few KB while holding tail error to well under
 // 1% for typical distributions.
 //
 // NewTDigest 返回一个空 digest。compression 在大小和精度之间取舍；值越高会保留
-// 更多质心。小于等于 1 的值会回退到默认值（100），这通常能把每个 digest 控制在
+// 更多质心。小于等于 1 的值会回退到默认值（30），这通常能把每个 digest 控制在
 // 几 KB，同时让典型分布的尾部误差远低于 1%。
 func NewTDigest(compression float64) *TDigest {
 	if compression <= 1 {

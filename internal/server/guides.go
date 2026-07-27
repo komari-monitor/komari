@@ -1,12 +1,15 @@
 package server
 
 import (
+	"context"
+
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/migrations"
 	installweb "github.com/komari-monitor/komari/web/install"
+	migrationweb "github.com/komari-monitor/komari/web/migration"
 	recoveryweb "github.com/komari-monitor/komari/web/recovery"
-	upgradeweb "github.com/komari-monitor/komari/web/update"
 )
 
 // InstallRequired reports whether the instance still needs the first-run guide.
@@ -18,8 +21,33 @@ func (a *App) InstallRequired() (bool, error) {
 	return count == 0, nil
 }
 
-func (a *App) LegacyUpgradeRequired() (bool, migrations.LegacyMonitoringSummary, error) {
-	return migrations.LegacyMonitoringMigrationRequired(dbcore.GetDBInstance())
+type DatabaseMigrationRequirement struct {
+	mode    migrationweb.Mode
+	summary migrations.LegacyMonitoringSummary
+}
+
+func (r DatabaseMigrationRequirement) Required() bool { return r.mode != "" }
+
+// DatabaseMigrationRequired checks both supported migration inputs before the
+// normal Metric Store connection is initialized. Structure upgrades run first
+// when both inputs exist, then the startup loop detects the legacy tables on
+// its next pass.
+func (a *App) DatabaseMigrationRequired() (DatabaseMigrationRequirement, error) {
+	structureRequired, err := metricstore.StructureUpgradeRequired(context.Background())
+	if err != nil {
+		return DatabaseMigrationRequirement{}, err
+	}
+	if structureRequired {
+		return DatabaseMigrationRequirement{mode: migrationweb.ModeMetricStructure}, nil
+	}
+	legacyRequired, summary, err := migrations.LegacyMonitoringMigrationRequired(dbcore.GetDBInstance())
+	if err != nil {
+		return DatabaseMigrationRequirement{}, err
+	}
+	if legacyRequired {
+		return DatabaseMigrationRequirement{mode: migrationweb.ModeLegacyMonitoring, summary: summary}, nil
+	}
+	return DatabaseMigrationRequirement{}, nil
 }
 
 // RunInstallGuide exposes only first-run installation APIs. It intentionally
@@ -45,13 +73,24 @@ func (a *App) RunMetricStoreRecovery(initialErr error) (bool, error) {
 	})
 }
 
-// RunLegacyUpgrade keeps login available while migration is in progress.
-func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool, error) {
+// RunDatabaseMigration serves the same authenticated guide and status model
+// for either migration input while leaving each conversion engine independent.
+func (a *App) RunDatabaseMigration(requirement DatabaseMigrationRequirement) (bool, error) {
 	a.initOAuth()
-	return a.runGuideServer(upgradeweb.NewController(dbcore.GetDBInstance(), summary), guideServerConfig{
-		pagePath:        upgradeweb.PagePath,
-		missingAPI:      "Not found in upgrade mode",
-		logMessage:      "Legacy monitoring data requires the 1.2.7 upgrade wizard on %s",
-		requireIdentity: true,
+	var controller guideController
+	switch requirement.mode {
+	case migrationweb.ModeMetricStructure:
+		controller = migrationweb.NewStructureController()
+	case migrationweb.ModeLegacyMonitoring:
+		controller = migrationweb.NewLegacyController(dbcore.GetDBInstance(), requirement.summary)
+	default:
+		return false, nil
+	}
+	return a.runGuideServer(controller, guideServerConfig{
+		pagePath:         migrationweb.PagePath,
+		missingAPI:       "Not found in database migration mode",
+		logMessage:       "Database migration guide is available on %s",
+		requireIdentity:  true,
+		restrictedStatic: true,
 	})
 }

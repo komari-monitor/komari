@@ -2,6 +2,7 @@ package metricstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -43,12 +44,12 @@ func useReportTestStore(t *testing.T, policy *metric.RollupPolicy) *metric.Store
 	return s
 }
 
-func TestWriteReportStoresRawMetricsAndResetAwareTraffic(t *testing.T) {
+func TestWriteReportStoresMinuteMetricsAndResetAwareTraffic(t *testing.T) {
 	ctx := context.Background()
 	policy := defaultRollupPolicy()
 	s := useReportTestStore(t, &policy)
-	now := time.Now().UTC().Truncate(time.Minute)
-	base := now.Add(-30 * time.Minute)
+	base := time.Now().UTC().Truncate(time.Minute).Add(5 * time.Second)
+	now := base.Add(45 * time.Second)
 
 	report := v1.Report{
 		UUID:        "node-a",
@@ -89,6 +90,8 @@ func TestWriteReportStoresRawMetricsAndResetAwareTraffic(t *testing.T) {
 	assertMetricValues(t, s, MetricTrafficUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 50, 20})
 	assertMetricValues(t, s, MetricTrafficDown, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 60, 30})
 	assertMetricValues(t, s, MetricNetTotalUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{100, 150, 20})
+	assertMetricAggregate(t, s, MetricTrafficUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggSum, 70, 3)
+	assertMetricAggregate(t, s, MetricTrafficDown, report.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggSum, 90, 3)
 
 	gpuPoints, err := s.Query(ctx, metric.Query{
 		MetricName: MetricGPUDeviceUsage,
@@ -101,7 +104,7 @@ func TestWriteReportStoresRawMetricsAndResetAwareTraffic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query GPU points: %v", err)
 	}
-	if len(gpuPoints) != 3 || gpuPoints[0].Timestamp != base || gpuPoints[0].Tags["device_name"] != "GPU 0" {
+	if len(gpuPoints) != 3 || !gpuPoints[2].Timestamp.Equal(base.Add(6*time.Second)) || gpuPoints[2].Tags["device_name"] != "GPU 0" {
 		t.Fatalf("unexpected GPU points: %#v", gpuPoints)
 	}
 
@@ -189,6 +192,7 @@ func TestReportBatcherFlushesQueuedReports(t *testing.T) {
 	assertMetricValues(t, s, MetricCPU, first.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{10, 20})
 	assertMetricValues(t, s, MetricTrafficUp, first.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 50})
 	assertMetricValues(t, s, MetricTrafficDown, first.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 60})
+	assertMetricAggregate(t, s, MetricCPU, first.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggAvg, 15, 2)
 }
 
 func TestPingBatcherFlushesLatencyAndLossTogether(t *testing.T) {
@@ -263,41 +267,7 @@ func TestPingBatcherFlushesLatencyAndLossTogether(t *testing.T) {
 	}
 }
 
-func TestCoalesceReportsP95KeepsLatestCounters(t *testing.T) {
-	base := time.Now().UTC().Truncate(time.Second)
-	reports := make([]v1.Report, 20)
-	for i := range reports {
-		value := i + 1
-		reports[i] = v1.Report{
-			UUID:      "p95-node",
-			UpdatedAt: base.Add(time.Duration(i) * time.Second),
-			CPU:       v1.CPUReport{Usage: float64(value)},
-			Ram:       v1.RamReport{Used: int64(value)},
-			Network: v1.NetworkReport{
-				Up:        int64(value),
-				TotalUp:   int64(value * 100),
-				TotalDown: int64(value * 200),
-			},
-			Process: value,
-		}
-	}
-
-	got := coalesceReportsP95(reports)
-	if len(got) != 1 {
-		t.Fatalf("coalesced report count = %d, want 1", len(got))
-	}
-	if got[0].CPU.Usage != 19 || got[0].Ram.Used != 19 || got[0].Network.Up != 19 || got[0].Process != 19 {
-		t.Fatalf("P95 fields = %#v, want nearest-rank P95 of 19", got[0])
-	}
-	if got[0].Network.TotalUp != 2000 || got[0].Network.TotalDown != 4000 {
-		t.Fatalf("cumulative counters = %#v, want latest report counters", got[0].Network)
-	}
-	if !got[0].UpdatedAt.Equal(base.Add(19 * time.Second)) {
-		t.Fatalf("timestamp = %s, want latest timestamp", got[0].UpdatedAt)
-	}
-}
-
-func TestLowResourceBatchWritesOneReportPerNode(t *testing.T) {
+func TestReportBatchKeepsEverySample(t *testing.T) {
 	ctx := context.Background()
 	s := useReportTestStore(t, nil)
 	base := time.Now().UTC().Truncate(time.Second)
@@ -308,17 +278,17 @@ func TestLowResourceBatchWritesOneReportPerNode(t *testing.T) {
 		{UUID: "node-b", UpdatedAt: base.Add(time.Second), CPU: v1.CPUReport{Usage: 40}, Network: v1.NetworkReport{TotalUp: 260}},
 	}
 
-	if err := writePendingReports(ctx, &pending, true); err != nil {
-		t.Fatalf("write low resource batch: %v", err)
+	if err := writePendingReports(ctx, &pending); err != nil {
+		t.Fatalf("write report batch: %v", err)
 	}
 	if len(pending) != 0 {
 		t.Fatalf("pending reports = %d, want 0", len(pending))
 	}
-	assertMetricValues(t, s, MetricCPU, "node-a", base.Add(-time.Second), base.Add(time.Minute), []float64{20})
-	assertMetricValues(t, s, MetricCPU, "node-b", base.Add(-time.Second), base.Add(time.Minute), []float64{40})
+	assertMetricValues(t, s, MetricCPU, "node-a", base.Add(-time.Second), base.Add(time.Minute), []float64{10, 20})
+	assertMetricValues(t, s, MetricCPU, "node-b", base.Add(-time.Second), base.Add(time.Minute), []float64{30, 40})
 }
 
-func TestLowResourceQueueFullDoesNotBlockRealtimeReport(t *testing.T) {
+func TestReportQueueFullReturnsError(t *testing.T) {
 	ctx := context.Background()
 	useReportTestStore(t, nil)
 	worker := &reportBatchWorker{
@@ -330,30 +300,21 @@ func TestLowResourceQueueFullDoesNotBlockRealtimeReport(t *testing.T) {
 	reportBatcherMu.Lock()
 	reportBatcher = worker
 	reportBatcherMu.Unlock()
-	setLowResourceMode(true)
 	t.Cleanup(func() {
 		reportBatcherMu.Lock()
 		if reportBatcher == worker {
 			reportBatcher = nil
 		}
 		reportBatcherMu.Unlock()
-		setLowResourceMode(false)
-		droppedReports.Store(0)
 	})
 
 	report := v1.Report{
 		UUID:      "realtime-node",
 		UpdatedAt: time.Now().UTC(),
 	}
-	saved, err := WriteReport(ctx, report)
-	if err != nil {
-		t.Fatalf("low resource queue full should not fail realtime ingest: %v", err)
-	}
-	if saved.UUID != report.UUID {
-		t.Fatalf("saved report UUID = %q, want %q", saved.UUID, report.UUID)
-	}
-	if droppedReports.Load() != 1 {
-		t.Fatalf("dropped reports = %d, want 1", droppedReports.Load())
+	_, err := WriteReport(ctx, report)
+	if !errors.Is(err, ErrReportBatchQueueFull) {
+		t.Fatalf("queue-full error = %v, want %v", err, ErrReportBatchQueueFull)
 	}
 }
 
@@ -413,7 +374,7 @@ func TestWriteReportNormalizesReceiveTimeToUTC(t *testing.T) {
 	ctx := context.Background()
 	s := useReportTestStore(t, nil)
 	local := time.FixedZone("UTC+8", 8*60*60)
-	receiveTime := time.Date(2026, 7, 17, 9, 30, 0, 123456789, local)
+	receiveTime := time.Now().In(local).Add(-10 * time.Second)
 	report := v1.Report{
 		UUID:      "utc-report",
 		UpdatedAt: receiveTime,
@@ -437,8 +398,8 @@ func TestWriteReportNormalizesReceiveTimeToUTC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query stored point: %v", err)
 	}
-	if len(points) != 1 || points[0].Timestamp.Location() != time.UTC || points[0].Timestamp.Nanosecond() != 123456789 {
-		t.Fatalf("stored points = %#v, want one UTC nanosecond point", points)
+	if len(points) != 1 || points[0].Timestamp.Location() != time.UTC || points[0].Timestamp.UnixMilli() != receiveTime.UnixMilli() {
+		t.Fatalf("stored points = %#v, want one UTC millisecond point", points)
 	}
 }
 
@@ -461,5 +422,19 @@ func assertMetricValues(t *testing.T, s *metric.Store, metricName, entityID stri
 		if points[i].Value != want[i] {
 			t.Fatalf("%s point %d = %v, want %v", metricName, i, points[i].Value, want[i])
 		}
+	}
+}
+
+func assertMetricAggregate(t *testing.T, s *metric.Store, metricName, entityID string, start, end time.Time, aggregation metric.Aggregation, want float64, wantCount int) {
+	t.Helper()
+	points, err := s.Series(context.Background(), metric.AggregateQuery{
+		Query:       metric.Query{MetricName: metricName, EntityID: entityID, Start: start, End: end},
+		Aggregation: aggregation, Interval: time.Minute, PreserveSeries: true,
+	}, end)
+	if err != nil {
+		t.Fatalf("aggregate %s: %v", metricName, err)
+	}
+	if len(points) != 1 || points[0].Value != want || points[0].Count != wantCount {
+		t.Fatalf("aggregate %s = %#v, want value=%v count=%d", metricName, points, want, wantCount)
 	}
 }

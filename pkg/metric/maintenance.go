@@ -46,11 +46,10 @@ func (s *Store) MaintenanceAction() MaintenanceAction {
 
 // StorageSize returns the physical bytes occupied by this Store. SQLite
 // includes the main database, WAL, and shared-memory files. Server backends
-// include only the definitions, points, and rollups tables managed by Store.
+// include only the definition, dictionary, and rollup tables managed by Store.
 //
 // StorageSize 返回当前 Store 占用的物理字节数。SQLite 会统计主数据库、WAL
-// 和共享内存文件；服务端数据库只统计 Store 管理的 definitions、points 和
-// rollups 三张表。
+// 和共享内存文件；服务端数据库只统计 Store 管理的定义、字典和 rollup 表。
 func (s *Store) StorageSize(ctx context.Context) (int64, error) {
 	s.maintenanceMu.RLock()
 	defer s.maintenanceMu.RUnlock()
@@ -74,6 +73,22 @@ func (s *Store) StorageSize(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("metric: query %s storage size: %w", s.cfg.Driver, err)
 	}
 	return size, nil
+}
+
+// CheckpointWAL copies committed SQLite WAL pages into the main database and
+// truncates the sidecar. Other backends have no local WAL sidecar.
+func (s *Store) CheckpointWAL(ctx context.Context) error {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed || s.db == nil {
+		return ErrClosed
+	}
+	if s.cfg.Driver != DriverSQLite {
+		return nil
+	}
+	return sqliteCheckpoint(ctx, s.db)
 }
 
 // ReclaimSpace performs the backend-specific blocking operation that returns
@@ -132,16 +147,25 @@ func (s *Store) ReclaimSpace(ctx context.Context) error {
 // maintenance window.
 func (s *Store) cleanupOrphanedMetricData(ctx context.Context) (int64, error) {
 	var deleted int64
-	for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.watermarks} {
-		if table == "" {
-			continue
-		}
-		result, err := s.db.ExecContext(ctx, fmt.Sprintf(
-			`DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s WHERE %s.name = %s.metric_name)`,
-			table, s.tables.definitions, s.tables.definitions, table,
-		))
+	result, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s s JOIN %s d ON d.name = s.metric_name WHERE s.id = %s.series_id)`,
+		s.tables.rollups, s.tables.series, s.tables.definitions, s.tables.rollups))
+	if err != nil {
+		return deleted, fmt.Errorf("metric: delete orphaned rows from %s: %w", s.tables.rollups, err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return deleted, err
+	}
+	deleted += count
+	for _, statement := range []string{
+		fmt.Sprintf(`DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s r WHERE r.series_id = %s.id)`, s.tables.series, s.tables.rollups, s.tables.series),
+		fmt.Sprintf(`DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s r WHERE r.label_id = %s.id)`, s.tables.labels, s.tables.rollups, s.tables.labels),
+		fmt.Sprintf(`DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s r WHERE r.resolution_id = %s.id)`, s.tables.resolutions, s.tables.rollups, s.tables.resolutions),
+	} {
+		result, err := s.db.ExecContext(ctx, statement)
 		if err != nil {
-			return deleted, fmt.Errorf("metric: delete orphaned rows from %s: %w", table, err)
+			return deleted, err
 		}
 		count, err := result.RowsAffected()
 		if err != nil {
@@ -311,11 +335,7 @@ func managedReclaimQuery(driver Driver, t tables) (string, error) {
 }
 
 func managedTableNames(t tables) []string {
-	names := []string{t.definitions, t.points, t.rollups}
-	if t.watermarks != "" {
-		names = append(names, t.watermarks)
-	}
-	return names
+	return []string{t.definitions, t.series, t.labels, t.resolutions, t.rollups}
 }
 
 func quoteMaintenanceIdentifier(driver Driver, identifier string) string {

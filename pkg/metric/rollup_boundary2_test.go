@@ -134,12 +134,9 @@ func TestSeriesHybridEndEqualsCutoff(t *testing.T) {
 	}
 }
 
-// TestSeriesHybridUsesLastCompactionWatermark verifies that a query does not
-// advance the raw/rollup split beyond the last successful compaction. The raw
-// point at 11:32 is still present after the 12:00 compaction, but a query at
-// 12:04 would calculate a dynamic cutoff of 11:34 and skip it without the
-// persisted watermark at 11:30.
-func TestSeriesHybridUsesLastCompactionWatermark(t *testing.T) {
+// TestSeriesIncludesLateMinuteRollup verifies that a late point is merged into
+// the persisted minute and remains visible without a raw/rollup split.
+func TestSeriesIncludesLateMinuteRollup(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{
 		RawRetention: 30 * time.Minute,
@@ -171,14 +168,6 @@ func TestSeriesHybridUsesLastCompactionWatermark(t *testing.T) {
 		t.Fatalf("series: %v", err)
 	}
 	if len(got) != 1 || got[0].Count != 2 {
-		t.Fatalf("series should include rollup and raw data before the next compaction, got %#v", got)
-	}
-
-	watermark, found, err := s.compactionWatermark(ctx, "watermark")
-	if err != nil {
-		t.Fatalf("read watermark: %v", err)
-	}
-	if !found || !watermark.Equal(policy.rawCutoff(compactAt)) {
-		t.Fatalf("watermark = %v, found=%v, want %v", watermark, found, policy.rawCutoff(compactAt))
+		t.Fatalf("series should include both minute summaries, got %#v", got)
 	}
 }

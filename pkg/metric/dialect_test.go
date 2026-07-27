@@ -1,9 +1,6 @@
 package metric
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // TestDialectsGenerateBackendSpecificSQL verifies backend-specific SQL rendering.
 //
@@ -13,29 +10,29 @@ func TestDialectsGenerateBackendSpecificSQL(t *testing.T) {
 		name        string
 		driver      Driver
 		placeholder string
-		upsert      string
 		jsonType    string
+		blobType    string
 	}{
 		{
 			name:        "sqlite",
 			driver:      DriverSQLite,
 			placeholder: "?",
-			upsert:      "ON CONFLICT(metric_name, entity_id, tags_hash, ts_nano)",
 			jsonType:    "TEXT",
+			blobType:    "BLOB",
 		},
 		{
 			name:        "mysql",
 			driver:      DriverMySQL,
 			placeholder: "?",
-			upsert:      "ON DUPLICATE KEY UPDATE",
 			jsonType:    "JSON",
+			blobType:    "LONGBLOB",
 		},
 		{
 			name:        "postgresql",
 			driver:      DriverPostgreSQL,
 			placeholder: "$1",
-			upsert:      "ON CONFLICT(metric_name, entity_id, tags_hash, ts_nano)",
 			jsonType:    "JSONB",
+			blobType:    "BYTEA",
 		},
 	}
 
@@ -48,12 +45,8 @@ func TestDialectsGenerateBackendSpecificSQL(t *testing.T) {
 			if got := d.jsonType(); got != tt.jsonType {
 				t.Fatalf("json type: expected %q, got %q", tt.jsonType, got)
 			}
-			sql := d.upsertPointSQL(tables{points: "metric_points"}, 2)
-			if !strings.Contains(sql, "metric_points") {
-				t.Fatalf("upsert sql should reference metric_points: %s", sql)
-			}
-			if !strings.Contains(sql, tt.upsert) {
-				t.Fatalf("upsert sql should contain %q: %s", tt.upsert, sql)
+			if got := d.blobType(); got != tt.blobType {
+				t.Fatalf("blob type: expected %q, got %q", tt.blobType, got)
 			}
 		})
 	}

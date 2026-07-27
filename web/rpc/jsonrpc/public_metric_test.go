@@ -41,6 +41,24 @@ func TestMetricQueryParamsRequireRFC3339Time(t *testing.T) {
 	}
 }
 
+func TestMetricQueryParamsIgnoreRemovedDownsampleFlags(t *testing.T) {
+	req := &rpc.JsonRpcRequest{Params: map[string]any{
+		"metric_key":                  "cpu.usage",
+		"downsample":                  false,
+		"server_downsample":           false,
+		"downsample_by_metric":        map[string]bool{"cpu.usage": false},
+		"server_downsample_by_metric": map[string]bool{"cpu.usage": false},
+		"max_points":                  123,
+	}}
+	var params publicMetricQueryParams
+	if err := req.BindParams(&params); err != nil {
+		t.Fatalf("removed downsample flags should be ignored: %v", err)
+	}
+	if params.MetricKey != "cpu.usage" || params.MaxPoints != 123 {
+		t.Fatalf("remaining query params were not bound: %#v", params)
+	}
+}
+
 func TestSplitPublicMetricSeriesKeepsTagSeries(t *testing.T) {
 	baseTime := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
 	base := publicMetricSeries{
@@ -146,13 +164,12 @@ func TestAdaptiveFillPublicMetricSeriesAddsCompactGapsAndBounds(t *testing.T) {
 	if got.IntervalSeconds != 60 {
 		t.Fatalf("expected observed 60s interval, got %v", got.IntervalSeconds)
 	}
-	if len(got.Points) != 7 {
-		t.Fatalf("expected four values, one gap and two bounds, got %#v", got.Points)
+	if len(got.Points) != 6 {
+		t.Fatalf("expected four values, one gap and one leading bound, got %#v", got.Points)
 	}
 	wantNullTimes := map[time.Time]bool{
 		start:                     true,
 		base.Add(3 * time.Minute): true,
-		end:                       true,
 	}
 	for _, point := range got.Points {
 		if point.Value != nil {
@@ -168,6 +185,23 @@ func TestAdaptiveFillPublicMetricSeriesAddsCompactGapsAndBounds(t *testing.T) {
 	}
 	if len(wantNullTimes) != 0 {
 		t.Fatalf("missing expected null points: %#v", wantNullTimes)
+	}
+}
+
+func TestAdaptiveFillPublicMetricSeriesNeverEndsWithNullAfterData(t *testing.T) {
+	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	series := publicMetricSeries{
+		MetricKey:       "cpu.usage",
+		EntityID:        "node-a",
+		IntervalSeconds: 60,
+		Points: []publicMetricPoint{
+			{Time: base, Value: publicMetricValue(10)},
+			{Time: base.Add(time.Minute), Value: publicMetricValue(20)},
+		},
+	}
+	got := adaptiveFillPublicMetricSeries(series, base, base.Add(time.Hour))
+	if len(got.Points) == 0 || got.Points[len(got.Points)-1].Value == nil {
+		t.Fatalf("series ended with an empty chart bucket: %#v", got.Points)
 	}
 }
 

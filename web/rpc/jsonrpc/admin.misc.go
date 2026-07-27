@@ -114,7 +114,6 @@ func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonR
 var metricStoreConfigKeys = map[string]struct{}{
 	metricstore.MetricDBDriverKey:     {},
 	metricstore.MetricDBDSNKey:        {},
-	config.LowResourceModeKey:         {},
 	metricstore.MetricTablePrefixKey:  {},
 	metricstore.MetricMaxOpenConnsKey: {},
 	metricstore.MetricMaxIdleConnsKey: {},
@@ -217,9 +216,6 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 		if s, ok := v.(string); ok {
 			merged.DSN = s
 		}
-	}
-	if v, ok := cfg[config.LowResourceModeKey]; ok {
-		merged.LowResourceMode = toBool(v, merged.LowResourceMode)
 	}
 	if v, ok := cfg[metricstore.MetricTablePrefixKey]; ok {
 		if s, ok := v.(string); ok {

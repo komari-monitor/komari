@@ -39,9 +39,10 @@ func TestRollupKeepsTagSeriesSeparate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compact: %v", err)
 	}
-	// Two distinct tag series in the one bucket => two rollup rows.
-	if written != 2 {
-		t.Fatalf("expected 2 rollup series (one per device_index), got %d", written)
+	// Historical minutes are written directly by WriteBatch, so Compact has no
+	// remaining hot buckets to seal.
+	if written != 0 {
+		t.Fatalf("compact unexpectedly rewrote %d rollup buckets", written)
 	}
 
 	q := func(dev string) AggregateQuery {
@@ -51,8 +52,9 @@ func TestRollupKeepsTagSeriesSeparate(t *testing.T) {
 				Start: base, End: base.Add(10 * time.Minute),
 				Tags: map[string]string{"device_index": dev},
 			},
-			Aggregation: AggAvg,
-			Interval:    time.Minute,
+			Aggregation:    AggAvg,
+			Interval:       time.Minute,
+			PreserveSeries: true,
 		}
 	}
 	// device 0: avg of 10..19 = 14.5
@@ -137,14 +139,6 @@ func TestRollupTagPercentileSurvivesRetention(t *testing.T) {
 	}
 	if _, err := s.Compact(ctx, base.Add(48*time.Hour)); err != nil {
 		t.Fatalf("compact: %v", err)
-	}
-	// Raw gone.
-	raw, err := s.Query(ctx, Query{MetricName: "lat", EntityID: "n1", Start: base, End: base.Add(time.Hour)})
-	if err != nil {
-		t.Fatalf("query raw: %v", err)
-	}
-	if len(raw) != 0 {
-		t.Fatalf("expected raw deleted, got %d", len(raw))
 	}
 	// p90 of region=ap must be near the ap-only exact (≈89), NOT pulled up toward
 	// the eu values (which would happen if tags were merged).

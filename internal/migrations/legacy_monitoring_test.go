@@ -101,35 +101,23 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	}
 
 	hour := base.Truncate(time.Hour)
-	cpuPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricCPU, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour)})
-	if err != nil {
-		t.Fatalf("query cpu points: %v", err)
-	}
-	if len(cpuPoints) != 1 || math.Abs(cpuPoints[0].Value-22) > 1e-9 || !cpuPoints[0].Timestamp.Equal(hour) {
+	cpuPoints := queryLegacyRollups(t, ctx, metricStore, metric.Query{MetricName: metricstore.MetricCPU, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour)})
+	if len(cpuPoints) != 1 || math.Abs(cpuPoints[0].Value-22) > 1e-9 || !cpuPoints[0].Bucket.Equal(hour) {
 		t.Fatalf("unexpected cpu points: %#v", cpuPoints)
 	}
 
-	gpuPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricGPUDeviceUsage, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour), Tags: map[string]string{"device_index": "0"}})
-	if err != nil {
-		t.Fatalf("query gpu points: %v", err)
-	}
+	gpuPoints := queryLegacyRollups(t, ctx, metricStore, metric.Query{MetricName: metricstore.MetricGPUDeviceUsage, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour), Tags: map[string]string{"device_index": "0"}})
 	if len(gpuPoints) != 1 || gpuPoints[0].Value != 67 {
 		t.Fatalf("unexpected gpu points: %#v", gpuPoints)
 	}
 
-	pingPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricPingLatency, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour), Tags: map[string]string{"task_id": "7"}})
-	if err != nil {
-		t.Fatalf("query ping points: %v", err)
-	}
-	if len(pingPoints) != 1 || math.Abs(pingPoints[0].Value-34.15) > 1e-9 || !pingPoints[0].Timestamp.Equal(hour) {
+	pingPoints := queryLegacyRollups(t, ctx, metricStore, metric.Query{MetricName: metricstore.MetricPingLatency, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour), Tags: map[string]string{"task_id": "7"}})
+	if len(pingPoints) != 1 || math.Abs(pingPoints[0].Value-34.15) > 1e-9 || !pingPoints[0].Bucket.Equal(hour) {
 		t.Fatalf("unexpected ping points: %#v", pingPoints)
 	}
 
-	pingLossPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricPingLoss, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour), Tags: map[string]string{"task_id": "7"}})
-	if err != nil {
-		t.Fatalf("query ping loss points: %v", err)
-	}
-	if len(pingLossPoints) != 1 || math.Abs(pingLossPoints[0].Value-0.95) > 1e-9 || !pingLossPoints[0].Timestamp.Equal(hour) {
+	pingLossPoints := queryLegacyRollups(t, ctx, metricStore, metric.Query{MetricName: metricstore.MetricPingLoss, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour), Tags: map[string]string{"task_id": "7"}})
+	if len(pingLossPoints) != 1 || math.Abs(pingLossPoints[0].Value-0.95) > 1e-9 || !pingLossPoints[0].Bucket.Equal(hour) {
 		t.Fatalf("unexpected ping loss points: %#v", pingLossPoints)
 	}
 
@@ -189,26 +177,31 @@ func TestLegacyHourlyP95PreservesHoursAndTaggedSeries(t *testing.T) {
 		t.Fatalf("flush aggregate input: %v", err)
 	}
 
-	taskOne, err := store.Query(ctx, metric.Query{
+	taskOne := queryLegacyRollups(t, ctx, store, metric.Query{
 		MetricName: "test.p95", EntityID: "node-a", Start: base.Add(-time.Second), End: base.Add(2 * time.Hour),
 		Tags: map[string]string{"task_id": "1"}, Order: metric.OrderAsc,
 	})
-	if err != nil {
-		t.Fatalf("query task one: %v", err)
-	}
 	if len(taskOne) != 2 || math.Abs(taskOne[0].Value-19.5) > 1e-9 || taskOne[1].Value != 30 {
 		t.Fatalf("unexpected task one aggregates: %#v", taskOne)
 	}
-	taskTwo, err := store.Query(ctx, metric.Query{
+	taskTwo := queryLegacyRollups(t, ctx, store, metric.Query{
 		MetricName: "test.p95", EntityID: "node-a", Start: base.Add(-time.Second), End: base.Add(2 * time.Hour),
 		Tags: map[string]string{"task_id": "2"}, Order: metric.OrderAsc,
 	})
-	if err != nil {
-		t.Fatalf("query task two: %v", err)
-	}
-	if len(taskTwo) != 1 || taskTwo[0].Value != 100 || !taskTwo[0].Timestamp.Equal(base) {
+	if len(taskTwo) != 1 || taskTwo[0].Value != 100 || !taskTwo[0].Bucket.Equal(base) {
 		t.Fatalf("unexpected task two aggregates: %#v", taskTwo)
 	}
+}
+
+func queryLegacyRollups(t *testing.T, ctx context.Context, store *metric.Store, query metric.Query) []metric.AggregatePoint {
+	t.Helper()
+	points, err := store.Series(ctx, metric.AggregateQuery{
+		Query: query, Aggregation: metric.AggLast, Interval: time.Hour, PreserveSeries: true,
+	}, query.End)
+	if err != nil {
+		t.Fatalf("query %s rollups: %v", query.MetricName, err)
+	}
+	return points
 }
 
 func TestLegacyRecordProjectionFillsMissingMetricColumns(t *testing.T) {
@@ -241,65 +234,6 @@ func TestLegacyRecordProjectionFillsMissingMetricColumns(t *testing.T) {
 	}
 	if record.ConnectionsUdp != 0 || record.NetTotalDown != 0 {
 		t.Fatalf("missing metric columns were not zero-filled: %#v", record)
-	}
-}
-
-func TestDeleteLegacyMonitoringBeforeOnlyRemovesOldHistory(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "cleanup.db"))+"?mode=rwc"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open cleanup db: %v", err)
-	}
-	if sqlDB, err := db.DB(); err == nil {
-		t.Cleanup(func() { _ = sqlDB.Close() })
-	} else {
-		t.Fatalf("cleanup sql db: %v", err)
-	}
-	if err := db.AutoMigrate(&models.Client{}, &models.Record{}, &models.GPURecord{}, &models.PingRecord{}); err != nil {
-		t.Fatalf("migrate cleanup tables: %v", err)
-	}
-	if err := db.Table("records_long_term").AutoMigrate(&models.Record{}); err != nil {
-		t.Fatalf("migrate cleanup long-term table: %v", err)
-	}
-	if err := db.Create(&models.Client{UUID: "client-a", Token: "token-a", Name: "A"}).Error; err != nil {
-		t.Fatalf("seed client: %v", err)
-	}
-
-	cutoff := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
-	oldTime := cutoff.Add(-time.Hour)
-	newTime := cutoff.Add(time.Hour)
-	for _, record := range []models.Record{{Client: "client-a", Time: oldTime}, {Client: "client-a", Time: newTime}} {
-		if err := db.Create(&record).Error; err != nil {
-			t.Fatalf("seed load record: %v", err)
-		}
-	}
-	for _, record := range []models.GPURecord{{Client: "client-a", Time: oldTime}, {Client: "client-a", Time: newTime}} {
-		if err := db.Create(&record).Error; err != nil {
-			t.Fatalf("seed GPU record: %v", err)
-		}
-	}
-	for _, record := range []models.PingRecord{{Client: "client-a", TaskId: 1, Time: oldTime}, {Client: "client-a", TaskId: 1, Time: newTime}} {
-		if err := db.Create(&record).Error; err != nil {
-			t.Fatalf("seed ping record: %v", err)
-		}
-	}
-
-	deleted, err := DeleteLegacyMonitoringBefore(db, cutoff)
-	if err != nil {
-		t.Fatalf("delete legacy monitoring before cutoff: %v", err)
-	}
-	if deleted.LoadRows != 1 || deleted.GPURows != 1 || deleted.LatencyRows != 1 {
-		t.Fatalf("unexpected deleted rows: %#v", deleted)
-	}
-	summary, err := InspectLegacyMonitoring(db)
-	if err != nil {
-		t.Fatalf("inspect remaining legacy monitoring: %v", err)
-	}
-	if summary.LoadRows != 1 || summary.GPURows != 1 || summary.LatencyRows != 1 || summary.ServerCount != 1 {
-		t.Fatalf("unexpected remaining legacy rows: %#v", summary)
-	}
-	var clients int64
-	if err := db.Model(&models.Client{}).Count(&clients).Error; err != nil || clients != 1 {
-		t.Fatalf("cleanup changed clients: count=%d err=%v", clients, err)
 	}
 }
 

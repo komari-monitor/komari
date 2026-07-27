@@ -23,15 +23,18 @@ var (
 	storeOperations   = newStoreOperationGate()
 	compactOperations = newStoreOperationGate()
 	compactAt         int
+	checkpointPending bool
 )
 
 var ErrCompactInProgress = errors.New("metric store compact already in progress")
 
 const (
-	// DefaultRollupRawRetention keeps a short hot raw window; older samples are
-	// served from rollups after compaction.
-	DefaultRollupRawRetention = 15 * time.Minute
+	// DefaultRollupRawRetention documents the fixed in-memory exact-sample
+	// window. Older history is served by the compact rollup ladder.
+	DefaultRollupRawRetention = time.Minute
 	DefaultRollupFinestTier   = time.Minute
+	defaultRollupPointLimit   = 600
+	checkpointRetryTimeout    = 250 * time.Millisecond
 )
 
 // MetricStoreConfig 保存 metric store 配置。
@@ -39,12 +42,11 @@ const (
 // 注意：metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）。
 // 未显式配置时默认使用 SQLite（./data/metrics.db）。
 type MetricStoreConfig struct {
-	Driver          string `json:"metric_db_driver" default:"sqlite"`         // 数据库类型: sqlite, mysql, postgresql
-	DSN             string `json:"metric_db_dsn" default:"./data/metrics.db"` // 数据库连接串
-	LowResourceMode bool   `json:"low_resource_mode"`                         // 低资源模式由首次探测或后台设置决定
-	TablePrefix     string `json:"metric_table_prefix" default:"metric_"`     // 表名前缀
-	MaxOpenConns    int    `json:"metric_max_open_conns" default:"25"`        // 最大连接数
-	MaxIdleConns    int    `json:"metric_max_idle_conns" default:"5"`         // 最大空闲连接数
+	Driver       string `json:"metric_db_driver" default:"sqlite"`         // 数据库类型: sqlite, mysql, postgresql
+	DSN          string `json:"metric_db_dsn" default:"./data/metrics.db"` // 数据库连接串
+	TablePrefix  string `json:"metric_table_prefix" default:"metric_"`     // 表名前缀
+	MaxOpenConns int    `json:"metric_max_open_conns" default:"25"`        // 最大连接数
+	MaxIdleConns int    `json:"metric_max_idle_conns" default:"5"`         // 最大空闲连接数
 }
 
 // MetricStoreConfigKeys 配置键
@@ -103,17 +105,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 		// 这里刻意忽略 cfg.MaxOpenConns/MaxIdleConns —— 对 SQLite 而言多写连接
 		// 只会引入锁竞争而非提升吞吐。
 		opts = append(opts, metric.WithMaxOpenConns(1), metric.WithMaxIdleConns(1))
-		if cfg.LowResourceMode {
-			opts = append(opts,
-				metric.WithSQLiteProfile(metric.SQLiteProfileBalanced),
-				metric.WithSQLiteCacheSizeKB(8*1024),
-				metric.WithSQLiteMMapSize(0),
-				metric.WithSQLiteTempStoreMemory(false),
-				metric.WithSQLiteReadPool(0),
-			)
-		} else {
-			opts = append(opts, metric.WithSQLiteReadPool(4))
-		}
+		opts = append(opts, metric.WithSQLiteReadPool(4))
 		return metric.SQLite(dsn, opts...), nil
 	case metric.DriverMySQL:
 		opts = append(opts,
@@ -136,10 +128,14 @@ func defaultRollupPolicy() metric.RollupPolicy {
 	return metric.RollupPolicy{
 		RawRetention: DefaultRollupRawRetention,
 		Tiers: []metric.RollupTier{
-			{Interval: DefaultRollupFinestTier, Retention: 48 * time.Hour},
-			{Interval: 5 * time.Minute, Retention: 14 * 24 * time.Hour},
-			{Interval: time.Hour, Retention: 14 * 24 * time.Hour},
+			{Interval: time.Minute, Retention: time.Minute * defaultRollupPointLimit},
+			{Interval: 5 * time.Minute, Retention: 5 * time.Minute * defaultRollupPointLimit},
+			{Interval: time.Hour, Retention: time.Hour * defaultRollupPointLimit},
+			// Daily buckets form the terminal tier. They remain available until
+			// the metric's own retention policy removes them.
+			{Interval: 24 * time.Hour, Retention: 100 * 365 * 24 * time.Hour},
 		},
+		Compression: 30,
 	}
 }
 
@@ -352,7 +348,6 @@ func InitializeStore() error {
 	store = s
 	storeFingerprint = targetFingerprint(cfg)
 	storeMu.Unlock()
-	setLowResourceMode(cfg.LowResourceMode)
 	clearStoreClosing()
 
 	logger.Infof("metricstore", "Metric store initialized successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
@@ -380,6 +375,22 @@ func RecoverStore(ctx context.Context, cfg *MetricStoreConfig) error {
 	recovered := *cfg
 	recovered.DSN = strings.TrimSpace(recovered.DSN)
 	recovered.Driver = string(ResolveDriverFromConfig(recovered.Driver, recovered.DSN))
+	restructureRequired, err := structureUpgradeRequiredForConfig(ctx, &recovered)
+	if err != nil {
+		return err
+	}
+	if restructureRequired {
+		target := targetFingerprint(&recovered)
+		if err := config.SetMany(map[string]any{
+			MetricDBDriverKey:  recovered.Driver,
+			MetricDBDSNKey:     recovered.DSN,
+			MigrationTargetKey: target,
+		}); err != nil {
+			return fmt.Errorf("save recovered metric store config: %w", err)
+		}
+		logger.Infof("metricstore", "Metric store connection recovered; structure upgrade is required (driver=%s)", recovered.Driver)
+		return nil
+	}
 	s, err := openStore(ctx, &recovered)
 	if err != nil {
 		return err
@@ -400,7 +411,6 @@ func RecoverStore(ctx context.Context, cfg *MetricStoreConfig) error {
 	store = s
 	storeFingerprint = target
 	storeMu.Unlock()
-	setLowResourceMode(recovered.LowResourceMode)
 	clearStoreClosing()
 
 	if old != nil {
@@ -443,8 +453,6 @@ func Reload(ctx context.Context) error {
 	store = s
 	storeFingerprint = targetFingerprint(cfg)
 	storeMu.Unlock()
-	setLowResourceMode(cfg.LowResourceMode)
-
 	if old != nil {
 		if cerr := old.Close(); cerr != nil {
 			logger.Errorf("metricstore", "Failed to close previous metric store on reload: %v", cerr)
@@ -514,6 +522,7 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 	if activeStore == nil {
 		return 0, fmt.Errorf("metric store not initialized")
 	}
+	retryMetricWALCheckpoint(ctx, activeStore)
 
 	defs, err := activeStore.ListMetrics(ctx)
 	if err != nil {
@@ -527,7 +536,10 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 		compactAt = 0
 	}
 
-	total := 0
+	total, err := activeStore.Flush(ctx, now)
+	if err != nil {
+		return 0, fmt.Errorf("flush closed metric minutes: %w", err)
+	}
 	start := compactAt
 	failedAt := -1
 	var compactErrors []error
@@ -543,8 +555,8 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 		}
 		total += n
 	}
-	if _, err := activeStore.CleanupExpired(ctx, now); err != nil {
-		compactErrors = append(compactErrors, fmt.Errorf("clean up expired raw metrics: %w", err))
+	if err := finishCompactCycle(ctx, activeStore, now); err != nil {
+		compactErrors = append(compactErrors, err)
 	}
 	if failedAt >= 0 {
 		compactAt = failedAt
@@ -552,6 +564,40 @@ func Compact(ctx context.Context, now time.Time) (int, error) {
 		compactAt = start
 	}
 	return total, errors.Join(compactErrors...)
+}
+
+func finishCompactCycle(ctx context.Context, activeStore *metric.Store, now time.Time) error {
+	var compactErrors []error
+	if _, err := activeStore.CleanupExpired(ctx, now); err != nil {
+		compactErrors = append(compactErrors, fmt.Errorf("clean up expired metric data: %w", err))
+	}
+	if activeStore.Driver() == metric.DriverSQLite {
+		checkpointCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		if err := activeStore.CheckpointWAL(checkpointCtx); err != nil {
+			checkpointPending = true
+			logger.Warnf("metricstore", "Failed to truncate metric WAL after compaction: %v", err)
+		} else {
+			checkpointPending = false
+		}
+		cancel()
+	}
+	return errors.Join(compactErrors...)
+}
+
+func retryMetricWALCheckpoint(ctx context.Context, activeStore *metric.Store) {
+	if !checkpointPending {
+		return
+	}
+	if activeStore.Driver() != metric.DriverSQLite {
+		checkpointPending = false
+		return
+	}
+	retryCtx, cancel := context.WithTimeout(ctx, checkpointRetryTimeout)
+	err := activeStore.CheckpointWAL(retryCtx)
+	cancel()
+	if err == nil {
+		checkpointPending = false
+	}
 }
 
 // CloseStoreContext stops the asynchronous store migration before taking the
@@ -955,9 +1001,8 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 
 // GetPingRecords 从 metric store 查询兼容旧接口的 ping 记录。
 //
-// 旧接口过去直接读取 ping_records 的原始点。启用 metric rollup 后，较旧
-// 的 raw 点会被压入 rollup 并删除，因此这里使用 Series 走与 queryMetrics
-// 相同的 raw/rollup 混合读取路径，并保留 task_id 标签。
+// 旧接口过去直接读取 ping_records。这里使用与 queryMetrics 相同的 Series
+// 查询路径从保留层级还原记录，并保留 task_id 标签。
 func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, end time.Time) ([]models.PingRecord, error) {
 	s := GetStore()
 	if s == nil {

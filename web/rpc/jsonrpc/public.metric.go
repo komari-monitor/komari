@@ -41,23 +41,16 @@ type publicMetricQueryParams struct {
 
 	Tags map[string]string `json:"tags"`
 
-	Downsample               *bool           `json:"downsample"`
-	ServerDownsample         *bool           `json:"server_downsample"`
-	DownsampleByMetric       map[string]bool `json:"downsample_by_metric"`
-	ServerDownsampleByMetric map[string]bool `json:"server_downsample_by_metric"`
-	FillEmpty                *bool           `json:"fill_empty"`
+	FillEmpty *bool `json:"fill_empty"`
 
 	MaxPoints         int            `json:"max_points"`
-	DownsamplePoints  int            `json:"downsample_points"`
 	MaxPointsByMetric map[string]int `json:"max_points_by_metric"`
 	PointsByMetric    map[string]int `json:"points_by_metric"`
 
-	Aggregation                 string            `json:"aggregation"`
-	DownsampleAlgorithm         string            `json:"downsample_algorithm"`
-	Algorithm                   string            `json:"algorithm"`
-	AggregationByMetric         map[string]string `json:"aggregation_by_metric"`
-	DownsampleAlgorithmByMetric map[string]string `json:"downsample_algorithm_by_metric"`
-	AlgorithmByMetric           map[string]string `json:"algorithm_by_metric"`
+	Aggregation         string            `json:"aggregation"`
+	Algorithm           string            `json:"algorithm"`
+	AggregationByMetric map[string]string `json:"aggregation_by_metric"`
+	AlgorithmByMetric   map[string]string `json:"algorithm_by_metric"`
 }
 
 type publicMetricPoint struct {
@@ -98,8 +91,7 @@ type publicPingMetricStatsParams struct {
 	EndTime   *time.Time `json:"end_time"`
 	Hours     float64    `json:"hours"`
 
-	MaxPoints        int `json:"max_points"`
-	DownsamplePoints int `json:"downsample_points"`
+	MaxPoints int `json:"max_points"`
 }
 
 type publicPingMetricTaskStats struct {
@@ -179,14 +171,6 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		return nil, rpcErr
 	}
 
-	downsample := true
-	if params.Downsample != nil {
-		downsample = *params.Downsample
-	}
-	if params.ServerDownsample != nil {
-		downsample = *params.ServerDownsample
-	}
-
 	store := metricstore.GetStore()
 	if store == nil {
 		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
@@ -210,7 +194,6 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 		}
-		metricDownsample := resolveMetricDownsample(metricKey, params)
 		algorithm := resolveMetricAggregation(metricKey, params)
 		metricFillEmpty := resolveMetricFillEmpty(params)
 
@@ -230,49 +213,33 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				Unit:          def.Unit,
 				RetentionDays: def.RetentionDays,
 				Tags:          params.Tags,
-				Downsampled:   metricDownsample,
+				Downsampled:   true,
 				FillEmpty:     metricFillEmpty,
 				MaxPoints:     maxPoints,
 			}
 
-			if metricDownsample {
-				item.DownsampleAlgorithm = string(algorithm)
-				now := time.Now().UTC()
-				interval := metricDownsampleInterval(end.Sub(start), maxPoints)
-				interval = store.CompatibleSeriesInterval(start, now, interval)
-				item.IntervalSeconds = interval.Seconds()
-				points, err := store.Series(ctx, metric.AggregateQuery{
-					Query:          query,
-					Aggregation:    algorithm,
-					Interval:       interval,
-					PreserveSeries: true,
-				}, now)
-				if err != nil {
-					return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metric "+metricKey+": "+err.Error(), nil)
-				}
-				item.Points = make([]publicMetricPoint, 0, len(points))
-				for _, point := range points {
-					item.Points = append(item.Points, publicMetricPoint{
-						Time:  point.Bucket.UTC(),
-						Value: publicRawMetricValue(point.MetricName, point.Value, metricFillEmpty),
-						Count: point.Count,
-						Tags:  point.Tags,
-					})
-				}
-			} else {
-				points, err := store.Query(ctx, query)
-				if err != nil {
-					return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metric "+metricKey+": "+err.Error(), nil)
-				}
-				item.Points = make([]publicMetricPoint, 0, len(points))
-				for _, point := range points {
-					item.Points = append(item.Points, publicMetricPoint{
-						Time:   point.Timestamp.UTC(),
-						Value:  publicRawMetricValue(metricKey, point.Value, metricFillEmpty),
-						Tags:   point.Tags,
-						Labels: point.Labels,
-					})
-				}
+			item.DownsampleAlgorithm = string(algorithm)
+			now := time.Now().UTC()
+			interval := metricDownsampleInterval(end.Sub(start), maxPoints)
+			interval = store.CompatibleSeriesInterval(start, now, interval)
+			item.IntervalSeconds = interval.Seconds()
+			points, err := store.Series(ctx, metric.AggregateQuery{
+				Query:          query,
+				Aggregation:    algorithm,
+				Interval:       interval,
+				PreserveSeries: true,
+			}, now)
+			if err != nil {
+				return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metric "+metricKey+": "+err.Error(), nil)
+			}
+			item.Points = make([]publicMetricPoint, 0, len(points))
+			for _, point := range points {
+				item.Points = append(item.Points, publicMetricPoint{
+					Time:  point.Bucket.UTC(),
+					Value: publicRawMetricValue(point.MetricName, point.Value, metricFillEmpty),
+					Count: point.Count,
+					Tags:  point.Tags,
+				})
 			}
 			for _, split := range splitPublicMetricSeries(item) {
 				if metricFillEmpty {
@@ -286,7 +253,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	return map[string]any{
 		"start":                     start.UTC(),
 		"end":                       end.UTC(),
-		"server_downsample_default": downsample,
+		"server_downsample_default": true,
 		"default_points":            defaultMetricQueryPoints,
 		"series":                    series,
 		"count":                     len(series),
@@ -336,9 +303,6 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	taskFilter := normalizePingMetricTaskIDs(params.TaskID, params.TaskIDs)
 
 	maxPoints := params.MaxPoints
-	if maxPoints == 0 {
-		maxPoints = params.DownsamplePoints
-	}
 	if maxPoints <= 0 {
 		maxPoints = defaultMetricQueryPoints
 	}
@@ -480,7 +444,9 @@ func adaptiveFillPublicMetricSeries(series publicMetricSeries, start, end time.T
 		}
 		filled = append(filled, point)
 	}
-	if len(pointTimes) == 0 || pointTimes[len(pointTimes)-1].Before(end) {
+	// Do not append a trailing null after real data. It would make the final chart
+	// bucket blank regardless of whether the tail is a collection delay or a gap.
+	if len(pointTimes) == 0 {
 		filled = append(filled, nullPoint(end))
 	}
 	series.Points = filled
@@ -597,9 +563,6 @@ func metricQueryHours(hours float64) time.Duration {
 func resolveMetricMaxPoints(metricKey string, params publicMetricQueryParams) (int, error) {
 	maxPoints := params.MaxPoints
 	if maxPoints == 0 {
-		maxPoints = params.DownsamplePoints
-	}
-	if maxPoints == 0 {
 		maxPoints = defaultMetricQueryPoints
 	}
 	if v, ok := params.PointsByMetric[metricKey]; ok {
@@ -615,10 +578,9 @@ func resolveMetricMaxPoints(metricKey string, params publicMetricQueryParams) (i
 }
 
 func resolveMetricAggregation(metricKey string, params publicMetricQueryParams) metric.Aggregation {
-	raw := firstNonEmpty(params.Aggregation, params.DownsampleAlgorithm, params.Algorithm)
+	raw := firstNonEmpty(params.Aggregation, params.Algorithm)
 	if v := firstNonEmpty(
 		params.AggregationByMetric[metricKey],
-		params.DownsampleAlgorithmByMetric[metricKey],
 		params.AlgorithmByMetric[metricKey],
 	); v != "" {
 		raw = v
@@ -627,23 +589,6 @@ func resolveMetricAggregation(metricKey string, params publicMetricQueryParams) 
 		raw = string(metric.AggAvg)
 	}
 	return metric.Aggregation(normalizeMetricAggregation(raw))
-}
-
-func resolveMetricDownsample(metricKey string, params publicMetricQueryParams) bool {
-	downsample := true
-	if params.Downsample != nil {
-		downsample = *params.Downsample
-	}
-	if params.ServerDownsample != nil {
-		downsample = *params.ServerDownsample
-	}
-	if v, ok := params.DownsampleByMetric[metricKey]; ok {
-		downsample = v
-	}
-	if v, ok := params.ServerDownsampleByMetric[metricKey]; ok {
-		downsample = v
-	}
-	return downsample
 }
 
 func resolveMetricFillEmpty(params publicMetricQueryParams) bool {

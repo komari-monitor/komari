@@ -51,16 +51,26 @@ func RunServer() {
 		}
 	}
 
-	required, summary, err := app.LegacyUpgradeRequired()
-	if err != nil {
-		_ = app.Shutdown()
-		logger.Fatalf("server", "server startup failed at %q: %v", "detect-1.2.7-upgrade", err)
-	}
-	if required {
-		completed, err := app.RunLegacyUpgrade(summary)
+	for {
+		requirement, err := app.DatabaseMigrationRequired()
+		if err != nil {
+			completed, recoveryErr := app.RunMetricStoreRecovery(err)
+			if recoveryErr != nil {
+				_ = app.Shutdown()
+				logger.Fatalf("server", "server startup failed at %q: %v", "database-migration-detection-recovery", recoveryErr)
+			}
+			if !completed {
+				return
+			}
+			continue
+		}
+		if !requirement.Required() {
+			break
+		}
+		completed, err := app.RunDatabaseMigration(requirement)
 		if err != nil {
 			_ = app.Shutdown()
-			logger.Fatalf("server", "server startup failed at %q: %v", "run-1.2.7-upgrade", err)
+			logger.Fatalf("server", "server startup failed at %q: %v", "run-database-migration", err)
 		}
 		if !completed {
 			return

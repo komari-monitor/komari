@@ -32,10 +32,9 @@ type LegacyMonitoringStats struct {
 	Ping    int64
 }
 
-// LegacyMonitoringSummary describes the legacy source data shown by the
-// pre-start upgrade wizard. Row counts deliberately stay separate from the
-// estimated metric point count because many source rows collapse into one
-// hourly P95 point per metric, entity, and tag set.
+// LegacyMonitoringSummary describes the full legacy source data shown by the
+// pre-start migration guide. Every source row participates in the migration;
+// EstimatedPoints is the number of hourly P95 points expected after grouping.
 type LegacyMonitoringSummary struct {
 	LoadRows        int64      `json:"load_rows"`
 	GPURows         int64      `json:"gpu_rows"`
@@ -54,12 +53,6 @@ type LegacyMonitoringProgress struct {
 	SourceRowsDone  int64  `json:"source_rows_done"`
 	SourceRowsTotal int64  `json:"source_rows_total"`
 	WrittenPoints   int64  `json:"written_points"`
-}
-
-type LegacyMonitoringDeleted struct {
-	LoadRows    int64 `json:"load_rows"`
-	GPURows     int64 `json:"gpu_rows"`
-	LatencyRows int64 `json:"latency_rows"`
 }
 
 type legacyMonitoringBounds struct {
@@ -173,40 +166,6 @@ func InspectLegacyMonitoring(db *gorm.DB) (LegacyMonitoringSummary, error) {
 		}
 	}
 	return summary, nil
-}
-
-// DeleteLegacyMonitoringBefore removes only monitoring history older than the
-// cutoff. Clients, users, ping tasks and other business data are untouched.
-func DeleteLegacyMonitoringBefore(db *gorm.DB, cutoff time.Time) (LegacyMonitoringDeleted, error) {
-	var deleted LegacyMonitoringDeleted
-	if db == nil {
-		return deleted, fmt.Errorf("migration database is nil")
-	}
-	if cutoff.IsZero() {
-		return deleted, fmt.Errorf("cleanup cutoff is required")
-	}
-
-	err := db.Transaction(func(tx *gorm.DB) error {
-		for _, table := range legacyMonitoringTables {
-			if !tx.Migrator().HasTable(table) {
-				continue
-			}
-			result := tx.Exec("DELETE FROM "+table+" WHERE time < ?", cutoff.UTC())
-			if result.Error != nil {
-				return fmt.Errorf("delete legacy %s before cutoff: %w", table, result.Error)
-			}
-			switch table {
-			case "records", "records_long_term":
-				deleted.LoadRows += result.RowsAffected
-			case "gpu_records":
-				deleted.GPURows += result.RowsAffected
-			case "ping_records":
-				deleted.LatencyRows += result.RowsAffected
-			}
-		}
-		return nil
-	})
-	return deleted, err
 }
 
 func MigrateLegacyMonitoring(ctx context.Context, db *gorm.DB, s *metric.Store, progress func(LegacyMonitoringProgress)) (LegacyMonitoringStats, error) {
@@ -541,7 +500,7 @@ func (a *legacyHourlyP95Aggregator) Flush(ctx context.Context) (int64, error) {
 			Tags:       group.tags,
 		})
 	}
-	if err := a.store.WriteBatch(ctx, points); err != nil {
+	if err := a.store.ReplaceRollupPoints(ctx, legacyMonitoringInterval, points); err != nil {
 		return 0, err
 	}
 	a.partitionKey = ""

@@ -1,7 +1,6 @@
 package metric
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -24,7 +23,6 @@ type dialect interface {
 	autoIncrementPrimaryKey() string
 	nowExpr() string
 	insertDefinitionSQL(t tables) string
-	upsertPointSQL(t tables, rowCount int) string
 	// jsonExtractEquals renders a boolean predicate comparing the text value at
 	// key inside a JSON column to a bind placeholder. The key is interpolated
 	// into the SQL (callers must restrict it to a safe charset); the compared
@@ -38,24 +36,6 @@ type dialect interface {
 	//
 	// blobType 是 rollup t-digest sketch 的列类型。
 	blobType() string
-	// upsertRollupSQL builds a single-row upsert for one rollup bucket cell.
-	//
-	// upsertRollupSQL 为单个 rollup 桶单元构造单行 upsert。
-	upsertRollupSQL(t tables) string
-	// upsertCompactionWatermarkSQL builds a single-row upsert for the metric's
-	// persisted compaction watermark.
-	upsertCompactionWatermarkSQL(t tables) string
-	// compactTxOptions returns the transaction options used for the compaction
-	// transaction. PostgreSQL/MySQL escalate to SERIALIZABLE so the raw scan and
-	// the raw deletion share one snapshot and a point inserted between them
-	// cannot be deleted without first being rolled up. SQLite returns nil
-	// (its default) because a single connection already serializes writes.
-	//
-	// compactTxOptions 返回 compaction 事务使用的事务选项。PostgreSQL/MySQL 会
-	// 提升到 SERIALIZABLE，使 raw 扫描和 raw 删除共享同一个快照，让两者之间写入
-	// 的点不会在尚未进入 rollup 前被删除。SQLite 返回 nil（默认），因为单连接
-	// 已经串行化写入。
-	compactTxOptions() *sql.TxOptions
 }
 
 // tables stores the physical table names used by a Store.
@@ -66,17 +46,19 @@ type tables struct {
 	//
 	// definitions 是指标定义表。
 	definitions string
-	// points is the raw points table.
-	//
-	// points 是原始采样点表。
+	// points and watermarks name legacy tables read only by the explicit
+	// structure rebuild. The normalized schema never creates either table.
 	points string
+	// series interns the name/entity/tag/tag-hash tuple.
+	series string
+	// resolutions interns rollup intervals in milliseconds.
+	resolutions string
+	// labels interns labels independently from series tags.
+	labels string
 	// rollups is the downsampled rollups table.
 	//
 	// rollups 是降采样 rollup 表。
-	rollups string
-	// watermarks stores the last successfully compacted raw boundary per metric.
-	//
-	// watermarks 保存每个指标最近一次成功压缩到的 raw 边界。
+	rollups    string
 	watermarks string
 }
 
@@ -129,7 +111,7 @@ func (sqliteDialect) nowExpr() string { return "CURRENT_TIMESTAMP" }
 // insertDefinitionSQL 构造 SQLite 指标定义 upsert SQL。
 func (sqliteDialect) insertDefinitionSQL(t tables) string {
 	return fmt.Sprintf(`INSERT INTO %s
-		(name, type, unit, description, retention_days, metadata, created_at, updated_at)
+		(name, type, unit, description, retention_days, metadata, created_at_milli, updated_at_milli)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			type = excluded.type,
@@ -137,28 +119,7 @@ func (sqliteDialect) insertDefinitionSQL(t tables) string {
 			description = excluded.description,
 			retention_days = excluded.retention_days,
 			metadata = excluded.metadata,
-			updated_at = excluded.updated_at`, t.definitions)
-}
-
-// upsertPointSQL builds SQL for inserting or updating metric points.
-//
-// upsertPointSQL 构造 SQLite 采样点批量 upsert SQL。
-func (sqliteDialect) upsertPointSQL(t tables, rowCount int) string {
-	return buildInsertPointsSQL(t.points, sqliteDialect{}, rowCount, `ON CONFLICT(metric_name, entity_id, tags_hash, ts_nano) DO UPDATE SET
-		value = excluded.value,
-		tags = excluded.tags,
-		labels = excluded.labels,
-		created_at = excluded.created_at`)
-}
-
-// upsertCompactionWatermarkSQL builds the SQLite watermark upsert.
-func (sqliteDialect) upsertCompactionWatermarkSQL(t tables) string {
-	return fmt.Sprintf(`INSERT INTO %s
-		(metric_name, watermark_nano, updated_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT(metric_name) DO UPDATE SET
-			watermark_nano = excluded.watermark_nano,
-			updated_at = excluded.updated_at`, t.watermarks)
+			updated_at_milli = excluded.updated_at_milli`, t.definitions)
 }
 
 // mysqlDialect implements SQL rendering for MySQL.
@@ -196,7 +157,7 @@ func (mysqlDialect) nowExpr() string { return "CURRENT_TIMESTAMP" }
 // insertDefinitionSQL 构造 MySQL 指标定义 upsert SQL。
 func (mysqlDialect) insertDefinitionSQL(t tables) string {
 	return fmt.Sprintf(`INSERT INTO %s
-		(name, type, unit, description, retention_days, metadata, created_at, updated_at)
+		(name, type, unit, description, retention_days, metadata, created_at_milli, updated_at_milli)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			type = VALUES(type),
@@ -204,28 +165,7 @@ func (mysqlDialect) insertDefinitionSQL(t tables) string {
 			description = VALUES(description),
 			retention_days = VALUES(retention_days),
 			metadata = VALUES(metadata),
-			updated_at = VALUES(updated_at)`, t.definitions)
-}
-
-// upsertPointSQL builds SQL for inserting or updating metric points.
-//
-// upsertPointSQL 构造 MySQL 采样点批量 upsert SQL。
-func (mysqlDialect) upsertPointSQL(t tables, rowCount int) string {
-	return buildInsertPointsSQL(t.points, mysqlDialect{}, rowCount, `ON DUPLICATE KEY UPDATE
-		value = VALUES(value),
-		tags = VALUES(tags),
-		labels = VALUES(labels),
-		created_at = VALUES(created_at)`)
-}
-
-// upsertCompactionWatermarkSQL builds the MySQL watermark upsert.
-func (mysqlDialect) upsertCompactionWatermarkSQL(t tables) string {
-	return fmt.Sprintf(`INSERT INTO %s
-		(metric_name, watermark_nano, updated_at)
-		VALUES (?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			watermark_nano = VALUES(watermark_nano),
-			updated_at = VALUES(updated_at)`, t.watermarks)
+			updated_at_milli = VALUES(updated_at_milli)`, t.definitions)
 }
 
 // postgresDialect implements SQL rendering for PostgreSQL.
@@ -263,7 +203,7 @@ func (postgresDialect) nowExpr() string { return "CURRENT_TIMESTAMP" }
 // insertDefinitionSQL 构造 PostgreSQL 指标定义 upsert SQL。
 func (postgresDialect) insertDefinitionSQL(t tables) string {
 	return fmt.Sprintf(`INSERT INTO %s
-		(name, type, unit, description, retention_days, metadata, created_at, updated_at)
+		(name, type, unit, description, retention_days, metadata, created_at_milli, updated_at_milli)
 		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
 		ON CONFLICT(name) DO UPDATE SET
 			type = EXCLUDED.type,
@@ -271,62 +211,7 @@ func (postgresDialect) insertDefinitionSQL(t tables) string {
 			description = EXCLUDED.description,
 			retention_days = EXCLUDED.retention_days,
 			metadata = EXCLUDED.metadata,
-			updated_at = EXCLUDED.updated_at`, t.definitions)
-}
-
-// upsertPointSQL builds SQL for inserting or updating metric points.
-//
-// upsertPointSQL 构造 PostgreSQL 采样点批量 upsert SQL。
-func (postgresDialect) upsertPointSQL(t tables, rowCount int) string {
-	return buildInsertPointsSQL(t.points, postgresDialect{}, rowCount, `ON CONFLICT(metric_name, entity_id, tags_hash, ts_nano) DO UPDATE SET
-		value = EXCLUDED.value,
-		tags = EXCLUDED.tags,
-		labels = EXCLUDED.labels,
-		created_at = EXCLUDED.created_at`)
-}
-
-// upsertCompactionWatermarkSQL builds the PostgreSQL watermark upsert.
-func (postgresDialect) upsertCompactionWatermarkSQL(t tables) string {
-	return fmt.Sprintf(`INSERT INTO %s
-		(metric_name, watermark_nano, updated_at)
-		VALUES ($1, $2, $3)
-		ON CONFLICT(metric_name) DO UPDATE SET
-			watermark_nano = EXCLUDED.watermark_nano,
-			updated_at = EXCLUDED.updated_at`, t.watermarks)
-}
-
-// buildInsertPointsSQL builds a multi-row insert statement for metric points.
-//
-// buildInsertPointsSQL 构造多行采样点 INSERT/UPSERT SQL。
-func buildInsertPointsSQL(table string, d dialect, rowCount int, suffix string) string {
-	var b strings.Builder
-	b.WriteString("INSERT INTO ")
-	b.WriteString(table)
-	b.WriteString(" (metric_name, entity_id, tags_hash, ts_nano, value, tags, labels, created_at) VALUES ")
-	arg := 1
-	rows := make([]string, rowCount)
-	for i := 0; i < rowCount; i++ {
-		parts := make([]string, 8)
-		for j := range parts {
-			// Columns are (metric_name, entity_id, tags_hash, ts_nano, value, tags,
-			// labels, created_at); positions 5 and 6 (0-indexed) are JSON values.
-			// tags_hash makes the tag set part of a point's identity, so points
-			// that share entity+timestamp but differ in tags no longer collide.
-			if j == 5 || j == 6 {
-				parts[j] = d.jsonPlaceholder(arg)
-			} else {
-				parts[j] = d.placeholder(arg)
-			}
-			arg++
-		}
-		rows[i] = "(" + strings.Join(parts, ", ") + ")"
-	}
-	b.WriteString(strings.Join(rows, ", "))
-	if suffix != "" {
-		b.WriteByte(' ')
-		b.WriteString(suffix)
-	}
-	return b.String()
+			updated_at_milli = EXCLUDED.updated_at_milli`, t.definitions)
 }
 
 // tableName combines a table prefix and logical table name.
@@ -343,7 +228,7 @@ func tableName(prefix, name string) string {
 // insertDefinitionOnlySQL 构造普通 INSERT（不带 upsert），供
 // CreateMetric 保持“只创建”语义；重复名称会暴露为唯一约束错误。
 func insertDefinitionOnlySQL(d dialect, t tables) string {
-	cols := "(name, type, unit, description, retention_days, metadata, created_at, updated_at)"
+	cols := "(name, type, unit, description, retention_days, metadata, created_at_milli, updated_at_milli)"
 	ph := []string{
 		d.placeholder(1),
 		d.placeholder(2),

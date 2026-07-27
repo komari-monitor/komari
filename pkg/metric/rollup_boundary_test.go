@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// TestAggregateRollupExcludesPartialBucket verifies the rollup query no longer
-// drags an out-of-window sample in through a partially-overlapping bucket.
+// TestAggregateRollupIncludesPartialMinute verifies query boundaries use the
+// persisted minute as the smallest indivisible unit.
 //
 // Two samples share one 1m rollup bucket [00:00:00, 00:01:00): 00:00:10=100 and
 // 00:00:50=10. A query window of [00:00:40, 00:01:30] only overlaps part of that
@@ -19,7 +19,7 @@ import (
 //
 // TestAggregateRollupExcludesPartialBucket 验证 rollup 查询不再通过部分重叠的桶
 // 把窗口外的样本带进来。
-func TestAggregateRollupExcludesPartialBucket(t *testing.T) {
+func TestAggregateRollupIncludesPartialMinute(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}}}
 	s := newRollupStore(t, policy)
@@ -47,13 +47,8 @@ func TestAggregateRollupExcludesPartialBucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("aggregate rollup: %v", err)
 	}
-	// The partially-overlapping bucket is excluded under full containment, so the
-	// out-of-window 00:00:10 sample (value 100) must not appear. Concretely: no
-	// returned bucket may carry the out-of-window value or a count of 2.
-	for _, p := range res {
-		if p.Count >= 2 || p.Value == 100 {
-			t.Fatalf("partial bucket leaked out-of-window sample: %#v", p)
-		}
+	if len(res) != 1 || res[0].Count != 2 || res[0].Value != 110 {
+		t.Fatalf("partial query should include the complete minute summary: %#v", res)
 	}
 }
 
@@ -140,16 +135,6 @@ func TestSeriesHybridMergesStraddlingBucket(t *testing.T) {
 	}
 	if _, err := s.Compact(ctx, now); err != nil {
 		t.Fatalf("compact: %v", err)
-	}
-
-	// Confirm the old raw point was deleted and the recent one survives, so the
-	// two halves genuinely come from different sources.
-	oldRaw, err := s.Query(ctx, Query{MetricName: "straddle", EntityID: "n1", Start: old.Add(-time.Minute), End: old.Add(time.Minute)})
-	if err != nil {
-		t.Fatalf("query old raw: %v", err)
-	}
-	if len(oldRaw) != 0 {
-		t.Fatalf("expected old raw point deleted by retention, got %d", len(oldRaw))
 	}
 
 	got, err := s.Series(ctx, AggregateQuery{
@@ -278,7 +263,7 @@ func TestSeriesHybridEndAtCutoffIncludesRawBoundary(t *testing.T) {
 	}
 
 	now := time.Date(2026, 6, 18, 12, 0, 30, 0, time.UTC)
-	cutoff := policy.rawCutoff(now)
+	cutoff := now.Add(-30 * time.Minute)
 	if err := s.Write(ctx, Point{MetricName: "cutedge", EntityID: "n1", Timestamp: cutoff, Value: 7}); err != nil {
 		t.Fatalf("write: %v", err)
 	}

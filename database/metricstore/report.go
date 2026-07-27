@@ -5,11 +5,8 @@ import (
 	"errors"
 	"fmt"
 	logger "github.com/komari-monitor/komari/utils/log"
-	"runtime"
-	"sort"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
@@ -35,19 +32,15 @@ type reportTrafficValues struct {
 var reportTrafficStates sync.Map
 
 const (
-	reportBatchInterval        = 3 * time.Second
-	lowResourceReportWindow    = 30 * time.Second
-	reportBatchQueueSize       = 4096
-	lowResourceBatchMaxReports = 128
-	pingBatchMaxRecords        = 512
-	reportBatchWriteTimeout    = 10 * time.Second
+	reportBatchInterval     = 3 * time.Second
+	reportBatchQueueSize    = 4096
+	pingBatchMaxRecords     = 512
+	reportBatchWriteTimeout = 10 * time.Second
 )
 
 var (
 	reportBatcherMu sync.Mutex
 	reportBatcher   *reportBatchWorker
-	lowResourceMode atomic.Bool
-	droppedReports  atomic.Uint64
 )
 
 var (
@@ -71,16 +64,8 @@ type reportBatchWorker struct {
 	stopping  bool
 }
 
-func setLowResourceMode(enabled bool) {
-	lowResourceMode.Store(enabled)
-}
-
-func LowResourceModeEnabled() bool {
-	return lowResourceMode.Load()
-}
-
-// StartReportBatcher starts the shared report writer. Normal mode uses a short
-// window; low-resource mode coalesces each node's 30-second window before write.
+// StartReportBatcher starts the shared report writer. Exact samples are kept in
+// the short raw window while the same writes update in-memory minute buckets.
 func StartReportBatcher() {
 	reportBatcherMu.Lock()
 	defer reportBatcherMu.Unlock()
@@ -162,9 +147,9 @@ func FlushReportBatch(ctx context.Context) error {
 	}
 }
 
-// WriteReport persists one agent report as raw metric points sharing the same
-// server receive time. Traffic deltas are derived from the previous counters
-// and stored alongside the raw counters so they remain summable after rollup.
+// WriteReport persists one agent report and adds it to in-memory minute
+// summaries using the same server receive time. Traffic deltas remain summable
+// after rollup.
 func WriteReport(ctx context.Context, report v1.Report) (v1.Report, error) {
 	if report.UUID == "" {
 		return v1.Report{}, fmt.Errorf("report UUID is required")
@@ -182,10 +167,6 @@ func WriteReport(ctx context.Context, report v1.Report) (v1.Report, error) {
 	reportBatcherMu.Unlock()
 	if worker != nil {
 		if err := worker.enqueue(ctx, report); err != nil {
-			if LowResourceModeEnabled() && errors.Is(err, ErrReportBatchQueueFull) {
-				droppedReports.Add(1)
-				return report, nil
-			}
 			return v1.Report{}, err
 		}
 		return report, nil
@@ -221,14 +202,13 @@ func (w *reportBatchWorker) run() {
 
 	var pending []v1.Report
 	var pendingPings []models.PingRecord
-	lastFlush := time.Now()
 	for {
 		select {
 		case request := <-w.requests:
 			pending = append(pending, drainReportQueue(w.queue, reportBatchQueueSize)...)
 			pendingPings = append(pendingPings, drainPingQueue(w.pingQueue, reportBatchQueueSize)...)
 			err := errors.Join(
-				writePendingReports(request.ctx, &pending, LowResourceModeEnabled()),
+				writePendingReports(request.ctx, &pending),
 				writePendingPingRecords(request.ctx, &pendingPings),
 			)
 			if request.stop {
@@ -239,27 +219,15 @@ func (w *reportBatchWorker) run() {
 				request.done <- err
 				return
 			}
-			if err == nil {
-				lastFlush = time.Now()
-			}
 			request.done <- err
 		case <-ticker.C:
 			pendingPings = append(pendingPings, drainPingQueue(w.pingQueue, reportBatchQueueSize)...)
 			if err := writePendingPingRecords(context.Background(), &pendingPings); err != nil {
 				logger.Errorf("metricstore", "failed to flush ping batch: %v", err)
 			}
-			lowResource := LowResourceModeEnabled()
-			if lowResource && time.Since(lastFlush) < lowResourceReportWindow {
-				continue
-			}
 			pending = append(pending, drainReportQueue(w.queue, reportBatchQueueSize)...)
-			if err := writePendingReports(context.Background(), &pending, lowResource); err != nil {
+			if err := writePendingReports(context.Background(), &pending); err != nil {
 				logger.Errorf("metricstore", "failed to flush metric report batch: %v", err)
-			} else {
-				lastFlush = time.Now()
-				if dropped := droppedReports.Swap(0); dropped > 0 {
-					logger.Warnf("metricstore", "low resource metric batching dropped %d reports after the queue filled", dropped)
-				}
 			}
 		}
 	}
@@ -314,17 +282,11 @@ func drainPingQueue(queue <-chan models.PingRecord, limit int) []models.PingReco
 	return records
 }
 
-func writePendingReports(ctx context.Context, pending *[]v1.Report, lowResource bool) error {
+func writePendingReports(ctx context.Context, pending *[]v1.Report) error {
 	if len(*pending) == 0 {
 		return nil
 	}
-	if lowResource {
-		*pending = coalesceReportsP95(*pending)
-	}
 	batchSize := len(*pending)
-	if lowResource && batchSize > lowResourceBatchMaxReports {
-		batchSize = lowResourceBatchMaxReports
-	}
 	for len(*pending) > 0 {
 		if batchSize > len(*pending) {
 			batchSize = len(*pending)
@@ -336,9 +298,6 @@ func writePendingReports(ctx context.Context, pending *[]v1.Report, lowResource 
 			return err
 		}
 		*pending = (*pending)[batchSize:]
-		if lowResource {
-			runtime.Gosched()
-		}
 	}
 	return nil
 }
@@ -358,108 +317,6 @@ func writePendingPingRecords(ctx context.Context, pending *[]models.PingRecord) 
 		*pending = (*pending)[batchSize:]
 	}
 	return nil
-}
-
-type reportNumber interface {
-	~int | ~int64 | ~float64
-}
-
-func percentile95[T reportNumber](values []T) T {
-	if len(values) == 0 {
-		var zero T
-		return zero
-	}
-	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
-	index := (95*len(values) + 99) / 100
-	return values[index-1]
-}
-
-func reportP95[T reportNumber](reports []v1.Report, value func(v1.Report) T) T {
-	values := make([]T, len(reports))
-	for i, report := range reports {
-		values[i] = value(report)
-	}
-	return percentile95(values)
-}
-
-func coalesceReportsP95(reports []v1.Report) []v1.Report {
-	grouped := make(map[string][]v1.Report)
-	order := make([]string, 0)
-	for _, report := range reports {
-		if _, exists := grouped[report.UUID]; !exists {
-			order = append(order, report.UUID)
-		}
-		grouped[report.UUID] = append(grouped[report.UUID], report)
-	}
-	coalesced := make([]v1.Report, 0, len(order))
-	for _, uuid := range order {
-		coalesced = append(coalesced, coalesceNodeReportsP95(grouped[uuid]))
-	}
-	return coalesced
-}
-
-func coalesceNodeReportsP95(reports []v1.Report) v1.Report {
-	latestIndex := 0
-	for i := 1; i < len(reports); i++ {
-		if reports[i].UpdatedAt.After(reports[latestIndex].UpdatedAt) {
-			latestIndex = i
-		}
-	}
-	result := reports[latestIndex]
-	result.CPU.Usage = reportP95(reports, func(r v1.Report) float64 { return r.CPU.Usage })
-	result.Ram.Used = reportP95(reports, func(r v1.Report) int64 { return r.Ram.Used })
-	result.Swap.Used = reportP95(reports, func(r v1.Report) int64 { return r.Swap.Used })
-	result.Load.Load1 = reportP95(reports, func(r v1.Report) float64 { return r.Load.Load1 })
-	result.Disk.Used = reportP95(reports, func(r v1.Report) int64 { return r.Disk.Used })
-	result.Network.Up = reportP95(reports, func(r v1.Report) int64 { return r.Network.Up })
-	result.Network.Down = reportP95(reports, func(r v1.Report) int64 { return r.Network.Down })
-	result.Process = reportP95(reports, func(r v1.Report) int { return r.Process })
-	result.Connections.TCP = reportP95(reports, func(r v1.Report) int { return r.Connections.TCP })
-	result.Connections.UDP = reportP95(reports, func(r v1.Report) int { return r.Connections.UDP })
-
-	latestGPU := -1
-	for i := range reports {
-		if reports[i].GPU != nil && (latestGPU < 0 || reports[i].UpdatedAt.After(reports[latestGPU].UpdatedAt)) {
-			latestGPU = i
-		}
-	}
-	if latestGPU < 0 {
-		result.GPU = nil
-		return result
-	}
-	gpu := *reports[latestGPU].GPU
-	gpu.DetailedInfo = append([]v1.GPUDeviceInfo(nil), gpu.DetailedInfo...)
-	gpuReports := make([]v1.Report, 0, len(reports))
-	for _, report := range reports {
-		if report.GPU != nil {
-			gpuReports = append(gpuReports, report)
-		}
-	}
-	gpu.AverageUsage = reportP95(gpuReports, func(r v1.Report) float64 { return r.GPU.AverageUsage })
-	for deviceIndex := range gpu.DetailedInfo {
-		deviceReports := make([]v1.GPUDeviceInfo, 0, len(gpuReports))
-		for _, report := range gpuReports {
-			if deviceIndex < len(report.GPU.DetailedInfo) {
-				deviceReports = append(deviceReports, report.GPU.DetailedInfo[deviceIndex])
-			}
-		}
-		if len(deviceReports) == 0 {
-			continue
-		}
-		memoryUsed := make([]int64, len(deviceReports))
-		utilization := make([]float64, len(deviceReports))
-		temperature := make([]int, len(deviceReports))
-		for i, device := range deviceReports {
-			memoryUsed[i] = device.MemoryUsed
-			utilization[i] = device.Utilization
-			temperature[i] = device.Temperature
-		}
-		gpu.DetailedInfo[deviceIndex].MemoryUsed = percentile95(memoryUsed)
-		gpu.DetailedInfo[deviceIndex].Utilization = percentile95(utilization)
-		gpu.DetailedInfo[deviceIndex].Temperature = percentile95(temperature)
-	}
-	result.GPU = &gpu
-	return result
 }
 
 func writeReportBatch(ctx context.Context, reports []v1.Report) ([]v1.Report, error) {
@@ -592,7 +449,7 @@ func latestReportCounter(ctx context.Context, s *metric.Store, metricName, entit
 }
 
 // GetLatestTrafficBefore returns the latest retained upload/download counters
-// before a boundary, transparently reading raw points or rollups.
+// before a boundary, transparently reading raw points or rollup summaries.
 func GetLatestTrafficBefore(ctx context.Context, entityIDs []string, before time.Time) (map[string]models.Record, error) {
 	s := GetStore()
 	if s == nil {

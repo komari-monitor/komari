@@ -58,6 +58,16 @@ type Store struct {
 	// retentionMu serializes a retention change with writes and compaction so a
 	// disabled metric cannot be repopulated by an in-flight operation.
 	retentionMu sync.RWMutex
+	// ingestMu keeps the exact-sample upsert and its hot-rollup update atomic
+	// with respect to other writers.
+	ingestMu sync.Mutex
+	// rawMu protects the compact exact-sample window used by Store.Query.
+	rawMu sync.RWMutex
+	raw   map[rawSeriesKey]*rawSeries
+	// hotMu protects minute buckets that have not closed yet. These summaries
+	// feed the rollup ladder without persisting exact samples.
+	hotMu sync.RWMutex
+	hot   map[hotRollupKey]*rollupBucket
 	// mu protects closed state.
 	//
 	// mu 保护 closed 状态。
@@ -95,9 +105,14 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		tables: tables{
 			definitions: tableName(cfg.TablePrefix, "definitions"),
 			points:      tableName(cfg.TablePrefix, "points"),
+			series:      tableName(cfg.TablePrefix, "series"),
+			resolutions: tableName(cfg.TablePrefix, "resolutions"),
+			labels:      tableName(cfg.TablePrefix, "label_sets"),
 			rollups:     tableName(cfg.TablePrefix, "rollups"),
 			watermarks:  tableName(cfg.TablePrefix, "compaction_watermarks"),
 		},
+		raw: make(map[rawSeriesKey]*rawSeries),
+		hot: make(map[hotRollupKey]*rollupBucket),
 	}
 
 	if cfg.DB != nil {
@@ -223,7 +238,10 @@ func prepareSQLiteConfig(cfg Config) (Config, error) {
 		cfg.SQLite.MMapSizeBytes = 256 * 1024 * 1024
 	}
 	if cfg.SQLite.WALAutoCheckpoint == 0 {
-		cfg.SQLite.WALAutoCheckpoint = 1000
+		cfg.SQLite.WALAutoCheckpoint = 256
+	}
+	if cfg.SQLite.JournalSizeLimitBytes == 0 {
+		cfg.SQLite.JournalSizeLimitBytes = 1024 * 1024
 	}
 
 	if cfg.DB == nil {
@@ -292,6 +310,7 @@ func (s *Store) configureSQLite(ctx context.Context, db *sql.DB) error {
 		fmt.Sprintf("PRAGMA cache_size = -%d", s.cfg.SQLite.CacheSizeKB),
 		fmt.Sprintf("PRAGMA mmap_size = %d", s.cfg.SQLite.MMapSizeBytes),
 		fmt.Sprintf("PRAGMA wal_autocheckpoint = %d", s.cfg.SQLite.WALAutoCheckpoint),
+		fmt.Sprintf("PRAGMA journal_size_limit = %d", s.cfg.SQLite.JournalSizeLimitBytes),
 	}
 	if s.cfg.SQLite.TempStoreMemory {
 		pragmas = append(pragmas, "PRAGMA temp_store = MEMORY")
@@ -332,13 +351,29 @@ func durationMillis(d time.Duration) int {
 //
 // Close 关闭 Store 拥有的连接池；外部传入的 DB 不会被关闭。
 func (s *Store) Close() error {
+	// Block new writes, mark the store closed, then persist the remaining partial
+	// minute before closing owned pools. A clean shutdown should not discard the
+	// last observations merely because their wall-clock minute has not ended.
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
+	s.mu.Unlock()
+
 	var firstErr error
+	flushCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := s.flushAllHotRollups(flushCtx); err != nil {
+		firstErr = err
+	}
+	cancel()
+	s.rawMu.Lock()
+	s.raw = nil
+	s.rawMu.Unlock()
 	if s.ownedReadDB && s.readDB != nil {
 		if err := s.readDB.Close(); err != nil {
 			firstErr = err
@@ -400,7 +435,7 @@ func (s *Store) CreateMetric(ctx context.Context, def Definition) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC().UnixNano()
+	now := timeMillis(time.Now())
 	_, err = s.db.ExecContext(
 		ctx,
 		insertDefinitionOnlySQL(s.dialect, s.tables),
@@ -445,7 +480,7 @@ func (s *Store) UpsertMetric(ctx context.Context, def Definition) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC().UnixNano()
+	now := timeMillis(time.Now())
 	_, err = s.db.ExecContext(
 		ctx,
 		s.dialect.insertDefinitionSQL(s.tables),
@@ -461,7 +496,7 @@ func (s *Store) UpsertMetric(ctx context.Context, def Definition) error {
 	if err != nil || def.RetentionDays != 0 {
 		return err
 	}
-	_, err = s.DeleteSeries(ctx, Query{MetricName: def.Name})
+	_, err = s.deleteSeries(ctx, Query{MetricName: def.Name})
 	return err
 }
 
@@ -476,7 +511,7 @@ func (s *Store) GetMetric(ctx context.Context, name string) (Definition, error) 
 		return Definition{}, fmt.Errorf("%w: metric name is required", ErrInvalidArgument)
 	}
 	row := s.reader().QueryRowContext(ctx, fmt.Sprintf(
-		`SELECT name, type, unit, description, retention_days, metadata, created_at, updated_at FROM %s WHERE name = %s`,
+		`SELECT name, type, unit, description, retention_days, metadata, created_at_milli, updated_at_milli FROM %s WHERE name = %s`,
 		s.tables.definitions, s.dialect.placeholder(1),
 	), name)
 	def, err := scanDefinition(row)
@@ -494,7 +529,7 @@ func (s *Store) ListMetrics(ctx context.Context) ([]Definition, error) {
 		return nil, err
 	}
 	rows, err := s.reader().QueryContext(ctx, fmt.Sprintf(
-		`SELECT name, type, unit, description, retention_days, metadata, created_at, updated_at FROM %s ORDER BY name ASC`,
+		`SELECT name, type, unit, description, retention_days, metadata, created_at_milli, updated_at_milli FROM %s ORDER BY name ASC`,
 		s.tables.definitions,
 	))
 	if err != nil {
@@ -515,7 +550,7 @@ func (s *Store) ListMetrics(ctx context.Context) ([]Definition, error) {
 
 // DeleteMetric deletes a metric definition and all of its raw and rollup data.
 //
-// DeleteMetric 删除指标定义及其所有原始点和 rollup 数据。
+// DeleteMetric 删除指标定义及其所有 rollup 数据。
 func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
@@ -523,25 +558,26 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("%w: metric name is required", ErrInvalidArgument)
 	}
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.rollups, s.dialect.placeholder(1)), name); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.points, s.dialect.placeholder(1)), name); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.watermarks, s.dialect.placeholder(1)), name); err != nil {
+	if err = s.deleteRollupsForMetricTx(ctx, name, tx); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE name = %s`, s.tables.definitions, s.dialect.placeholder(1)), name); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	_, rawErr := s.deleteRawPoints(name, "", nil)
+	_, hotErr := s.deleteHotRollups(name, "", nil, nil)
+	return errors.Join(rawErr, hotErr)
 }
 
 // UpdateMetricRetention updates one metric's retention policy without deleting
@@ -568,9 +604,9 @@ func (s *Store) UpdateMetricRetention(ctx context.Context, name string, retentio
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	updatedAt := time.Now().UTC().UnixNano()
+	updatedAt := timeMillis(time.Now())
 	result, err := tx.ExecContext(ctx,
-		fmt.Sprintf(`UPDATE %s SET retention_days = %s, updated_at = %s WHERE name = %s`,
+		fmt.Sprintf(`UPDATE %s SET retention_days = %s, updated_at_milli = %s WHERE name = %s`,
 			s.tables.definitions, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3)),
 		retentionDays, updatedAt, name,
 	)
@@ -614,9 +650,9 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	updatedAt := time.Now().UTC().UnixNano()
+	updatedAt := timeMillis(time.Now())
 	result, err := tx.ExecContext(ctx,
-		fmt.Sprintf(`UPDATE %s SET retention_days = %s, updated_at = %s WHERE name = %s`,
+		fmt.Sprintf(`UPDATE %s SET retention_days = %s, updated_at_milli = %s WHERE name = %s`,
 			s.tables.definitions, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3)),
 		retentionDays, updatedAt, name,
 	)
@@ -631,21 +667,24 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 		return Definition{}, fmt.Errorf("%w: metric %q", ErrNotFound, name)
 	}
 	if retentionDays == 0 {
-		for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.watermarks} {
-			if _, err := tx.ExecContext(ctx,
-				fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, table, s.dialect.placeholder(1)), name,
-			); err != nil {
-				return Definition{}, err
-			}
+		if err := s.deleteRollupsForMetricTx(ctx, name, tx); err != nil {
+			return Definition{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Definition{}, err
 	}
+	if retentionDays == 0 {
+		_, rawErr := s.deleteRawPoints(name, "", nil)
+		_, hotErr := s.deleteHotRollups(name, "", nil, nil)
+		if err := errors.Join(rawErr, hotErr); err != nil {
+			return Definition{}, err
+		}
+	}
 	return s.GetMetric(ctx, name)
 }
 
-// DeleteMetricData removes all raw, rollup, and watermark data for one metric.
+// DeleteMetricData removes all raw and rollup data for one metric.
 func (s *Store) DeleteMetricData(ctx context.Context, name string) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
@@ -663,14 +702,15 @@ func (s *Store) DeleteMetricData(ctx context.Context, name string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.watermarks} {
-		if _, err := tx.ExecContext(ctx,
-			fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, table, s.dialect.placeholder(1)), name,
-		); err != nil {
-			return err
-		}
+	if err := s.deleteRollupsForMetricTx(ctx, name, tx); err != nil {
+		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	_, rawErr := s.deleteRawPoints(name, "", nil)
+	_, hotErr := s.deleteHotRollups(name, "", nil, nil)
+	return errors.Join(rawErr, hotErr)
 }
 
 // DeleteMetricDataIfDisabled removes a metric's data only while its retention
@@ -707,14 +747,15 @@ func (s *Store) DeleteMetricDataIfDisabled(ctx context.Context, name string) (bo
 	if retentionDays != 0 {
 		return false, nil
 	}
-	for _, table := range []string{s.tables.points, s.tables.rollups, s.tables.watermarks} {
-		if _, err := tx.ExecContext(ctx,
-			fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, table, s.dialect.placeholder(1)), name,
-		); err != nil {
-			return false, err
-		}
+	if err := s.deleteRollupsForMetricTx(ctx, name, tx); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	_, rawErr := s.deleteRawPoints(name, "", nil)
+	_, hotErr := s.deleteHotRollups(name, "", nil, nil)
+	if err := errors.Join(rawErr, hotErr); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -722,7 +763,7 @@ func (s *Store) DeleteMetricDataIfDisabled(ctx context.Context, name string) (bo
 
 // DeleteEntity deletes all raw and rollup data for one entity across every metric.
 //
-// DeleteEntity 删除某个实体在所有指标下的原始点和 rollup 数据。
+// DeleteEntity 删除某个实体在所有指标下的 rollup 数据。
 func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
@@ -730,35 +771,35 @@ func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error
 	if strings.TrimSpace(entityID) == "" {
 		return 0, fmt.Errorf("%w: entity id is required", ErrInvalidArgument)
 	}
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var total int64
-	for _, table := range []string{s.tables.points, s.tables.rollups} {
-		res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE entity_id = %s`, table, s.dialect.placeholder(1)), entityID)
-		if err != nil {
-			return total, err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return total, err
-		}
-		total += n
+	res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE series_id IN (SELECT id FROM %s WHERE entity_id = %s)`, s.tables.rollups, s.tables.series, s.dialect.placeholder(1)), entityID)
+	if err != nil {
+		return 0, err
+	}
+	rollups, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
-		return total, err
+		return rollups, err
 	}
-	return total, nil
+	raw, rawErr := s.deleteRawPoints("", entityID, nil)
+	hot, hotErr := s.deleteHotRollups("", entityID, nil, nil)
+	return rollups + raw + hot, errors.Join(rawErr, hotErr)
 }
 
 // DeleteSeries deletes raw and rollup data matching a query-shaped series filter.
 // MetricName is required; EntityID and Tags are optional, so callers can delete
 // one task tag across all agents or one tagged series for a single agent.
 //
-// DeleteSeries 删除匹配查询式序列过滤条件的原始点和 rollup 数据。MetricName 必填；
+// DeleteSeries 删除匹配查询式序列过滤条件的 rollup 数据。MetricName 必填；
 // EntityID 和 Tags 可选，因此调用方可以删除所有 agent 的某个 task 标签，或删除
 // 单个 agent 的某条带标签序列。
 func (s *Store) DeleteSeries(ctx context.Context, filter Query) (int64, error) {
@@ -768,46 +809,42 @@ func (s *Store) DeleteSeries(ctx context.Context, filter Query) (int64, error) {
 	if strings.TrimSpace(filter.MetricName) == "" {
 		return 0, fmt.Errorf("%w: metric name is required", ErrInvalidArgument)
 	}
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
+	return s.deleteSeries(ctx, filter)
+}
+
+func (s *Store) deleteSeries(ctx context.Context, filter Query) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var total int64
-	for _, table := range []string{s.tables.points, s.tables.rollups} {
-		args := []any{filter.MetricName}
-		parts := []string{"metric_name = " + s.dialect.placeholder(1)}
-		if strings.TrimSpace(filter.EntityID) != "" {
-			args = append(args, filter.EntityID)
-			parts = append(parts, "entity_id = "+s.dialect.placeholder(len(args)))
-		}
-		for _, k := range sortedKeys(filter.Tags) {
-			args = append(args, filter.Tags[k])
-			parts = append(parts, s.dialect.jsonExtractEquals("tags", k, s.dialect.placeholder(len(args))))
-		}
-		res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE %s`, table, strings.Join(parts, " AND ")), args...)
-		if err != nil {
-			return total, err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return total, err
-		}
-		total += n
+	args := []any{filter.MetricName}
+	parts := []string{"metric_name = " + s.dialect.placeholder(1)}
+	if strings.TrimSpace(filter.EntityID) != "" {
+		args = append(args, filter.EntityID)
+		parts = append(parts, "entity_id = "+s.dialect.placeholder(len(args)))
 	}
-	if strings.TrimSpace(filter.EntityID) == "" && len(filter.Tags) == 0 {
-		if _, err := tx.ExecContext(ctx,
-			fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.watermarks, s.dialect.placeholder(1)),
-			filter.MetricName,
-		); err != nil {
-			return total, err
-		}
+	for _, k := range sortedKeys(filter.Tags) {
+		args = append(args, filter.Tags[k])
+		parts = append(parts, s.dialect.jsonExtractEquals("tags", k, s.dialect.placeholder(len(args))))
+	}
+	res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE series_id IN (SELECT id FROM %s WHERE %s)`, s.tables.rollups, s.tables.series, strings.Join(parts, " AND ")), args...)
+	if err != nil {
+		return 0, err
+	}
+	rollups, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
-		return total, err
+		return rollups, err
 	}
-	return total, nil
+	raw, rawErr := s.deleteRawPoints(filter.MetricName, filter.EntityID, filter.Tags)
+	hot, hotErr := s.deleteHotRollups(filter.MetricName, filter.EntityID, filter.Tags, nil)
+	return rollups + raw + hot, errors.Join(rawErr, hotErr)
 }
 
 // Write stores one metric point.
@@ -829,6 +866,9 @@ func (s *Store) WriteBatch(ctx context.Context, points []Point) error {
 	}
 	s.retentionMu.RLock()
 	defer s.retentionMu.RUnlock()
+	if err := s.ensureOpen(); err != nil {
+		return err
+	}
 	points, err := s.filterDisabledMetricPoints(ctx, points)
 	if err != nil {
 		return err
@@ -836,28 +876,17 @@ func (s *Store) WriteBatch(ctx context.Context, points []Point) error {
 	if len(points) == 0 {
 		return nil
 	}
-	const batchSize = 1000
-	// A single chunk is one statement; send it directly. Multiple chunks are
-	// wrapped in one transaction so the batch is all-or-nothing rather than
-	// leaving earlier chunks committed when a later one fails.
-	if len(points) <= batchSize {
-		return s.writeBatch(ctx, s.db, points)
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	s.ingestMu.Lock()
+	defer s.ingestMu.Unlock()
+	prepared, err := prepareMetricPoints(points)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-	for i := 0; i < len(points); i += batchSize {
-		end := i + batchSize
-		if end > len(points) {
-			end = len(points)
-		}
-		if err := s.writeBatch(ctx, tx, points[i:end]); err != nil {
-			return err
-		}
+	rebuild, err := s.writeRawPoints(ctx, prepared)
+	if err != nil {
+		return err
 	}
-	return tx.Commit()
+	return s.writePreparedHotRollups(ctx, prepared, time.Now().UTC(), rebuild)
 }
 
 // filterDisabledMetricPoints rejects points without a definition and drops
@@ -886,15 +915,6 @@ func (s *Store) filterDisabledMetricPoints(ctx context.Context, points []Point) 
 	return filtered, nil
 }
 
-// execer is satisfied by both *sql.DB and *sql.Tx, letting writeBatch run either
-// standalone or inside the batch transaction.
-//
-// execer 同时由 *sql.DB 和 *sql.Tx 满足，使 writeBatch 既可独立执行，
-// 也可在批量事务中执行。
-type execer interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
-
 // querier is satisfied by both *sql.DB and *sql.Tx, letting read helpers run
 // either standalone (on the read pool / primary) or inside an existing
 // transaction. Running a read on the owning *sql.Tx is required when the store
@@ -910,36 +930,7 @@ type querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-// writeBatch writes one chunk of metric points through an executor.
-//
-// writeBatch 使用给定执行器写入一批采样点。
-func (s *Store) writeBatch(ctx context.Context, ex execer, points []Point) error {
-	args := make([]any, 0, len(points)*8)
-	now := time.Now().UTC().UnixNano()
-	for i, point := range points {
-		if err := point.Validate(); err != nil {
-			return fmt.Errorf("point %d (metric %q, entity %q): %w", i, point.MetricName, point.EntityID, err)
-		}
-		point = point.normalized()
-		// tagsFingerprint returns the canonical tag JSON too, so the tags column
-		// reuses it rather than encoding the map a second time.
-		tagsHash, tags, err := tagsFingerprint(point.Tags)
-		if err != nil {
-			return err
-		}
-		labels, err := encodeMap(point.Labels)
-		if err != nil {
-			return err
-		}
-		args = append(args, point.MetricName, point.EntityID, tagsHash, point.Timestamp.UnixNano(), point.Value, tags, labels, now)
-	}
-	_, err := ex.ExecContext(ctx, s.dialect.upsertPointSQL(s.tables, len(points)), args...)
-	return err
-}
-
-// Query loads raw metric points matching a query.
-//
-// Query 按条件查询原始采样点。
+// Query loads exact raw samples from the configured short retention window.
 func (s *Store) Query(ctx context.Context, query Query) ([]Point, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
@@ -948,58 +939,11 @@ func (s *Store) Query(ctx context.Context, query Query) ([]Point, error) {
 		return nil, err
 	}
 	query = query.normalized()
-	where, args := s.buildWhere(query)
-	order := "ASC"
-	if query.Order == OrderDesc {
-		order = "DESC"
-	}
-
-	sqlText := fmt.Sprintf(`SELECT metric_name, entity_id, ts_nano, value, tags, labels FROM %s WHERE %s ORDER BY ts_nano %s`,
-		s.tables.points, where, order)
-	// Tag filtering is now pushed into buildWhere, so paging always runs in SQL.
-	if query.Limit > 0 {
-		args = append(args, query.Limit)
-		sqlText += " LIMIT " + s.dialect.placeholder(len(args))
-	}
-	if query.Offset > 0 {
-		args = append(args, query.Offset)
-		sqlText += " OFFSET " + s.dialect.placeholder(len(args))
-	}
-
-	rows, err := s.reader().QueryContext(ctx, sqlText, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []Point
-	for rows.Next() {
-		var p Point
-		var ts int64
-		var rawTags, rawLabels any
-		if err := rows.Scan(&p.MetricName, &p.EntityID, &ts, &p.Value, &rawTags, &rawLabels); err != nil {
-			return nil, err
-		}
-		p.Timestamp = time.Unix(0, ts).UTC()
-		p.Tags, err = decodeMap(rawTags)
-		if err != nil {
-			return nil, err
-		}
-		p.Labels, err = decodeMap(rawLabels)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return s.queryRawPoints(ctx, query)
 }
 
-// EntityIDs returns distinct entity ids that have raw or rollup data matching a query.
-//
-// EntityIDs 返回在原始点或 rollup 中匹配查询条件的实体 ID。
+// EntityIDs returns distinct entity ids that have exact in-memory samples or
+// persisted/hot rollups.
 func (s *Store) EntityIDs(ctx context.Context, query Query) ([]string, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
@@ -1008,50 +952,64 @@ func (s *Store) EntityIDs(ctx context.Context, query Query) ([]string, error) {
 		return nil, err
 	}
 	query = query.normalized()
+	rawIDs, err := s.rawEntityIDs(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(rawIDs))
+	for _, entityID := range rawIDs {
+		seen[entityID] = struct{}{}
+	}
 
-	pointsWhere, args := s.buildWhere(query)
-	rollupArgsStart := len(args)
-	rollupArgs := []any{query.MetricName, query.Start.UnixNano(), query.End.UnixNano()}
-	rollupParts := []string{
-		"metric_name = " + s.dialect.placeholder(rollupArgsStart+1),
-		"bucket_nano >= " + s.dialect.placeholder(rollupArgsStart+2),
-		"bucket_nano <= " + s.dialect.placeholder(rollupArgsStart+3),
+	args := []any{query.MetricName, bucketStartMillis(query.Start.UnixMilli(), time.Minute.Milliseconds()), query.End.UnixMilli()}
+	parts := []string{
+		"s.metric_name = " + s.dialect.placeholder(1),
+		"r.bucket_milli >= " + s.dialect.placeholder(2),
+		"r.bucket_milli <= " + s.dialect.placeholder(3),
 	}
 	if strings.TrimSpace(query.EntityID) != "" {
-		rollupArgs = append(rollupArgs, query.EntityID)
-		rollupParts = append(rollupParts, "entity_id = "+s.dialect.placeholder(rollupArgsStart+len(rollupArgs)))
+		args = append(args, query.EntityID)
+		parts = append(parts, "s.entity_id = "+s.dialect.placeholder(len(args)))
 	}
 	for _, k := range sortedKeys(query.Tags) {
-		rollupArgs = append(rollupArgs, query.Tags[k])
-		rollupParts = append(rollupParts, s.dialect.jsonExtractEquals("tags", k, s.dialect.placeholder(rollupArgsStart+len(rollupArgs))))
+		args = append(args, query.Tags[k])
+		parts = append(parts, s.dialect.jsonExtractEquals("s.tags", k, s.dialect.placeholder(len(args))))
 	}
-	args = append(args, rollupArgs...)
-
-	sqlText := fmt.Sprintf(`SELECT DISTINCT entity_id FROM (
-SELECT entity_id FROM %s WHERE %s
-UNION
-SELECT entity_id FROM %s WHERE %s
-) AS metric_entities ORDER BY entity_id ASC`,
-		s.tables.points, pointsWhere,
-		s.tables.rollups, strings.Join(rollupParts, " AND "),
-	)
+	sqlText := fmt.Sprintf(`SELECT DISTINCT s.entity_id FROM %s r JOIN %s s ON s.id = r.series_id JOIN %s d ON d.id = r.resolution_id WHERE %s AND d.resolution_milli = %s ORDER BY s.entity_id ASC`, s.tables.rollups, s.tables.series, s.tables.resolutions, strings.Join(parts, " AND "), s.dialect.placeholder(len(args)+1))
+	args = append(args, time.Minute.Milliseconds())
 	rows, err := s.reader().QueryContext(ctx, sqlText, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []string
 	for rows.Next() {
 		var entityID string
 		if err := rows.Scan(&entityID); err != nil {
 			return nil, err
 		}
 		if entityID != "" {
-			out = append(out, entityID)
+			seen[entityID] = struct{}{}
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	hot, err := s.hotRollupRows(query.MetricName, query.EntityID, query.Tags, query.Start, query.End, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range hot {
+		seen[row.entityID] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for entityID := range seen {
+		out = append(out, entityID)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // Latest loads the newest points for a metric and entity.
@@ -1070,43 +1028,18 @@ func (s *Store) Latest(ctx context.Context, metricName, entityID string, limit i
 	if limit <= 0 {
 		limit = 1
 	}
-	// Dedicated query rather than a full-range Query: no synthetic time bounds,
-	// and the index on (metric_name, entity_id, ts_nano) serves the ORDER BY.
-	sqlText := fmt.Sprintf(
-		`SELECT metric_name, entity_id, ts_nano, value, tags, labels FROM %s WHERE metric_name = %s AND entity_id = %s ORDER BY ts_nano DESC LIMIT %s`,
-		s.tables.points, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3),
-	)
-	rows, err := s.reader().QueryContext(ctx, sqlText, metricName, entityID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []Point
-	for rows.Next() {
-		var p Point
-		var ts int64
-		var rawTags, rawLabels any
-		if err := rows.Scan(&p.MetricName, &p.EntityID, &ts, &p.Value, &rawTags, &rawLabels); err != nil {
-			return nil, err
-		}
-		p.Timestamp = time.Unix(0, ts).UTC()
-		p.Tags, err = decodeMap(rawTags)
-		if err != nil {
-			return nil, err
-		}
-		p.Labels, err = decodeMap(rawLabels)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
+	return s.Query(ctx, Query{
+		MetricName: metricName,
+		EntityID:   entityID,
+		Start:      time.Unix(0, 0),
+		End:        time.Now().UTC(),
+		Order:      OrderDesc,
+		Limit:      limit,
+	})
 }
 
-// LatestBefore returns the newest retained point before an exclusive boundary.
-// It checks both indexed raw points and rollup last-values so callers do not
-// need to scan and aggregate an entire retention window to restore a counter.
+// LatestBefore returns the newest raw point or rollup representative before an
+// exclusive boundary. The active in-memory minute is included.
 func (s *Store) LatestBefore(ctx context.Context, metricName, entityID string, before time.Time) (Point, bool, error) {
 	if err := s.ensureOpen(); err != nil {
 		return Point{}, false, err
@@ -1121,83 +1054,26 @@ func (s *Store) LatestBefore(ctx context.Context, metricName, entityID string, b
 		return Point{}, false, fmt.Errorf("%w: before time is required", ErrInvalidArgument)
 	}
 
-	beforeNano := before.UTC().UnixNano()
-	var latest Point
-	found := false
-	rawSQL := fmt.Sprintf(
-		`SELECT metric_name, entity_id, ts_nano, value, tags, labels FROM %s
-		 WHERE metric_name = %s AND entity_id = %s AND ts_nano < %s
-		 ORDER BY ts_nano DESC LIMIT 1`,
-		s.tables.points, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3),
-	)
-	var rawTags, rawLabels any
-	var rawNano int64
-	err := s.reader().QueryRowContext(ctx, rawSQL, metricName, entityID, beforeNano).Scan(
-		&latest.MetricName, &latest.EntityID, &rawNano, &latest.Value, &rawTags, &rawLabels,
-	)
-	if err == nil {
-		latest.Timestamp = time.Unix(0, rawNano).UTC()
-		latest.Tags, err = decodeMap(rawTags)
-		if err != nil {
-			return Point{}, false, err
-		}
-		latest.Labels, err = decodeMap(rawLabels)
-		if err != nil {
-			return Point{}, false, err
-		}
-		found = true
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	latestRows, err := s.Query(ctx, Query{MetricName: metricName, EntityID: entityID, Start: time.Unix(0, 0), End: before.Add(-time.Nanosecond), Order: OrderDesc, Limit: 1})
+	if err != nil {
 		return Point{}, false, err
 	}
+	var latest Point
+	found := len(latestRows) > 0
 	if found {
-		rawCutoff := s.cfg.RollupPolicy.rawCutoff(before)
-		if rawCutoff.IsZero() || !latest.Timestamp.Before(rawCutoff) {
-			return latest, true, nil
-		}
+		latest = latestRows[0]
 	}
-
-	for _, tier := range s.cfg.RollupPolicy.Tiers {
-		rollupSQL := fmt.Sprintf(
-			`SELECT tags, last_val, last_ts FROM %s
-			 WHERE metric_name = %s AND entity_id = %s AND resolution_nano = %s AND last_ts < %s
-			 ORDER BY last_ts DESC LIMIT 1`,
-			s.tables.rollups, s.dialect.placeholder(1), s.dialect.placeholder(2),
-			s.dialect.placeholder(3), s.dialect.placeholder(4),
-		)
-		var tags any
-		var value float64
-		var timestamp int64
-		err = s.reader().QueryRowContext(ctx, rollupSQL, metricName, entityID, tier.Interval.Nanoseconds(), beforeNano).Scan(
-			&tags, &value, &timestamp,
-		)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return Point{}, false, err
-		}
-		if found && timestamp <= latest.Timestamp.UnixNano() {
-			continue
-		}
-		decodedTags, err := decodeMap(tags)
-		if err != nil {
-			return Point{}, false, err
-		}
-		latest = Point{
-			MetricName: metricName,
-			EntityID:   entityID,
-			Timestamp:  time.Unix(0, timestamp).UTC(),
-			Value:      value,
-			Tags:       decodedTags,
-		}
-		found = true
+	rollup, rollupFound, err := s.latestRollupBefore(ctx, metricName, entityID, before)
+	if err != nil {
+		return Point{}, false, err
+	}
+	if rollupFound && (!found || rollup.Timestamp.After(latest.Timestamp)) {
+		latest, found = rollup, true
 	}
 	return latest, found, nil
 }
 
-// Aggregate computes bucketed aggregates from raw points.
-//
-// Aggregate 对原始点执行分桶聚合，能下推到 SQL 的聚合会优先下推。
+// Aggregate computes bucketed aggregates from retained raw samples.
 func (s *Store) Aggregate(ctx context.Context, query AggregateQuery) ([]AggregatePoint, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
@@ -1205,16 +1081,6 @@ func (s *Store) Aggregate(ctx context.Context, query AggregateQuery) ([]Aggregat
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
-	// Push simple reductions (avg/min/max/sum/count) down to SQL via GROUP BY on
-	// a time bucket so large ranges don't pull every raw point into memory.
-	// Percentiles, first/last and rate need the ordered raw series, so those fall
-	// back to the in-memory aggregator.
-	if valueExpr, ok := sqlAggValueExpr(s.cfg.Driver, query.Aggregation); ok {
-		return s.aggregateInSQL(ctx, query, valueExpr)
-	}
-	// In-memory fallback. Strip the embedded raw-point Limit/Offset so the full
-	// series feeds the aggregator; paging is then applied per bucket, matching
-	// the SQL pushdown path's BucketLimit/BucketOffset semantics.
 	rawQuery := query.Query
 	rawQuery.Limit = 0
 	rawQuery.Offset = 0
@@ -1231,12 +1097,10 @@ func (s *Store) Aggregate(ctx context.Context, query AggregateQuery) ([]Aggregat
 
 // pageBuckets applies bucket-level paging to an ordered slice of aggregate
 // points. offset buckets are skipped from the front; at most limit buckets are
-// returned (limit <= 0 means no limit). It mirrors the SQL LIMIT/OFFSET applied
-// in aggregateInSQL so both paths page identically.
+// returned (limit <= 0 means no limit).
 //
 // pageBuckets 对有序 AggregatePoint 切片应用桶级分页。它会从前面跳过 offset
-// 个桶，并最多返回 limit 个桶（limit <= 0 表示不限制）。它镜像 aggregateInSQL
-// 中应用的 SQL LIMIT/OFFSET，使两条路径的分页行为一致。
+// 个桶，并最多返回 limit 个桶（limit <= 0 表示不限制）。
 func pageBuckets(buckets []AggregatePoint, limit, offset int) []AggregatePoint {
 	if offset > 0 {
 		if offset >= len(buckets) {
@@ -1250,81 +1114,26 @@ func pageBuckets(buckets []AggregatePoint, limit, offset int) []AggregatePoint {
 	return buckets
 }
 
-// aggregateInSQL computes a bucketed aggregate in the database.
-//
-// aggregateInSQL 使用数据库 GROUP BY 执行可下推的聚合查询。
-func (s *Store) aggregateInSQL(ctx context.Context, query AggregateQuery, valueExpr string) ([]AggregatePoint, error) {
-	q := query.Query.normalized()
-	where, args := s.buildWhere(q)
-	interval := query.Interval.Nanoseconds()
-	// interval is a trusted int64 (validated > 0); inline it so bucket math and
-	// GROUP BY/ORDER BY reference the same expression without extra binds.
-	//
-	// Note: this bucket expression is a computed (non-sargable) value, so the
-	// GROUP BY cannot be served directly by the (metric_name, entity_id,
-	// ts_nano) index — the database still range-scans the rows selected by the
-	// WHERE clause (which IS index-served) and groups them on the fly. That is
-	// fine for typical windows; for very large ranges the cost is the scan, not
-	// the grouping. We keep the raw-timestamp index rather than materializing a
-	// bucket column so writes stay cheap and the bucket size can vary per query.
-	bucketExpr := fmt.Sprintf("(ts_nano - ((ts_nano %% %d) + %d) %% %d)", interval, interval, interval)
-	sqlText := fmt.Sprintf(
-		`SELECT %s AS bucket, metric_name, entity_id, tags_hash, tags, %s AS agg_value, COUNT(*) AS agg_count FROM %s WHERE %s GROUP BY bucket, metric_name, entity_id, tags_hash, tags ORDER BY bucket ASC, metric_name ASC, entity_id ASC, tags_hash ASC`,
-		bucketExpr, valueExpr, s.tables.points, where,
-	)
-	// Page over aggregate buckets (BucketLimit/BucketOffset), not raw points.
-	if query.BucketLimit > 0 {
-		args = append(args, query.BucketLimit)
-		sqlText += " LIMIT " + s.dialect.placeholder(len(args))
-	}
-	if query.BucketOffset > 0 {
-		args = append(args, query.BucketOffset)
-		sqlText += " OFFSET " + s.dialect.placeholder(len(args))
-	}
-
-	rows, err := s.reader().QueryContext(ctx, sqlText, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make([]AggregatePoint, 0)
-	for rows.Next() {
-		var bucket int64
-		var metricName, entityID, tagsHash string
-		var rawTags any
-		var value float64
-		var count int
-		if err := rows.Scan(&bucket, &metricName, &entityID, &tagsHash, &rawTags, &value, &count); err != nil {
-			return nil, err
-		}
-		_ = tagsHash
-		tags, err := decodeMap(rawTags)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, AggregatePoint{
-			MetricName: metricName,
-			EntityID:   entityID,
-			Bucket:     time.Unix(0, bucket).UTC(),
-			Value:      value,
-			Count:      count,
-			Tags:       tags,
-		})
-	}
-	return out, rows.Err()
-}
-
-// Stats stores or computes summary statistics for a point series.
-//
-// Stats 查询原始点并计算统计摘要。
+// Stats computes summary statistics from persisted and active minute summaries.
 func (s *Store) Stats(ctx context.Context, query Query) (Stats, error) {
-	points, err := s.Query(ctx, query)
+	if err := s.ensureOpen(); err != nil {
+		return Stats{}, err
+	}
+	if err := query.Validate(); err != nil {
+		return Stats{}, err
+	}
+	query = query.normalized()
+	rows, err := s.scanRollupRowsBetween(ctx, query.MetricName, query.EntityID, query.Tags,
+		time.Minute.Milliseconds(), bucketStartMillis(query.Start.UnixMilli(), time.Minute.Milliseconds()), query.End.UnixMilli(), true)
 	if err != nil {
 		return Stats{}, err
 	}
-	stats, err := CalculateStats(points)
-	if errors.Is(err, ErrNoData) {
+	hot, err := s.hotRollupRows(query.MetricName, query.EntityID, query.Tags, query.Start, query.End, true)
+	if err != nil {
+		return Stats{}, err
+	}
+	rows = append(rows, hot...)
+	if len(rows) == 0 {
 		// No samples in range. Disambiguate from a non-existent metric so the
 		// caller can tell "empty window" apart from "unknown metric".
 		if _, gerr := s.GetMetric(ctx, query.MetricName); errors.Is(gerr, ErrNotFound) {
@@ -1332,13 +1141,36 @@ func (s *Store) Stats(ctx context.Context, query Query) (Stats, error) {
 		} else if gerr != nil {
 			return Stats{}, gerr
 		}
+		return Stats{}, ErrNoData
 	}
-	return stats, err
+	bucket := newRollupBucket(s.cfg.RollupPolicy.compression())
+	for _, row := range rows {
+		bucket.mergeStored(row.bucketData)
+	}
+	value := func(aggregation Aggregation) float64 {
+		result, _ := bucket.value(aggregation)
+		return result
+	}
+	representatives := representativePoints(query.MetricName, rows)
+	sort.Slice(representatives, func(i, j int) bool { return representatives[i].Timestamp.Before(representatives[j].Timestamp) })
+	return Stats{
+		Count: int(bucket.count), Min: bucket.min, Max: bucket.max,
+		Avg: value(AggAvg), Sum: bucket.sum,
+		P50: value(AggP50), P95: value(AggP95), P99: value(AggP99),
+		First: bucket.firstVal, Last: bucket.lastVal,
+		Rate:  valueFromPoints(representatives, AggRate),
+		Start: fromMillis(bucket.firstTS), End: fromMillis(bucket.lastTS),
+		StdDev: value(AggStdDev),
+	}, nil
 }
 
-// DeleteBefore deletes raw points older than a cutoff.
-//
-// DeleteBefore 删除指定时间之前的原始点，可按指标名限定范围。
+func valueFromPoints(points []Point, aggregation Aggregation) float64 {
+	value, _ := aggregateValue(points, aggregation)
+	return value
+}
+
+// DeleteBefore deletes retained raw points and summaries older than a cutoff
+// across every resolution, including matching active in-memory minute buckets.
 func (s *Store) DeleteBefore(ctx context.Context, metricName string, before time.Time) (int64, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
@@ -1346,22 +1178,43 @@ func (s *Store) DeleteBefore(ctx context.Context, metricName string, before time
 	if before.IsZero() {
 		return 0, fmt.Errorf("%w: before time is required", ErrInvalidArgument)
 	}
-	args := []any{before.UTC().UnixNano()}
-	where := "ts_nano < " + s.dialect.placeholder(1)
-	if strings.TrimSpace(metricName) != "" {
-		args = append(args, metricName)
-		where += " AND metric_name = " + s.dialect.placeholder(2)
-	}
-	res, err := s.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE %s`, s.tables.points, where), args...)
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
+
+	before = before.UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	defer func() { _ = tx.Rollback() }()
+	var deleted int64
+	for _, tier := range s.cfg.RollupPolicy.Tiers {
+		args := []any{tier.Interval.Milliseconds(), bucketStartMillis(before.UnixMilli(), tier.Interval.Milliseconds())}
+		where := "resolution_id IN (SELECT id FROM " + s.tables.resolutions + " WHERE resolution_milli = " + s.dialect.placeholder(1) + ") AND bucket_milli < " + s.dialect.placeholder(2)
+		if strings.TrimSpace(metricName) != "" {
+			args = append(args, metricName)
+			where += " AND series_id IN (SELECT id FROM " + s.tables.series + " WHERE metric_name = " + s.dialect.placeholder(3) + ")"
+		}
+		res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE %s`, s.tables.rollups, where), args...)
+		if err != nil {
+			return 0, err
+		}
+		count, err := res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		deleted += count
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	raw := s.deleteRawBefore(metricName, before.UnixMilli())
+	hotCutoff := fromMillis(bucketStartMillis(before.UnixMilli(), time.Minute.Milliseconds()))
+	hot, hotErr := s.deleteHotRollups(metricName, "", nil, &hotCutoff)
+	return deleted + raw + hot, hotErr
 }
 
-// CleanupExpired deletes expired raw points for every metric.
-//
-// CleanupExpired 根据各指标保留天数清理过期原始点。
+// CleanupExpired deletes summaries past each metric's final retention.
 func (s *Store) CleanupExpired(ctx context.Context, now time.Time) (int64, error) {
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
@@ -1384,30 +1237,6 @@ func (s *Store) CleanupExpired(ctx context.Context, now time.Time) (int64, error
 		total += deleted
 	}
 	return total, nil
-}
-
-// buildWhere renders the WHERE clause and arguments for a raw query.
-//
-// buildWhere 根据 Query 构造 SQL WHERE 条件和参数。
-func (s *Store) buildWhere(query Query) (string, []any) {
-	args := []any{query.MetricName, query.Start.UnixNano(), query.End.UnixNano()}
-	parts := []string{
-		"metric_name = " + s.dialect.placeholder(1),
-		"ts_nano >= " + s.dialect.placeholder(2),
-		"ts_nano <= " + s.dialect.placeholder(3),
-	}
-	if strings.TrimSpace(query.EntityID) != "" {
-		args = append(args, query.EntityID)
-		parts = append(parts, "entity_id = "+s.dialect.placeholder(len(args)))
-	}
-	// Push tag filtering down into SQL via the dialect's JSON accessor so that
-	// LIMIT/OFFSET can also be applied by the database instead of pulling every
-	// matching row into memory. Keys are sorted for deterministic SQL.
-	for _, k := range sortedKeys(query.Tags) {
-		args = append(args, query.Tags[k])
-		parts = append(parts, s.dialect.jsonExtractEquals("tags", k, s.dialect.placeholder(len(args))))
-	}
-	return strings.Join(parts, " AND "), args
 }
 
 // sortedKeys returns sorted map keys.
@@ -1442,8 +1271,8 @@ func scanDefinition(scanner interface{ Scan(dest ...any) error }) (Definition, e
 	}
 	def.Type = MetricType(typ)
 	def.Metadata = metadata
-	def.CreatedAt = time.Unix(0, created).UTC()
-	def.UpdatedAt = time.Unix(0, updated).UTC()
+	def.CreatedAt = fromMillis(created)
+	def.UpdatedAt = fromMillis(updated)
 	return def, nil
 }
 
@@ -1451,9 +1280,8 @@ func scanDefinition(scanner interface{ Scan(dest ...any) error }) (Definition, e
 //
 // sortedPoints 返回按时间排序的点；若输入已排序则直接复用。
 func sortedPoints(points []Point) []Point {
-	// Callers frequently pass series that are already time-ordered (the SQL
-	// queries ORDER BY ts_nano). Detecting that lets us return the input as-is
-	// and skip the copy + sort allocation on the common path.
+	// Most store queries already return time-ordered representatives. Detecting
+	// that avoids a copy and sort allocation on the common path.
 	if isTimeSorted(points) {
 		return points
 	}

@@ -81,34 +81,34 @@ func TestCleanupOrphanedMetricData(t *testing.T) {
 	if err := store.CreateMetric(ctx, Definition{Name: "known", Type: TypeGauge, RetentionDays: 1}); err != nil {
 		t.Fatalf("create known definition: %v", err)
 	}
-	if err := store.writeBatch(ctx, store.db, []Point{{
-		MetricName: "orphan", EntityID: "node-1", Timestamp: time.Now().UTC(), Value: 1,
-	}}); err != nil {
-		t.Fatalf("seed orphan point: %v", err)
+	now := time.Now().UTC().UnixMilli()
+	if _, err := store.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (metric_name, entity_id, tags_hash, tags) VALUES (?, ?, ?, ?)`, store.tables.series), "orphan", "node-1", "hash", "{}"); err != nil {
+		t.Fatalf("seed orphan series: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (labels_hash, labels) VALUES (?, ?)`, store.tables.labels), emptyLabelsHash, "{}"); err != nil {
+		t.Fatalf("seed orphan labels: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (resolution_milli) VALUES (?)`, store.tables.resolutions), time.Minute.Milliseconds()); err != nil {
+		t.Fatalf("seed orphan resolution: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx, fmt.Sprintf(
-		`INSERT INTO %s (metric_name, entity_id, tags_hash, tags, resolution_nano, bucket_nano, count, sum, sum_sq, min_val, max_val, first_val, first_ts, last_val, last_ts, digest, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		store.tables.rollups,
-	), "orphan", "node-1", "", "{}", int64(time.Minute), time.Now().UTC().UnixNano(), 1, 1, 1, 1, 1, 1, time.Now().UTC().UnixNano(), 1, time.Now().UTC().UnixNano(), []byte{}, time.Now().UTC().UnixNano()); err != nil {
+		`INSERT INTO %s (series_id, resolution_id, label_id, bucket_milli, count, sum, sum_sq, min_val, max_val, first_val, first_ts_milli, last_val, last_ts_milli, digest, created_at_milli)
+		 SELECT s.id, r.id, l.id, ?, 1, 1, 1, 1, 1, 1, ?, 1, ?, NULL, ? FROM %s s, %s r, %s l WHERE s.metric_name = ?`,
+		store.tables.rollups, store.tables.series, store.tables.resolutions, store.tables.labels,
+	), now, now, now, now, "orphan"); err != nil {
 		t.Fatalf("seed orphan rollup: %v", err)
-	}
-	if _, err := store.db.ExecContext(ctx, fmt.Sprintf(
-		`INSERT INTO %s (metric_name, watermark_nano, updated_at) VALUES (?, ?, ?)`, store.tables.watermarks,
-	), "orphan", time.Now().UTC().UnixNano(), time.Now().UTC().UnixNano()); err != nil {
-		t.Fatalf("seed orphan watermark: %v", err)
 	}
 
 	deleted, err := store.cleanupOrphanedMetricData(ctx)
 	if err != nil {
 		t.Fatalf("clean orphaned metric data: %v", err)
 	}
-	if deleted != 3 {
-		t.Fatalf("deleted rows = %d, want 3", deleted)
+	if deleted != 4 {
+		t.Fatalf("deleted rows = %d, want 4", deleted)
 	}
-	for _, table := range []string{store.tables.points, store.tables.rollups, store.tables.watermarks} {
+	for _, table := range []string{store.tables.series, store.tables.labels, store.tables.resolutions, store.tables.rollups} {
 		var count int
-		if err := store.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE metric_name = ?`, table), "orphan").Scan(&count); err != nil {
+		if err := store.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s`, table)).Scan(&count); err != nil {
 			t.Fatalf("count orphan rows in %s: %v", table, err)
 		}
 		if count != 0 {
@@ -121,8 +121,10 @@ func TestMaintenanceMappings(t *testing.T) {
 	tables := tables{
 		definitions: "Metric_definitions",
 		points:      "Metric_points",
+		series:      "Metric_series",
+		labels:      "Metric_label_sets",
+		resolutions: "Metric_resolutions",
 		rollups:     "Metric_rollups",
-		watermarks:  "Metric_compaction_watermarks",
 	}
 
 	tests := []struct {
@@ -145,18 +147,18 @@ func TestMaintenanceMappings(t *testing.T) {
 			name:       "mysql",
 			driver:     DriverMySQL,
 			action:     MaintenanceOptimize,
-			reclaim:    "OPTIMIZE TABLE `Metric_definitions`, `Metric_points`, `Metric_rollups`, `Metric_compaction_watermarks`",
-			sizeParts:  []string{"information_schema.TABLES", "TABLE_SCHEMA = DATABASE()", "TABLE_NAME IN (?, ?, ?, ?)"},
-			sizeArgs:   []any{"Metric_definitions", "Metric_points", "Metric_rollups", "Metric_compaction_watermarks"},
+			reclaim:    "OPTIMIZE TABLE `Metric_definitions`, `Metric_series`, `Metric_label_sets`, `Metric_resolutions`, `Metric_rollups`",
+			sizeParts:  []string{"information_schema.TABLES", "TABLE_SCHEMA = DATABASE()", "TABLE_NAME IN (?, ?, ?, ?, ?)"},
+			sizeArgs:   []any{"Metric_definitions", "Metric_series", "Metric_label_sets", "Metric_resolutions", "Metric_rollups"},
 			hasSizeSQL: true,
 		},
 		{
 			name:       "postgresql",
 			driver:     DriverPostgreSQL,
 			action:     MaintenanceVacuumFull,
-			reclaim:    `VACUUM (FULL, ANALYZE) "metric_definitions", "metric_points", "metric_rollups", "metric_compaction_watermarks"`,
-			sizeParts:  []string{"pg_total_relation_size(c.oid)", "n.nspname = current_schema()", "c.relname IN ($1, $2, $3, $4)"},
-			sizeArgs:   []any{"metric_definitions", "metric_points", "metric_rollups", "metric_compaction_watermarks"},
+			reclaim:    `VACUUM (FULL, ANALYZE) "metric_definitions", "metric_series", "metric_label_sets", "metric_resolutions", "metric_rollups"`,
+			sizeParts:  []string{"pg_total_relation_size(c.oid)", "n.nspname = current_schema()", "c.relname IN ($1, $2, $3, $4, $5)"},
+			sizeArgs:   []any{"metric_definitions", "metric_series", "metric_label_sets", "metric_resolutions", "metric_rollups"},
 			hasSizeSQL: true,
 		},
 	}

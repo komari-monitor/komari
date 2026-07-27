@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,12 +21,12 @@ func TestDefaultRollupPolicy(t *testing.T) {
 	if policy.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("raw retention = %s, want %s", policy.RawRetention, DefaultRollupRawRetention)
 	}
-	if len(policy.Tiers) != 3 {
-		t.Fatalf("expected 3 rollup tiers, got %d", len(policy.Tiers))
+	if len(policy.Tiers) != 4 {
+		t.Fatalf("expected 4 rollup tiers, got %d", len(policy.Tiers))
 	}
 
-	wantIntervals := []time.Duration{time.Minute, 5 * time.Minute, time.Hour}
-	wantRetentions := []time.Duration{48 * time.Hour, 14 * 24 * time.Hour, 14 * 24 * time.Hour}
+	wantIntervals := []time.Duration{time.Minute, 5 * time.Minute, time.Hour, 24 * time.Hour}
+	wantRetentions := []time.Duration{600 * time.Minute, 600 * 5 * time.Minute, 600 * time.Hour, 100 * 365 * 24 * time.Hour}
 	for i := range wantIntervals {
 		if policy.Tiers[i].Interval != wantIntervals[i] {
 			t.Fatalf("tier %d interval = %s, want %s", i, policy.Tiers[i].Interval, wantIntervals[i])
@@ -53,6 +52,9 @@ func TestBuildMetricConfigEnablesDefaultRollupPolicy(t *testing.T) {
 	if cfg.RollupPolicy.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("raw retention = %s, want %s", cfg.RollupPolicy.RawRetention, DefaultRollupRawRetention)
 	}
+	if cfg.SQLite.ReadPoolSize != 4 {
+		t.Fatalf("metric store read pool = %d, want fixed size 4", cfg.SQLite.ReadPoolSize)
+	}
 }
 
 func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
@@ -63,7 +65,7 @@ func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
 	}
-	wantRollupRetention := 14 * 24 * time.Hour
+	wantRollupRetention := 100 * 365 * 24 * time.Hour
 	lastTier := cfg.RollupPolicy.Tiers[len(cfg.RollupPolicy.Tiers)-1]
 	if lastTier.Retention != wantRollupRetention {
 		t.Fatalf("rollup retention = %s, want %s", lastTier.Retention, wantRollupRetention)
@@ -80,32 +82,6 @@ func TestBuildMetricConfigAlwaysEnablesDownsampling(t *testing.T) {
 	}
 	if !cfg.RollupPolicy.Enabled() {
 		t.Fatal("expected rollup policy to be enabled")
-	}
-}
-
-func TestBuildMetricConfigUsesSmallSQLiteProfileInLowResourceMode(t *testing.T) {
-	cfg, err := buildMetricConfig(&MetricStoreConfig{
-		Driver:          "sqlite",
-		DSN:             "./data/metrics.db",
-		LowResourceMode: true,
-	}, false)
-	if err != nil {
-		t.Fatalf("build metric config: %v", err)
-	}
-	if cfg.SQLite.CacheSizeKB != 8*1024 {
-		t.Fatalf("cache size = %dKiB, want 8192KiB", cfg.SQLite.CacheSizeKB)
-	}
-	if cfg.SQLite.MMapSizeBytes != 0 {
-		t.Fatalf("mmap size = %d, want 0", cfg.SQLite.MMapSizeBytes)
-	}
-	if cfg.SQLite.TempStoreMemory {
-		t.Fatal("temp store should use FILE in low resource mode")
-	}
-	if cfg.SQLite.ReadPoolSize != 0 {
-		t.Fatalf("read pool size = %d, want 0", cfg.SQLite.ReadPoolSize)
-	}
-	if cfg.SQLite.PerformanceProfile != metric.SQLiteProfileBalanced {
-		t.Fatalf("SQLite profile = %q, want balanced", cfg.SQLite.PerformanceProfile)
 	}
 }
 
@@ -355,7 +331,7 @@ func TestSummarizeRetentionDefinitionsRequiresEveryMetricToBePositive(t *testing
 
 func TestCompactCleansExpiredRawPointsWhenDownsamplingDisabled(t *testing.T) {
 	ctx := context.Background()
-	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1)))
+	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1), metric.WithRollupPolicy(metric.RollupPolicy{})))
 	if err != nil {
 		t.Fatalf("open metric store: %v", err)
 	}
@@ -367,10 +343,10 @@ func TestCompactCleansExpiredRawPointsWhenDownsamplingDisabled(t *testing.T) {
 		t.Fatalf("upsert metric: %v", err)
 	}
 
-	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	if err := s.WriteBatch(ctx, []metric.Point{
-		{MetricName: "raw.metric", EntityID: "node", Timestamp: now.Add(-48 * time.Hour), Value: 1},
-		{MetricName: "raw.metric", EntityID: "node", Timestamp: now.Add(-time.Hour), Value: 2},
+		{MetricName: "raw.metric", EntityID: "node", Timestamp: now.Add(-2 * time.Minute), Value: 1},
+		{MetricName: "raw.metric", EntityID: "node", Timestamp: now.Add(-30 * time.Second), Value: 2},
 	}); err != nil {
 		t.Fatalf("write points: %v", err)
 	}
@@ -395,7 +371,7 @@ func TestCompactCleansExpiredRawPointsWhenDownsamplingDisabled(t *testing.T) {
 	points, err := s.Query(ctx, metric.Query{
 		MetricName: "raw.metric",
 		EntityID:   "node",
-		Start:      now.Add(-72 * time.Hour),
+		Start:      now.Add(-time.Hour),
 		End:        now,
 	})
 	if err != nil {
@@ -424,23 +400,25 @@ func TestCompactContinuesAfterOneMetricFails(t *testing.T) {
 	}
 
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
-	old := now.Add(-time.Hour)
-	if err := s.Write(ctx, metric.Point{MetricName: "b.healthy", EntityID: "node", Timestamp: old, Value: 2}); err != nil {
-		t.Fatalf("write healthy point: %v", err)
+	old := now.Add(-48 * time.Hour)
+	if err := s.WriteBatch(ctx, []metric.Point{
+		{MetricName: "a.invalid", EntityID: "node", Timestamp: old, Value: 1},
+		{MetricName: "b.healthy", EntityID: "node", Timestamp: old, Value: 2},
+	}); err != nil {
+		t.Fatalf("write compact fixtures: %v", err)
 	}
 
 	rawDB, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		t.Fatalf("open raw sqlite connection: %v", err)
 	}
-	_, err = rawDB.ExecContext(ctx, `INSERT INTO metric_points
-		(metric_name, entity_id, tags_hash, ts_nano, value, tags, labels, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		"a.invalid", "node", "invalid", old.UnixNano(), 1, "not-json", "{}", now.UnixNano(),
-	)
+	_, err = rawDB.ExecContext(ctx, `CREATE TRIGGER fail_invalid_metric_rollup
+		BEFORE DELETE ON metric_rollups
+		WHEN OLD.series_id IN (SELECT id FROM metric_series WHERE metric_name = 'a.invalid')
+		BEGIN SELECT RAISE(FAIL, 'forced compact failure'); END`)
 	_ = rawDB.Close()
 	if err != nil {
-		t.Fatalf("insert malformed point: %v", err)
+		t.Fatalf("create compact failure trigger: %v", err)
 	}
 
 	storeMu.Lock()
@@ -466,10 +444,10 @@ func TestCompactContinuesAfterOneMetricFails(t *testing.T) {
 		End:        now,
 	})
 	if err != nil {
-		t.Fatalf("query healthy raw points: %v", err)
+		t.Fatalf("query healthy rollups: %v", err)
 	}
 	if len(points) != 0 {
-		t.Fatalf("healthy metric was blocked by another metric failure: %s", fmt.Sprint(points))
+		t.Fatalf("healthy metric was blocked by another metric failure: %#v", points)
 	}
 }
 
@@ -569,19 +547,6 @@ func TestGetRecordsByClientAndTimeReadsRollupsAfterRawCompaction(t *testing.T) {
 	if _, err := s.Compact(ctx, now); err != nil {
 		t.Fatalf("compact raw into rollup: %v", err)
 	}
-	raw, err := s.Query(ctx, metric.Query{
-		MetricName: MetricCPU,
-		EntityID:   rec.Client,
-		Start:      ts.Add(-time.Minute),
-		End:        now,
-	})
-	if err != nil {
-		t.Fatalf("query raw cpu: %v", err)
-	}
-	if len(raw) != 0 {
-		t.Fatalf("expected old raw cpu point to be deleted after compaction, got %d", len(raw))
-	}
-
 	got, err := GetRecordsByClientAndTime(ctx, rec.Client, ts.Add(-time.Minute), now)
 	if err != nil {
 		t.Fatalf("get records: %v", err)

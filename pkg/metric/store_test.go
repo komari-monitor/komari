@@ -25,12 +25,12 @@ func TestSQLiteStoreWriteQueryAggregate(t *testing.T) {
 		t.Fatalf("create metric: %v", err)
 	}
 
-	base := time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 	points := []Point{
 		{MetricName: "cpu.usage", EntityID: "server-1", Timestamp: base, Value: 10, Tags: map[string]string{"region": "ap"}},
-		{MetricName: "cpu.usage", EntityID: "server-1", Timestamp: base.Add(time.Minute), Value: 20, Tags: map[string]string{"region": "ap"}},
-		{MetricName: "cpu.usage", EntityID: "server-1", Timestamp: base.Add(2 * time.Minute), Value: 30, Tags: map[string]string{"region": "ap"}},
-		{MetricName: "cpu.usage", EntityID: "server-2", Timestamp: base.Add(time.Minute), Value: 99, Tags: map[string]string{"region": "eu"}},
+		{MetricName: "cpu.usage", EntityID: "server-1", Timestamp: base.Add(10 * time.Second), Value: 20, Tags: map[string]string{"region": "ap"}},
+		{MetricName: "cpu.usage", EntityID: "server-1", Timestamp: base.Add(20 * time.Second), Value: 30, Tags: map[string]string{"region": "ap"}},
+		{MetricName: "cpu.usage", EntityID: "server-2", Timestamp: base.Add(10 * time.Second), Value: 99, Tags: map[string]string{"region": "eu"}},
 	}
 	if err := store.WriteBatch(ctx, points); err != nil {
 		t.Fatalf("write batch: %v", err)
@@ -40,7 +40,7 @@ func TestSQLiteStoreWriteQueryAggregate(t *testing.T) {
 		MetricName: "cpu.usage",
 		EntityID:   "server-1",
 		Start:      base.Add(-time.Second),
-		End:        base.Add(3 * time.Minute),
+		End:        base.Add(time.Minute),
 		Tags:       map[string]string{"region": "ap"},
 	})
 	if err != nil {
@@ -58,10 +58,10 @@ func TestSQLiteStoreWriteQueryAggregate(t *testing.T) {
 			MetricName: "cpu.usage",
 			EntityID:   "server-1",
 			Start:      base,
-			End:        base.Add(3 * time.Minute),
+			End:        base.Add(time.Minute),
 		},
 		Aggregation: AggAvg,
-		Interval:    2 * time.Minute,
+		Interval:    20 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
@@ -77,12 +77,12 @@ func TestSQLiteStoreWriteQueryAggregate(t *testing.T) {
 		MetricName: "cpu.usage",
 		EntityID:   "server-1",
 		Start:      base,
-		End:        base.Add(3 * time.Minute),
+		End:        base.Add(time.Minute),
 	})
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
-	if stats.Count != 3 || stats.Avg != 20 || stats.P95 != 29 {
+	if stats.Count != 3 || stats.Avg != 20 || math.Abs(stats.P95-29) > 1 {
 		t.Fatalf("unexpected stats: %#v", stats)
 	}
 }

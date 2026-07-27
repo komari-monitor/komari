@@ -253,9 +253,9 @@ func (p Point) normalized() Point {
 	return p
 }
 
-// Query loads raw metric points matching a query.
+// Query loads exact raw samples from the retained raw window.
 //
-// Query 描述原始点查询条件，包括指标、实体、时间范围、标签和分页。
+// Query 描述指标值查询条件，包括指标、实体、时间范围、标签和分页。
 type Query struct {
 	// MetricName restricts the query to one metric.
 	//
@@ -277,13 +277,13 @@ type Query struct {
 	//
 	// Tags 按标签键值精确匹配过滤采样点。
 	Tags map[string]string `json:"tags,omitempty"`
-	// Limit limits the number of raw points returned.
+	// Limit limits the number of values returned.
 	//
-	// Limit 限制返回的原始点数量。
+	// Limit 限制返回的值数量。
 	Limit int `json:"limit,omitempty"`
-	// Offset skips this many raw points before returning results.
+	// Offset skips this many values before returning results.
 	//
-	// Offset 在返回结果前跳过指定数量的原始点。
+	// Offset 在返回结果前跳过指定数量的值。
 	Offset int `json:"offset,omitempty"`
 	// Order controls chronological result ordering.
 	//
@@ -425,7 +425,7 @@ type AggregatePoint struct {
 
 // Stats stores or computes summary statistics for a point series.
 //
-// Stats 表示一段原始点序列的统计摘要。
+// Stats 表示一段指标序列的统计摘要。
 type Stats struct {
 	// Count is the number of points in the series.
 	//

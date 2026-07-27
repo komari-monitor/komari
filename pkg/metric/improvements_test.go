@@ -68,7 +68,7 @@ func TestTagFilterPushdownWithPaging(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "req", Type: TypeCounter, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 	var batch []Point
 	for i := 0; i < 6; i++ {
 		env := "prod"
@@ -77,7 +77,7 @@ func TestTagFilterPushdownWithPaging(t *testing.T) {
 		}
 		batch = append(batch, Point{
 			MetricName: "req", EntityID: "n1",
-			Timestamp: base.Add(time.Duration(i) * time.Minute),
+			Timestamp: base.Add(time.Duration(i) * 5 * time.Second),
 			Value:     float64(i),
 			Tags:      map[string]string{"env": env},
 		})
@@ -89,7 +89,7 @@ func TestTagFilterPushdownWithPaging(t *testing.T) {
 	// tag-filtered set, returning the first two prod points in time order.
 	got, err := s.Query(ctx, Query{
 		MetricName: "req", EntityID: "n1",
-		Start: base, End: base.Add(time.Hour),
+		Start: base, End: base.Add(time.Minute),
 		Tags:  map[string]string{"env": "prod"},
 		Limit: 2,
 	})
@@ -113,13 +113,13 @@ func TestSQLAggregateMatchesInMemory(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "g", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 	var batch []Point
 	vals := []float64{5, 15, 25, 35, 100, 200}
 	for i, v := range vals {
 		batch = append(batch, Point{
 			MetricName: "g", EntityID: "n1",
-			Timestamp: base.Add(time.Duration(i) * time.Minute),
+			Timestamp: base.Add(time.Duration(i) * 5 * time.Second),
 			Value:     v,
 		})
 	}
@@ -127,9 +127,9 @@ func TestSQLAggregateMatchesInMemory(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	q := AggregateQuery{
-		Query:       Query{MetricName: "g", EntityID: "n1", Start: base, End: base.Add(time.Hour)},
+		Query:       Query{MetricName: "g", EntityID: "n1", Start: base, End: base.Add(time.Minute)},
 		Aggregation: AggAvg,
-		Interval:    3 * time.Minute,
+		Interval:    15 * time.Second,
 	}
 	// SQL pushdown path.
 	sqlRes, err := s.Aggregate(ctx, q)
@@ -159,7 +159,7 @@ func TestSQLAggregateMatchesInMemory(t *testing.T) {
 //
 // TestCounterRateHandlesReset 验证计数器重置时速率计算仍然稳定。
 func TestCounterRateHandlesReset(t *testing.T) {
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 	// Counter goes 0 -> 10 -> reset -> 5; naive (last-first)/sec would give a
 	// positive-but-wrong 5/30s. Correct counter rate sums positive deltas:
 	// (10-0) + (5-0 after reset) = 15 over 30s = 0.5/s.
@@ -198,9 +198,9 @@ func TestLatestReturnsMostRecent(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "l", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Add(-30 * time.Second)
 	for i := 0; i < 5; i++ {
-		if err := s.Write(ctx, Point{MetricName: "l", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Minute), Value: float64(i)}); err != nil {
+		if err := s.Write(ctx, Point{MetricName: "l", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * 5 * time.Second), Value: float64(i)}); err != nil {
 			t.Fatalf("write: %v", err)
 		}
 	}
@@ -219,7 +219,7 @@ func TestLatestReturnsMostRecent(t *testing.T) {
 func TestStatsDistinguishesNoDataFromUnknownMetric(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore(t)
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 
 	// Unknown metric -> ErrNotFound.
 	_, err := s.Stats(ctx, Query{MetricName: "nope", Start: base, End: base.Add(time.Hour)})
@@ -269,16 +269,16 @@ func TestAggregateStdDevSQLiteUsesMemoryPath(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "sd", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 	var batch []Point
 	for i, v := range []float64{10, 20, 30} {
-		batch = append(batch, Point{MetricName: "sd", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Minute), Value: v})
+		batch = append(batch, Point{MetricName: "sd", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * 5 * time.Second), Value: v})
 	}
 	if err := s.WriteBatch(ctx, batch); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	res, err := s.Aggregate(ctx, AggregateQuery{
-		Query:       Query{MetricName: "sd", EntityID: "n1", Start: base, End: base.Add(time.Hour)},
+		Query:       Query{MetricName: "sd", EntityID: "n1", Start: base, End: base.Add(time.Minute)},
 		Aggregation: AggStdDev,
 		Interval:    time.Hour,
 	})
@@ -345,7 +345,7 @@ func TestSQLiteReadPoolOpens(t *testing.T) {
 	if err := store.CreateMetric(ctx, Definition{Name: "rp", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC()
 	if err := store.Write(ctx, Point{MetricName: "rp", EntityID: "n1", Timestamp: base, Value: 7}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -412,20 +412,20 @@ func TestAggregateBucketPagingSQLPath(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "bp", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
-	// 6 points across 6 one-minute buckets, values 0..5.
+	base := time.Now().UTC().Truncate(time.Minute)
+	// 6 points across 6 ten-second buckets, values 0..5.
 	var batch []Point
 	for i := 0; i < 6; i++ {
-		batch = append(batch, Point{MetricName: "bp", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Minute), Value: float64(i)})
+		batch = append(batch, Point{MetricName: "bp", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * 10 * time.Second), Value: float64(i)})
 	}
 	if err := s.WriteBatch(ctx, batch); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	// AggAvg -> SQL pushdown path. One bucket per minute. Page: offset 1, limit 2.
+	// One bucket per ten seconds. Page: offset 1, limit 2.
 	res, err := s.Aggregate(ctx, AggregateQuery{
-		Query:        Query{MetricName: "bp", EntityID: "n1", Start: base, End: base.Add(time.Hour)},
+		Query:        Query{MetricName: "bp", EntityID: "n1", Start: base, End: base.Add(time.Minute)},
 		Aggregation:  AggAvg,
-		Interval:     time.Minute,
+		Interval:     10 * time.Second,
 		BucketLimit:  2,
 		BucketOffset: 1,
 	})
@@ -450,22 +450,22 @@ func TestAggregateBucketPagingMemoryPathMatchesSQL(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "bp2", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 	var batch []Point
 	for i := 0; i < 6; i++ {
-		batch = append(batch, Point{MetricName: "bp2", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Minute), Value: float64(i * 10)})
+		batch = append(batch, Point{MetricName: "bp2", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * 10 * time.Second), Value: float64(i * 10)})
 	}
 	if err := s.WriteBatch(ctx, batch); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	q := Query{MetricName: "bp2", EntityID: "n1", Start: base, End: base.Add(time.Hour)}
+	q := Query{MetricName: "bp2", EntityID: "n1", Start: base, End: base.Add(time.Minute)}
 	// AggMin (SQL pushdown) and AggP50 (memory fallback on sqlite) with identical
 	// bucket paging must select the same bucket window (the same timestamps).
-	sqlPaged, err := s.Aggregate(ctx, AggregateQuery{Query: q, Aggregation: AggMin, Interval: time.Minute, BucketLimit: 3, BucketOffset: 2})
+	sqlPaged, err := s.Aggregate(ctx, AggregateQuery{Query: q, Aggregation: AggMin, Interval: 10 * time.Second, BucketLimit: 3, BucketOffset: 2})
 	if err != nil {
 		t.Fatalf("sql aggregate: %v", err)
 	}
-	memPaged, err := s.Aggregate(ctx, AggregateQuery{Query: q, Aggregation: AggP50, Interval: time.Minute, BucketLimit: 3, BucketOffset: 2})
+	memPaged, err := s.Aggregate(ctx, AggregateQuery{Query: q, Aggregation: AggP50, Interval: 10 * time.Second, BucketLimit: 3, BucketOffset: 2})
 	if err != nil {
 		t.Fatalf("mem aggregate: %v", err)
 	}
@@ -491,7 +491,7 @@ func TestAggregateSeparatesTagSeries(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "tagged.util", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 	points := []Point{
 		{MetricName: "tagged.util", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 10, Tags: map[string]string{"device": "0"}},
 		{MetricName: "tagged.util", EntityID: "n1", Timestamp: base.Add(20 * time.Second), Value: 30, Tags: map[string]string{"device": "0"}},
@@ -549,10 +549,10 @@ func TestAggregateIgnoresRawPointLimit(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "ig", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 	var batch []Point
 	for i := 0; i < 6; i++ {
-		batch = append(batch, Point{MetricName: "ig", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Minute), Value: float64(i)})
+		batch = append(batch, Point{MetricName: "ig", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * 5 * time.Second), Value: float64(i)})
 	}
 	if err := s.WriteBatch(ctx, batch); err != nil {
 		t.Fatalf("write: %v", err)
@@ -581,7 +581,7 @@ func TestJSONTagKeyWithSpecialChars(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "tk", Type: TypeGauge, RetentionDays: 30}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 	// Keys containing a dot, a hyphen, a space, and a quote.
 	tags := map[string]string{
 		"region.zone": "ap-1",
@@ -592,7 +592,7 @@ func TestJSONTagKeyWithSpecialChars(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	// A second point that should NOT match the filter below.
-	if err := s.Write(ctx, Point{MetricName: "tk", EntityID: "n1", Timestamp: base.Add(time.Minute), Value: 2, Tags: map[string]string{"region.zone": "eu-1"}}); err != nil {
+	if err := s.Write(ctx, Point{MetricName: "tk", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 2, Tags: map[string]string{"region.zone": "eu-1"}}); err != nil {
 		t.Fatalf("write 2: %v", err)
 	}
 
