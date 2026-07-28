@@ -59,6 +59,11 @@ func readChunkUploadMetadata(chunkDir string) (chunkUploadMetadata, error) {
 	return metadata, nil
 }
 
+func chunkPartIndex(name string) (int, bool) {
+	index, err := strconv.Atoi(strings.TrimSuffix(name, ".part"))
+	return index, err == nil && index >= 0 && strings.HasSuffix(name, ".part")
+}
+
 func chunkUploadSize(chunkDir string) (int64, error) {
 	entries, err := os.ReadDir(chunkDir)
 	if err != nil {
@@ -66,7 +71,10 @@ func chunkUploadSize(chunkDir string) (int64, error) {
 	}
 	var total int64
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".part") {
+		if entry.IsDir() {
+			continue
+		}
+		if _, ok := chunkPartIndex(entry.Name()); !ok {
 			continue
 		}
 		info, err := entry.Info()
@@ -132,6 +140,11 @@ func InitChunkUpload(c *gin.Context) {
 
 // UploadChunk 接收单个分块，保存到临时目录。
 func UploadChunk(c *gin.Context) {
+	defer func() {
+		if c.Request.Context().Err() != nil {
+			_ = clearChunkUploadCache(chunkUploadRoot)
+		}
+	}()
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxChunkRequestSize)
 	uploadID := c.PostForm("upload_id")
 	chunkDir, err := chunkUploadDir(uploadID)
@@ -221,7 +234,7 @@ func UploadChunk(c *gin.Context) {
 	})
 }
 
-// MergeChunkUpload 合并分块 → 校验 ZIP → 保存到 data/backup/ → 触发恢复。
+// MergeChunkUpload 合并分块到 backup.zip 后触发恢复。
 func MergeChunkUpload(c *gin.Context) {
 	restoreLock, err := backup.AcquireRestoreLock()
 	if err != nil {
@@ -258,6 +271,7 @@ func MergeChunkUpload(c *gin.Context) {
 		return
 	}
 	if uploadedSize, err := chunkUploadSize(chunkDir); err != nil || uploadedSize != metadata.Size {
+		_ = clearChunkUploadCache(chunkUploadRoot)
 		if err != nil {
 			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error checking uploaded chunks: %v", err))
 		} else {
@@ -265,14 +279,6 @@ func MergeChunkUpload(c *gin.Context) {
 		}
 		return
 	}
-
-	backupDir := filepath.Join(".", "data", "backup")
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error creating backup directory: %v", err))
-		return
-	}
-
-	archiveName := fmt.Sprintf("backup-%s.zip", time.Now().UTC().Format("20060102-150405.000000"))
 
 	mergedPath := filepath.Join(chunkDir, "merged.zip")
 	if err := mergeChunks(chunkDir, mergedPath); err != nil {
@@ -287,26 +293,21 @@ func MergeChunkUpload(c *gin.Context) {
 		return
 	}
 
-	// 保存归档副本到 data/backup/，文件名由服务端生成。
-	archivePath := filepath.Join(backupDir, archiveName)
-	if err := os.Rename(mergedPath, archivePath); err != nil {
-		if cpErr := copyFile(mergedPath, archivePath); cpErr != nil {
-			clearChunkUploadCache(chunkUploadRoot)
-			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error saving merged file: %v", cpErr))
-			return
-		}
-	}
-
-	archive, err := os.Open(archivePath)
+	archive, err := os.Open(mergedPath)
 	if err != nil {
 		clearChunkUploadCache(chunkUploadRoot)
-		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error opening archived backup: %v", err))
+		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error opening merged backup: %v", err))
 		return
 	}
-	defer archive.Close()
-	if err := restoreLock.SaveUploadedBackup(archive, archiveName); err != nil {
+	if err := restoreLock.SaveUploadedBackup(archive, "backup.zip"); err != nil {
+		archive.Close()
 		clearChunkUploadCache(chunkUploadRoot)
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("Error preparing restore: %v", err))
+		return
+	}
+	if err := archive.Close(); err != nil {
+		clearChunkUploadCache(chunkUploadRoot)
+		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error closing merged backup: %v", err))
 		return
 	}
 
@@ -333,14 +334,21 @@ func mergeChunks(chunkDir, destPath string) error {
 	if err != nil {
 		return err
 	}
+	numericParts := parts[:0]
+	for _, partPath := range parts {
+		if _, ok := chunkPartIndex(filepath.Base(partPath)); ok {
+			numericParts = append(numericParts, partPath)
+		}
+	}
+	parts = numericParts
 	if len(parts) == 0 {
 		return fmt.Errorf("no chunks found")
 	}
 
 	// 按分块索引数值排序（非字典序），避免 10.part 排在 2.part 前面
 	sort.Slice(parts, func(i, j int) bool {
-		idxI, _ := strconv.Atoi(strings.TrimSuffix(filepath.Base(parts[i]), ".part"))
-		idxJ, _ := strconv.Atoi(strings.TrimSuffix(filepath.Base(parts[j]), ".part"))
+		idxI, _ := chunkPartIndex(filepath.Base(parts[i]))
+		idxJ, _ := chunkPartIndex(filepath.Base(parts[j]))
 		return idxI < idxJ
 	})
 

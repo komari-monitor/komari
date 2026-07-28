@@ -68,7 +68,7 @@ func TestChunkUploadMetadataAndSize(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, uploadMetadataName), metadata, 0600); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
-	for name, content := range map[string]string{"0.part": "abc", "1.part": "defg", "ignored.txt": "ignored"} {
+	for name, content := range map[string]string{"0.part": "abc", "1.part": "defg", ".1-staging.part": "staging", "ignored.txt": "ignored"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0600); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
@@ -87,5 +87,25 @@ func TestChunkUploadMetadataAndSize(t *testing.T) {
 	}
 	if gotSize != 7 {
 		t.Fatalf("chunk upload size = %d, want 7", gotSize)
+	}
+}
+
+func TestMergeChunksIgnoresTemporaryParts(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{"0.part": "first", "1.part": "second", ".1-staging.part": "temporary"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	destination := filepath.Join(dir, "merged.zip")
+	if err := mergeChunks(dir, destination); err != nil {
+		t.Fatalf("mergeChunks: %v", err)
+	}
+	content, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("read merged chunks: %v", err)
+	}
+	if string(content) != "firstsecond" {
+		t.Fatalf("merged chunks = %q, want %q", content, "firstsecond")
 	}
 }
