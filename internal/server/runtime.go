@@ -18,6 +18,7 @@ import (
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/config"
+	"github.com/komari-monitor/komari/internal/lifecycle"
 	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logger "github.com/komari-monitor/komari/utils/log"
@@ -28,6 +29,18 @@ import (
 	recoveryweb "github.com/komari-monitor/komari/web/recovery"
 	"github.com/komari-monitor/komari/web/router"
 	"github.com/komari-monitor/komari/web/security"
+)
+
+// ErrRestartRequested is returned after a clean shutdown when a configuration
+// change requires the next startup to enter a restricted guide.
+var ErrRestartRequested = errors.New("server restart requested")
+
+const (
+	// Give in-flight HTTP requests time to finish before the listener closes.
+	httpShutdownTimeout = 10 * time.Second
+	// Keep an independent budget for report flushing and store teardown. Reusing
+	// the HTTP deadline here can skip queued metric writes after a slow request.
+	resourceCleanupTimeout = 30 * time.Second
 )
 
 // StartBackground starts scheduled work after all stores are ready.
@@ -106,6 +119,12 @@ func (a *App) Run() error {
 	case err := <-serverErr:
 		a.onFatal(err)
 		return fmt.Errorf("listen: %w", err)
+	case reason := <-lifecycle.RestartRequests():
+		logger.Infof("server", "Restarting service for %s", reason)
+		if err := a.Shutdown(); err != nil {
+			logger.Errorf("server", "Cleanup before restart failed: %v", err)
+		}
+		return fmt.Errorf("%w: %s", ErrRestartRequested, reason)
 	case <-quit:
 		return a.Shutdown()
 	}
@@ -116,33 +135,40 @@ func (a *App) Shutdown() error {
 	if a.dbReady {
 		auditlog.Log("", "", "server is shutting down", "info")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), httpShutdownTimeout)
+	defer cancelHTTP()
 	if a.server != nil {
-		if err := a.server.Shutdown(ctx); err != nil {
+		if err := a.server.Shutdown(httpCtx); err != nil {
 			logger.Infof("server", "HTTP server forced to shutdown: %v", err)
 		}
 	}
-	a.runCleanups(ctx)
-	return nil
+
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), resourceCleanupTimeout)
+	defer cancelCleanup()
+	return a.runCleanups(cleanupCtx)
 }
 
 func (a *App) onFatal(err error) {
 	if a.dbReady {
 		auditlog.Log("", "", "server encountered a fatal error: "+err.Error(), "error")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), resourceCleanupTimeout)
 	defer cancel()
-	a.runCleanups(ctx)
+	if cleanupErr := a.runCleanups(ctx); cleanupErr != nil {
+		logger.Errorf("server", "Cleanup after fatal server error failed: %v", cleanupErr)
+	}
 }
 
-func (a *App) runCleanups(ctx context.Context) {
+func (a *App) runCleanups(ctx context.Context) error {
+	var cleanupErrors []error
 	for i := len(a.cleanups) - 1; i >= 0; i-- {
 		cleanup := a.cleanups[i]
 		if err := cleanup.fn(ctx); err != nil {
 			logger.Errorf("server", "cleanup %q failed: %v", cleanup.name, err)
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup %q: %w", cleanup.name, err))
 		}
 	}
+	return errors.Join(cleanupErrors...)
 }
 
 func registerScheduledWork() {

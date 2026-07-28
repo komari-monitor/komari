@@ -54,6 +54,40 @@ func TestMainSQLiteConnectorAppliesBoundedSettings(t *testing.T) {
 	}
 }
 
+func TestMainSQLiteAutoCheckpointKeepsWALBounded(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "komari.db")
+	db, err := sqlitetune.Open(buildSQLiteDSN(databasePath), mainSQLiteOptions())
+	if err != nil {
+		t.Fatalf("open SQLite connector: %v", err)
+	}
+	defer db.Close()
+
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if _, err := db.Exec("CREATE TABLE checkpoint_test (payload BLOB NOT NULL)"); err != nil {
+		t.Fatalf("create checkpoint test table: %v", err)
+	}
+
+	// This produces well beyond one auto-checkpoint interval. The checkpoint
+	// below reports the WAL frame count observed before its own work begins.
+	for range 1024 {
+		if _, err := db.Exec("INSERT INTO checkpoint_test (payload) VALUES (zeroblob(4096))"); err != nil {
+			t.Fatalf("insert checkpoint test row: %v", err)
+		}
+	}
+
+	var busy, logFrames, checkpointedFrames int
+	if err := db.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
+		t.Fatalf("inspect automatic checkpoint: %v", err)
+	}
+	if busy != 0 {
+		t.Fatalf("automatic checkpoint left a busy WAL: %d", busy)
+	}
+	if logFrames >= 2*mainSQLiteWALAutoCheckpoint {
+		t.Fatalf("WAL retained %d frames after %d-frame auto-checkpoint interval", logFrames, mainSQLiteWALAutoCheckpoint)
+	}
+}
+
 func sqlitePragmaInt(t *testing.T, db *sql.DB, pragma string) int64 {
 	t.Helper()
 

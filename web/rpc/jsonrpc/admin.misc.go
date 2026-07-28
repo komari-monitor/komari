@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/config"
+	"github.com/komari-monitor/komari/internal/lifecycle"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -49,7 +51,7 @@ func init() {
 	RegisterWithGroupAndMeta("editSettings", rpc.RoleAdmin, adminEditSettings, &rpc.MethodMeta{
 		Name:    "admin:editSettings",
 		Summary: "Update settings (partial)",
-		Returns: "null",
+		Returns: "null | { restart_required: true, guide_path: string }",
 	})
 	RegisterWithGroupAndMeta("clearAllRecords", rpc.RoleAdmin, adminClearAllRecords, &rpc.MethodMeta{
 		Name:    "admin:clearAllRecords",
@@ -170,18 +172,31 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to update settings: "+err.Error(), nil)
 	}
 
-	// 配置已落库，热重载 metric store（无需重启）。连接已在上面验证过，
-	// 这里再次失败属异常情况，回报给用户。
+	// 配置已落库，热重载 metric store（无需重启）。旧结构必须在下一次
+	// 启动前进入受限迁移页，不能在普通 HTTP 服务仍运行时切换路由。
 	if touchedMetric {
 		reloadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		if err := metricstore.Reload(reloadCtx); err != nil {
 			cancel()
+			if errors.Is(err, metricstore.ErrStructureUpgradeRequired) {
+				auditSettingsUpdate(ctx, cfg)
+				lifecycle.RequestRestart(lifecycle.RestartForMetricStoreStructureUpgrade)
+				return map[string]any{
+					"restart_required": true,
+					"guide_path":       "/admin/database-migration",
+				}, nil
+			}
 			return nil, rpc.MakeError(rpc.InternalError,
 				"Settings saved but metrics database hot reload failed: "+err.Error(), nil)
 		}
 		cancel()
 	}
 
+	auditSettingsUpdate(ctx, cfg)
+	return nil, nil
+}
+
+func auditSettingsUpdate(ctx context.Context, cfg map[string]interface{}) {
 	message := "update settings: "
 	for key := range cfg {
 		message += key + ", "
@@ -191,7 +206,6 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	}
 	actor, ip := auditActor(ctx)
 	auditlog.Log(ip, actor, message, "info")
-	return nil, nil
 }
 
 // removeRetiredLowResourceMode keeps older admin clients from recreating its

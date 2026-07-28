@@ -3,10 +3,12 @@ package metricstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/komari-monitor/komari/internal/config"
+	"github.com/komari-monitor/komari/pkg/metric"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -118,5 +120,45 @@ func TestRecoverStorePersistsLegacyStoreForStructureGuide(t *testing.T) {
 	}
 	if !required {
 		t.Fatal("legacy recovery did not lead to the structure upgrade guide")
+	}
+}
+
+func TestReloadRejectsLegacyStoreForStructureUpgrade(t *testing.T) {
+	prepareRecoveryTest(t)
+	active, err := metric.Open(context.Background(), metric.SQLite(":memory:"))
+	if err != nil {
+		t.Fatalf("open active metric store: %v", err)
+	}
+	installTestStore(t, active)
+
+	dsn := filepath.ToSlash(filepath.Join(t.TempDir(), "legacy.db"))
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open legacy store: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE metric_definitions (
+		name TEXT PRIMARY KEY, type TEXT NOT NULL, unit TEXT NOT NULL,
+		description TEXT NOT NULL, retention_days INTEGER NOT NULL,
+		metadata TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+	)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("create legacy definition table: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy store: %v", err)
+	}
+	if err := config.SetMany(map[string]any{
+		MetricDBDriverKey: "sqlite",
+		MetricDBDSNKey:    dsn,
+	}); err != nil {
+		t.Fatalf("save legacy metric store config: %v", err)
+	}
+
+	err = Reload(context.Background())
+	if !errors.Is(err, ErrStructureUpgradeRequired) {
+		t.Fatalf("reload error = %v, want %v", err, ErrStructureUpgradeRequired)
+	}
+	if GetStore() != active {
+		t.Fatal("legacy target replaced the active metric store during hot reload")
 	}
 }

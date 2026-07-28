@@ -267,6 +267,12 @@ func stopStoreMigrationForClose(ctx context.Context) error {
 	}
 }
 
+// StopStoreMigrationForShutdown prevents a new store migration and waits for
+// an active one to release its exclusive lease before report batches flush.
+func StopStoreMigrationForShutdown(ctx context.Context) error {
+	return stopStoreMigrationForClose(ctx)
+}
+
 func clearStoreClosing() {
 	storeMigMu.Lock()
 	storeClosing = false

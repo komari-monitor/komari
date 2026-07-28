@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -64,5 +65,18 @@ func TestRetryMetricStoreConnectionReturnsLastError(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
+
+func TestShutdownReturnsCleanupError(t *testing.T) {
+	wantErr := errors.New("queued reports were not flushed")
+	app := New(Options{})
+	app.addCleanup("metric-report-batcher", func(_ context.Context) error {
+		return wantErr
+	})
+
+	err := app.Shutdown()
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("shutdown error = %v, want %v", err, wantErr)
 	}
 }

@@ -53,6 +53,7 @@ sudo ./install-komari.sh
 2. Run the Docker container:
    ```bash
    docker run -d \
+     --restart=always \
      -p 25774:25774 \
      -v $(pwd)/data:/app/data \
      --name komari \

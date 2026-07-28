@@ -83,5 +83,8 @@ func (a *App) InitStores() error {
 	}
 	metricstore.StartReportBatcher()
 	a.addCleanup("metric-report-batcher", metricstore.StopReportBatcher)
+	// A store-to-store migration holds the exclusive operation lease. Stop it
+	// before flushing queued reports, which need the shared lease to write.
+	a.addCleanup("metric-store-migration", metricstore.StopStoreMigrationForShutdown)
 	return nil
 }

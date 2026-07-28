@@ -28,6 +28,10 @@ var (
 
 var ErrCompactInProgress = errors.New("metric store compact already in progress")
 
+// ErrStructureUpgradeRequired reports that the configured store must be
+// migrated by the restricted startup guide before it can be opened normally.
+var ErrStructureUpgradeRequired = errors.New("metric store structure upgrade is required")
+
 const (
 	// DefaultRollupRawRetention documents the fixed in-memory exact-sample
 	// window. Samples older than one minute are losslessly byte-encoded;
@@ -461,7 +465,7 @@ func Reload(ctx context.Context) error {
 		return fmt.Errorf("inspect metric store structure: %w", err)
 	}
 	if needsRestructure {
-		return fmt.Errorf("metric store structure upgrade is required before hot reload")
+		return fmt.Errorf("%w before hot reload", ErrStructureUpgradeRequired)
 	}
 
 	// 用新配置打开并建表（内部已 Ping 校验连接）。

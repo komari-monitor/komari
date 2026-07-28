@@ -50,6 +50,7 @@ sudo ./install-komari.sh
 2. Dockerコンテナを実行します:
    ```bash
    docker run -d \
+     --restart=always \
      -p 25774:25774 \
      -v $(pwd)/data:/app/data \
      --name komari \
