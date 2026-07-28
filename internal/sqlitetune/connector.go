@@ -26,10 +26,11 @@ const (
 )
 
 // Options configures the SQLite PRAGMAs applied to every physical connection.
-// Foreign keys and WAL mode are always enabled. Zero mmap size explicitly
-// disables memory mapping; it is not treated as an unset value.
+// WAL mode is always enabled. Zero mmap size explicitly disables memory
+// mapping; it is not treated as an unset value.
 type Options struct {
 	PageSize              int
+	ForeignKeys           bool
 	BusyTimeout           time.Duration
 	CacheSizeKB           int
 	MMapSizeBytes         int64
@@ -136,8 +137,10 @@ func normalize(options Options) (Options, error) {
 	if options.WALAutoCheckpoint <= 0 {
 		return options, fmt.Errorf("sqlite tune: WAL auto-checkpoint must be positive")
 	}
-	if options.JournalSizeLimitBytes < 0 {
-		return options, fmt.Errorf("sqlite tune: journal size limit cannot be negative")
+	// SQLite uses -1 to disable the post-checkpoint WAL size limit. Preserve
+	// that documented value for callers that explicitly opt out of the cap.
+	if options.JournalSizeLimitBytes < -1 {
+		return options, fmt.Errorf("sqlite tune: journal size limit cannot be less than -1")
 	}
 	return options, nil
 }
@@ -147,9 +150,11 @@ func pragmas(options Options) []string {
 	if options.PageSize > 0 {
 		pragmas = append(pragmas, fmt.Sprintf("PRAGMA page_size = %d", options.PageSize))
 	}
+	pragmas = append(pragmas, "PRAGMA journal_mode = WAL")
+	if options.ForeignKeys {
+		pragmas = append(pragmas, "PRAGMA foreign_keys = ON")
+	}
 	pragmas = append(pragmas,
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA journal_mode = WAL",
 		fmt.Sprintf("PRAGMA synchronous = %s", options.Synchronous),
 		fmt.Sprintf("PRAGMA busy_timeout = %d", durationMillis(options.BusyTimeout)),
 		fmt.Sprintf("PRAGMA cache_size = -%d", options.CacheSizeKB),

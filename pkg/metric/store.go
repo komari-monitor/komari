@@ -315,6 +315,7 @@ func (s *Store) configureSQLite(ctx context.Context, db *sql.DB) error {
 func sqliteTuneOptions(options SQLiteOptions) sqlitetune.Options {
 	return sqlitetune.Options{
 		PageSize:              options.PageSize,
+		ForeignKeys:           true,
 		BusyTimeout:           options.BusyTimeout,
 		CacheSizeKB:           options.CacheSizeKB,
 		MMapSizeBytes:         options.MMapSizeBytes,

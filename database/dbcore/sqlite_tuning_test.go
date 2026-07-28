@@ -20,6 +20,12 @@ func TestMainSQLiteConnectorAppliesBoundedSettings(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
+	if got := sqlitePragmaInt(t, db, "busy_timeout"); got != mainSQLiteBusyTimeout.Milliseconds() {
+		t.Fatalf("busy_timeout = %d, want %d", got, mainSQLiteBusyTimeout.Milliseconds())
+	}
+	if got := sqlitePragmaInt(t, db, "synchronous"); got != 1 {
+		t.Fatalf("synchronous = %d, want NORMAL (1)", got)
+	}
 	if got := sqlitePragmaInt(t, db, "cache_size"); got != -mainSQLiteCacheSizeKB {
 		t.Fatalf("cache_size = %d, want %d", got, -mainSQLiteCacheSizeKB)
 	}
