@@ -20,7 +20,13 @@ func UploadBackup(c *gin.Context) {
 		return
 	}
 	defer file.Close()
-	if err := backup.SaveUploadedBackup(file, header.Filename); err != nil {
+	restoreLock, err := backup.AcquireRestoreLock()
+	if err != nil {
+		api.RespondError(c, http.StatusConflict, err.Error())
+		return
+	}
+	if err := restoreLock.SaveUploadedBackup(file, header.Filename); err != nil {
+		restoreLock.Release()
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -33,6 +39,7 @@ func UploadBackup(c *gin.Context) {
 	go func() {
 		logger.InfoArgs("admin-api", "Backup uploaded, restarting service in 2 seconds to apply on startup...")
 		time.Sleep(2 * time.Second)
+		restoreLock.Release()
 		os.Exit(0)
 	}()
 }

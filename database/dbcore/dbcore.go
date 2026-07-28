@@ -207,7 +207,7 @@ func resolveDatabaseFile() string {
 }
 
 // backupOnVersionUpgrade 在检测到版本升级时，把当前 ./data 打包到
-// ./backup/upgrade-{time}.zip，便于升级（含 metrics 迁移）异常时回滚。
+// ./data/backup/upgrade-{time}.zip，便于升级（含 metrics 迁移）异常时回滚。
 //
 // 版本标识存放于配置库（configs 表，键 system_version），因此本函数必须在
 // config.SetDb 之后、一次性 metrics 迁移（InitStores）之前调用。
@@ -247,14 +247,15 @@ func backupOnVersionUpgrade() {
 		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
 
-	if err := os.MkdirAll("./backup", 0755); err != nil {
+	backupDir := filepath.Join(".", "data", "backup")
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
 		logger.Errorf("dbcore", "[upgrade-backup] failed to create backup dir: %v", err)
 		return
 	}
 	tsName := time.Now().UTC().Format("20060102-150405")
-	bakPath := filepath.Join("./backup", fmt.Sprintf("upgrade-%s.zip", tsName))
+	bakPath := filepath.Join(backupDir, fmt.Sprintf("upgrade-%s.zip", tsName))
 	backupZipPath := filepath.Join(".", "data", "backup.zip")
-	if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
+	if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}, backupDir: {}}); zipErr != nil {
 		logger.Errorf("dbcore", "[upgrade-backup] failed to backup ./data before upgrade (from %q to %q): %v", prevVersion, versionID, zipErr)
 		return
 	}
@@ -344,21 +345,22 @@ func doInitialize() error {
 	func() {
 		backupZipPath := filepath.Join(".", "data", "backup.zip")
 		if _, statErr := os.Stat(backupZipPath); statErr == nil {
-			// 4. 把除了 ./data/backup.zip 之外的所有文件压缩到 ./backup/{time}.zip
-			if err := os.MkdirAll("./backup", 0755); err != nil {
+			// 4. 将当前数据快照保存到 ./data/backup/，并保留已有归档。
+			backupDir := filepath.Join(".", "data", "backup")
+			if err := os.MkdirAll(backupDir, 0755); err != nil {
 				logger.Errorf("dbcore", "[restore] failed to create backup dir: %v", err)
 			} else {
 				tsName := time.Now().UTC().Format("20060102-150405")
-				bakPath := filepath.Join("./backup", fmt.Sprintf("%s.zip", tsName))
-				if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
+				bakPath := filepath.Join(backupDir, fmt.Sprintf("pre-restore-%s.zip", tsName))
+				if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}, backupDir: {}}); zipErr != nil {
 					logger.Errorf("dbcore", "[restore] failed to zip current data: %v", zipErr)
 				} else {
 					logger.Infof("dbcore", "[restore] current data zipped to %s", bakPath)
 				}
 			}
 
-			// 5. 删除除了 ./data/backup.zip 之外的所有文件
-			if delErr := removeAllInDirExcept("./data", map[string]struct{}{backupZipPath: {}}); delErr != nil {
+			// 5. 删除数据文件，但保留归档目录和待恢复的 backup.zip。
+			if delErr := removeAllInDirExcept("./data", map[string]struct{}{backupZipPath: {}, backupDir: {}}); delErr != nil {
 				logger.Errorf("dbcore", "[restore] failed to cleanup data dir: %v", delErr)
 			}
 
