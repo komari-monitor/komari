@@ -1,18 +1,15 @@
 package admin
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestIsValidUploadID(t *testing.T) {
-	valid := "0123456789abcdef0123456789abcdef"
-	for _, uploadID := range []string{valid, "../" + valid, "", "not-a-valid-upload-id", valid + "00"} {
-		want := uploadID == valid
+	for _, uploadID := range []string{chunkUploadID, "../backup", "", "another-upload"} {
+		want := uploadID == chunkUploadID
 		if got := isValidUploadID(uploadID); got != want {
 			t.Errorf("isValidUploadID(%q) = %v, want %v", uploadID, got, want)
 		}
@@ -25,29 +22,20 @@ func TestChunkUploadDirRejectsTraversal(t *testing.T) {
 	}
 }
 
-func TestCleanupExpiredChunkUploadsPreservesActiveUploads(t *testing.T) {
+func TestClearChunkUploadCache(t *testing.T) {
 	root := t.TempDir()
-	oldDir := filepath.Join(root, "old")
-	activeDir := filepath.Join(root, "active")
-	for _, dir := range []string{oldDir, activeDir} {
-		if err := os.Mkdir(dir, 0755); err != nil {
-			t.Fatalf("create %s: %v", dir, err)
-		}
+	if err := os.WriteFile(filepath.Join(root, "interrupted.part"), []byte("stale"), 0600); err != nil {
+		t.Fatalf("write cache: %v", err)
 	}
-	now := time.Now()
-	oldTime := now.Add(-uploadExpiration - time.Minute)
-	if err := os.Chtimes(oldDir, oldTime, oldTime); err != nil {
-		t.Fatalf("age old upload: %v", err)
+	if err := clearChunkUploadCache(root); err != nil {
+		t.Fatalf("clearChunkUploadCache: %v", err)
 	}
-
-	if err := cleanupExpiredChunkUploads(root, now); err != nil {
-		t.Fatalf("cleanupExpiredChunkUploads: %v", err)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read cache: %v", err)
 	}
-	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
-		t.Fatalf("expired upload still exists: %v", err)
-	}
-	if _, err := os.Stat(activeDir); err != nil {
-		t.Fatalf("active upload was removed: %v", err)
+	if len(entries) != 0 {
+		t.Fatalf("cache entries = %d, want 0", len(entries))
 	}
 }
 
@@ -99,17 +87,5 @@ func TestChunkUploadMetadataAndSize(t *testing.T) {
 	}
 	if gotSize != 7 {
 		t.Fatalf("chunk upload size = %d, want 7", gotSize)
-	}
-}
-
-func TestMergeChunksStopsWhenRequestIsCancelled(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "0.part"), []byte("chunk"), 0600); err != nil {
-		t.Fatalf("write chunk: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := mergeChunks(ctx, dir, filepath.Join(dir, "merged.zip")); err != context.Canceled {
-		t.Fatalf("mergeChunks error = %v, want context.Canceled", err)
 	}
 }

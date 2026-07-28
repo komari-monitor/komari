@@ -4,13 +4,10 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,8 +15,6 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/web/api"
 )
-
-var backupArchiveMu sync.Mutex
 
 // copyFile 复制单个文件到目标路径（会确保父目录存在）
 func copyFile(srcPath, destPath string) error {
@@ -131,41 +126,9 @@ func backupSQLiteTo(destDBPath string) error {
 // DownloadBackup 使用白名单打包 ./data 及数据库文件为 zip 并下载，
 // 同时归档到 ./data/backup/ 确保 Docker 挂载后备份文件可持久化。
 //
-// 短时去重：一分钟内重复请求直接返回最近备份，避免网络不佳或下载管理器重复调用
-// TODO: 后续需前端配合改为自动获取备份列表并展示的方式 弃用旧版本函数
+// 归档文件由前端后续统一管理，服务端只负责生成并保存。
 func DownloadBackup(c *gin.Context) {
 	backupDir := filepath.Join(".", "data", "backup")
-	backupArchiveMu.Lock()
-	defer backupArchiveMu.Unlock()
-
-	// 0) 短时去重：检查最近一分钟 backup-*.zip 是否在窗口内
-	const dedupWindow = 60 * time.Second
-	if entries, readErr := os.ReadDir(backupDir); readErr == nil {
-		var latest os.DirEntry
-		var latestTime time.Time
-		for _, e := range entries {
-			name := strings.ToLower(e.Name())
-			if e.IsDir() || !strings.HasPrefix(name, "backup-") || !strings.HasSuffix(name, ".zip") {
-				continue
-			}
-			info, _ := e.Info()
-			if info != nil && info.ModTime().After(latestTime) {
-				latestTime = info.ModTime()
-				latest = e
-			}
-		}
-		if latest != nil && time.Since(latestTime) < dedupWindow {
-			cachedPath := filepath.Join(backupDir, latest.Name())
-			f, err := os.Open(cachedPath)
-			if err == nil {
-				defer f.Close()
-				c.Writer.Header().Set("Content-Type", "application/zip")
-				c.Writer.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", latest.Name()))
-				http.ServeContent(c.Writer, c.Request, latest.Name(), latestTime, f)
-				return
-			}
-		}
-	}
 
 	// 1) 创建临时目录，内容隔离到 content/ 子目录
 	tempDir, err := os.MkdirTemp("", "komari-backup-*")
@@ -239,7 +202,7 @@ func DownloadBackup(c *gin.Context) {
 	}
 	tempZip.Close()
 
-	// 5) 归档到 data/backup/。先写临时文件再原子发布，去重请求不会读到半写入文件。
+	// 5) 归档到 data/backup/。先写临时文件再原子发布。
 	ts := time.Now().UTC().Format("20060102-150405.000000")
 	archiveName := fmt.Sprintf("backup-%s.zip", ts)
 
@@ -270,9 +233,6 @@ func DownloadBackup(c *gin.Context) {
 		return
 	}
 
-	// 裁剪旧备份：仅保留最近 3 份 backup-* 类型
-	pruneOldZipByPrefix(backupDir, "backup-", 3)
-
 	// 6) 发送给客户端
 	c.Writer.Header().Set("Content-Type", "application/zip")
 	c.Writer.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", archiveName))
@@ -285,38 +245,4 @@ func DownloadBackup(c *gin.Context) {
 	defer zipReader.Close()
 
 	http.ServeContent(c.Writer, c.Request, archiveName, time.Now(), zipReader)
-}
-
-// pruneOldZipByPrefix 裁剪指定前缀的 .zip 文件，仅保留最近 keep 份。
-// 文件名格式 {prefix}YYYYMMDD-HHmmSS.zip，按名称字典序即为时间序。
-func pruneOldZipByPrefix(backupDir, prefix string, keep int) {
-	entries, err := os.ReadDir(backupDir)
-	if err != nil {
-		return
-	}
-
-	lowerPrefix := strings.ToLower(prefix)
-	var files []os.DirEntry
-	for _, e := range entries {
-		name := strings.ToLower(e.Name())
-		if e.IsDir() || !strings.HasPrefix(name, lowerPrefix) || !strings.HasSuffix(name, ".zip") {
-			continue
-		}
-		files = append(files, e)
-	}
-
-	if len(files) <= keep {
-		return
-	}
-
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Name() < files[j].Name()
-	})
-
-	for i := 0; i < len(files)-keep; i++ {
-		path := filepath.Join(backupDir, files[i].Name())
-		if err := os.Remove(path); err != nil {
-			log.Printf("[prune] failed to remove old %s %s: %v", prefix, path, err)
-		}
-	}
 }
