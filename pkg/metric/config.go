@@ -158,11 +158,11 @@ func DefaultConfig(driver Driver, dsn string) Config {
 		SQLite: SQLiteOptions{
 			PerformanceProfile:    SQLiteProfileBalanced,
 			BusyTimeout:           5 * time.Second,
-			CacheSizeKB:           64 * 1024,
-			TempStoreMemory:       true,
-			MMapSizeBytes:         256 * 1024 * 1024,
-			WALAutoCheckpoint:     256,
-			JournalSizeLimitBytes: 1024 * 1024,
+			CacheSizeKB:           16 * 1024,
+			TempStoreMemory:       false,
+			MMapSizeBytes:         32 * 1024 * 1024,
+			WALAutoCheckpoint:     1000,
+			JournalSizeLimitBytes: 4 * 1024 * 1024,
 		},
 		RollupPolicy: RollupPolicy{
 			RawRetention: 10 * time.Minute,
@@ -239,6 +239,10 @@ func SQLiteConfig(dsn string) Config {
 	// is honored instead of being mistaken for "unset".
 	cfg.MaxOpenConns = 1
 	cfg.MaxIdleConns = 1
+	// SQLite benefits from warm page caches. Unlike client/server backends,
+	// rotating its local file connections only adds churn, so the default keeps
+	// them until the Store closes. Callers can still set a lifetime explicitly.
+	cfg.ConnMaxLifetime = 0
 	return cfg
 }
 

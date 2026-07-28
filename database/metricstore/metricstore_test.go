@@ -52,8 +52,8 @@ func TestBuildMetricConfigEnablesDefaultRollupPolicy(t *testing.T) {
 	if cfg.RollupPolicy.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("raw retention = %s, want %s", cfg.RollupPolicy.RawRetention, DefaultRollupRawRetention)
 	}
-	if cfg.SQLite.ReadPoolSize != 4 {
-		t.Fatalf("metric store read pool = %d, want fixed size 4", cfg.SQLite.ReadPoolSize)
+	if cfg.SQLite.ReadPoolSize != 2 {
+		t.Fatalf("metric store read pool = %d, want fixed size 2", cfg.SQLite.ReadPoolSize)
 	}
 }
 

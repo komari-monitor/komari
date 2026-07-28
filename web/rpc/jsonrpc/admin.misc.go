@@ -134,6 +134,7 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if err := req.BindParams(&cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing request body: "+err.Error(), nil)
 	}
+	removeRetiredLowResourceMode(cfg)
 
 	// 若本次修改涉及 metrics 数据库配置，则在落库前先用「当前配置 + 本次改动」
 	// 合并出的目标配置做一次连接测试。metric store 始终启用，只要触及 metrics
@@ -168,11 +169,6 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if err := config.SetMany(cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to update settings: "+err.Error(), nil)
 	}
-	if v, ok := cfg[config.LowResourceModeKey]; ok {
-		if err := dbcore.ConfigureLowResourceMode(toBool(v, false)); err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to apply low resource mode: "+err.Error(), nil)
-		}
-	}
 
 	// 配置已落库，热重载 metric store（无需重启）。连接已在上面验证过，
 	// 这里再次失败属异常情况，回报给用户。
@@ -196,6 +192,12 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	actor, ip := auditActor(ctx)
 	auditlog.Log(ip, actor, message, "info")
 	return nil, nil
+}
+
+// removeRetiredLowResourceMode keeps older admin clients from recreating its
+// config row after the startup migration removes it.
+func removeRetiredLowResourceMode(cfg map[string]interface{}) {
+	delete(cfg, "low_resource_mode")
 }
 
 // mergedMetricConfig 读取当前持久化的 metric store 配置，并把本次请求中涉及的
@@ -230,18 +232,6 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 	}
 
 	return merged, nil
-}
-
-func toBool(v any, fallback bool) bool {
-	switch val := v.(type) {
-	case bool:
-		return val
-	case string:
-		if parsed, err := strconv.ParseBool(val); err == nil {
-			return parsed
-		}
-	}
-	return fallback
 }
 
 // toInt 将 JSON 解码得到的任意值（通常是 float64 或 string）转换为 int，失败时返回 fallback。

@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/internal/migrations"
+	"github.com/komari-monitor/komari/internal/sqlitetune"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -175,6 +176,13 @@ var (
 // 也避免额外的裸文件依赖。
 const SystemVersionKey = "system_version"
 
+const (
+	mainSQLiteBusyTimeout       = 5 * time.Second
+	mainSQLiteCacheSizeKB       = 8 * 1024
+	mainSQLiteWALAutoCheckpoint = 256
+	mainSQLiteJournalSizeLimit  = 1 << 20
+)
+
 // versionID 是当前构建的版本标识，由 SetVersionID 在 Initialize 前注入。
 var versionID string
 
@@ -267,7 +275,7 @@ func buildSQLiteDSN(databaseFile string) string {
 		databaseFile = "./data/komari.db"
 	}
 
-	params := "_busy_timeout=5000&_txlock=immediate&_journal_mode=WAL&_synchronous=NORMAL"
+	params := fmt.Sprintf("_busy_timeout=%d&_txlock=immediate", mainSQLiteBusyTimeout.Milliseconds())
 	separator := "?"
 	if strings.Contains(databaseFile, "?") {
 		separator = "&"
@@ -282,6 +290,19 @@ func buildSQLiteDSN(databaseFile string) string {
 	}
 
 	return "file:" + filepath.ToSlash(databaseFile) + separator + params
+}
+
+func mainSQLiteOptions() sqlitetune.Options {
+	return sqlitetune.Options{
+		BusyTimeout:           mainSQLiteBusyTimeout,
+		CacheSizeKB:           mainSQLiteCacheSizeKB,
+		MMapSizeBytes:         0,
+		TempStoreMemory:       false,
+		CacheSpill:            true,
+		WALAutoCheckpoint:     mainSQLiteWALAutoCheckpoint,
+		JournalSizeLimitBytes: mainSQLiteJournalSizeLimit,
+		Synchronous:           sqlitetune.SynchronousNormal,
+	}
 }
 
 // Initialize 显式初始化数据库连接与表结构，仅执行一次。
@@ -378,40 +399,29 @@ func doInitialize() error {
 	// 根据数据库类型选择不同的连接方式
 	switch flags.ApplyDatabaseTypeNormalization() {
 	case flags.DatabaseTypeSQLite:
-		// SQLite 连接
-		// 通过 DSN 传入 _busy_timeout / _txlock 等参数，确保连接池中的每一条连接
-		// 都生效：
-		//   - _busy_timeout=5000：遇到写锁时最多等待 5s 再返回，避免瞬时
-		//     "database is locked" 直接失败（仅靠后续 PRAGMA Exec 只作用于
-		//     当时执行该语句的单条连接，池内其它连接不生效）。
-		//   - _txlock=immediate：事务一开始即获取写锁，避免「先 SELECT 后写」
-		//     的锁升级在并发写入下产生死锁式的立即 SQLITE_BUSY。
-		//   - _journal_mode=WAL / _synchronous=NORMAL：与下方 PRAGMA 保持一致，
-		//     在 DSN 层为所有连接预设。
+		// _txlock=immediate lets writes acquire their lock before reads can
+		// turn into a lock-upgrade conflict. sqlitetune applies the remaining
+		// per-connection PRAGMAs whenever database/sql opens a connection.
 		dsn := buildSQLiteDSN(flags.DatabaseFile)
-		instance, err = gorm.Open(sqlite.Open(dsn), logConfig)
+		sqlDB, dbErr := sqlitetune.Open(dsn, mainSQLiteOptions())
+		if dbErr != nil {
+			return fmt.Errorf("open SQLite connection pool: %w", dbErr)
+		}
+		// SQLite has one writer. Keeping exactly one durable connection also
+		// keeps connection-local cache and WAL limits stable for the main DB.
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
+		sqlDB.SetConnMaxLifetime(0)
+		sqlDB.SetConnMaxIdleTime(0)
+
+		instance, err = gorm.Open(sqlite.New(sqlite.Config{Conn: sqlDB}), logConfig)
 		if err != nil {
+			_ = sqlDB.Close()
 			return fmt.Errorf("failed to connect to SQLite3 database: %w", err)
 		}
-		if sqlDB, dbErr := instance.DB(); dbErr == nil {
-			// SQLite 同一时刻只允许一个写者；限制连接数可避免连接池层面的写写竞争。
-			// 负载历史每分钟会执行包含读和写的事务，若连接池允许多个连接，容易与
-			// ping 结果等短写入撞锁并导致整批负载记录回滚。
-			sqlDB.SetMaxOpenConns(1)
-			sqlDB.SetMaxIdleConns(1)
-			sqlDB.SetConnMaxLifetime(0)
-		} else {
-			logger.Errorf("dbcore", "Failed to access underlying sql.DB for SQLite tuning: %v", dbErr)
+		if err := instance.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error; err != nil {
+			logger.Errorf("dbcore", "Failed to checkpoint SQLite WAL at startup: %v", err)
 		}
-		instance.Exec("PRAGMA wal = ON;")
-		if err := instance.Exec("PRAGMA journal_mode = WAL;").Error; err != nil {
-			logger.Errorf("dbcore", "Failed to enable WAL mode for SQLite: %v", err)
-		}
-		instance.Exec("PRAGMA synchronous = NORMAL;")
-		instance.Exec("PRAGMA busy_timeout = 5000;")
-		instance.Exec("PRAGMA cache_size = -65536;")
-		instance.Exec("PRAGMA temp_store = MEMORY;")
-		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	default:
 		return fmt.Errorf("unsupported database type: %s (supported: %s)", flags.DatabaseType, flags.SupportedDatabaseTypes())
 	}
@@ -461,35 +471,5 @@ func doInitialize() error {
 		logger.Errorf("dbcore", "Failed to create Task and TaskResult table, it may already exist: %v", err)
 	}
 
-	return nil
-}
-
-// ConfigureLowResourceMode updates connection-local SQLite memory settings.
-// The main database uses one connection, so these PRAGMAs remain effective for
-// the lifetime of the pool and can be switched without reopening the database.
-func ConfigureLowResourceMode(enabled bool) error {
-	if instance == nil || flags.ApplyDatabaseTypeNormalization() != flags.DatabaseTypeSQLite {
-		return nil
-	}
-	pragmas := []string{
-		"PRAGMA synchronous = NORMAL;",
-		"PRAGMA mmap_size = 0;",
-	}
-	if enabled {
-		pragmas = append(pragmas,
-			"PRAGMA cache_size = -8192;",
-			"PRAGMA temp_store = FILE;",
-		)
-	} else {
-		pragmas = append(pragmas,
-			"PRAGMA cache_size = -65536;",
-			"PRAGMA temp_store = MEMORY;",
-		)
-	}
-	for _, pragma := range pragmas {
-		if err := instance.Exec(pragma).Error; err != nil {
-			return fmt.Errorf("apply SQLite resource setting %q: %w", pragma, err)
-		}
-	}
 	return nil
 }

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,7 +14,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/komari-monitor/komari/internal/sqlitetune"
 )
 
 // Store is the main metric storage handle.
@@ -122,6 +121,13 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 
 	if cfg.DB != nil {
 		s.db = cfg.DB
+	} else if cfg.Driver == DriverSQLite {
+		db, err := sqlitetune.Open(cfg.DSN, sqliteTuneOptions(cfg.SQLite))
+		if err != nil {
+			return nil, err
+		}
+		s.db = db
+		s.ownedDB = true
 	} else {
 		db, err := sql.Open(cfg.driverName(), cfg.DSN)
 		if err != nil {
@@ -150,7 +156,11 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		return nil, err
 	}
 
-	if cfg.Driver == DriverSQLite {
+	// Caller-owned pools cannot install a connector hook. Configure one
+	// currently acquired connection as a compatibility fallback; callers that
+	// rotate or expand their own SQLite pools remain responsible for applying
+	// the same settings to those new connections.
+	if cfg.Driver == DriverSQLite && cfg.DB != nil {
 		if err := s.configureSQLite(ctx, s.db); err != nil {
 			if s.ownedDB {
 				_ = s.db.Close()
@@ -165,7 +175,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	// reopened as a second pool (each connection is a separate memory db), and a
 	// caller-supplied *sql.DB owns its own pooling.
 	if cfg.Driver == DriverSQLite && cfg.SQLite.ReadPoolSize > 1 && cfg.DB == nil && !isMemoryDSN(cfg.DSN) {
-		readDB, err := sql.Open(cfg.driverName(), cfg.DSN)
+		readDB, err := sqlitetune.Open(cfg.DSN, sqliteTuneOptions(cfg.SQLite))
 		if err != nil {
 			if s.ownedDB {
 				_ = s.db.Close()
@@ -178,13 +188,6 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 			readDB.SetConnMaxLifetime(cfg.ConnMaxLifetime)
 		}
 		if err := readDB.PingContext(pingCtx); err != nil {
-			_ = readDB.Close()
-			if s.ownedDB {
-				_ = s.db.Close()
-			}
-			return nil, err
-		}
-		if err := s.configureSQLite(ctx, readDB); err != nil {
 			_ = readDB.Close()
 			if s.ownedDB {
 				_ = s.db.Close()
@@ -237,16 +240,16 @@ func prepareSQLiteConfig(cfg Config) (Config, error) {
 		cfg.SQLite.BusyTimeout = 5 * time.Second
 	}
 	if cfg.SQLite.CacheSizeKB == 0 {
-		cfg.SQLite.CacheSizeKB = 64 * 1024
+		cfg.SQLite.CacheSizeKB = 16 * 1024
 	}
 	if cfg.SQLite.MMapSizeBytes == 0 {
-		cfg.SQLite.MMapSizeBytes = 256 * 1024 * 1024
+		cfg.SQLite.MMapSizeBytes = 32 * 1024 * 1024
 	}
 	if cfg.SQLite.WALAutoCheckpoint == 0 {
-		cfg.SQLite.WALAutoCheckpoint = 256
+		cfg.SQLite.WALAutoCheckpoint = 1000
 	}
 	if cfg.SQLite.JournalSizeLimitBytes == 0 {
-		cfg.SQLite.JournalSizeLimitBytes = 1024 * 1024
+		cfg.SQLite.JournalSizeLimitBytes = 4 * 1024 * 1024
 	}
 
 	if cfg.DB == nil {
@@ -299,60 +302,49 @@ func isMemoryDSN(dsn string) bool {
 	return sqliteFilePath(dsn) == ":memory:"
 }
 
-// configureSQLite applies SQLite PRAGMA settings, including foreign-key
-// enforcement for caller-owned connections.
+// configureSQLite applies SQLite PRAGMA settings to one connection in a
+// caller-owned pool. Store-owned pools use a connector hook so every physical
+// connection receives the same configuration.
 //
-// configureSQLite 对 SQLite 连接执行外键、WAL、busy_timeout、cache 等 PRAGMA。
+// configureSQLite 对调用方持有的 SQLite 连接池中的一个连接执行 PRAGMA；
+// Store 自己持有的连接池会在每个物理连接建立时配置。
 func (s *Store) configureSQLite(ctx context.Context, db *sql.DB) error {
-	if s.cfg.SQLite.PageSize > 0 {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA page_size = %d", s.cfg.SQLite.PageSize)); err != nil {
-			return err
-		}
-	}
-
-	pragmas := []string{
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA journal_mode = WAL",
-		sqliteSynchronousPragma(s.cfg.SQLite.PerformanceProfile),
-		fmt.Sprintf("PRAGMA busy_timeout = %d", durationMillis(s.cfg.SQLite.BusyTimeout)),
-		fmt.Sprintf("PRAGMA cache_size = -%d", s.cfg.SQLite.CacheSizeKB),
-		fmt.Sprintf("PRAGMA mmap_size = %d", s.cfg.SQLite.MMapSizeBytes),
-		fmt.Sprintf("PRAGMA wal_autocheckpoint = %d", s.cfg.SQLite.WALAutoCheckpoint),
-		fmt.Sprintf("PRAGMA journal_size_limit = %d", s.cfg.SQLite.JournalSizeLimitBytes),
-	}
-	if s.cfg.SQLite.TempStoreMemory {
-		pragmas = append(pragmas, "PRAGMA temp_store = MEMORY")
-	} else {
-		pragmas = append(pragmas, "PRAGMA temp_store = FILE")
-	}
-
-	for _, pragma := range pragmas {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			return err
-		}
-	}
-	return nil
+	return sqlitetune.Apply(ctx, db, sqliteTuneOptions(s.cfg.SQLite))
 }
 
-// sqliteSynchronousPragma returns the synchronous PRAGMA for a profile.
+func sqliteTuneOptions(options SQLiteOptions) sqlitetune.Options {
+	return sqlitetune.Options{
+		PageSize:              options.PageSize,
+		BusyTimeout:           options.BusyTimeout,
+		CacheSizeKB:           options.CacheSizeKB,
+		MMapSizeBytes:         options.MMapSizeBytes,
+		TempStoreMemory:       options.TempStoreMemory,
+		CacheSpill:            true,
+		WALAutoCheckpoint:     options.WALAutoCheckpoint,
+		JournalSizeLimitBytes: options.JournalSizeLimitBytes,
+		Synchronous:           sqliteSynchronousMode(options.PerformanceProfile),
+	}
+}
+
+// sqliteSynchronousMode returns the synchronous mode for a profile.
 //
-// sqliteSynchronousPragma 根据性能预设返回 SQLite synchronous PRAGMA。
-func sqliteSynchronousPragma(profile SQLitePerformanceProfile) string {
+// sqliteSynchronousMode 根据性能预设返回 SQLite synchronous 模式。
+func sqliteSynchronousMode(profile SQLitePerformanceProfile) sqlitetune.SynchronousMode {
 	switch profile {
 	case SQLiteProfilePerformance:
-		return "PRAGMA synchronous = OFF"
+		return sqlitetune.SynchronousOff
 	case SQLiteProfileDurable:
-		return "PRAGMA synchronous = FULL"
+		return sqlitetune.SynchronousFull
 	default:
-		return "PRAGMA synchronous = NORMAL"
+		return sqlitetune.SynchronousNormal
 	}
 }
 
-// durationMillis converts a duration to rounded-up milliseconds.
-//
-// durationMillis 将 duration 转换为向上取整的毫秒数。
 func durationMillis(d time.Duration) int {
-	return int(math.Ceil(float64(d) / float64(time.Millisecond)))
+	if d <= 0 {
+		return 0
+	}
+	return int((d + time.Millisecond - 1) / time.Millisecond)
 }
 
 // Close closes resources owned by the Store.

@@ -2,6 +2,7 @@ package metric
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math"
 	"os"
@@ -200,5 +201,119 @@ func TestSQLiteInDirCreatesDirectoryAndAppliesPragmas(t *testing.T) {
 	}
 	if synchronous != 0 {
 		t.Fatalf("expected performance profile synchronous=OFF(0), got %d", synchronous)
+	}
+}
+
+// TestSQLiteConnectionHookConfiguresExpandedAndRotatedReaders verifies that
+// connection-local PRAGMAs do not disappear after the reader pool grows or
+// database/sql replaces expired connections.
+func TestSQLiteConnectionHookConfiguresExpandedAndRotatedReaders(t *testing.T) {
+	ctx := context.Background()
+	dsn := "file:" + filepath.ToSlash(filepath.Join(t.TempDir(), "metrics.db")) + "?mode=rwc&_txlock=immediate"
+	store, err := Open(ctx, SQLite(
+		dsn,
+		WithSQLiteProfile(SQLiteProfileDurable),
+		WithSQLiteCacheSizeKB(8*1024),
+		WithSQLiteMMapSize(8*1024*1024),
+		WithSQLiteTempStoreMemory(false),
+		WithSQLiteWALAutoCheckpoint(128),
+		WithSQLiteJournalSizeLimit(512*1024),
+		WithSQLiteReadPool(2),
+	))
+	if err != nil {
+		t.Fatalf("open sqlite store: %v", err)
+	}
+	defer store.Close()
+	if store.readDB == nil {
+		t.Fatal("expected dedicated SQLite read pool")
+	}
+
+	first, err := store.readDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire first reader: %v", err)
+	}
+	defer first.Close()
+	second, err := store.readDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire second reader: %v", err)
+	}
+	defer second.Close()
+	assertSQLiteConnectionTuning(t, ctx, first)
+	assertSQLiteConnectionTuning(t, ctx, second)
+
+	if err := first.Close(); err != nil {
+		t.Fatalf("release first reader: %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("release second reader: %v", err)
+	}
+	statsBefore := store.readDB.Stats()
+	store.readDB.SetConnMaxLifetime(time.Nanosecond)
+	time.Sleep(time.Millisecond)
+
+	rotated, err := store.readDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire rotated reader: %v", err)
+	}
+	defer rotated.Close()
+	assertSQLiteConnectionTuning(t, ctx, rotated)
+	if statsAfter := store.readDB.Stats(); statsAfter.MaxLifetimeClosed <= statsBefore.MaxLifetimeClosed {
+		t.Fatalf("reader pool did not replace an expired connection: before=%d after=%d", statsBefore.MaxLifetimeClosed, statsAfter.MaxLifetimeClosed)
+	}
+}
+
+func assertSQLiteConnectionTuning(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	checks := []struct {
+		pragma string
+		want   any
+	}{
+		{pragma: "foreign_keys", want: 1},
+		{pragma: "journal_mode", want: "wal"},
+		{pragma: "synchronous", want: 2},
+		{pragma: "busy_timeout", want: 5000},
+		{pragma: "cache_size", want: -8 * 1024},
+		{pragma: "mmap_size", want: int64(8 * 1024 * 1024)},
+		{pragma: "temp_store", want: 1},
+		{pragma: "wal_autocheckpoint", want: 128},
+		{pragma: "journal_size_limit", want: int64(512 * 1024)},
+	}
+	for _, check := range checks {
+		switch want := check.want.(type) {
+		case int:
+			var got int
+			if err := conn.QueryRowContext(ctx, "PRAGMA "+check.pragma).Scan(&got); err != nil {
+				t.Fatalf("read PRAGMA %s: %v", check.pragma, err)
+			}
+			if got != want {
+				t.Fatalf("PRAGMA %s = %d, want %d", check.pragma, got, want)
+			}
+		case int64:
+			var got int64
+			if err := conn.QueryRowContext(ctx, "PRAGMA "+check.pragma).Scan(&got); err != nil {
+				t.Fatalf("read PRAGMA %s: %v", check.pragma, err)
+			}
+			if got != want {
+				t.Fatalf("PRAGMA %s = %d, want %d", check.pragma, got, want)
+			}
+		case string:
+			var got string
+			if err := conn.QueryRowContext(ctx, "PRAGMA "+check.pragma).Scan(&got); err != nil {
+				t.Fatalf("read PRAGMA %s: %v", check.pragma, err)
+			}
+			if got != want {
+				t.Fatalf("PRAGMA %s = %q, want %q", check.pragma, got, want)
+			}
+		default:
+			t.Fatalf("unsupported expected type for PRAGMA %s: %T", check.pragma, want)
+		}
+	}
+
+	var cacheSpill int
+	if err := conn.QueryRowContext(ctx, "PRAGMA cache_spill").Scan(&cacheSpill); err != nil {
+		t.Fatalf("read PRAGMA cache_spill: %v", err)
+	}
+	if cacheSpill == 0 {
+		t.Fatal("PRAGMA cache_spill is disabled")
 	}
 }

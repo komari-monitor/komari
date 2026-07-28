@@ -106,7 +106,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 		// 这里刻意忽略 cfg.MaxOpenConns/MaxIdleConns —— 对 SQLite 而言多写连接
 		// 只会引入锁竞争而非提升吞吐。
 		opts = append(opts, metric.WithMaxOpenConns(1), metric.WithMaxIdleConns(1))
-		opts = append(opts, metric.WithSQLiteReadPool(4))
+		opts = append(opts, metric.WithSQLiteReadPool(2))
 		return metric.SQLite(dsn, opts...), nil
 	case metric.DriverMySQL:
 		opts = append(opts,

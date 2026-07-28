@@ -104,7 +104,7 @@ func TestRunRemovesCompatibilityConfig(t *testing.T) {
 	if err := db.AutoMigrate(&appconfig.ConfigItem{}); err != nil {
 		t.Fatalf("migrate config item table: %v", err)
 	}
-	for _, key := range []string{"nezha_compat_enabled", "nezha_compat_listen"} {
+	for _, key := range []string{"nezha_compat_enabled", "nezha_compat_listen", "low_resource_mode"} {
 		if err := db.Create(&appconfig.ConfigItem{Key: key, Value: "true"}).Error; err != nil {
 			t.Fatalf("seed removed config %q: %v", key, err)
 		}
@@ -121,6 +121,7 @@ func TestRunRemovesCompatibilityConfig(t *testing.T) {
 	if err := db.Model(&appconfig.ConfigItem{}).Where("key IN ?", []string{
 		"nezha_compat_enabled",
 		"nezha_compat_listen",
+		"low_resource_mode",
 	}).Count(&count).Error; err != nil {
 		t.Fatalf("count removed config: %v", err)
 	}

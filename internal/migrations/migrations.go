@@ -150,6 +150,7 @@ func migrateRemovedCompatibilityConfig(db *gorm.DB) error {
 	return db.Delete(&appconfig.ConfigItem{}, "key IN ?", []string{
 		"nezha_compat_enabled",
 		"nezha_compat_listen",
+		"low_resource_mode",
 	}).Error
 }
 
