@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,6 +18,8 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/web/api"
 )
+
+var backupArchiveMu sync.Mutex
 
 // copyFile 复制单个文件到目标路径（会确保父目录存在）
 func copyFile(srcPath, destPath string) error {
@@ -132,6 +135,8 @@ func backupSQLiteTo(destDBPath string) error {
 // TODO: 后续需前端配合改为自动获取备份列表并展示的方式 弃用旧版本函数
 func DownloadBackup(c *gin.Context) {
 	backupDir := filepath.Join(".", "data", "backup")
+	backupArchiveMu.Lock()
+	defer backupArchiveMu.Unlock()
 
 	// 0) 短时去重：检查最近一分钟 backup-*.zip 是否在窗口内
 	const dedupWindow = 60 * time.Second
@@ -234,8 +239,8 @@ func DownloadBackup(c *gin.Context) {
 	}
 	tempZip.Close()
 
-	// 5) 归档到 data/backup/backup-YYYYMMDD-HHmmSS.zip
-	ts := time.Now().UTC().Format("20060102-150405")
+	// 5) 归档到 data/backup/。先写临时文件再原子发布，去重请求不会读到半写入文件。
+	ts := time.Now().UTC().Format("20060102-150405.000000")
 	archiveName := fmt.Sprintf("backup-%s.zip", ts)
 
 	archivePath := filepath.Join(backupDir, archiveName)
@@ -244,8 +249,24 @@ func DownloadBackup(c *gin.Context) {
 		return
 	}
 
-	if err := copyFile(tempZipPath, archivePath); err != nil {
+	archiveTemp, err := os.CreateTemp(backupDir, ".backup-*.tmp")
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error creating archive temp file: %v", err))
+		return
+	}
+	archiveTempPath := archiveTemp.Name()
+	if err := archiveTemp.Close(); err != nil {
+		os.Remove(archiveTempPath)
+		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error closing archive temp file: %v", err))
+		return
+	}
+	defer os.Remove(archiveTempPath)
+	if err := copyFile(tempZipPath, archiveTempPath); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error archiving backup: %v", err))
+		return
+	}
+	if err := os.Rename(archiveTempPath, archivePath); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error publishing backup archive: %v", err))
 		return
 	}
 

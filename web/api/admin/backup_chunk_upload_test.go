@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,5 +67,36 @@ func TestCopyWhitelistedFilesIncludesFont(t *testing.T) {
 	}
 	if string(content) != "font-data" {
 		t.Fatalf("font content = %q, want %q", content, "font-data")
+	}
+}
+
+func TestChunkUploadMetadataAndSize(t *testing.T) {
+	dir := t.TempDir()
+	metadata, err := json.Marshal(chunkUploadMetadata{Size: 7})
+	if err != nil {
+		t.Fatalf("marshal metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, uploadMetadataName), metadata, 0600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	for name, content := range map[string]string{"0.part": "abc", "1.part": "defg", "ignored.txt": "ignored"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	gotMetadata, err := readChunkUploadMetadata(dir)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if gotMetadata.Size != 7 {
+		t.Fatalf("metadata size = %d, want 7", gotMetadata.Size)
+	}
+	gotSize, err := chunkUploadSize(dir)
+	if err != nil {
+		t.Fatalf("chunkUploadSize: %v", err)
+	}
+	if gotSize != 7 {
+		t.Fatalf("chunk upload size = %d, want 7", gotSize)
 	}
 }
