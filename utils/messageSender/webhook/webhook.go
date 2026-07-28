@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
+	"github.com/komari-monitor/komari/utils/messageSender/outboundhttp"
 )
 
 type WebhookSender struct {
@@ -43,9 +44,7 @@ func (w *WebhookSender) SendTextMessage(message, title string) error {
 		method = "GET" // 默认使用 GET
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second, // 固定30秒超时
-	}
+	client := outboundhttp.NewClient(30 * time.Second)
 
 	var req *http.Request
 	var err error

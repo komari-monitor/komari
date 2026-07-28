@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/komari-monitor/komari/utils/messageSender/outboundhttp"
 )
 
 // createFetchFunction 创建一个 fetch API 实现
@@ -80,9 +81,7 @@ func (j *JavaScriptSender) createFetchFunction() func(goja.FunctionCall) goja.Va
 			}
 
 			// 发送请求
-			client := &http.Client{
-				Timeout: 30 * time.Second,
-			}
+			client := outboundhttp.NewClient(30 * time.Second)
 			resp, err := client.Do(req)
 			if err != nil {
 				reject(j.vm.ToValue(fmt.Sprintf("Fetch failed: %v", err)))
@@ -229,9 +228,7 @@ func (j *JavaScriptSender) createXHRConstructor() func(goja.ConstructorCall) *go
 				xhr.Set("readyState", 2)
 				j.callHandler(xhr, "onreadystatechange")
 
-				client := &http.Client{
-					Timeout: 30 * time.Second,
-				}
+				client := outboundhttp.NewClient(30 * time.Second)
 				resp, err := client.Do(req)
 				if err != nil {
 					xhr.Set("readyState", 4)

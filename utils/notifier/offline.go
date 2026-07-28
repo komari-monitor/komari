@@ -127,21 +127,10 @@ func OfflineNotification(clientID string, endedConnectionID int64) {
 	}(now, endedConnectionID)
 }
 
-// OnlineNotification 在启用通知的情况下，发送客户端上线通知。
-func OnlineNotification(clientID string, connectionID int64) {
-	client, err := clients.GetClientByUUID(clientID)
-	if err != nil {
-		return
-	}
-	// 上线时检测续费
-	renewal.CheckAndAutoRenewal(client)
-	_, enabled := getNotificationConfig(clientID)
-	if !enabled {
-		return
-	}
-
+// updateOnlineState records a connection before notification configuration is checked.
+// It reports whether this connection should produce an online notification.
+func updateOnlineState(clientID string, connectionID int64) bool {
 	state := getOrInitState(clientID)
-
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.connectionID = connectionID
@@ -152,7 +141,7 @@ func OnlineNotification(clientID string, connectionID int64) {
 		// 同时清除任何待离线状态（如服务器重启时客户端本已离线）
 		state.pendingOfflineSince = time.Time{}
 		state.isConnExist = true
-		return
+		return false
 	}
 
 	// 检查客户端是否处于待离线状态。
@@ -162,16 +151,33 @@ func OnlineNotification(clientID string, connectionID int64) {
 
 	// 规则2：宽限期内重连，不通知。
 	if wasPending {
-		return
+		return false
 	}
 
 	// 规则3: 没断开后重连, 不通知
 	// 为了解决OfflineNotify中不是全程加锁
 	if state.isConnExist {
 		logger.Infof("notifier", "%s has connection exist: %d", clientID, connectionID)
-		return
+		return false
 	} else {
 		state.isConnExist = true
+	}
+
+	return true
+}
+
+// OnlineNotification records the connection state and, when enabled, sends a client online notification.
+func OnlineNotification(clientID string, connectionID int64) {
+	client, err := clients.GetClientByUUID(clientID)
+	if err != nil {
+		return
+	}
+	// 上线时检测续费
+	renewal.CheckAndAutoRenewal(client)
+	shouldNotify := updateOnlineState(clientID, connectionID)
+	_, enabled := getNotificationConfig(clientID)
+	if !enabled || !shouldNotify {
+		return
 	}
 
 	// 规则4：客户端离线足够久已通知（或未待离线），现在重新上线，发送上线通知。
