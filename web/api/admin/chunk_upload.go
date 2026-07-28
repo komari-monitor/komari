@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -321,15 +322,26 @@ func MergeChunkUpload(c *gin.Context) {
 	archiveName := fmt.Sprintf("backup-%s.zip", time.Now().UTC().Format("20060102-150405.000000"))
 
 	mergedPath := filepath.Join(chunkDir, "merged.zip")
-	if err := mergeChunks(chunkDir, mergedPath); err != nil {
+	if err := mergeChunks(c.Request.Context(), chunkDir, mergedPath); err != nil {
 		cleanupChunkDir(chunkDir)
+		if c.Request.Context().Err() != nil {
+			return
+		}
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error merging chunks: %v", err))
+		return
+	}
+	if c.Request.Context().Err() != nil {
+		cleanupChunkDir(chunkDir)
 		return
 	}
 
 	if err := validateBackupZip(mergedPath); err != nil {
 		cleanupChunkDir(chunkDir)
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("Invalid backup: %v", err))
+		return
+	}
+	if c.Request.Context().Err() != nil {
+		cleanupChunkDir(chunkDir)
 		return
 	}
 
@@ -358,6 +370,13 @@ func MergeChunkUpload(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("Error preparing restore: %v", err))
 		return
 	}
+	if c.Request.Context().Err() != nil {
+		if err := os.Remove(filepath.Join(".", "data", "backup.zip")); err != nil && !os.IsNotExist(err) {
+			log.Printf("[chunk_upload] failed to discard cancelled restore: %v", err)
+		}
+		cleanupChunkDir(chunkDir)
+		return
+	}
 
 	cleanupChunkDir(chunkDir)
 
@@ -377,7 +396,7 @@ func MergeChunkUpload(c *gin.Context) {
 }
 
 // mergeChunks 按分块索引数值排序后顺序合并所有 .part 文件。
-func mergeChunks(chunkDir, destPath string) error {
+func mergeChunks(ctx context.Context, chunkDir, destPath string) error {
 	parts, err := filepath.Glob(filepath.Join(chunkDir, "*.part"))
 	if err != nil {
 		return err
@@ -400,6 +419,9 @@ func mergeChunks(chunkDir, destPath string) error {
 	defer out.Close()
 
 	for _, partPath := range parts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		f, err := os.Open(partPath)
 		if err != nil {
 			return fmt.Errorf("error opening chunk %s: %v", filepath.Base(partPath), err)

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -98,5 +99,17 @@ func TestChunkUploadMetadataAndSize(t *testing.T) {
 	}
 	if gotSize != 7 {
 		t.Fatalf("chunk upload size = %d, want 7", gotSize)
+	}
+}
+
+func TestMergeChunksStopsWhenRequestIsCancelled(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "0.part"), []byte("chunk"), 0600); err != nil {
+		t.Fatalf("write chunk: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := mergeChunks(ctx, dir, filepath.Join(dir, "merged.zip")); err != context.Canceled {
+		t.Fatalf("mergeChunks error = %v, want context.Canceled", err)
 	}
 }
