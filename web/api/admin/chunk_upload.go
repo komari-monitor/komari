@@ -17,9 +17,18 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/backup"
 )
 
-const defaultChunkSize = 5 * 1024 * 1024 // 5MB
+const (
+	defaultChunkSize    = 5 * 1024 * 1024 // 5 MiB
+	maxChunkRequestSize = defaultChunkSize + 1*1024*1024
+	uploadIDLength      = 32
+	uploadExpiration    = 24 * time.Hour
+	maxChunkIndex       = 1_000_000
+)
+
+var chunkUploadRoot = filepath.Join(".", "data", "backup", ".uploading")
 
 // generateUploadID 生成随机上传 ID，仅包含 hex 字符防止路径穿越。
 func generateUploadID() (string, error) {
@@ -30,12 +39,50 @@ func generateUploadID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+func isValidUploadID(uploadID string) bool {
+	if len(uploadID) != uploadIDLength {
+		return false
+	}
+	_, err := hex.DecodeString(uploadID)
+	return err == nil
+}
+
+func chunkUploadDir(uploadID string) (string, error) {
+	if !isValidUploadID(uploadID) {
+		return "", fmt.Errorf("invalid upload_id")
+	}
+	return filepath.Join(chunkUploadRoot, uploadID), nil
+}
+
+func cleanupExpiredChunkUploads(root string, now time.Time) error {
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || now.Sub(info.ModTime()) < uploadExpiration {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // InitChunkUpload 初始化分块上传，返回 upload_id 和 chunk_size。
-// 每次初始化前清理上一次遗留的 .uploading/ 临时目录。
+// 仅清理过期上传，避免影响仍在进行的其他上传。
 func InitChunkUpload(c *gin.Context) {
-	// 清理上次可能残留的临时目录
-	uploadingRoot := filepath.Join(".", "data", "backup", ".uploading")
-	_ = os.RemoveAll(uploadingRoot)
+	if err := cleanupExpiredChunkUploads(chunkUploadRoot, time.Now()); err != nil {
+		log.Printf("[chunk_upload] failed to clean expired uploads: %v", err)
+	}
 
 	uploadID, err := generateUploadID()
 	if err != nil {
@@ -43,7 +90,11 @@ func InitChunkUpload(c *gin.Context) {
 		return
 	}
 
-	chunkDir := filepath.Join(".", "data", "backup", ".uploading", uploadID)
+	chunkDir, err := chunkUploadDir(uploadID)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Error preparing upload directory")
+		return
+	}
 	if err := os.MkdirAll(chunkDir, 0755); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error creating upload directory: %v", err))
 		return
@@ -57,9 +108,11 @@ func InitChunkUpload(c *gin.Context) {
 
 // UploadChunk 接收单个分块，保存到临时目录。
 func UploadChunk(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxChunkRequestSize)
 	uploadID := c.PostForm("upload_id")
-	if uploadID == "" {
-		api.RespondError(c, http.StatusBadRequest, "upload_id is required")
+	chunkDir, err := chunkUploadDir(uploadID)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, "invalid upload_id")
 		return
 	}
 
@@ -69,28 +122,22 @@ func UploadChunk(c *gin.Context) {
 		return
 	}
 	chunkIndex, err := strconv.Atoi(chunkIndexStr)
-	if err != nil || chunkIndex < 0 {
+	if err != nil || chunkIndex < 0 || chunkIndex > maxChunkIndex {
 		api.RespondError(c, http.StatusBadRequest, "chunk_index must be a non-negative integer")
 		return
 	}
 
-	chunkDir := filepath.Join(".", "data", "backup", ".uploading", uploadID)
-	if _, err := os.Stat(chunkDir); err != nil {
+	if info, err := os.Stat(chunkDir); err != nil || !info.IsDir() {
 		api.RespondError(c, http.StatusNotFound, "upload_id not found or expired")
 		return
 	}
 
-	file, header, err := c.Request.FormFile("chunk_data")
+	file, _, err := c.Request.FormFile("chunk_data")
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("Error getting chunk data: %v", err))
 		return
 	}
 	defer file.Close()
-
-	if header.Size > defaultChunkSize+1024 {
-		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("Chunk too large: %d bytes (max %d)", header.Size, defaultChunkSize))
-		return
-	}
 
 	chunkPath := filepath.Join(chunkDir, fmt.Sprintf("%d.part", chunkIndex))
 	out, err := os.Create(chunkPath)
@@ -98,11 +145,18 @@ func UploadChunk(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error saving chunk: %v", err))
 		return
 	}
-	defer out.Close()
 
-	if _, err := io.Copy(out, file); err != nil {
+	written, err := io.Copy(out, io.LimitReader(file, defaultChunkSize+1))
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil || written > defaultChunkSize {
 		os.Remove(chunkPath)
-		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error writing chunk: %v", err))
+		if err != nil {
+			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error writing chunk: %v", err))
+		} else {
+			api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("Chunk too large: %d bytes (max %d)", written, defaultChunkSize))
+		}
 		return
 	}
 
@@ -114,24 +168,20 @@ func UploadChunk(c *gin.Context) {
 
 // MergeChunkUpload 合并分块 → 校验 ZIP → 保存到 data/backup/ → 触发恢复。
 func MergeChunkUpload(c *gin.Context) {
-	// 尝试获取恢复锁
-	if !restoreMutex.TryLock() {
-		api.RespondError(c, http.StatusConflict, "Another restore operation is already in progress")
-		return
-	}
-	defer restoreMutex.Unlock()
-
 	var req struct {
 		UploadID string `json:"upload_id" binding:"required"`
-		Filename string `json:"filename"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
 		return
 	}
 
-	chunkDir := filepath.Join(".", "data", "backup", ".uploading", req.UploadID)
-	if _, err := os.Stat(chunkDir); err != nil {
+	chunkDir, err := chunkUploadDir(req.UploadID)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, "invalid upload_id")
+		return
+	}
+	if info, err := os.Stat(chunkDir); err != nil || !info.IsDir() {
 		api.RespondError(c, http.StatusNotFound, "upload_id not found or expired")
 		return
 	}
@@ -142,13 +192,7 @@ func MergeChunkUpload(c *gin.Context) {
 		return
 	}
 
-	// 生成归档文件名
-	filename := req.Filename
-	if filename == "" {
-		filename = fmt.Sprintf("backup-%s.zip", time.Now().UTC().Format("20060102-150405"))
-	} else if !strings.HasSuffix(strings.ToLower(filename), ".zip") {
-		filename += ".zip"
-	}
+	archiveName := fmt.Sprintf("backup-%s.zip", time.Now().UTC().Format("20060102-150405.000000"))
 
 	mergedPath := filepath.Join(chunkDir, "merged.zip")
 	if err := mergeChunks(chunkDir, mergedPath); err != nil {
@@ -163,8 +207,8 @@ func MergeChunkUpload(c *gin.Context) {
 		return
 	}
 
-	// 保存归档副本到 data/backup/{filename}
-	archivePath := filepath.Join(backupDir, filename)
+	// 保存归档副本到 data/backup/，文件名由服务端生成。
+	archivePath := filepath.Join(backupDir, archiveName)
 	if err := os.Rename(mergedPath, archivePath); err != nil {
 		if cpErr := copyFile(mergedPath, archivePath); cpErr != nil {
 			cleanupChunkDir(chunkDir)
@@ -176,13 +220,16 @@ func MergeChunkUpload(c *gin.Context) {
 	// 裁剪旧备份，仅保留最近 3 份
 	pruneOldZipByPrefix(backupDir, "backup-", 3)
 
-	// 写入 ./data/backup.zip 作为恢复标记
-	// 注意：pre-restore 备份由 dbcore.doInitialize 在恢复执行时创建，上传阶段不重复创建。
-	restorePath := filepath.Join(".", "data", "backup.zip")
-	_ = os.Remove(restorePath)
-	if err := copyFile(archivePath, restorePath); err != nil {
+	archive, err := os.Open(archivePath)
+	if err != nil {
 		cleanupChunkDir(chunkDir)
-		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error preparing restore: %v", err))
+		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error opening archived backup: %v", err))
+		return
+	}
+	defer archive.Close()
+	if err := backup.SaveUploadedBackup(archive, archiveName); err != nil {
+		cleanupChunkDir(chunkDir)
+		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("Error preparing restore: %v", err))
 		return
 	}
 
@@ -191,7 +238,7 @@ func MergeChunkUpload(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
 		"message": "Backup uploaded successfully. The service will restart and apply the backup.",
-		"path":    restorePath,
+		"path":    filepath.Join(".", "data", "backup.zip"),
 	})
 
 	go func() {

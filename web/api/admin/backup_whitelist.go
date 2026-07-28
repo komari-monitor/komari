@@ -13,6 +13,7 @@ import (
 // SQLite VACUUM INTO 或 copyFile 单独备份，确保一致性快照。
 var backupWhitelist = []string{
 	"favicon.ico",
+	"font.ttf",
 	"theme/",
 	"metrics.db",
 }
@@ -20,8 +21,12 @@ var backupWhitelist = []string{
 // copyWhitelistedFiles 将白名单中存在的文件/目录复制到临时目录。
 // 不存在的项静默跳过，确保白名单扩展的向前兼容。
 func copyWhitelistedFiles(tempDir string) error {
+	return copyWhitelistedFilesFrom(filepath.Join(".", "data"), tempDir)
+}
+
+func copyWhitelistedFilesFrom(dataDir, tempDir string) error {
 	for _, relPath := range backupWhitelist {
-		src := filepath.Join(".", "data", relPath)
+		src := filepath.Join(dataDir, relPath)
 		info, err := os.Stat(src)
 		if err != nil {
 			if os.IsNotExist(err) {
