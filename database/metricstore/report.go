@@ -254,7 +254,14 @@ func drainReportQueue(queue <-chan v1.Report, limit int) []v1.Report {
 	if limit <= 0 {
 		return nil
 	}
-	reports := make([]v1.Report, 0, limit)
+	capacity := len(queue)
+	if capacity > limit {
+		capacity = limit
+	}
+	if capacity == 0 {
+		return nil
+	}
+	reports := make([]v1.Report, 0, capacity)
 	for len(reports) < limit {
 		select {
 		case report := <-queue:
@@ -270,7 +277,14 @@ func drainPingQueue(queue <-chan models.PingRecord, limit int) []models.PingReco
 	if limit <= 0 {
 		return nil
 	}
-	records := make([]models.PingRecord, 0, limit)
+	capacity := len(queue)
+	if capacity > limit {
+		capacity = limit
+	}
+	if capacity == 0 {
+		return nil
+	}
+	records := make([]models.PingRecord, 0, capacity)
 	for len(records) < limit {
 		select {
 		case record := <-queue:
