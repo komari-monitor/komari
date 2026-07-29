@@ -218,4 +218,9 @@ func compactMetricStore(ctx context.Context) {
 	if written > 0 {
 		logger.Infof("server", "Metric store compacted %d rollup buckets", written)
 	}
+	// Compaction is the point where row counts shift the most, so it is also
+	// where refreshed planner statistics are worth the (bounded) cost.
+	if err := metricstore.UpdateStatistics(compactCtx); err != nil {
+		logger.Errorf("server", "Failed to update metric store statistics: %v", err)
+	}
 }

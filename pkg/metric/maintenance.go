@@ -27,6 +27,11 @@ const (
 const (
 	sqliteCheckpointSQL = "PRAGMA wal_checkpoint(TRUNCATE)"
 	sqliteVacuumSQL     = "VACUUM"
+	// sqliteAnalysisLimitSQL bounds the rows sampled per index so that refreshing
+	// statistics stays cheap regardless of how large the metric database grows.
+	// 400 is the value SQLite's own documentation recommends for this pattern.
+	sqliteAnalysisLimitSQL = "PRAGMA analysis_limit=400"
+	sqliteOptimizeSQL      = "PRAGMA optimize"
 )
 
 // Driver returns the Store's configured database backend.
@@ -89,6 +94,31 @@ func (s *Store) CheckpointWAL(ctx context.Context) error {
 		return nil
 	}
 	return sqliteCheckpoint(ctx, s.db)
+}
+
+// UpdateStatistics refreshes the query planner statistics behind the
+// normalized rollup schema. Reads reach a rollup row through two dictionary
+// joins, so choosing the series-first plan depends on the planner knowing that
+// metric_series is tiny while metric_rollups is not. Without sqlite_stat1 the
+// planner falls back to the resolution index and scans a whole tier per query.
+// Other backends maintain their own statistics automatically.
+//
+// UpdateStatistics 刷新规范化 rollup 表的查询计划统计信息。读取一行 rollup 需要
+// 经过两次字典表 JOIN,优化器只有知道 metric_series 很小、metric_rollups 很大,
+// 才会选择先定位 series 的执行计划;缺少 sqlite_stat1 时它会退化为走分辨率索引,
+// 每次查询扫描整个分辨率层。其他后端自行维护统计信息。
+func (s *Store) UpdateStatistics(ctx context.Context) error {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed || s.db == nil {
+		return ErrClosed
+	}
+	if s.cfg.Driver != DriverSQLite {
+		return nil
+	}
+	return sqliteUpdateStatistics(ctx, s.db)
 }
 
 // ReclaimSpace performs the backend-specific blocking operation that returns
@@ -227,6 +257,22 @@ func sqliteCheckpoint(ctx context.Context, db *sql.DB) error {
 	}
 	if busy != 0 {
 		return fmt.Errorf("metric: checkpoint sqlite WAL: database is busy (%d log frames, %d checkpointed)", logFrames, checkpointedFrames)
+	}
+	return nil
+}
+
+func sqliteUpdateStatistics(ctx context.Context, db *sql.DB) error {
+	// analysis_limit caps how many index rows each ANALYZE samples, which keeps
+	// the cost bounded on large metric databases. PRAGMA optimize then only
+	// re-analyzes the tables whose content changed enough to matter.
+	//
+	// analysis_limit 限制每个索引的采样行数,使大型监控库上的开销保持恒定;
+	// PRAGMA optimize 随后只会重新分析内容变化足够大的表。
+	if _, err := db.ExecContext(ctx, sqliteAnalysisLimitSQL); err != nil {
+		return fmt.Errorf("metric: set sqlite analysis limit: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, sqliteOptimizeSQL); err != nil {
+		return fmt.Errorf("metric: optimize sqlite statistics: %w", err)
 	}
 	return nil
 }

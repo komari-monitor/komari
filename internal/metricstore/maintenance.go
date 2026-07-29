@@ -58,6 +58,29 @@ func InspectStorage(ctx context.Context) (StorageInfo, error) {
 	return info, err
 }
 
+// UpdateStatistics refreshes query planner statistics for the active store.
+// It takes the shared lock because refreshing statistics only samples existing
+// rows and is safe to run alongside report writes and compaction; it must still
+// keep a store reload from closing the connection underneath it.
+//
+// UpdateStatistics 刷新当前 store 的查询计划统计信息。它只对已有数据采样,
+// 可与上报写入和压缩并发执行,因此取共享锁;但仍需防止 store 重载在执行过程中
+// 关闭底层连接。
+func UpdateStatistics(ctx context.Context) error {
+	if err := storeOperations.AcquireShared(ctx); err != nil {
+		return fmt.Errorf("wait for metric store operation before updating statistics: %w", err)
+	}
+	defer storeOperations.ReleaseShared()
+
+	storeMu.RLock()
+	activeStore := store
+	storeMu.RUnlock()
+	if activeStore == nil {
+		return ErrStoreNotInitialized
+	}
+	return activeStore.UpdateStatistics(ctx)
+}
+
 // ReclaimSpace performs the driver-specific physical maintenance operation.
 // It takes the exclusive operation lock, so a table/file rewrite cannot run
 // concurrently with report writes or compaction.
