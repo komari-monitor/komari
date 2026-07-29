@@ -36,9 +36,9 @@ Komari 是一款輕量級的自託管伺服器監控工具，旨在提供簡單�
 適用於使用了 systemd 的發行版（Ubuntu、Debian...）。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/install-komari.sh -o install-komari.sh
-chmod +x install-komari.sh
-sudo ./install-komari.sh
+curl -fsSL https://github.fryfries13.cn/https://raw.githubusercontent.com/beibing173/komari/main/cn-install-komari.sh -o cn-install-komari.sh
+chmod +x cn-install-komari.sh
+sudo ./cn-install-komari.sh
 ```
 
 適用於中國大陸用戶的安裝腳本
