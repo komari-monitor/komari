@@ -21,7 +21,6 @@ type dialect interface {
 	jsonPlaceholder(n int) string
 	jsonType() string
 	autoIncrementPrimaryKey() string
-	nowExpr() string
 	insertDefinitionSQL(t tables) string
 	// jsonExtractEquals renders a boolean predicate comparing the text value at
 	// key inside a JSON column to a bind placeholder. The key is interpolated
@@ -101,11 +100,6 @@ func (sqliteDialect) jsonType() string { return "TEXT" }
 // autoIncrementPrimaryKey 返回 SQLite 自增主键定义。
 func (sqliteDialect) autoIncrementPrimaryKey() string { return "INTEGER PRIMARY KEY AUTOINCREMENT" }
 
-// nowExpr returns the SQL expression for the current time.
-//
-// nowExpr 返回 SQLite 当前时间表达式。
-func (sqliteDialect) nowExpr() string { return "CURRENT_TIMESTAMP" }
-
 // insertDefinitionSQL builds SQL for inserting or updating a metric definition.
 //
 // insertDefinitionSQL 构造 SQLite 指标定义 upsert SQL。
@@ -147,11 +141,6 @@ func (mysqlDialect) jsonType() string { return "JSON" }
 // autoIncrementPrimaryKey 返回 MySQL 自增主键定义。
 func (mysqlDialect) autoIncrementPrimaryKey() string { return "BIGINT AUTO_INCREMENT PRIMARY KEY" }
 
-// nowExpr returns the SQL expression for the current time.
-//
-// nowExpr 返回 MySQL 当前时间表达式。
-func (mysqlDialect) nowExpr() string { return "CURRENT_TIMESTAMP" }
-
 // insertDefinitionSQL builds SQL for inserting or updating a metric definition.
 //
 // insertDefinitionSQL 构造 MySQL 指标定义 upsert SQL。
@@ -192,11 +181,6 @@ func (postgresDialect) jsonType() string { return "JSONB" }
 //
 // autoIncrementPrimaryKey 返回 PostgreSQL 自增主键定义。
 func (postgresDialect) autoIncrementPrimaryKey() string { return "BIGSERIAL PRIMARY KEY" }
-
-// nowExpr returns the SQL expression for the current time.
-//
-// nowExpr 返回 PostgreSQL 当前时间表达式。
-func (postgresDialect) nowExpr() string { return "CURRENT_TIMESTAMP" }
 
 // insertDefinitionSQL builds SQL for inserting or updating a metric definition.
 //

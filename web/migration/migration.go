@@ -14,7 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	appconfig "github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/internal/migrations"
 	"github.com/komari-monitor/komari/pkg/metric"
@@ -25,12 +25,8 @@ import (
 )
 
 const (
-	PagePath          = "/admin/database-migration"
-	APIPath           = "/api/admin/database-migration"
-	LegacyPagePath    = "/admin/update/1.2.7"
-	LegacyAPIPath     = "/api/admin/update/1.2.7"
-	StructurePagePath = "/admin/metric-store/restructure"
-	StructureAPIPath  = "/api/admin/metric-store/restructure"
+	PagePath = "/admin/database-migration"
+	APIPath  = "/api/admin/database-migration"
 )
 
 const largeDatasetThreshold int64 = 300_000
@@ -42,8 +38,8 @@ const (
 	ModeMetricStructure  Mode = "metric_store_restructure"
 )
 
-// Status is the shared polling payload. Mode-specific fields are omitted when
-// they do not apply so the two previous guide response shapes remain valid.
+// Status is the shared polling payload for both migration modes. Mode-specific
+// fields are omitted when they do not apply.
 type Status struct {
 	Mode     Mode    `json:"mode"`
 	State    string  `json:"state"`
@@ -122,28 +118,14 @@ func (c *Controller) Register(r *gin.Engine) {
 	r.GET("/api/oauth", publicapi.OAuth)
 	r.GET("/api/oauth_callback", publicapi.OAuthCallback)
 
-	for _, route := range c.apiRoutes() {
-		g := r.Group(route.path, c.requireActive)
-		g.GET("/auth", c.authStatusFor(route.compatibility))
-		authorized := g.Group("", api.RequireRole(api.RoleAdmin))
-		authorized.GET("/status", c.getStatusFor(route.compatibility))
-		authorized.POST("/start", c.start)
-		if c.mode == ModeMetricStructure {
-			authorized.POST("/discard", c.discard)
-		}
+	g := r.Group(APIPath, c.requireActive)
+	g.GET("/auth", c.authStatus)
+	authorized := g.Group("", api.RequireRole(api.RoleAdmin))
+	authorized.GET("/status", c.getStatus)
+	authorized.POST("/start", c.start)
+	if c.mode == ModeMetricStructure {
+		authorized.POST("/discard", c.discard)
 	}
-}
-
-type apiRoute struct {
-	path          string
-	compatibility bool
-}
-
-func (c *Controller) apiRoutes() []apiRoute {
-	if c.mode == ModeLegacyMonitoring {
-		return []apiRoute{{path: APIPath}, {path: LegacyAPIPath, compatibility: true}}
-	}
-	return []apiRoute{{path: APIPath}, {path: StructureAPIPath, compatibility: true}}
 }
 
 func (c *Controller) requireActive(ctx *gin.Context) {
@@ -154,38 +136,23 @@ func (c *Controller) requireActive(ctx *gin.Context) {
 	ctx.Next()
 }
 
-func (c *Controller) authStatusFor(compatibility bool) gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		oauthEnabled, _ := appconfig.GetAs[bool](appconfig.OAuthEnabledKey, false)
-		oauthProvider, _ := appconfig.GetAs[string](appconfig.OAuthProviderKey, "github")
-		disablePassword, _ := appconfig.GetAs[bool](appconfig.DisablePasswordLoginKey, false)
-		status := gin.H{
-			"oauth_enabled":          oauthEnabled,
-			"oauth_provider":         oauthProvider,
-			"password_login_enabled": !disablePassword,
-		}
-		if !compatibility {
-			status["mode"] = c.mode
-		}
-		api.RespondSuccess(ctx, status)
-	}
+func (c *Controller) authStatus(ctx *gin.Context) {
+	oauthEnabled, _ := appconfig.GetAs[bool](appconfig.OAuthEnabledKey, false)
+	oauthProvider, _ := appconfig.GetAs[string](appconfig.OAuthProviderKey, "github")
+	disablePassword, _ := appconfig.GetAs[bool](appconfig.DisablePasswordLoginKey, false)
+	api.RespondSuccess(ctx, gin.H{
+		"oauth_enabled":          oauthEnabled,
+		"oauth_provider":         oauthProvider,
+		"password_login_enabled": !disablePassword,
+		"mode":                   c.mode,
+	})
 }
 
-func (c *Controller) getStatusFor(compatibility bool) gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		c.mu.RLock()
-		status := c.status
-		c.mu.RUnlock()
-		if !compatibility {
-			api.RespondSuccess(ctx, status)
-			return
-		}
-		if c.mode == ModeLegacyMonitoring {
-			api.RespondSuccess(ctx, legacyCompatibilityStatus(status))
-			return
-		}
-		api.RespondSuccess(ctx, structureCompatibilityStatus(status))
-	}
+func (c *Controller) getStatus(ctx *gin.Context) {
+	c.mu.RLock()
+	status := c.status
+	c.mu.RUnlock()
+	api.RespondSuccess(ctx, status)
 }
 
 func (c *Controller) start(ctx *gin.Context) {
@@ -391,58 +358,6 @@ func (c *Controller) runLegacy(cfg metricstore.MetricStoreConfig, legacyRetentio
 	c.status.Error = ""
 	c.mu.Unlock()
 	c.completeLater()
-}
-
-type legacyStatus struct {
-	State           string                             `json:"state"`
-	Phase           string                             `json:"phase"`
-	Table           string                             `json:"table,omitempty"`
-	Summary         migrations.LegacyMonitoringSummary `json:"summary"`
-	SourceRowsDone  int64                              `json:"source_rows_done"`
-	SourceRowsTotal int64                              `json:"source_rows_total"`
-	WrittenPoints   int64                              `json:"written_points"`
-	Progress        float64                            `json:"progress"`
-	TargetDriver    string                             `json:"target_driver,omitempty"`
-	Error           string                             `json:"error,omitempty"`
-}
-
-func legacyCompatibilityStatus(status Status) legacyStatus {
-	var summary migrations.LegacyMonitoringSummary
-	if status.Summary != nil {
-		summary = *status.Summary
-	}
-	return legacyStatus{
-		State: status.State, Phase: status.Phase, Table: status.Table, Summary: summary,
-		SourceRowsDone: status.SourceRowsDone, SourceRowsTotal: status.SourceRowsTotal,
-		WrittenPoints: status.WrittenPoints, Progress: status.Progress,
-		TargetDriver: status.TargetDriver, Error: status.Error,
-	}
-}
-
-type structureStatus struct {
-	State         string  `json:"state"`
-	Phase         string  `json:"phase"`
-	CurrentMetric string  `json:"current_metric,omitempty"`
-	RowsDone      int64   `json:"rows_done"`
-	RowsTotal     int64   `json:"rows_total"`
-	MetricsDone   int     `json:"metrics_done"`
-	MetricsTotal  int     `json:"metrics_total"`
-	Progress      float64 `json:"progress"`
-	BeforeBytes   int64   `json:"before_bytes,omitempty"`
-	AfterBytes    int64   `json:"after_bytes,omitempty"`
-	SavedBytes    int64   `json:"saved_bytes,omitempty"`
-	SavedPercent  float64 `json:"saved_percent,omitempty"`
-	Error         string  `json:"error,omitempty"`
-}
-
-func structureCompatibilityStatus(status Status) structureStatus {
-	return structureStatus{
-		State: status.State, Phase: status.Phase, CurrentMetric: status.CurrentMetric,
-		RowsDone: status.RowsDone, RowsTotal: status.RowsTotal,
-		MetricsDone: status.MetricsDone, MetricsTotal: status.MetricsTotal,
-		Progress: status.Progress, BeforeBytes: status.BeforeBytes, AfterBytes: status.AfterBytes,
-		SavedBytes: status.SavedBytes, SavedPercent: status.SavedPercent, Error: status.Error,
-	}
 }
 
 func (c *Controller) runStructure() {

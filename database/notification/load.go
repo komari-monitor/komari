@@ -53,11 +53,6 @@ func GetAllLoadNotifications() ([]models.LoadNotification, error) {
 	return notifications, nil
 }
 
-func SaveLoadNotification(record models.LoadNotification) error {
-	db := dbcore.GetDBInstance()
-	return db.Create(&record).Error
-}
-
 func ReloadLoadNotificationSchedule() error {
 	db := dbcore.GetDBInstance()
 	var loadNotifications []models.LoadNotification

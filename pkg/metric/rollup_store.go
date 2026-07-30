@@ -365,16 +365,6 @@ func (s *Store) deleteRollupsForMetricTx(ctx context.Context, metricName string,
 	return err
 }
 
-// DeleteBeforeTx trims the in-memory exact-sample window. The transaction is
-// retained in the signature for source compatibility but is not used because
-// raw samples are never persisted.
-func (s *Store) DeleteBeforeTx(ctx context.Context, metricName string, before time.Time, tx *sql.Tx) (int64, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	return s.deleteRawBefore(metricName, before.UTC().UnixMilli()), nil
-}
-
 func sortRollupKeys(keys []rollupKey) {
 	sort.Slice(keys, func(i, j int) bool {
 		if keys[i].bucket != keys[j].bucket {

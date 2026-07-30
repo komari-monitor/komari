@@ -685,35 +685,6 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 	return s.GetMetric(ctx, name)
 }
 
-// DeleteMetricData removes all raw and rollup data for one metric.
-func (s *Store) DeleteMetricData(ctx context.Context, name string) error {
-	if err := s.ensureOpen(); err != nil {
-		return err
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return fmt.Errorf("%w: metric name is required", ErrInvalidArgument)
-	}
-
-	s.retentionMu.Lock()
-	defer s.retentionMu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := s.deleteRollupsForMetricTx(ctx, name, tx); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	_, rawErr := s.deleteRawPoints(name, "", nil)
-	_, hotErr := s.deleteHotRollups(name, "", nil, nil)
-	return errors.Join(rawErr, hotErr)
-}
-
 // DeleteMetricDataIfDisabled removes a metric's data only while its retention
 // policy is still disabled. It prevents a delayed background cleanup from
 // deleting data after an administrator has re-enabled the metric.

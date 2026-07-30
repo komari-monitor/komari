@@ -52,33 +52,6 @@ func defaultSQLiteFingerprint() string {
 	return targetFingerprint(&MetricStoreConfig{Driver: "sqlite", DSN: "./data/metrics.db"})
 }
 
-// migrateFromPreviousStore 打开由 prevFingerprint 指定的上一个 metrics 目标库作为源，
-// 把其中的全部指标定义和持久化 rollup 搬运到当前目标 dst（例如 SQLite
-// metrics.db → MySQL/PostgreSQL）。
-//
-// 该过程幂等：dst 以 (series, resolution, labels, bucket) upsert 写入，中断后重启可安全重跑。
-func migrateFromPreviousStore(prevFingerprint string, cfg *MetricStoreConfig, dst *metric.Store) error {
-	prevCfg, err := configFromFingerprint(prevFingerprint, cfg)
-	if err != nil {
-		return fmt.Errorf("parse previous metrics target %q: %w", prevFingerprint, err)
-	}
-
-	ctx := context.Background()
-	src, err := openSourceStore(ctx, prevCfg)
-	if err != nil {
-		return fmt.Errorf("open previous metrics store (%s): %w", prevFingerprint, err)
-	}
-	defer src.Close()
-
-	logger.Infof("metricstore", "Migrating metrics from previous store %s to current target...", prevFingerprint)
-	total, err := MigrateBetweenStores(ctx, src, dst)
-	if err != nil {
-		return fmt.Errorf("store-to-store metrics migration failed: %w", err)
-	}
-	logger.Infof("metricstore", "Store-to-store metrics migration completed (%d rollups)", total)
-	return nil
-}
-
 // storeMigrationObserver 在 store-to-store 迁移过程中接收进度回调。
 //   - currentMetric：当前正在搬运的指标名。
 //   - metricIndex：该指标在全部指标中的序号（0 起），即已完成的指标数。
@@ -86,19 +59,6 @@ func migrateFromPreviousStore(prevFingerprint string, cfg *MetricStoreConfig, ds
 //   - addedPoints：本次新写入目标库的 rollup 行数（用于外部累计）。
 type storeMigrationObserver func(currentMetric string, metricIndex, totalMetrics int, addedPoints int64)
 
-// MigrateBetweenStores 把 src metric store 的全部指标定义与持久化 rollup 搬运到 dst。
-//
-// 用于 metrics 后端切换（例如默认 SQLite metrics.db → MySQL/PostgreSQL）：
-//   - 先在 dst 建立/更新全部指标定义；
-//   - 再按指标流式读取源库 rollup 并分批写入 dst。
-//
-// rollup 在 dst 以 (series, resolution, labels, bucket) upsert 写入，因此整个
-// 过程可安全重试。返回搬运的 rollup 行数。
-func MigrateBetweenStores(ctx context.Context, src, dst *metric.Store) (int64, error) {
-	return migrateBetweenStores(ctx, src, dst, nil)
-}
-
-// migrateBetweenStores 是 MigrateBetweenStores 的内部实现，额外接受一个可选的进度
 // 观察者 observe（为 nil 时行为与旧版本完全一致）。WebUI/API 手动触发的迁移传入
 // 回调以实时更新进度。
 func migrateBetweenStores(ctx context.Context, src, dst *metric.Store, observe storeMigrationObserver) (int64, error) {

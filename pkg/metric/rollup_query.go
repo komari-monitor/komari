@@ -115,10 +115,6 @@ func rollupGroupsToPoints(groups map[rollupKey]*rollupBucket, query AggregateQue
 	return result, nil
 }
 
-func (s *Store) scanRollupRowsContained(ctx context.Context, metricName, entityID string, tags map[string]string, resolution time.Duration, start, end time.Time, needDigest bool) ([]storedRollup, error) {
-	return s.scanRollupRowsBetween(ctx, metricName, entityID, tags, resolution.Milliseconds(), bucketStartMillis(start.UTC().UnixMilli(), resolution.Milliseconds()), end.UTC().UnixMilli(), needDigest)
-}
-
 func (s *Store) scanRollupRowsBetween(ctx context.Context, metricName, entityID string, tags map[string]string, resolutionMilli, lowerBucket, upperBucket int64, needDigest bool) ([]storedRollup, error) {
 	return s.scanRollupRowsBetweenWith(ctx, s.reader(), metricName, entityID, tags, time.Duration(resolutionMilli)*time.Millisecond, lowerBucket, upperBucket, needDigest)
 }

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	v1 "github.com/komari-monitor/komari/protocol/v1"

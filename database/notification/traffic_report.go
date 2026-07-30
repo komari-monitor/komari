@@ -126,19 +126,3 @@ func DisableTrafficReportNotifications(uuids []string) error {
 		Select("client", "enable").
 		Create(notifications).Error
 }
-
-// GetEnabledTrafficReportByType 获取启用了指定类型报告的客户端配置
-func GetEnabledTrafficReportByType(daily, weekly, monthly bool) ([]models.TrafficReportNotification, error) {
-	db := dbcore.GetDBInstance()
-	var notifications []models.TrafficReportNotification
-	query := db.Model(&models.TrafficReportNotification{}).Where("enable = ?", true)
-	if daily {
-		query = query.Where("daily = ?", true)
-	} else if weekly {
-		query = query.Where("weekly = ?", true)
-	} else if monthly {
-		query = query.Where("monthly = ?", true)
-	}
-	err := query.Find(&notifications).Error
-	return notifications, err
-}

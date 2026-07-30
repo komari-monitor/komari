@@ -42,14 +42,6 @@ func GetConstructor(name string) (OidcConstructor, bool) {
 	return constructor, exists
 }
 
-func GetAllOidcProviderNames() []string {
-	names := make([]string, 0, len(providers))
-	for name := range providers {
-		names = append(names, name)
-	}
-	return names
-}
-
 func Initialize() {
 	for _, provider := range providers {
 		if err := provider.Init(); err != nil {

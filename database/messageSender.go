@@ -5,15 +5,6 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 )
 
-func GetAllMessageSenderConfigs() []models.MessageSenderProvider {
-	db := dbcore.GetDBInstance()
-	var result []models.MessageSenderProvider
-	if err := db.Find(&result).Error; err != nil {
-		return nil
-	}
-	return result
-}
-
 func GetMessageSenderConfigByName(name string) (*models.MessageSenderProvider, error) {
 	db := dbcore.GetDBInstance()
 	var config models.MessageSenderProvider

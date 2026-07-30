@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	appconfig "github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/internal/migrations"
 	"github.com/komari-monitor/komari/web/api"
@@ -53,15 +53,14 @@ func TestMetricConfigValidatesSelectedDriverAgainstDSN(t *testing.T) {
 	}
 }
 
-func TestRestrictedControllersRegisterUnifiedAndCompatibilityRoutes(t *testing.T) {
+func TestRestrictedControllersRegisterUnifiedRoutes(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		controller *Controller
-		alias      string
 		discard    bool
 	}{
-		{name: "legacy", controller: NewLegacyController(setupConfigDB(t), migrations.LegacyMonitoringSummary{}), alias: LegacyAPIPath},
-		{name: "structure", controller: NewStructureController(), alias: StructureAPIPath, discard: true},
+		{name: "legacy", controller: NewLegacyController(setupConfigDB(t), migrations.LegacyMonitoringSummary{})},
+		{name: "structure", controller: NewStructureController(), discard: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
@@ -74,18 +73,17 @@ func TestRestrictedControllersRegisterUnifiedAndCompatibilityRoutes(t *testing.T
 			for _, route := range r.Routes() {
 				routes[route.Method+" "+route.Path] = true
 			}
-			for _, base := range []string{APIPath, test.alias} {
-				for _, route := range []string{"GET " + base + "/auth", "GET " + base + "/status", "POST " + base + "/start"} {
-					if !routes[route] {
-						t.Fatalf("required restricted route is missing: %s", route)
-					}
+			base := APIPath
+			for _, route := range []string{"GET " + base + "/auth", "GET " + base + "/status", "POST " + base + "/start"} {
+				if !routes[route] {
+					t.Fatalf("required restricted route is missing: %s", route)
 				}
-				if routes["POST "+base+"/cleanup"] {
-					t.Fatalf("full-history migration unexpectedly exposes cleanup: %s", base)
-				}
-				if routes["POST "+base+"/discard"] != test.discard {
-					t.Fatalf("POST %s/discard presence = %v, want %v", base, routes["POST "+base+"/discard"], test.discard)
-				}
+			}
+			if routes["POST "+base+"/cleanup"] {
+				t.Fatalf("full-history migration unexpectedly exposes cleanup: %s", base)
+			}
+			if routes["POST "+base+"/discard"] != test.discard {
+				t.Fatalf("POST %s/discard presence = %v, want %v", base, routes["POST "+base+"/discard"], test.discard)
 			}
 			if routes["GET /api/public"] || routes["GET /api/rpc2"] || routes["POST /api/clients/report"] {
 				t.Fatalf("ordinary APIs leaked into restricted routes: %#v", routes)
@@ -101,7 +99,7 @@ func TestRestrictedControllersRegisterUnifiedAndCompatibilityRoutes(t *testing.T
 	}
 }
 
-func TestCompatibilityAuthOmitsUnifiedMode(t *testing.T) {
+func TestUnifiedAuthIncludesMode(t *testing.T) {
 	db := setupConfigDB(t)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -110,41 +108,20 @@ func TestCompatibilityAuthOmitsUnifiedMode(t *testing.T) {
 	controller.Activate()
 	controller.Register(r)
 
-	for _, test := range []struct {
-		path     string
-		wantMode bool
-	}{
-		{path: APIPath + "/auth", wantMode: true},
-		{path: LegacyAPIPath + "/auth", wantMode: false},
-	} {
-		request := httptest.NewRequest(http.MethodGet, test.path, nil)
-		response := httptest.NewRecorder()
-		r.ServeHTTP(response, request)
-		if response.Code != http.StatusOK {
-			t.Fatalf("GET %s status = %d, want 200", test.path, response.Code)
-		}
-		var payload struct {
-			Data map[string]any `json:"data"`
-		}
-		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
-			t.Fatalf("decode GET %s response: %v", test.path, err)
-		}
-		_, hasMode := payload.Data["mode"]
-		if hasMode != test.wantMode {
-			t.Fatalf("GET %s mode presence = %v, want %v", test.path, hasMode, test.wantMode)
-		}
+	request := httptest.NewRequest(http.MethodGet, APIPath+"/auth", nil)
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", APIPath+"/auth", response.Code)
 	}
-}
-
-func TestCompatibilityStatusShapes(t *testing.T) {
-	summary := migrations.LegacyMonitoringSummary{MonitoringRows: 7}
-	legacy := legacyCompatibilityStatus(Status{Mode: ModeLegacyMonitoring, State: "migrating", Summary: &summary, SourceRowsTotal: 7})
-	if legacy.Summary.MonitoringRows != 7 || legacy.SourceRowsTotal != 7 {
-		t.Fatalf("unexpected legacy compatibility status: %#v", legacy)
+	var payload struct {
+		Data map[string]any `json:"data"`
 	}
-	structure := structureCompatibilityStatus(Status{Mode: ModeMetricStructure, State: "copying", RowsDone: 3, RowsTotal: 9})
-	if structure.RowsDone != 3 || structure.RowsTotal != 9 {
-		t.Fatalf("unexpected structure compatibility status: %#v", structure)
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode GET %s response: %v", APIPath+"/auth", err)
+	}
+	if got := payload.Data["mode"]; got != string(ModeLegacyMonitoring) {
+		t.Fatalf("GET %s mode = %v, want %q", APIPath+"/auth", got, ModeLegacyMonitoring)
 	}
 }
 
