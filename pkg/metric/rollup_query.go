@@ -325,25 +325,27 @@ func (s *Store) coveringSeriesResolution(ctx context.Context, query Query, prefe
 }
 
 func (s *Store) rollupTimeBounds(ctx context.Context, query Query, interval time.Duration) (int64, int64, bool, error) {
-	args := []any{query.MetricName, interval.Milliseconds(), query.End.UTC().UnixMilli()}
-	parts := []string{
-		"s.metric_name = " + s.dialect.placeholder(1),
-		"d.resolution_milli = " + s.dialect.placeholder(2),
-		"r.first_ts_milli <= " + s.dialect.placeholder(3),
-	}
+	args := []any{query.MetricName}
+	seriesParts := []string{"s.metric_name = " + s.dialect.placeholder(1)}
 	if query.EntityID != "" {
 		args = append(args, query.EntityID)
-		parts = append(parts, "s.entity_id = "+s.dialect.placeholder(len(args)))
+		seriesParts = append(seriesParts, "s.entity_id = "+s.dialect.placeholder(len(args)))
 	}
 	for _, key := range sortedKeys(query.Tags) {
 		args = append(args, query.Tags[key])
-		parts = append(parts, s.dialect.jsonExtractEquals("s.tags", key, s.dialect.placeholder(len(args))))
+		seriesParts = append(seriesParts, s.dialect.jsonExtractEquals("s.tags", key, s.dialect.placeholder(len(args))))
 	}
+	args = append(args, interval.Milliseconds())
+	resolutionPlaceholder := s.dialect.placeholder(len(args))
+	args = append(args, query.End.UTC().UnixMilli())
+	endPlaceholder := s.dialect.placeholder(len(args))
+
 	var earliest, latest sql.NullInt64
 	err := s.reader().QueryRowContext(ctx, fmt.Sprintf(`SELECT MIN(r.first_ts_milli), MAX(r.last_ts_milli) FROM %s r
-		JOIN %s s ON s.id = r.series_id
-		JOIN %s d ON d.id = r.resolution_id
-		WHERE %s`, s.tables.rollups, s.tables.series, s.tables.resolutions, joinSQLWith(parts, " AND ")),
+		WHERE r.series_id IN (SELECT s.id FROM %s s WHERE %s)
+		AND r.resolution_id IN (SELECT d.id FROM %s d WHERE d.resolution_milli = %s)
+		AND r.first_ts_milli <= %s`, s.tables.rollups, s.tables.series, joinSQLWith(seriesParts, " AND "),
+		s.tables.resolutions, resolutionPlaceholder, endPlaceholder),
 		args...).Scan(&earliest, &latest)
 	if err != nil {
 		return 0, 0, false, err

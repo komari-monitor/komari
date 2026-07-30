@@ -782,6 +782,16 @@ func GetRecordsByClientAndTime(ctx context.Context, clientUUID string, start, en
 	return getRecordsByClientAndTimeFromSeries(ctx, s, clientUUID, start, end)
 }
 
+// GetRecordMetricMaxByClientAndTime 查询单项监控指标在各时间桶内的最大值。
+func GetRecordMetricMaxByClientAndTime(ctx context.Context, clientUUID, recordMetric string, start, end time.Time) ([]models.Record, error) {
+	s := GetStore()
+	if s == nil {
+		return nil, fmt.Errorf("metric store not enabled")
+	}
+
+	return getRecordMetricMaxByClientAndTimeFromSeries(ctx, s, clientUUID, recordMetric, start, end)
+}
+
 // GetRecordsByTime 从 metric store 查询所有客户端在时间范围内的记录
 func GetRecordsByTime(ctx context.Context, start, end time.Time) ([]models.Record, error) {
 	s := GetStore()
@@ -852,6 +862,41 @@ func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, c
 		records = append(records, *rec)
 	}
 	sortRecords(records)
+	return records, nil
+}
+
+func getRecordMetricMaxByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, clientUUID, recordMetric string, start, end time.Time) ([]models.Record, error) {
+	metricName, ok := metricNameForRecordField(recordMetric)
+	if !ok {
+		return nil, fmt.Errorf("unsupported record metric %q", recordMetric)
+	}
+
+	now := time.Now().UTC()
+	points, err := s.Series(ctx, metric.AggregateQuery{
+		Query: metric.Query{
+			MetricName: metricName,
+			EntityID:   clientUUID,
+			Start:      start,
+			End:        end,
+			Order:      metric.OrderAsc,
+		},
+		Aggregation: metric.AggMax,
+		Interval:    recordSeriesInterval(s, start, end, now),
+	}, now)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query metric %s: %w", metricName, err)
+	}
+
+	records := make([]models.Record, 0, len(points))
+	for _, point := range points {
+		entityID := point.EntityID
+		if entityID == "" {
+			entityID = clientUUID
+		}
+		record := models.Record{Client: entityID, Time: point.Bucket.UTC()}
+		applyRecordMetricValue(&record, metricName, point.Value)
+		records = append(records, record)
+	}
 	return records, nil
 }
 

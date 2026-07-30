@@ -588,11 +588,14 @@ func (s *Store) latestRollupBefore(ctx context.Context, metricName, entityID str
 		var timestamp int64
 		var rawTags, rawLabels any
 		err := s.reader().QueryRowContext(ctx, fmt.Sprintf(`SELECT r.last_val, r.last_ts_milli, s.tags, l.labels
-			FROM %s r JOIN %s s ON s.id = r.series_id JOIN %s d ON d.id = r.resolution_id JOIN %s l ON l.id = r.label_id
-			WHERE s.metric_name = %s AND s.entity_id = %s AND d.resolution_milli = %s AND r.last_ts_milli <= %s
+			FROM %s r JOIN %s s ON s.id = r.series_id JOIN %s l ON l.id = r.label_id
+			WHERE r.series_id IN (SELECT id FROM %s WHERE metric_name = %s AND entity_id = %s)
+			AND r.resolution_id IN (SELECT id FROM %s WHERE resolution_milli = %s)
+			AND r.last_ts_milli <= %s
 			ORDER BY r.last_ts_milli DESC LIMIT 1`,
-			s.tables.rollups, s.tables.series, s.tables.resolutions, s.tables.labels,
-			s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3), s.dialect.placeholder(4)),
+			s.tables.rollups, s.tables.series, s.tables.labels, s.tables.series,
+			s.dialect.placeholder(1), s.dialect.placeholder(2), s.tables.resolutions,
+			s.dialect.placeholder(3), s.dialect.placeholder(4)),
 			metricName, entityID, tier.Interval.Milliseconds(), endMilli,
 		).Scan(&value, &timestamp, &rawTags, &rawLabels)
 		if err == sql.ErrNoRows {

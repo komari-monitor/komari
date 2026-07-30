@@ -2,7 +2,6 @@ package notifier
 
 import (
 	"fmt"
-	logger "github.com/komari-monitor/komari/utils/log"
 	"reflect"
 	"sync"
 	"time"
@@ -13,6 +12,7 @@ import (
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/internal/scheduler"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
 )
 
@@ -68,8 +68,8 @@ func executeLoadNotificationTask(task models.LoadNotification) {
 	windowStart := now.Add(-time.Duration(task.Interval) * time.Minute)
 	overloadClients := make([]string, 0)
 	for _, clientUUID := range task.Clients {
-		// 获取客户端在时间窗口内的记录
-		records, err := getRecordsForClient(clientUUID, windowStart, now)
+		// 仅查询当前通知使用的指标，避免重建完整监控记录。
+		records, err := getMetricRecordsForClient(clientUUID, task.Metric, windowStart, now)
 		if err != nil {
 			continue
 		}
@@ -97,9 +97,9 @@ func shouldSkipNotification(task models.LoadNotification) bool {
 	return timeSinceLastNotified < cooldownPeriod
 }
 
-// getRecordsForClient 获取指定客户端在时间窗口内的记录
-func getRecordsForClient(clientUUID string, start, end time.Time) ([]models.Record, error) {
-	return records.GetRecordsByClientAndTime(clientUUID, start, end)
+// getMetricRecordsForClient 获取指定客户端在时间窗口内的单项指标最大值。
+func getMetricRecordsForClient(clientUUID, metricName string, start, end time.Time) ([]models.Record, error) {
+	return records.GetRecordMetricMaxByClientAndTime(clientUUID, metricName, start, end)
 }
 
 // checkMetricThreshold 检查指标是否达到阈值
@@ -143,7 +143,7 @@ func getMetricValue(record models.Record, metric string) float32 {
 			logger.Errorf("notifier", "Failed to get client info for %s: %v", record.Client, err)
 			return 0
 		}
-		if record.RamTotal > 0 {
+		if client.MemTotal > 0 {
 			return float32(record.Ram) / float32(client.MemTotal) * 100
 		}
 		return 0
@@ -153,7 +153,7 @@ func getMetricValue(record models.Record, metric string) float32 {
 			logger.Errorf("notifier", "Failed to get client info for %s: %v", record.Client, err)
 			return 0
 		}
-		if record.SwapTotal > 0 {
+		if client.SwapTotal > 0 {
 			return float32(record.Swap) / float32(client.SwapTotal) * 100
 		}
 		return 0
@@ -167,7 +167,7 @@ func getMetricValue(record models.Record, metric string) float32 {
 			logger.Errorf("notifier", "Failed to get client info for %s: %v", record.Client, err)
 			return 0
 		}
-		if record.DiskTotal > 0 {
+		if client.DiskTotal > 0 {
 			return float32(record.Disk) / float32(client.DiskTotal) * 100
 		}
 		return 0

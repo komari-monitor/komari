@@ -50,6 +50,43 @@ var recordMetricNames = joinMetricNames(loadRecordMetricNames, gpuDeviceRecordMe
 // Ping has an independent retention and cleanup boundary.
 var pingMetricNames = []string{MetricPingLatency, MetricPingLoss}
 
+func metricNameForRecordField(name string) (string, bool) {
+	switch name {
+	case "cpu":
+		return MetricCPU, true
+	case "gpu":
+		return MetricGPU, true
+	case "ram":
+		return MetricRAM, true
+	case "swap":
+		return MetricSwap, true
+	case "load":
+		return MetricLoad, true
+	case "disk":
+		return MetricDisk, true
+	case "net_in", "netin":
+		return MetricNetIn, true
+	case "net_out", "netout":
+		return MetricNetOut, true
+	case "net_total_up":
+		return MetricNetTotalUp, true
+	case "net_total_down":
+		return MetricNetTotalDown, true
+	case "traffic_up":
+		return MetricTrafficUp, true
+	case "traffic_down":
+		return MetricTrafficDown, true
+	case "process":
+		return MetricProcess, true
+	case "connections":
+		return MetricConnections, true
+	case "connections_udp":
+		return MetricConnectionsUDP, true
+	default:
+		return "", false
+	}
+}
+
 func joinMetricNames(groups ...[]string) []string {
 	total := 0
 	for _, group := range groups {

@@ -566,3 +566,41 @@ func TestGetRecordsByClientAndTimeReadsRollupsAfterRawCompaction(t *testing.T) {
 		t.Fatalf("all-client records were not reconstructed from rollup: %#v", all)
 	}
 }
+
+func TestGetRecordMetricMaxByClientAndTimeQueriesOnlySelectedMetric(t *testing.T) {
+	ctx := context.Background()
+	s, err := metric.Open(ctx, metric.SQLite(":memory:",
+		metric.WithMaxOpenConns(1),
+		metric.WithRollupPolicy(defaultRollupPolicy()),
+	))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	defer s.Close()
+	if err := createMetricDefinitions(ctx, s); err != nil {
+		t.Fatalf("create metric definitions: %v", err)
+	}
+
+	base := time.Now().UTC().Truncate(time.Minute).Add(-time.Minute)
+	if err := s.WriteBatch(ctx, []metric.Point{
+		{MetricName: MetricCPU, EntityID: "node-a", Timestamp: base.Add(10 * time.Second), Value: 10},
+		{MetricName: MetricCPU, EntityID: "node-a", Timestamp: base.Add(20 * time.Second), Value: 90},
+		{MetricName: MetricRAM, EntityID: "node-a", Timestamp: base.Add(20 * time.Second), Value: 123456},
+	}); err != nil {
+		t.Fatalf("write metric points: %v", err)
+	}
+
+	got, err := getRecordMetricMaxByClientAndTimeFromSeries(ctx, s, "node-a", "cpu", base, base.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("get CPU max records: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("record count = %d, want 1: %#v", len(got), got)
+	}
+	if got[0].Cpu != 90 {
+		t.Fatalf("CPU max = %v, want 90", got[0].Cpu)
+	}
+	if got[0].Ram != 0 {
+		t.Fatalf("unselected RAM value = %d, want 0", got[0].Ram)
+	}
+}
