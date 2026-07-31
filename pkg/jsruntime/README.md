@@ -13,7 +13,7 @@
 | --- | --- |
 | `可用` | 主要行为已实现，可按本文列出的签名使用。 |
 | `部分实现` | 常见用法可用，但参数、返回值、流式处理或边界语义不完整。 |
-| `空实现/固定值` | 名称存在，但不执行对应行为，或始终返回占位值。 |
+| `固定值/调用抛错` | 名称存在，但始终返回占位值；没有真实语义的方法调用会明确抛错。 |
 | `未实现` | 当前运行时没有注入该接口，调用或 `require()` 会失败。 |
 
 ## Go 侧接口
@@ -561,7 +561,7 @@ function runtimeInfo() {
 | `spawnSync/execSync/execFileSync` | `部分实现`，同步阻塞事件循环 |
 | `fork` | `未实现`，明确抛错 |
 | ChildProcess `pid/exitCode/signalCode/killed/stdin/stdout/stderr/stdio` | `部分实现` |
-| ChildProcess `kill/ref/unref/disconnect/send` | `部分实现` 或占位，见下文 |
+| ChildProcess `kill/ref/unref/disconnect/send` | `部分实现` 或调用抛错，见下文 |
 
 支持的 options：`cwd`、`env`、`shell`、`timeout`、`encoding`、`maxBuffer`。
 `cwd` 受 `BaseDir` 限制；请求的 timeout 和 maxBuffer 只能收紧 Go 侧全局上限，不能放大。
@@ -570,8 +570,8 @@ function runtimeInfo() {
 - `spawn()` 的 stdin `write/end` 通过后台写队列执行；stdout/stderr 通过 `data/end/close` 事件读取。
 - `exec()`/`execFile()` 返回的是简化 child，只保证 pid、kill 和 exit/close/error 等事件，
   不像当前 `spawn()` 结果那样暴露完整的 stdin/stdout/stderr 属性。
-- stdout/stderr 的 `pause/resume` 是空实现，没有 backpressure；没有完整 Node Stream API。
-- ChildProcess `ref/unref` 只返回自身。
+- stdout/stderr 的 `pause/resume` 调用会明确抛错；没有 backpressure、pipe 和完整 stream 状态。
+- ChildProcess `ref/unref` 调用会明确抛错（事件循环由宿主驱动，没有引用计数语义）。
 - `connected` 固定为 `false`，`send()` 固定返回 `false` 并向 callback 报告 IPC 未启用；
   `disconnect()` 只发事件，没有 IPC channel。
 - `kill("SIGKILL")` 使用强制结束，其他 signal 统一按 interrupt 处理；`signalCode` 当前不更新。
@@ -596,7 +596,7 @@ function runCommand() {
 | 对象 | 可用成员 | 状态 |
 | --- | --- | --- |
 | 模块 | `createServer/connect/createConnection/isIP/isIPv4/isIPv6` | `部分实现` |
-| 默认 family | `getDefaultAutoSelectFamily/setDefaultAutoSelectFamily` | `空实现/固定值` |
+| 默认 family | `getDefaultAutoSelectFamily` 固定 `true`；`setDefaultAutoSelectFamily` 调用抛错 | `固定值/调用抛错` |
 | Server | `listen/close/address/getConnections`、`listening/maxConnections`、EventEmitter | `部分实现` |
 | Socket | `write/end/destroy/setEncoding/setTimeout/setNoDelay/setKeepAlive/address`、地址属性、EventEmitter | `部分实现` |
 
@@ -605,11 +605,12 @@ Server `listen()` 需要 `AllowListen`，默认 host 是 `127.0.0.1`。`connect(
 
 主要差异：
 
-- `getDefaultAutoSelectFamily()` 固定返回 `true`；`setDefaultAutoSelectFamily()` 是空实现，
+- `getDefaultAutoSelectFamily()` 固定返回 `true`；`setDefaultAutoSelectFamily()` 调用会明确抛错，
   不改变 Go resolver/dialer。实际地址选择仍由 Go 和系统网络配置决定。
-- `Server.closeAllConnections/closeIdleConnections` 是空实现；`maxConnections` 不执行限制。
-- Server/Socket 的 `ref/unref` 只返回自身。
-- Socket 的 `pause/resume` 是空实现；没有 backpressure、pipe 和完整 stream 状态。
+- `Server.closeAllConnections/closeIdleConnections` 调用会明确抛错（连接未逐个跟踪）；
+  `maxConnections` 不执行限制。
+- Server/Socket 的 `ref/unref` 调用会明确抛错（事件循环由宿主驱动，没有引用计数语义）。
+- Socket 的 `pause/resume` 调用会明确抛错；没有 backpressure、pipe 和完整 stream 状态。
 - `setTimeout()` 使用连接 deadline，不完全等同于 Node 的 idle timeout 重置语义。
 - 连接 options 只处理常见 `port/host`；`family/lookup/localAddress/happyEyeballs` 等未实现。
 - 异步 dial 完成前的占位 Socket 没有 `write/end/destroy`，因此不能像 Node 一样预先排队写入；
@@ -656,8 +657,8 @@ HTTPS URL。
 | --- | --- |
 | `listen/close/address/setTimeout` | `部分实现` |
 | `closeAllConnections` | `部分实现`：调用 Go server `Close()`，行为比 Node 更强，会停止 server |
-| `closeIdleConnections` | `空实现` |
-| `ref/unref` | `空实现/固定值`：只返回自身 |
+| `closeIdleConnections` | 调用抛错（Go `net/http` 不暴露单个空闲连接） |
+| `ref/unref` | 调用抛错（事件循环由宿主驱动） |
 | `listening` | `可用` |
 | `timeout/keepAliveTimeout/headersTimeout/requestTimeout` | `部分实现/占位` |
 
@@ -680,7 +681,7 @@ setEncoding()  pause()  resume()  destroy()
 ```
 
 body 已经完整读入内存，随后最多发出一个 `data`，再发出 `end/close`。
-`complete` 在交给 JavaScript 时固定为 `true`；`setEncoding/pause/resume` 是空实现。
+`complete` 在交给 JavaScript 时固定为 `true`；`setEncoding/pause/resume` 调用会明确抛错。
 
 ServerResponse 可用成员：
 
@@ -692,7 +693,7 @@ hasHeader  removeHeader  writeHead  flushHeaders  writeContinue
 write  end  destroy  setTimeout
 ```
 
-response body 会缓冲到 `end()`。`flushHeaders()` 只更新状态，`writeContinue()` 是空实现，
+response body 会缓冲到 `end()`。`flushHeaders()` 只更新状态，`writeContinue()` 调用会明确抛错，
 `sendDate` 和自定义 `statusMessage` 不控制 Go `net/http` 的实际 wire 行为。
 
 #### ClientRequest
@@ -700,8 +701,8 @@ response body 会缓冲到 `end()`。`flushHeaders()` 只更新状态，`writeCo
 `request/get` 返回简化 ClientRequest，支持 header 方法、`write/end/abort/destroy/setTimeout`。
 请求体缓冲到 `end()` 后通过 `fetch()` 发送；响应也一次性缓冲后发出一个 `data`。
 
-- `Agent` 只保存 `options/keepAlive/maxSockets`，`destroy()` 是空实现，不提供连接池控制。
-- ClientRequest `flushHeaders/setNoDelay/setSocketKeepAlive` 是空实现。
+- `Agent` 只保存 `options/keepAlive/maxSockets`，`destroy()` 调用会明确抛错，不提供连接池控制。
+- ClientRequest `flushHeaders/setNoDelay/setSocketKeepAlive` 调用会明确抛错。
 - client timeout 只定时发 `timeout`，不会自动终止请求，也不会在完成后自动取消 timer。
 - upgrade、CONNECT、trailers、stream backpressure、socket 复用和完整 Agent 行为未实现。
 
@@ -724,9 +725,9 @@ function serveOnce() {
 }
 ```
 
-## 空实现和固定值汇总
+## 固定值与调用抛错汇总
 
-下表列出容易被误认为“完整可用”的占位接口。
+下表列出容易被误认为“完整可用”的占位接口；没有真实语义的方法调用会明确抛错。
 
 | 接口 | 当前行为 |
 | --- | --- |
@@ -742,17 +743,17 @@ function serveOnce() {
 | `os.constants.errno` | 固定空对象；signals 只有 3 项。 |
 | `process.versions.node` | 固定 `"0.0.0-goja"`。 |
 | `process.connected`、`process.config` | 固定 `false`、空对象。 |
-| process stream `fd/isTTY/setEncoding/pause/resume` | `fd=-1`、`isTTY=false`；其余只返回 stream，没有真实语义。 |
-| ChildProcess `connected/send/ref/unref/disconnect` | 无 IPC 或 event-loop 引用控制。 |
-| child stdout/stderr `pause/resume` | 空实现。 |
+| process stream `fd/isTTY` 与 `setEncoding/pause/resume/write` | `fd=-1`、`isTTY=false`；`setEncoding/pause/resume` 和未连接的 stdin `write` 调用抛错。 |
+| ChildProcess `connected/send/ref/unref/disconnect` | 无 IPC；`connected` 固定 `false`，`send()` 向 callback 报告 IPC 未启用，`ref/unref` 调用抛错，`disconnect()` 只发事件。 |
+| child stdout/stderr `pause/resume` | 调用抛错。 |
 | `net.getDefaultAutoSelectFamily()` | 固定 `true`。 |
-| `net.setDefaultAutoSelectFamily()` | 空实现。 |
-| `net.Server.closeAllConnections/closeIdleConnections` | 空实现。 |
-| net Server/Socket `ref/unref`、Socket `pause/resume` | 只返回自身。 |
-| `http.Server.closeIdleConnections` | 空实现。 |
+| `net.setDefaultAutoSelectFamily()` | 调用抛错。 |
+| `net.Server.closeAllConnections/closeIdleConnections` | 调用抛错（连接未逐个跟踪）。 |
+| net Server/Socket `ref/unref`、Socket `pause/resume` | 调用抛错。 |
+| `http.Server.closeIdleConnections` | 调用抛错。 |
 | `http.Server/ClientRequest` 若干 timeout/socket 属性 | 仅部分状态或定时事件，不是完整连接控制。 |
-| HTTP `Agent.destroy`、ClientRequest `setNoDelay/setSocketKeepAlive` | 空实现。 |
-| ServerResponse `writeContinue` | 空实现；`flushHeaders` 不实际 flush。 |
+| HTTP `Agent.destroy`、ClientRequest `flushHeaders/setNoDelay/setSocketKeepAlive` | 调用抛错。 |
+| ServerResponse `writeContinue` | 调用抛错；`flushHeaders` 只更新状态，不实际 flush。 |
 
 ## 常见但未实现的接口
 
@@ -779,4 +780,4 @@ Go 进程。当前可用于约束单次执行的机制只有 `Timeout`、HTTP bo
    `execSync` 等会阻塞该 runtime 的事件循环。
 3. 所有 runtime 都应 `defer runtime.Close()`，否则 listener、socket、文件和 timer 可能继续存活。
 4. 引入 npm/CommonJS 包前先核对它依赖的 Node 核心模块。纯 JavaScript 不代表能在当前兼容子集运行。
-5. 依赖空实现或固定值前，应把它视为“不支持”，不要把存在的方法名当成能力检测。
+5. 调用会抛错的方法或依赖固定值前，应把它视为“不支持”，不要把存在的方法名当成能力检测。

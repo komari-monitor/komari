@@ -276,7 +276,7 @@ const fetchAPISource = `
 			const value = new Uint8Array(copyBuffer(slot(this).buffer));
 			let consumed = false;
 			return {
-				getReader() { return { read() { if (consumed) return Promise.resolve({ done: true, value: undefined }); consumed = true; return Promise.resolve({ done: false, value }); }, cancel() { consumed = true; return Promise.resolve(); }, releaseLock() {} }; },
+				getReader() { return { read() { if (consumed) return Promise.resolve({ done: true, value: undefined }); consumed = true; return Promise.resolve({ done: false, value }); }, cancel() { consumed = true; return Promise.resolve(); }, releaseLock() { throw new Error("Blob.stream().getReader().releaseLock is not supported by jsruntime"); } }; },
 				[Symbol.asyncIterator]() { return { next() { if (consumed) return Promise.resolve({ done: true }); consumed = true; return Promise.resolve({ done: false, value }); } }; }
 			};
 		}

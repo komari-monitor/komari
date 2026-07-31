@@ -285,8 +285,12 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 		}
 		return err == nil
 	})
-	_ = child.Set("ref", func() *goja.Object { return child })
-	_ = child.Set("unref", func() *goja.Object { return child })
+	_ = child.Set("ref", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("child_process.ChildProcess.ref is not supported by jsruntime; the event loop is host-driven")))
+	})
+	_ = child.Set("unref", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("child_process.ChildProcess.unref is not supported by jsruntime; the event loop is host-driven")))
+	})
 	_ = child.Set("disconnect", func() { _ = events.Emit(vm, child, "disconnect") })
 	_ = child.Set("send", func(call goja.FunctionCall) goja.Value {
 		if callback, ok := goja.AssertFunction(call.Argument(len(call.Arguments) - 1)); ok {
@@ -295,8 +299,8 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 		return vm.ToValue(false)
 	})
 
-	m.pipeChildOutput(stdoutReader, stdout, options.encoding)
-	m.pipeChildOutput(stderrReader, stderr, options.encoding)
+	m.pipeChildOutput(vm, stdoutReader, stdout, options.encoding)
+	m.pipeChildOutput(vm, stderrReader, stderr, options.encoding)
 	go func() {
 		err := cmd.Wait()
 		cancel()
@@ -396,7 +400,7 @@ func childCallback(call goja.FunctionCall) goja.Callable {
 	return nil
 }
 
-func (m *Module) pipeChildOutput(reader io.Reader, stream *goja.Object, encoding string) {
+func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goja.Object, encoding string) {
 	var currentEncoding atomic.Value
 	currentEncoding.Store(encoding)
 	go func() {
@@ -432,8 +436,12 @@ func (m *Module) pipeChildOutput(reader io.Reader, stream *goja.Object, encoding
 	_ = stream.Set("readable", true)
 	_ = stream.Set("destroyed", false)
 	_ = stream.Set("setEncoding", func(value string) *goja.Object { currentEncoding.Store(value); return stream })
-	_ = stream.Set("pause", func() *goja.Object { return stream })
-	_ = stream.Set("resume", func() *goja.Object { return stream })
+	_ = stream.Set("pause", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("child_process stream pause is not supported by jsruntime; output is delivered as events without backpressure")))
+	})
+	_ = stream.Set("resume", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("child_process stream resume is not supported by jsruntime; output is delivered as events without backpressure")))
+	})
 }
 
 func (m *Module) execChild(vm *goja.Runtime, command string, arguments []string, options childCommandOptions, callback goja.Callable) *goja.Object {

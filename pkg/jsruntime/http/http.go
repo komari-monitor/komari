@@ -275,7 +275,7 @@ func (m *Module) newHTTPServer(vm *goja.Runtime) *goja.Object {
 		}
 	})
 	_ = serverObject.Set("closeIdleConnections", func() {
-		// net/http does not expose individual idle server connections.
+		panic(vm.NewGoError(fmt.Errorf("http.Server.closeIdleConnections is not supported by jsruntime; net/http does not expose individual idle server connections")))
 	})
 	_ = serverObject.Set("address", func() goja.Value {
 		serverMu.RLock()
@@ -298,8 +298,12 @@ func (m *Module) newHTTPServer(vm *goja.Runtime) *goja.Object {
 		}
 		return serverObject
 	})
-	_ = serverObject.Set("ref", func() *goja.Object { return serverObject })
-	_ = serverObject.Set("unref", func() *goja.Object { return serverObject })
+	_ = serverObject.Set("ref", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("http.Server.ref is not supported by jsruntime; the event loop is host-driven")))
+	})
+	_ = serverObject.Set("unref", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("http.Server.unref is not supported by jsruntime; the event loop is host-driven")))
+	})
 	return serverObject
 }
 
@@ -343,9 +347,15 @@ func (m *Module) httpIncomingMessage(vm *goja.Runtime, request *http.Request, bo
 	_ = incoming.Set("readable", len(body) > 0)
 	_ = incoming.Set("socket", httpSocketInfo(vm, request))
 	_ = incoming.Set("connection", incoming.Get("socket"))
-	_ = incoming.Set("setEncoding", func() *goja.Object { return incoming })
-	_ = incoming.Set("pause", func() *goja.Object { return incoming })
-	_ = incoming.Set("resume", func() *goja.Object { return incoming })
+	_ = incoming.Set("setEncoding", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("http.IncomingMessage.setEncoding is not supported by jsruntime; the body is fully buffered")))
+	})
+	_ = incoming.Set("pause", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("http.IncomingMessage.pause is not supported by jsruntime; the body is fully buffered")))
+	})
+	_ = incoming.Set("resume", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("http.IncomingMessage.resume is not supported by jsruntime; the body is fully buffered")))
+	})
 	_ = incoming.Set("destroy", func() { _ = request.Body.Close() })
 	return incoming
 }
@@ -436,7 +446,9 @@ func (m *Module) httpServerResponse(vm *goja.Runtime, state *nodeHTTPResponse) *
 		return response
 	})
 	_ = response.Set("flushHeaders", func() { _ = response.Set("headersSent", true) })
-	_ = response.Set("writeContinue", func() {})
+	_ = response.Set("writeContinue", func() {
+		panic(vm.NewGoError(fmt.Errorf("http.ServerResponse.writeContinue is not supported by jsruntime; the Go server never sends 100 Continue")))
+	})
 	_ = response.Set("write", func(call goja.FunctionCall) goja.Value {
 		state.mu.Lock()
 		_, _ = state.body.Write(buffer.Bytes(vm, call.Argument(0)))
@@ -564,7 +576,7 @@ func validHTTPToken(value string) bool {
 const httpClientSource = `
 (function (EventEmitter, fetch, AbortController, Blob) {
 	"use strict";
-	class Agent { constructor(options) { this.options = options || {}; this.keepAlive = Boolean(this.options.keepAlive); this.maxSockets = this.options.maxSockets || Infinity; } destroy() {} }
+	class Agent { constructor(options) { this.options = options || {}; this.keepAlive = Boolean(this.options.keepAlive); this.maxSockets = this.options.maxSockets || Infinity; } destroy() { throw new Error("http.Agent.destroy is not supported by jsruntime; no connection pool"); } }
 	class ClientRequest extends EventEmitter {
 		constructor(input, options, callback) {
 			super(); this._chunks = []; this._controller = new AbortController(); this.destroyed = false; this.finished = false;
@@ -579,7 +591,7 @@ const httpClientSource = `
 		getHeaderNames() { return Array.from(this._headers.keys()); }
 		hasHeader(name) { return this._headers.has(name); }
 		removeHeader(name) { this._headers.delete(name); }
-		flushHeaders() { return this; }
+		flushHeaders() { throw new Error("http.ClientRequest.flushHeaders is not supported by jsruntime; headers are buffered until end()"); }
 		write(chunk, encoding, callback) { this._chunks.push(chunk); if (typeof encoding === "function") callback = encoding; if (callback) callback(); return true; }
 		end(chunk, encoding, callback) {
 			if (chunk !== undefined && chunk !== null && typeof chunk !== "function") this._chunks.push(chunk);
@@ -589,7 +601,7 @@ const httpClientSource = `
 			fetch(this.url, { method: this.method, headers: this._headers, body, signal: this._controller.signal }).then(async (response) => {
 				const incoming = new EventEmitter(); incoming.statusCode = response.status; incoming.statusMessage = response.statusText;
 				incoming.headers = Object.fromEntries(response.headers); incoming.rawHeaders = Array.from(response.headers).flat(); incoming.httpVersion = "1.1";
-				incoming.complete = true; incoming.aborted = false; incoming.setEncoding = () => incoming; incoming.pause = () => incoming; incoming.resume = () => incoming;
+				incoming.complete = true; incoming.aborted = false; incoming.setEncoding = () => { throw new Error("http.IncomingMessage.setEncoding is not supported by jsruntime; the body is fully buffered"); }; incoming.pause = () => { throw new Error("http.IncomingMessage.pause is not supported by jsruntime; the body is fully buffered"); }; incoming.resume = () => { throw new Error("http.IncomingMessage.resume is not supported by jsruntime; the body is fully buffered"); };
 				this.emit("response", incoming); const bytes = new Uint8Array(await response.arrayBuffer());
 				setTimeout(() => { if (bytes.length) incoming.emit("data", bytes); incoming.emit("end"); incoming.emit("close"); this.emit("close"); }, 0);
 			}, (error) => { this.emit("error", error); this.emit("close"); });
@@ -598,7 +610,7 @@ const httpClientSource = `
 		abort() { this.destroyed = true; this._controller.abort(); this.emit("abort"); }
 		destroy(error) { this.destroyed = true; this._controller.abort(error); if (error) this.emit("error", error); this.emit("close"); return this; }
 		setTimeout(ms, callback) { if (callback) this.once("timeout", callback); setTimeout(() => this.emit("timeout"), ms); return this; }
-		setNoDelay() { return this; } setSocketKeepAlive() { return this; }
+		setNoDelay() { throw new Error("http.ClientRequest.setNoDelay is not supported by jsruntime"); } setSocketKeepAlive() { throw new Error("http.ClientRequest.setSocketKeepAlive is not supported by jsruntime"); }
 	}
 	function request(input, options, callback) { if (typeof options === "function") { callback = options; options = {}; } return new ClientRequest(input, options, callback); }
 	function get(input, options, callback) { const req = request(input, options, callback); req.end(); return req; }

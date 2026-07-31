@@ -49,7 +49,9 @@ func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 	_ = exports.Set("isIPv4", func(value string) bool { ip := net.ParseIP(value); return ip != nil && ip.To4() != nil })
 	_ = exports.Set("isIPv6", func(value string) bool { ip := net.ParseIP(value); return ip != nil && ip.To4() == nil })
 	_ = exports.Set("getDefaultAutoSelectFamily", func() bool { return true })
-	_ = exports.Set("setDefaultAutoSelectFamily", func(bool) {})
+	_ = exports.Set("setDefaultAutoSelectFamily", func(bool) {
+		panic(vm.NewGoError(fmt.Errorf("net.setDefaultAutoSelectFamily is not supported by jsruntime; autoSelectFamily is always enabled")))
+	})
 	_ = module.Set("exports", exports)
 }
 
@@ -182,8 +184,12 @@ func (m *Module) newNetServer(vm *goja.Runtime) *goja.Object {
 		}
 		return server
 	})
-	_ = server.Set("closeAllConnections", func() {})
-	_ = server.Set("closeIdleConnections", func() {})
+	_ = server.Set("closeAllConnections", func() {
+		panic(vm.NewGoError(fmt.Errorf("net.Server.closeAllConnections is not supported by jsruntime; connections are not tracked individually")))
+	})
+	_ = server.Set("closeIdleConnections", func() {
+		panic(vm.NewGoError(fmt.Errorf("net.Server.closeIdleConnections is not supported by jsruntime; connections are not tracked individually")))
+	})
 	_ = server.Set("address", func() goja.Value {
 		serverMu.RLock()
 		currentListener := listener
@@ -203,8 +209,12 @@ func (m *Module) newNetServer(vm *goja.Runtime) *goja.Object {
 			})
 		}, 0)
 	})
-	_ = server.Set("ref", func() *goja.Object { return server })
-	_ = server.Set("unref", func() *goja.Object { return server })
+	_ = server.Set("ref", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("net.Server.ref is not supported by jsruntime; the event loop is host-driven")))
+	})
+	_ = server.Set("unref", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("net.Server.unref is not supported by jsruntime; the event loop is host-driven")))
+	})
 	return server
 }
 
@@ -257,10 +267,18 @@ func (m *Module) netConnect(vm *goja.Runtime, call goja.FunctionCall) *goja.Obje
 		}
 		return placeholder
 	})
-	_ = placeholder.Set("setNoDelay", func() *goja.Object { return placeholder })
-	_ = placeholder.Set("setKeepAlive", func() *goja.Object { return placeholder })
-	_ = placeholder.Set("ref", func() *goja.Object { return placeholder })
-	_ = placeholder.Set("unref", func() *goja.Object { return placeholder })
+	_ = placeholder.Set("setNoDelay", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("net.Socket.setNoDelay is not supported by jsruntime before the connection is established")))
+	})
+	_ = placeholder.Set("setKeepAlive", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("net.Socket.setKeepAlive is not supported by jsruntime before the connection is established")))
+	})
+	_ = placeholder.Set("ref", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("net.Socket.ref is not supported by jsruntime; the event loop is host-driven")))
+	})
+	_ = placeholder.Set("unref", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("net.Socket.unref is not supported by jsruntime; the event loop is host-driven")))
+	})
 	if callback, ok := goja.AssertFunction(call.Argument(callbackIndex)); ok {
 		once, _ := goja.AssertFunction(placeholder.Get("once"))
 		_, _ = once(placeholder, vm.ToValue("connect"), vm.ToValue(callback))
@@ -437,10 +455,18 @@ func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, conne
 	_ = socket.Set("address", func() map[string]any {
 		return map[string]any{"address": localHost, "family": netAddressFamily(localHost), "port": localPort}
 	})
-	_ = socket.Set("pause", func() *goja.Object { return socket })
-	_ = socket.Set("resume", func() *goja.Object { return socket })
-	_ = socket.Set("ref", func() *goja.Object { return socket })
-	_ = socket.Set("unref", func() *goja.Object { return socket })
+	_ = socket.Set("pause", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("net.Socket.pause is not supported by jsruntime; no backpressure")))
+	})
+	_ = socket.Set("resume", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("net.Socket.resume is not supported by jsruntime; no backpressure")))
+	})
+	_ = socket.Set("ref", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("net.Socket.ref is not supported by jsruntime; the event loop is host-driven")))
+	})
+	_ = socket.Set("unref", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("net.Socket.unref is not supported by jsruntime; the event loop is host-driven")))
+	})
 	go func() {
 		data := make([]byte, 32*1024)
 		for {

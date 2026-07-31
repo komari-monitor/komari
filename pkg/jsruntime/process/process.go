@@ -172,22 +172,22 @@ func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 		panic(vm.NewGoError(fmt.Errorf("process.exit(%d) requested", code)))
 	})
 	_ = process.Set("abort", func() { panic(vm.NewGoError(fmt.Errorf("process.abort() requested"))) })
-	_ = process.Set("stdout", processStream(vm, os.Stdout, true))
-	_ = process.Set("stderr", processStream(vm, os.Stderr, true))
-	_ = process.Set("stdin", processStream(vm, nil, false))
+	_ = process.Set("stdout", processStream(vm, "stdout", os.Stdout, true))
+	_ = process.Set("stderr", processStream(vm, "stderr", os.Stderr, true))
+	_ = process.Set("stdin", processStream(vm, "stdin", nil, false))
 	if err := m.initNextTickScheduler(vm); err != nil {
 		panic(vm.NewGoError(err))
 	}
 	_ = module.Set("exports", process)
 }
 
-func processStream(vm *goja.Runtime, output *os.File, writable bool) *goja.Object {
+func processStream(vm *goja.Runtime, name string, output *os.File, writable bool) *goja.Object {
 	stream := events.NewEmitter(vm)
 	_ = stream.Set("isTTY", false)
 	_ = stream.Set("fd", -1)
 	_ = stream.Set("write", func(call goja.FunctionCall) goja.Value {
 		if !writable || output == nil {
-			return vm.ToValue(false)
+			panic(vm.NewGoError(fmt.Errorf("process.%s.write is not supported by jsruntime; the stream is not connected", name)))
 		}
 		_, _ = fmt.Fprint(output, call.Argument(0).String())
 		if callback, ok := goja.AssertFunction(call.Argument(2)); ok {
@@ -195,8 +195,14 @@ func processStream(vm *goja.Runtime, output *os.File, writable bool) *goja.Objec
 		}
 		return vm.ToValue(true)
 	})
-	_ = stream.Set("setEncoding", func() *goja.Object { return stream })
-	_ = stream.Set("resume", func() *goja.Object { return stream })
-	_ = stream.Set("pause", func() *goja.Object { return stream })
+	_ = stream.Set("setEncoding", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("process.%s.setEncoding is not supported by jsruntime; streams have no encoding state", name)))
+	})
+	_ = stream.Set("resume", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("process.%s.resume is not supported by jsruntime; streams have no backpressure state", name)))
+	})
+	_ = stream.Set("pause", func() *goja.Object {
+		panic(vm.NewGoError(fmt.Errorf("process.%s.pause is not supported by jsruntime; streams have no backpressure state", name)))
+	})
 	return stream
 }
