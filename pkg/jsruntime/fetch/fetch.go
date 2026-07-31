@@ -1,4 +1,4 @@
-package jsruntime
+package fetch
 
 import (
 	"bytes"
@@ -13,8 +13,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/dop251/goja"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/httpbody"
 )
 
 type abortSignalState struct {
@@ -49,59 +52,84 @@ type formEntry struct {
 	File     bool
 }
 
-func (r *Runtime) injectFetch() error {
-	if err := r.vm.Set("__komariBodyBuffer", r.bodyBuffer); err != nil {
+type Module struct {
+	runtime      *bridge.Runtime
+	vm           *goja.Runtime
+	client       *http.Client
+	maxBodyBytes int64
+	abortMu      sync.Mutex
+	abortIDs     int64
+	abortState   map[int64]*abortSignalState
+}
+
+func New(runtime *bridge.Runtime, client *http.Client, maxBodyBytes int64) *Module {
+	return &Module{
+		runtime:      runtime,
+		client:       client,
+		maxBodyBytes: maxBodyBytes,
+		abortState:   make(map[int64]*abortSignalState),
+	}
+}
+
+func (m *Module) Inject(vm *goja.Runtime) error {
+	m.vm = vm
+	if err := vm.Set("__komariBodyBuffer", m.bodyBuffer); err != nil {
 		return err
 	}
-	if err := r.vm.Set("__komariBodyText", r.bodyText); err != nil {
+	if err := vm.Set("__komariBodyText", m.bodyText); err != nil {
 		return err
 	}
-	if err := r.vm.Set("__komariEncodeFormData", r.encodeFormData); err != nil {
+	if err := vm.Set("__komariEncodeFormData", m.encodeFormData); err != nil {
 		return err
 	}
-	if err := r.vm.Set("__komariParseFormData", r.parseFormData); err != nil {
+	if err := vm.Set("__komariParseFormData", m.parseFormData); err != nil {
 		return err
 	}
-	if err := r.vm.Set("__komariNewAbortSignal", r.newAbortSignal); err != nil {
+	if err := vm.Set("__komariNewAbortSignal", m.newAbortSignal); err != nil {
 		return err
 	}
-	if err := r.vm.Set("__komariAbortSignal", r.abortSignal); err != nil {
+	if err := vm.Set("__komariAbortSignal", m.abortSignal); err != nil {
 		return err
 	}
-	if err := r.vm.Set("__komariFetch", r.createFetchFunction(false)); err != nil {
+	if err := vm.Set("__komariFetch", m.createFetchFunction(false)); err != nil {
 		return err
 	}
-	if err := r.vm.Set("__komariFetchSync", r.createFetchFunction(true)); err != nil {
+	if err := vm.Set("__komariFetchSync", m.createFetchFunction(true)); err != nil {
 		return err
 	}
-	if _, err := r.vm.RunString(fetchAPISource); err != nil {
+	if _, err := vm.RunString(fetchAPISource); err != nil {
 		return fmt.Errorf("inject Fetch API: %w", err)
 	}
 	return nil
 }
 
-func (r *Runtime) createFetchFunction(syncRequest bool) func(goja.FunctionCall) goja.Value {
+func (m *Module) createFetchFunction(syncRequest bool) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
-		request, err := r.exportNativeRequest(call.Argument(0))
+		request, err := m.exportNativeRequest(call.Argument(0))
 		if err != nil {
-			panic(r.vm.NewTypeError("%s", err))
+			panic(m.vm.NewTypeError("%s", err))
 		}
-		ctx, release := r.requestContext(request.signalID)
+		ctx, releaseSignal := m.requestContext(request.signalID)
+		ctx, cancelTimeout := context.WithTimeout(ctx, m.runtime.Timeout())
+		release := func() {
+			cancelTimeout()
+			releaseSignal()
+		}
 		if syncRequest {
 			defer release()
-			result, requestErr := r.doHTTPRequest(ctx, request)
+			result, requestErr := m.doHTTPRequest(ctx, request)
 			if requestErr != nil {
-				panic(webAPIError(r.vm, "TypeError", fmt.Sprintf("fetch failed: %v", requestErr)))
+				panic(webAPIError(m.vm, "TypeError", fmt.Sprintf("fetch failed: %v", requestErr)))
 			}
-			return r.httpResultValue(r.vm, result)
+			return m.httpResultValue(m.vm, result)
 		}
 
-		promise, resolve, reject := r.vm.NewPromise()
+		promise, resolve, reject := m.vm.NewPromise()
 		go func() {
-			result, requestErr := r.doHTTPRequest(ctx, request)
-			if !r.loop.RunOnLoop(func(vm *goja.Runtime) {
+			result, requestErr := m.doHTTPRequest(ctx, request)
+			if !m.runtime.RunOnLoop(func(vm *goja.Runtime) {
 				defer release()
-				r.runAsyncJob(vm, "fetch", func() error {
+				m.runtime.RunJob(vm, "fetch", func() error {
 					if ctx.Err() != nil {
 						return reject(webAPIError(vm, "AbortError", fmt.Sprintf("fetch failed: %v", ctx.Err())))
 					}
@@ -112,21 +140,21 @@ func (r *Runtime) createFetchFunction(syncRequest bool) func(goja.FunctionCall) 
 						}
 						return reject(webAPIError(vm, name, fmt.Sprintf("fetch failed: %v", requestErr)))
 					}
-					return resolve(r.httpResultValue(vm, result))
+					return resolve(m.httpResultValue(vm, result))
 				})
 			}) {
 				release()
 			}
 		}()
-		return r.vm.ToValue(promise)
+		return m.vm.ToValue(promise)
 	}
 }
 
-func (r *Runtime) exportNativeRequest(value goja.Value) (nativeRequest, error) {
+func (m *Module) exportNativeRequest(value goja.Value) (nativeRequest, error) {
 	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
 		return nativeRequest{}, errors.New("missing request data")
 	}
-	object := value.ToObject(r.vm)
+	object := value.ToObject(m.vm)
 	request := nativeRequest{
 		method:   object.Get("method").String(),
 		url:      object.Get("url").String(),
@@ -141,7 +169,7 @@ func (r *Runtime) exportNativeRequest(value goja.Value) (nativeRequest, error) {
 	}
 	if value := object.Get("headers"); value != nil && !goja.IsUndefined(value) {
 		var headers [][]string
-		if err := r.vm.ExportTo(value, &headers); err != nil {
+		if err := m.vm.ExportTo(value, &headers); err != nil {
 			return nativeRequest{}, fmt.Errorf("invalid request headers: %w", err)
 		}
 		for _, header := range headers {
@@ -152,7 +180,7 @@ func (r *Runtime) exportNativeRequest(value goja.Value) (nativeRequest, error) {
 		}
 	}
 	if value := object.Get("body"); value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
-		body, err := exportBytes(r.vm, value)
+		body, err := exportBytes(m.vm, value)
 		if err != nil {
 			return nativeRequest{}, fmt.Errorf("invalid request body: %w", err)
 		}
@@ -161,7 +189,7 @@ func (r *Runtime) exportNativeRequest(value goja.Value) (nativeRequest, error) {
 	return request, nil
 }
 
-func (r *Runtime) doHTTPRequest(ctx context.Context, request nativeRequest) (httpResult, error) {
+func (m *Module) doHTTPRequest(ctx context.Context, request nativeRequest) (httpResult, error) {
 	httpRequest, err := http.NewRequestWithContext(ctx, request.method, request.url, bytes.NewReader(request.body))
 	if err != nil {
 		return httpResult{}, fmt.Errorf("create request: %w", err)
@@ -174,7 +202,7 @@ func (r *Runtime) doHTTPRequest(ctx context.Context, request nativeRequest) (htt
 		httpRequest.Header.Add(header[0], header[1])
 	}
 
-	client := *r.httpClient
+	client := *m.client
 	switch request.redirect {
 	case "manual":
 		client.CheckRedirect = func(*http.Request, []*http.Request) error {
@@ -194,7 +222,7 @@ func (r *Runtime) doHTTPRequest(ctx context.Context, request nativeRequest) (htt
 		return httpResult{}, err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
+	body, err := httpbody.ReadAll(response.Body, m.maxBodyBytes)
 	if err != nil {
 		return httpResult{}, fmt.Errorf("read response: %w", err)
 	}
@@ -213,7 +241,7 @@ func (r *Runtime) doHTTPRequest(ctx context.Context, request nativeRequest) (htt
 	}, nil
 }
 
-func (r *Runtime) httpResultValue(vm *goja.Runtime, result httpResult) goja.Value {
+func (m *Module) httpResultValue(vm *goja.Runtime, result httpResult) goja.Value {
 	object := vm.NewObject()
 	_ = object.Set("status", result.statusCode)
 	_ = object.Set("statusText", result.statusText)
@@ -230,20 +258,20 @@ func (r *Runtime) httpResultValue(vm *goja.Runtime, result httpResult) goja.Valu
 	return object
 }
 
-func (r *Runtime) bodyBuffer(call goja.FunctionCall) goja.Value {
-	data, err := exportBytes(r.vm, call.Argument(0))
+func (m *Module) bodyBuffer(call goja.FunctionCall) goja.Value {
+	data, err := exportBytes(m.vm, call.Argument(0))
 	if err != nil {
-		panic(r.vm.NewTypeError("unsupported body value: %v", err))
+		panic(m.vm.NewTypeError("unsupported body value: %v", err))
 	}
-	return r.vm.ToValue(r.vm.NewArrayBuffer(data))
+	return m.vm.ToValue(m.vm.NewArrayBuffer(data))
 }
 
-func (r *Runtime) bodyText(call goja.FunctionCall) goja.Value {
-	data, err := exportBytes(r.vm, call.Argument(0))
+func (m *Module) bodyText(call goja.FunctionCall) goja.Value {
+	data, err := exportBytes(m.vm, call.Argument(0))
 	if err != nil {
-		panic(r.vm.NewTypeError("invalid body buffer: %v", err))
+		panic(m.vm.NewTypeError("invalid body buffer: %v", err))
 	}
-	return r.vm.ToValue(strings.ToValidUTF8(string(data), "\uFFFD"))
+	return m.vm.ToValue(strings.ToValidUTF8(string(data), "\uFFFD"))
 }
 
 func exportBytes(vm *goja.Runtime, value goja.Value) ([]byte, error) {
@@ -263,68 +291,68 @@ func exportBytes(vm *goja.Runtime, value goja.Value) ([]byte, error) {
 	return append([]byte(nil), bytesValue...), nil
 }
 
-func (r *Runtime) newAbortSignal(goja.FunctionCall) goja.Value {
-	r.abortMu.Lock()
-	defer r.abortMu.Unlock()
-	r.abortIDs++
-	return r.vm.ToValue(r.abortIDs)
+func (m *Module) newAbortSignal(goja.FunctionCall) goja.Value {
+	m.abortMu.Lock()
+	defer m.abortMu.Unlock()
+	m.abortIDs++
+	return m.vm.ToValue(m.abortIDs)
 }
 
-func (r *Runtime) abortSignal(call goja.FunctionCall) goja.Value {
+func (m *Module) abortSignal(call goja.FunctionCall) goja.Value {
 	id := call.Argument(0).ToInteger()
-	r.abortMu.Lock()
-	state := r.abortState[id]
+	m.abortMu.Lock()
+	state := m.abortState[id]
 	if state == nil {
 		state = &abortSignalState{requests: make(map[int64]context.CancelFunc)}
-		r.abortState[id] = state
+		m.abortState[id] = state
 	}
 	state.aborted = true
 	for _, cancel := range state.requests {
 		cancel()
 	}
-	r.abortMu.Unlock()
+	m.abortMu.Unlock()
 	return goja.Undefined()
 }
 
-func (r *Runtime) requestContext(signalID int64) (context.Context, context.CancelFunc) {
+func (m *Module) requestContext(signalID int64) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	if signalID <= 0 {
 		return ctx, cancel
 	}
 
-	r.abortMu.Lock()
-	state := r.abortState[signalID]
+	m.abortMu.Lock()
+	state := m.abortState[signalID]
 	if state != nil && state.aborted {
-		r.abortMu.Unlock()
+		m.abortMu.Unlock()
 		cancel()
 		return ctx, cancel
 	}
 	if state == nil {
 		state = &abortSignalState{requests: make(map[int64]context.CancelFunc)}
-		r.abortState[signalID] = state
+		m.abortState[signalID] = state
 	}
-	r.abortIDs++
-	requestID := r.abortIDs
+	m.abortIDs++
+	requestID := m.abortIDs
 	state.requests[requestID] = cancel
-	r.abortMu.Unlock()
+	m.abortMu.Unlock()
 
 	return ctx, func() {
-		r.abortMu.Lock()
-		if current := r.abortState[signalID]; current != nil {
+		m.abortMu.Lock()
+		if current := m.abortState[signalID]; current != nil {
 			delete(current.requests, requestID)
 			if !current.aborted && len(current.requests) == 0 {
-				delete(r.abortState, signalID)
+				delete(m.abortState, signalID)
 			}
 		}
-		r.abortMu.Unlock()
+		m.abortMu.Unlock()
 		cancel()
 	}
 }
 
-func (r *Runtime) cancelHTTPRequests() {
-	r.abortMu.Lock()
-	defer r.abortMu.Unlock()
-	for _, state := range r.abortState {
+func (m *Module) Close() {
+	m.abortMu.Lock()
+	defer m.abortMu.Unlock()
+	for _, state := range m.abortState {
 		state.aborted = true
 		for _, cancel := range state.requests {
 			cancel()
@@ -338,21 +366,21 @@ func webAPIError(vm *goja.Runtime, name, message string) *goja.Object {
 	return object
 }
 
-func (r *Runtime) encodeFormData(call goja.FunctionCall) goja.Value {
+func (m *Module) encodeFormData(call goja.FunctionCall) goja.Value {
 	var entries []formEntry
-	array := call.Argument(0).ToObject(r.vm)
+	array := call.Argument(0).ToObject(m.vm)
 	length := int(array.Get("length").ToInteger())
 	for index := 0; index < length; index++ {
-		entryObject := array.Get(strconv.Itoa(index)).ToObject(r.vm)
+		entryObject := array.Get(strconv.Itoa(index)).ToObject(m.vm)
 		entry := formEntry{Name: entryObject.Get("name").String()}
 		value := entryObject.Get("value")
 		if entryObject.Get("file").ToBoolean() {
 			entry.File = true
 			entry.Filename = entryObject.Get("filename").String()
 			entry.Type = entryObject.Get("type").String()
-			data, err := exportBytes(r.vm, value)
+			data, err := exportBytes(m.vm, value)
 			if err != nil {
-				panic(r.vm.NewTypeError("invalid FormData file: %v", err))
+				panic(m.vm.NewTypeError("invalid FormData file: %v", err))
 			}
 			entry.Bytes = data
 		} else {
@@ -375,27 +403,27 @@ func (r *Runtime) encodeFormData(call goja.FunctionCall) goja.Value {
 		}
 		part, err := writer.CreatePart(header)
 		if err != nil {
-			panic(r.vm.NewGoError(err))
+			panic(m.vm.NewGoError(err))
 		}
 		_, _ = part.Write(entry.Bytes)
 	}
 	if err := writer.Close(); err != nil {
-		panic(r.vm.NewGoError(err))
+		panic(m.vm.NewGoError(err))
 	}
-	result := r.vm.NewObject()
-	_ = result.Set("body", r.vm.NewArrayBuffer(output.Bytes()))
+	result := m.vm.NewObject()
+	_ = result.Set("body", m.vm.NewArrayBuffer(output.Bytes()))
 	_ = result.Set("contentType", writer.FormDataContentType())
 	return result
 }
 
-func (r *Runtime) parseFormData(call goja.FunctionCall) goja.Value {
-	data, err := exportBytes(r.vm, call.Argument(0))
+func (m *Module) parseFormData(call goja.FunctionCall) goja.Value {
+	data, err := exportBytes(m.vm, call.Argument(0))
 	if err != nil {
-		panic(r.vm.NewTypeError("invalid FormData body: %v", err))
+		panic(m.vm.NewTypeError("invalid FormData body: %v", err))
 	}
 	mediaType, parameters, err := mime.ParseMediaType(call.Argument(1).String())
 	if err != nil {
-		panic(r.vm.NewTypeError("invalid form content type: %v", err))
+		panic(m.vm.NewTypeError("invalid form content type: %v", err))
 	}
 	entries := make([]map[string]any, 0)
 	switch mediaType {
@@ -407,13 +435,13 @@ func (r *Runtime) parseFormData(call goja.FunctionCall) goja.Value {
 			nameValue := strings.SplitN(field, "=", 2)
 			name, parseErr := url.QueryUnescape(nameValue[0])
 			if parseErr != nil {
-				panic(r.vm.NewTypeError("invalid form field name: %v", parseErr))
+				panic(m.vm.NewTypeError("invalid form field name: %v", parseErr))
 			}
 			value := ""
 			if len(nameValue) == 2 {
 				value, parseErr = url.QueryUnescape(nameValue[1])
 				if parseErr != nil {
-					panic(r.vm.NewTypeError("invalid form field value: %v", parseErr))
+					panic(m.vm.NewTypeError("invalid form field value: %v", parseErr))
 				}
 			}
 			entries = append(entries, map[string]any{"name": name, "value": value})
@@ -421,7 +449,7 @@ func (r *Runtime) parseFormData(call goja.FunctionCall) goja.Value {
 	case "multipart/form-data":
 		boundary := parameters["boundary"]
 		if boundary == "" {
-			panic(r.vm.NewTypeError("multipart form data has no boundary"))
+			panic(m.vm.NewTypeError("multipart form data has no boundary"))
 		}
 		reader := multipart.NewReader(bytes.NewReader(data), boundary)
 		for {
@@ -430,11 +458,11 @@ func (r *Runtime) parseFormData(call goja.FunctionCall) goja.Value {
 				break
 			}
 			if partErr != nil {
-				panic(r.vm.NewTypeError("invalid multipart body: %v", partErr))
+				panic(m.vm.NewTypeError("invalid multipart body: %v", partErr))
 			}
 			partBytes, readErr := io.ReadAll(part)
 			if readErr != nil {
-				panic(r.vm.NewTypeError("read multipart body: %v", readErr))
+				panic(m.vm.NewTypeError("read multipart body: %v", readErr))
 			}
 			entry := map[string]any{"name": part.FormName()}
 			if part.FileName() == "" {
@@ -443,12 +471,12 @@ func (r *Runtime) parseFormData(call goja.FunctionCall) goja.Value {
 				entry["file"] = true
 				entry["filename"] = part.FileName()
 				entry["type"] = part.Header.Get("Content-Type")
-				entry["value"] = r.vm.NewArrayBuffer(partBytes)
+				entry["value"] = m.vm.NewArrayBuffer(partBytes)
 			}
 			entries = append(entries, entry)
 		}
 	default:
-		panic(r.vm.NewTypeError("unsupported form content type %q", mediaType))
+		panic(m.vm.NewTypeError("unsupported form content type %q", mediaType))
 	}
-	return r.vm.ToValue(entries)
+	return m.vm.ToValue(entries)
 }

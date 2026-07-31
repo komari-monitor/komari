@@ -24,9 +24,24 @@ import (
 	"github.com/dop251/goja_nodejs/require"
 	_ "github.com/dop251/goja_nodejs/url"
 	_ "github.com/dop251/goja_nodejs/util"
+	childprocess "github.com/komari-monitor/komari/pkg/jsruntime/child_process"
+	"github.com/komari-monitor/komari/pkg/jsruntime/console"
+	"github.com/komari-monitor/komari/pkg/jsruntime/fetch"
+	"github.com/komari-monitor/komari/pkg/jsruntime/fs"
+	httpmodule "github.com/komari-monitor/komari/pkg/jsruntime/http"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	netmodule "github.com/komari-monitor/komari/pkg/jsruntime/net"
+	pathmodule "github.com/komari-monitor/komari/pkg/jsruntime/path"
+	processmodule "github.com/komari-monitor/komari/pkg/jsruntime/process"
+	"github.com/komari-monitor/komari/pkg/jsruntime/timers"
 )
 
 const defaultTimeout = 30 * time.Second
+
+const (
+	defaultMaxHTTPBodyBytes    int64 = 32 << 20
+	defaultMaxChildOutputBytes       = 1 << 20
+)
 
 var errExecutionTimeout = errors.New("JavaScript execution timeout")
 
@@ -62,36 +77,44 @@ type Options struct {
 	// AllowAllFileAccess allows require and fs paths to escape BaseDir. The
 	// default confines both module and filesystem access to BaseDir.
 	AllowAllFileAccess bool
+	// MaxHTTPBodyBytes limits buffered fetch responses and HTTP server request
+	// bodies. Values less than one use a 32 MiB default.
+	MaxHTTPBodyBytes int64
+	// MaxChildOutputBytes limits each buffered stdout or stderr stream returned
+	// by exec, execFile, and their synchronous variants. Values less than one
+	// use Node.js' 1 MiB default.
+	MaxChildOutputBytes int
 }
 
 // Runtime owns one isolated JavaScript VM and its event loop. Public
 // operations are serialized, and all VM access runs on the event-loop
 // goroutine because goja runtimes are not goroutine-safe.
 type Runtime struct {
-	mu                 sync.Mutex
-	loop               *eventloop.EventLoop
-	vm                 *goja.Runtime
-	httpClient         *http.Client
-	timeout            time.Duration
-	console            io.Writer
-	closed             bool
-	abortMu            sync.Mutex
-	abortIDs           int64
-	abortState         map[int64]*abortSignalState
-	nodeJS             bool
-	allowExec          bool
-	allowListen        bool
-	allowAllFileAccess bool
-	nodeRoot           string
-	nodeCwd            string
-	resourceMu         sync.Mutex
-	resourceID         uint64
-	resources          map[uint64]func()
-	resourcesClosed    bool
-	startedAt          time.Time
-	fileMu             sync.Mutex
-	fileID             int
-	files              map[int]nodeFileHandle
+	mu                  sync.Mutex
+	loop                *eventloop.EventLoop
+	host                *bridge.Runtime
+	vm                  *goja.Runtime
+	timeout             time.Duration
+	closed              bool
+	nodeJS              bool
+	maxHTTPBodyBytes    int64
+	maxChildOutputBytes int
+	consoleMod          *console.Module
+	timersMod           *timers.Module
+	fetchMod            *fetch.Module
+	fsModule            *fs.Module
+	pathModule          *pathmodule.Module
+	processModule       *processmodule.Module
+	childProcessModule  *childprocess.Module
+	netModule           *netmodule.Module
+	httpModule          *httpmodule.Module
+	resourceMu          sync.Mutex
+	resourceID          uint64
+	resources           map[uint64]func()
+	resourcesClosed     bool
+	fileMu              sync.Mutex
+	fileID              int
+	files               map[int]nodeFileHandle
 }
 
 // New creates and initializes a runtime from script.
@@ -120,58 +143,121 @@ func New(script string, options Options) (*Runtime, error) {
 			return nil, fmt.Errorf("resolve Node.js filesystem root: %w", err)
 		}
 	}
-	registryOptions := make([]require.Option, 0, 3)
+	maxHTTPBodyBytes := options.MaxHTTPBodyBytes
+	if maxHTTPBodyBytes < 1 {
+		maxHTTPBodyBytes = defaultMaxHTTPBodyBytes
+	}
+	maxChildOutputBytes := options.MaxChildOutputBytes
+	if maxChildOutputBytes < 1 {
+		maxChildOutputBytes = defaultMaxChildOutputBytes
+	}
 	loader := options.RequireLoader
 	if loader == nil {
 		loader = require.DefaultSourceLoader
 	}
+	if fileRoot != "" && !options.AllowAllFileAccess {
+		loader = confinedSourceLoader(fileRoot, loader)
+	}
+	registryOptions := make([]require.Option, 0, 3)
 	if fileRoot != "" {
-		if !options.AllowAllFileAccess {
-			loader = confinedSourceLoader(fileRoot, loader)
-		}
 		registryOptions = append(registryOptions,
 			require.WithPathResolver(baseDirPathResolver(fileRoot)),
 			require.WithGlobalFolders(filepath.Join(fileRoot, "node_modules")),
 		)
 	}
-	registryOptions = append(registryOptions, require.WithLoader(loader))
+	// Keep the loader indirection so the Node.js filesystem module can become
+	// the canonical rooted loader after it owns the os.Root handle.
+	var activeLoader require.SourceLoader = loader
+	registryOptions = append(registryOptions, require.WithLoader(func(modulePath string) ([]byte, error) {
+		return activeLoader(modulePath)
+	}))
 	registry := require.NewRegistry(registryOptions...)
-	runtime := &Runtime{
-		httpClient:         client,
-		timeout:            timeout,
-		console:            options.Console,
-		abortState:         make(map[int64]*abortSignalState),
-		nodeJS:             options.NodeJS,
-		allowExec:          options.AllowExec,
-		allowListen:        options.AllowListen,
-		allowAllFileAccess: options.AllowAllFileAccess,
-		resources:          make(map[uint64]func()),
-		startedAt:          time.Now(),
-		fileID:             2,
-		files:              make(map[int]nodeFileHandle),
-	}
-	if options.NodeJS {
-		runtime.nodeRoot = fileRoot
-		runtime.nodeCwd = fileRoot
-		runtime.registerNodeModules(registry)
-	}
-	if options.ConfigureRequire != nil {
-		options.ConfigureRequire(registry)
-	}
-	runtime.loop = eventloop.NewEventLoop(
+	runtimeLoop := eventloop.NewEventLoop(
 		eventloop.EnableConsole(false),
 		eventloop.WithRegistry(registry),
 	)
+	host := bridge.New(runtimeLoop, timeout)
+	startedAt := time.Now()
+	runtime := &Runtime{
+		loop:                runtimeLoop,
+		host:                host,
+		timeout:             timeout,
+		nodeJS:              options.NodeJS,
+		maxHTTPBodyBytes:    maxHTTPBodyBytes,
+		maxChildOutputBytes: maxChildOutputBytes,
+		resources:           make(map[uint64]func()),
+		fileID:              2,
+		files:               make(map[int]nodeFileHandle),
+	}
+	runtime.consoleMod = console.New(options.Console)
+	runtime.timersMod = timers.New(host)
+	runtime.fetchMod = fetch.New(host, client, maxHTTPBodyBytes)
+	filesystem, fsErr := fs.New(host, fileRoot, fileRoot, options.AllowAllFileAccess)
+	if fsErr != nil {
+		runtimeLoop.Terminate()
+		return nil, fsErr
+	}
+	runtime.fsModule = filesystem
+	if options.RequireLoader == nil && fileRoot != "" && !options.AllowAllFileAccess {
+		activeLoader = func(modulePath string) ([]byte, error) {
+			data, readErr := filesystem.ReadSource(modulePath)
+			if errors.Is(readErr, os.ErrNotExist) {
+				return nil, require.ModuleFileDoesNotExistError
+			}
+			return data, readErr
+		}
+	}
+	if options.NodeJS {
+		runtime.pathModule = pathmodule.New(filesystem.Cwd)
+		runtime.processModule = processmodule.New(host, filesystem, options.AllowExec, startedAt, func(vm *goja.Runtime, values []goja.Value) {
+			runtime.consoleMod.WriteError(vm, values, false)
+		})
+		runtime.childProcessModule = childprocess.New(host, filesystem, options.AllowExec, maxChildOutputBytes)
+		runtime.netModule = netmodule.New(host, options.AllowListen)
+		runtime.httpModule = httpmodule.New(host, options.AllowListen, maxHTTPBodyBytes)
+		runtime.registerNodeModules(registry)
+	}
+	host.SetTurnRunner(func(vm *goja.Runtime, job func() error) error {
+		if runtime.processModule != nil {
+			return runtime.processModule.RunTurn(vm, job)
+		}
+		return job()
+	})
+	host.SetErrorReporter(func(vm *goja.Runtime, name string, reportErr error) {
+		runtime.consoleMod.Report(vm, name, reportErr)
+	})
+	if options.ConfigureRequire != nil {
+		options.ConfigureRequire(registry)
+	}
+	runtime.fsModule.SetFileHooks(func(fd int, file *os.File, resourceID uint64) {
+		runtime.fileMu.Lock()
+		runtime.fileID = max(runtime.fileID, fd)
+		runtime.files[fd] = nodeFileHandle{file: file, resourceID: resourceID}
+		runtime.fileMu.Unlock()
+	}, func(fd int) {
+		runtime.fileMu.Lock()
+		delete(runtime.files, fd)
+		runtime.fileMu.Unlock()
+	})
+	runtime.fsModule.SetExternalFileLookup(func(fd int) (*os.File, bool) {
+		runtime.fileMu.Lock()
+		handle, ok := runtime.files[fd]
+		runtime.fileMu.Unlock()
+		if !ok {
+			return nil, false
+		}
+		return handle.file, true
+	})
 	runtime.loop.Start()
 
 	initialized := make(chan error, 1)
-	deadline := time.Now().Add(timeout)
 	if !runtime.loop.RunOnLoop(func(vm *goja.Runtime) {
 		runtime.vm = vm
-		err := runWithDeadline(vm, deadline, func() error {
-			if err := runtime.injectGlobals(); err != nil {
-				return err
-			}
+		if err := runtime.injectGlobals(); err != nil {
+			initialized <- err
+			return
+		}
+		err := runWithDeadline(vm, time.Now().Add(timeout), func() error {
 			sourceName := "script.js"
 			if baseDir != "" {
 				sourceName = filepath.Join(baseDir, sourceName)
@@ -183,11 +269,13 @@ func New(script string, options Options) (*Runtime, error) {
 		})
 		initialized <- err
 	}) {
+		runtime.closeHostResources()
 		runtime.loop.Terminate()
 		return nil, errors.New("JavaScript event loop is not running")
 	}
 
 	if err := <-initialized; err != nil {
+		runtime.closeHostResources()
 		runtime.loop.Terminate()
 		return nil, err
 	}
@@ -274,9 +362,21 @@ func (r *Runtime) Close() {
 		return
 	}
 	r.closed = true
-	r.cancelHTTPRequests()
-	r.closeNodeResources()
+	r.closeHostResources()
 	r.loop.Terminate()
+}
+
+func (r *Runtime) closeHostResources() {
+	if r.fetchMod != nil {
+		r.fetchMod.Close()
+	}
+	if r.fsModule != nil {
+		r.fsModule.Close()
+	}
+	if r.host != nil {
+		r.host.CloseResources()
+	}
+	r.closeNodeResources()
 }
 
 // HasFunction reports whether name resolves to a callable JavaScript
@@ -368,9 +468,11 @@ func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline
 
 	var callResult goja.Value
 	err := runWithDeadline(vm, deadline, func() error {
-		var err error
-		callResult, err = call(goja.Undefined(), values...)
-		return err
+		return r.host.RunTurn(vm, func() error {
+			var err error
+			callResult, err = call(goja.Undefined(), values...)
+			return err
+		})
 	})
 	if err != nil {
 		if errors.Is(err, errExecutionTimeout) {

@@ -1,4 +1,4 @@
-package jsruntime
+package console
 
 // JavaScript compatibility: console.assert(), debug(), error(), exception(),
 // info(), log(), trace(), and warn(). Supports basic %s/%d/%i/%f/%o/%O/%c/%%
@@ -6,85 +6,102 @@ package jsruntime
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/dop251/goja"
 	logger "github.com/komari-monitor/komari/utils/log"
 )
 
-type consoleLevel uint8
+type level uint8
 
 const (
-	consoleDebug consoleLevel = iota
-	consoleInfo
-	consoleWarn
-	consoleError
+	debug level = iota
+	info
+	warn
+	errorLevel
 )
 
-func (r *Runtime) injectConsole() {
-	console := r.vm.NewObject()
+type Module struct {
+	output io.Writer
+}
+
+func New(output io.Writer) *Module {
+	return &Module{output: output}
+}
+
+func (m *Module) Inject(vm *goja.Runtime) error {
+	console := vm.NewObject()
 	console.Set("assert", func(call goja.FunctionCall) goja.Value {
 		if len(call.Arguments) > 0 && call.Argument(0).ToBoolean() {
 			return goja.Undefined()
 		}
 		values := call.Arguments
 		if len(values) <= 1 {
-			values = []goja.Value{r.vm.ToValue("Assertion failed")}
+			values = []goja.Value{vm.ToValue("Assertion failed")}
 		} else {
-			values = append([]goja.Value{r.vm.ToValue("Assertion failed:")}, values[1:]...)
+			values = append([]goja.Value{vm.ToValue("Assertion failed:")}, values[1:]...)
 		}
-		r.writeConsole(consoleError, values, true)
+		m.write(vm, errorLevel, values, true)
 		return goja.Undefined()
 	})
 	console.Set("debug", func(call goja.FunctionCall) goja.Value {
-		r.writeConsole(consoleDebug, call.Arguments, false)
+		m.write(vm, debug, call.Arguments, false)
 		return goja.Undefined()
 	})
 	error := func(call goja.FunctionCall) goja.Value {
-		r.writeConsole(consoleError, call.Arguments, false)
+		m.write(vm, errorLevel, call.Arguments, false)
 		return goja.Undefined()
 	}
 	console.Set("error", error)
 	console.Set("exception", error)
 	console.Set("info", func(call goja.FunctionCall) goja.Value {
-		r.writeConsole(consoleInfo, call.Arguments, false)
+		m.write(vm, info, call.Arguments, false)
 		return goja.Undefined()
 	})
 	console.Set("log", func(call goja.FunctionCall) goja.Value {
-		r.writeConsole(consoleInfo, call.Arguments, false)
+		m.write(vm, info, call.Arguments, false)
 		return goja.Undefined()
 	})
 	console.Set("trace", func(call goja.FunctionCall) goja.Value {
-		r.writeConsole(consoleDebug, call.Arguments, true)
+		m.write(vm, debug, call.Arguments, true)
 		return goja.Undefined()
 	})
 	console.Set("warn", func(call goja.FunctionCall) goja.Value {
-		r.writeConsole(consoleWarn, call.Arguments, false)
+		m.write(vm, warn, call.Arguments, false)
 		return goja.Undefined()
 	})
-	r.vm.Set("console", console)
+	return vm.Set("console", console)
 }
 
-func (r *Runtime) writeConsole(level consoleLevel, values []goja.Value, withStack bool) {
+func (m *Module) WriteError(vm *goja.Runtime, values []goja.Value, withStack bool) {
+	m.write(vm, errorLevel, values, withStack)
+}
+
+func (m *Module) Report(vm *goja.Runtime, name string, err error) {
+	m.WriteError(vm, []goja.Value{vm.ToValue(fmt.Sprintf("%s callback failed: %v", name, err))}, false)
+}
+
+func (m *Module) write(vm *goja.Runtime, messageLevel level, values []goja.Value, withStack bool) {
 	message := formatConsoleValues(values)
 	if withStack {
-		if stack := r.stackTrace(); stack != "" {
+		if stack := stackTrace(vm); stack != "" {
 			if message != "" {
 				message += "\n"
 			}
 			message += stack
 		}
 	}
-	if r.console != nil {
-		_, _ = fmt.Fprintln(r.console, message)
+	if m.output != nil {
+		_, _ = fmt.Fprintln(m.output, message)
 		return
 	}
-	switch level {
-	case consoleDebug:
+	switch messageLevel {
+	case debug:
 		logger.Debug("JavaScript", message)
-	case consoleWarn:
+	case warn:
 		logger.Warn("JavaScript", message)
-	case consoleError:
+	case errorLevel:
 		logger.Error("JavaScript", message)
 	default:
 		logger.Info("JavaScript", message)
@@ -189,11 +206,11 @@ func toConsoleFloat(value any) float64 {
 	}
 }
 
-func (r *Runtime) stackTrace() string {
-	if r.vm == nil {
+func stackTrace(vm *goja.Runtime) string {
+	if vm == nil {
 		return ""
 	}
-	value, err := r.vm.RunString("new Error().stack")
+	value, err := vm.RunString("new Error().stack")
 	if err != nil {
 		return ""
 	}

@@ -1,9 +1,8 @@
-package jsruntime
+package http
 
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -14,6 +13,9 @@ import (
 	"github.com/dop251/goja"
 	"github.com/dop251/goja_nodejs/buffer"
 	"github.com/dop251/goja_nodejs/require"
+	"github.com/komari-monitor/komari/pkg/jsruntime/events"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/httpbody"
 )
 
 type nodeHTTPResponse struct {
@@ -26,10 +28,20 @@ type nodeHTTPResponse struct {
 	done       chan struct{}
 }
 
-func (r *Runtime) loadHTTPModule(vm *goja.Runtime, module *goja.Object) {
+type Module struct {
+	runtime      *bridge.Runtime
+	allowListen  bool
+	maxBodyBytes int64
+}
+
+func New(runtime *bridge.Runtime, allowListen bool, maxBodyBytes int64) *Module {
+	return &Module{runtime: runtime, allowListen: allowListen, maxBodyBytes: maxBodyBytes}
+}
+
+func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 	exports := vm.NewObject()
 	_ = exports.Set("createServer", func(call goja.FunctionCall) goja.Value {
-		server := r.newHTTPServer(vm)
+		server := m.newHTTPServer(vm)
 		listener := call.Argument(0)
 		if _, ok := goja.AssertFunction(listener); !ok {
 			listener = call.Argument(1)
@@ -59,49 +71,58 @@ func (r *Runtime) loadHTTPModule(vm *goja.Runtime, module *goja.Object) {
 			panic(vm.NewTypeError("Invalid value for header %s", name))
 		}
 	})
-	r.attachHTTPClient(vm, exports)
+	m.attachHTTPClient(vm, exports)
 	_ = module.Set("exports", exports)
 }
 
-func (r *Runtime) newHTTPServer(vm *goja.Runtime) *goja.Object {
-	serverObject := newEventEmitter(vm)
-	server := &http.Server{ReadHeaderTimeout: r.timeout}
+func (m *Module) newHTTPServer(vm *goja.Runtime) *goja.Object {
+	serverObject := events.NewEmitter(vm)
+	var server *http.Server
 	var listener net.Listener
 	var resourceID uint64
 	var serverMu sync.RWMutex
+	var listenGeneration uint64
+	var listenPending bool
+	var readTimeout time.Duration
 	_ = serverObject.Set("listening", false)
 	_ = serverObject.Set("timeout", 0)
 	_ = serverObject.Set("keepAliveTimeout", 5000)
 	_ = serverObject.Set("headersTimeout", 60000)
 	_ = serverObject.Set("requestTimeout", 300000)
-	server.Handler = http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		body, err := io.ReadAll(request.Body)
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := httpbody.ReadAll(request.Body, m.maxBodyBytes)
 		if err != nil {
-			http.Error(response, err.Error(), http.StatusBadRequest)
+			http.Error(response, err.Error(), http.StatusRequestEntityTooLarge)
 			return
 		}
 		state := &nodeHTTPResponse{headers: make(http.Header), statusCode: http.StatusOK, done: make(chan struct{})}
-		queued := r.loop.RunOnLoop(func(vm *goja.Runtime) {
-			incoming := r.httpIncomingMessage(vm, request, body)
-			outgoing := r.httpServerResponse(vm, state)
-			err := r.runAsyncJob(vm, "http.Server request", func() error { return emitEvent(vm, serverObject, "request", incoming, outgoing) })
+		queued := m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+			incoming := m.httpIncomingMessage(vm, request, body)
+			outgoing := m.httpServerResponse(vm, state)
+			err := m.runtime.RunJob(vm, "http.Server request", func() error { return events.Emit(vm, serverObject, "request", incoming, outgoing) })
 			if err != nil {
 				state.finish(http.StatusInternalServerError, nil)
 				return
 			}
-			r.loop.SetTimeout(func(vm *goja.Runtime) {
-				if len(body) > 0 {
-					_ = emitEvent(vm, incoming, "data", buffer.WrapBytes(vm, append([]byte(nil), body...)))
-				}
-				_ = emitEvent(vm, incoming, "end")
-				_ = emitEvent(vm, incoming, "close")
+			m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
+				_ = m.runtime.RunJob(vm, "http.IncomingMessage body", func() error {
+					if len(body) > 0 {
+						if emitErr := events.Emit(vm, incoming, "data", buffer.WrapBytes(vm, append([]byte(nil), body...))); emitErr != nil {
+							return emitErr
+						}
+					}
+					if emitErr := events.Emit(vm, incoming, "end"); emitErr != nil {
+						return emitErr
+					}
+					return events.Emit(vm, incoming, "close")
+				})
 			}, 0)
 		})
 		if !queued {
 			http.Error(response, "JavaScript runtime is closed", http.StatusServiceUnavailable)
 			return
 		}
-		timer := time.NewTimer(r.timeout)
+		timer := time.NewTimer(m.runtime.Timeout())
 		defer timer.Stop()
 		select {
 		case <-state.done:
@@ -123,34 +144,95 @@ func (r *Runtime) newHTTPServer(vm *goja.Runtime) *goja.Object {
 		_, _ = response.Write(responseBody)
 	})
 	_ = serverObject.Set("listen", func(call goja.FunctionCall) goja.Value {
-		if !r.allowListen {
+		if !m.allowListen {
 			panic(vm.NewGoError(fmt.Errorf("http.Server.listen requires AllowListen")))
 		}
-		address, callback := netListenArguments(vm, call)
-		if callback != nil {
-			once, _ := goja.AssertFunction(serverObject.Get("once"))
-			_, _ = once(serverObject, vm.ToValue("listening"), vm.ToValue(callback))
+		address, callback := listenArguments(vm, call)
+		serverMu.Lock()
+		if listenPending || listener != nil {
+			serverMu.Unlock()
+			panic(vm.NewGoError(fmt.Errorf("server is already listening")))
 		}
+		listenGeneration++
+		generation := listenGeneration
+		listenPending = true
+		configuredReadTimeout := readTimeout
+		serverMu.Unlock()
 		go func() {
 			created, err := net.Listen("tcp", address)
 			if err != nil {
-				r.loop.RunOnLoop(func(vm *goja.Runtime) { _ = emitEvent(vm, serverObject, "error", vm.NewGoError(err)) })
+				serverMu.Lock()
+				active := listenPending && listenGeneration == generation
+				if active {
+					listenPending = false
+				}
+				serverMu.Unlock()
+				if active {
+					m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+						_ = m.runtime.RunJob(vm, "http.Server error", func() error {
+							return events.Emit(vm, serverObject, "error", vm.NewGoError(err))
+						})
+					})
+				}
 				return
+			}
+			createdServer := &http.Server{
+				Handler:           handler,
+				ReadHeaderTimeout: m.runtime.Timeout(),
+				ReadTimeout:       configuredReadTimeout,
 			}
 			serverMu.Lock()
-			listener = created
-			resourceID = r.addNodeResource(func() { _ = server.Close() })
-			serverMu.Unlock()
-			if resourceID == 0 {
+			if !listenPending || listenGeneration != generation {
+				serverMu.Unlock()
+				_ = created.Close()
 				return
 			}
-			r.loop.RunOnLoop(func(vm *goja.Runtime) {
-				_ = serverObject.Set("listening", true)
-				_ = emitEvent(vm, serverObject, "listening")
+			id := m.runtime.AddResource(func() {
+				_ = createdServer.Close()
+				_ = created.Close()
 			})
-			err = server.Serve(created)
-			if err != nil && err != http.ErrServerClosed {
-				r.loop.RunOnLoop(func(vm *goja.Runtime) { _ = emitEvent(vm, serverObject, "error", vm.NewGoError(err)) })
+			if id == 0 {
+				listenPending = false
+				serverMu.Unlock()
+				return
+			}
+			server = createdServer
+			listener = created
+			resourceID = id
+			listenPending = false
+			serverMu.Unlock()
+			m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+				serverMu.RLock()
+				active := listenGeneration == generation && server == createdServer && listener == created
+				serverMu.RUnlock()
+				if !active {
+					return
+				}
+				if callback != nil {
+					once, _ := goja.AssertFunction(serverObject.Get("once"))
+					_, _ = once(serverObject, vm.ToValue("listening"), vm.ToValue(callback))
+				}
+				_ = m.runtime.RunJob(vm, "http.Server listening", func() error {
+					_ = serverObject.Set("listening", true)
+					return events.Emit(vm, serverObject, "listening")
+				})
+			})
+			err = createdServer.Serve(created)
+			serverMu.Lock()
+			active := listenGeneration == generation && server == createdServer
+			if active {
+				server, listener, resourceID = nil, nil, 0
+			}
+			serverMu.Unlock()
+			if active {
+				m.runtime.RemoveResource(id)
+			}
+			if active && err != nil && err != http.ErrServerClosed {
+				m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+					_ = m.runtime.RunJob(vm, "http.Server error", func() error {
+						return events.Emit(vm, serverObject, "error", vm.NewGoError(err))
+					})
+				})
 			}
 		}()
 		return serverObject
@@ -160,17 +242,41 @@ func (r *Runtime) newHTTPServer(vm *goja.Runtime) *goja.Object {
 			once, _ := goja.AssertFunction(serverObject.Get("once"))
 			_, _ = once(serverObject, vm.ToValue("close"), vm.ToValue(callback))
 		}
-		serverMu.RLock()
-		currentResourceID := resourceID
-		serverMu.RUnlock()
-		_ = server.Close()
-		r.removeNodeResource(currentResourceID)
+		serverMu.Lock()
+		wasActive := listenPending || listener != nil
+		listenGeneration++
+		listenPending = false
+		currentServer, currentListener, currentResourceID := server, listener, resourceID
+		server, listener, resourceID = nil, nil, 0
+		serverMu.Unlock()
+		if currentServer != nil {
+			_ = currentServer.Close()
+		}
+		if currentListener != nil {
+			_ = currentListener.Close()
+		}
+		if currentResourceID != 0 {
+			m.runtime.RemoveResource(currentResourceID)
+		}
 		_ = serverObject.Set("listening", false)
-		r.loop.SetTimeout(func(vm *goja.Runtime) { _ = emitEvent(vm, serverObject, "close") }, 0)
+		if wasActive {
+			m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
+				_ = m.runtime.RunJob(vm, "http.Server close", func() error { return events.Emit(vm, serverObject, "close") })
+			}, 0)
+		}
 		return serverObject
 	})
-	_ = serverObject.Set("closeAllConnections", server.Close)
-	_ = serverObject.Set("closeIdleConnections", server.Close)
+	_ = serverObject.Set("closeAllConnections", func() {
+		serverMu.RLock()
+		current := server
+		serverMu.RUnlock()
+		if current != nil {
+			_ = current.Close()
+		}
+	})
+	_ = serverObject.Set("closeIdleConnections", func() {
+		// net/http does not expose individual idle server connections.
+	})
 	_ = serverObject.Set("address", func() goja.Value {
 		serverMu.RLock()
 		current := listener
@@ -180,10 +286,12 @@ func (r *Runtime) newHTTPServer(vm *goja.Runtime) *goja.Object {
 		}
 		host, port, _ := net.SplitHostPort(current.Addr().String())
 		portNumber, _ := strconv.Atoi(port)
-		return vm.ToValue(map[string]any{"address": host, "family": netAddressFamily(host), "port": portNumber})
+		return vm.ToValue(map[string]any{"address": host, "family": addressFamily(host), "port": portNumber})
 	})
 	_ = serverObject.Set("setTimeout", func(milliseconds int64, callback goja.Value) *goja.Object {
-		server.ReadTimeout = time.Duration(milliseconds) * time.Millisecond
+		serverMu.Lock()
+		readTimeout = time.Duration(milliseconds) * time.Millisecond
+		serverMu.Unlock()
 		if function, ok := goja.AssertFunction(callback); ok {
 			on, _ := goja.AssertFunction(serverObject.Get("on"))
 			_, _ = on(serverObject, vm.ToValue("timeout"), vm.ToValue(function))
@@ -212,8 +320,8 @@ func (state *nodeHTTPResponse) finish(status int, body []byte) {
 	state.mu.Unlock()
 }
 
-func (r *Runtime) httpIncomingMessage(vm *goja.Runtime, request *http.Request, body []byte) *goja.Object {
-	incoming := newEventEmitter(vm)
+func (m *Module) httpIncomingMessage(vm *goja.Runtime, request *http.Request, body []byte) *goja.Object {
+	incoming := events.NewEmitter(vm)
 	headers := make(map[string]string, len(request.Header))
 	rawHeaders := make([]string, 0, len(request.Header)*2)
 	for name, values := range request.Header {
@@ -243,25 +351,25 @@ func (r *Runtime) httpIncomingMessage(vm *goja.Runtime, request *http.Request, b
 }
 
 func httpSocketInfo(vm *goja.Runtime, request *http.Request) *goja.Object {
-	socket := newEventEmitter(vm)
+	socket := events.NewEmitter(vm)
 	remoteHost, remotePort, _ := net.SplitHostPort(request.RemoteAddr)
 	localHost, localPort := "", 0
 	if local, ok := request.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
-		localHost, localPort = splitNetAddress(local)
+		localHost, localPort = splitAddress(local)
 	}
 	remotePortNumber, _ := strconv.Atoi(remotePort)
 	_ = socket.Set("remoteAddress", remoteHost)
 	_ = socket.Set("remotePort", remotePortNumber)
-	_ = socket.Set("remoteFamily", netAddressFamily(remoteHost))
+	_ = socket.Set("remoteFamily", addressFamily(remoteHost))
 	_ = socket.Set("localAddress", localHost)
 	_ = socket.Set("localPort", localPort)
-	_ = socket.Set("localFamily", netAddressFamily(localHost))
+	_ = socket.Set("localFamily", addressFamily(localHost))
 	_ = socket.Set("encrypted", request.TLS != nil)
 	return socket
 }
 
-func (r *Runtime) httpServerResponse(vm *goja.Runtime, state *nodeHTTPResponse) *goja.Object {
-	response := newEventEmitter(vm)
+func (m *Module) httpServerResponse(vm *goja.Runtime, state *nodeHTTPResponse) *goja.Object {
+	response := events.NewEmitter(vm)
 	_ = response.Set("statusCode", http.StatusOK)
 	_ = response.Set("statusMessage", "")
 	_ = response.Set("headersSent", false)
@@ -357,17 +465,22 @@ func (r *Runtime) httpServerResponse(vm *goja.Runtime, state *nodeHTTPResponse) 
 		if callback, ok := goja.AssertFunction(call.Argument(2)); ok {
 			_, _ = callback(goja.Undefined())
 		}
-		_ = emitEvent(vm, response, "finish")
+		_ = events.Emit(vm, response, "finish")
 		return response
 	})
 	_ = response.Set("destroy", func() {
 		_ = response.Set("destroyed", true)
 		state.finish(0, nil)
-		_ = emitEvent(vm, response, "close")
+		_ = events.Emit(vm, response, "close")
 	})
 	_ = response.Set("setTimeout", func(milliseconds int64, callback goja.Value) *goja.Object {
 		if function, ok := goja.AssertFunction(callback); ok {
-			r.loop.SetTimeout(func(vm *goja.Runtime) { _, _ = function(response) }, time.Duration(milliseconds)*time.Millisecond)
+			m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
+				_ = m.runtime.RunJob(vm, "http.ServerResponse timeout", func() error {
+					_, err := function(response)
+					return err
+				})
+			}, time.Duration(milliseconds)*time.Millisecond)
 		}
 		return response
 	})
@@ -385,7 +498,42 @@ func applyHTTPHeaders(vm *goja.Runtime, response *goja.Object, value goja.Value)
 	}
 }
 
-func (r *Runtime) attachHTTPClient(vm *goja.Runtime, exports *goja.Object) {
+func listenArguments(vm *goja.Runtime, call goja.FunctionCall) (string, goja.Callable) {
+	host := "127.0.0.1"
+	port := int(call.Argument(0).ToInteger())
+	callbackIndex := 1
+	if object, ok := call.Argument(0).(*goja.Object); ok {
+		port = int(object.Get("port").ToInteger())
+		if value := object.Get("host"); !goja.IsUndefined(value) {
+			host = value.String()
+		}
+	} else if value := call.Argument(1); !goja.IsUndefined(value) {
+		if _, ok := goja.AssertFunction(value); !ok {
+			host = value.String()
+			callbackIndex = 2
+		}
+	}
+	callback, _ := goja.AssertFunction(call.Argument(callbackIndex))
+	return net.JoinHostPort(host, strconv.Itoa(port)), callback
+}
+
+func splitAddress(address net.Addr) (string, int) {
+	if address == nil {
+		return "", 0
+	}
+	host, port, _ := net.SplitHostPort(address.String())
+	portNumber, _ := strconv.Atoi(port)
+	return host, portNumber
+}
+
+func addressFamily(host string) string {
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return "IPv6"
+	}
+	return "IPv4"
+}
+
+func (m *Module) attachHTTPClient(vm *goja.Runtime, exports *goja.Object) {
 	factoryValue, err := vm.RunString(httpClientSource)
 	if err != nil {
 		panic(vm.NewGoError(err))

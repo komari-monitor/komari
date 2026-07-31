@@ -1,4 +1,4 @@
-package jsruntime
+package fs
 
 import (
 	"errors"
@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 
 	"github.com/dop251/goja"
 	"github.com/dop251/goja_nodejs/buffer"
@@ -52,13 +51,13 @@ func fsSingleValue(vm *goja.Runtime, result any) []goja.Value {
 	return []goja.Value{vm.ToValue(result)}
 }
 
-func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja.Value) fsAsyncOperation {
-	cwd := r.nodeCwd
+func (m *Module) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja.Value) fsAsyncOperation {
+	cwd := m.Cwd()
 	follow := func(path string, allowMissing bool) (string, error) {
-		return r.resolveNodePathAt(path, cwd, allowMissing, nodePathFollowFinal)
+		return m.resolveNodePathAt(path, cwd, allowMissing, nodePathFollowFinal)
 	}
 	noFollow := func(path string, allowMissing bool) (string, error) {
-		return r.resolveNodePathAt(path, cwd, allowMissing, nodePathNoFollowFinal)
+		return m.resolveNodePathAt(path, cwd, allowMissing, nodePathNoFollowFinal)
 	}
 
 	switch name {
@@ -71,7 +70,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 				if err != nil {
 					return nil, err
 				}
-				data, err := os.ReadFile(path)
+				data, err := m.nodeReadFile(path)
 				return fsReadFileResult{data: data, encoding: encoding}, err
 			},
 			values: func(vm *goja.Runtime, result any) []goja.Value {
@@ -93,7 +92,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 			if appendMode {
 				flags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
 			}
-			file, err := os.OpenFile(path, flags, mode)
+			file, err := m.nodeOpenFile(path, flags, mode)
 			if err != nil {
 				return nil, err
 			}
@@ -102,10 +101,11 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 		}, values: fsNoValues}
 	case "access":
 		pathName := fsArgument(arguments, 0).String()
+		mode := fsAccessMode(fsArgument(arguments, 1))
 		return fsAsyncOperation{run: func() (any, error) {
 			path, err := follow(pathName, false)
 			if err == nil {
-				_, err = os.Stat(path)
+				err = m.nodeAccess(path, mode)
 			}
 			return nil, err
 		}, values: fsNoValues}
@@ -124,9 +124,9 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 				return nil, err
 			}
 			if isLstat {
-				return os.Lstat(path)
+				return m.nodeStat(path, false)
 			}
-			return os.Stat(path)
+			return m.nodeStat(path, true)
 		}, values: func(vm *goja.Runtime, result any) []goja.Value {
 			return []goja.Value{fsStatObject(vm, result.(os.FileInfo))}
 		}}
@@ -138,7 +138,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 			if err != nil {
 				return nil, err
 			}
-			entries, err := os.ReadDir(path)
+			entries, err := m.nodeReadDir(path)
 			return fsReadDirResult{entries: entries, withTypes: withTypes}, err
 		}, values: func(vm *goja.Runtime, result any) []goja.Value {
 			value := result.(fsReadDirResult)
@@ -162,9 +162,9 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 				return nil, err
 			}
 			if recursive {
-				err = os.MkdirAll(path, mode)
+				err = m.nodeMkdir(path, mode, true)
 			} else {
-				err = os.Mkdir(path, mode)
+				err = m.nodeMkdir(path, mode, false)
 			}
 			return nil, err
 		}, values: fsNoValues}
@@ -178,9 +178,9 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 				return nil, err
 			}
 			if recursive {
-				err = os.RemoveAll(path)
+				err = m.nodeRemove(path, true)
 			} else {
-				err = os.Remove(path)
+				err = m.nodeRemove(path, false)
 			}
 			if force && os.IsNotExist(err) {
 				err = nil
@@ -192,7 +192,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 		return fsAsyncOperation{run: func() (any, error) {
 			path, err := noFollow(pathName, false)
 			if err == nil {
-				err = os.Remove(path)
+				err = m.nodeRemove(path, false)
 			}
 			return nil, err
 		}, values: fsNoValues}
@@ -205,7 +205,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 			}
 			newPath, err := noFollow(newName, true)
 			if err == nil {
-				err = os.Rename(oldPath, newPath)
+				err = m.nodeRename(oldPath, newPath)
 			}
 			return nil, err
 		}, values: fsNoValues}
@@ -220,12 +220,12 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 			if err != nil {
 				return nil, err
 			}
-			input, err := os.Open(source)
+			input, err := m.nodeOpenFile(source, os.O_RDONLY, 0)
 			if err != nil {
 				return nil, err
 			}
 			defer input.Close()
-			output, err := os.Create(target)
+			output, err := m.nodeOpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o666)
 			if err != nil {
 				return nil, err
 			}
@@ -241,7 +241,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 				if err != nil {
 					return nil, err
 				}
-				return os.Readlink(path)
+				return m.nodeReadlink(path)
 			}
 			return follow(pathName, false)
 		}, values: fsSingleValue}
@@ -254,7 +254,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 			}
 			link, err := noFollow(linkName, true)
 			if err == nil {
-				err = os.Symlink(target, link)
+				err = m.nodeSymlink(target, link)
 			}
 			return nil, err
 		}, values: fsNoValues}
@@ -263,7 +263,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 		return fsAsyncOperation{run: func() (any, error) {
 			path, err := follow(pathName, false)
 			if err == nil {
-				err = os.Truncate(path, size)
+				err = m.nodeTruncate(path, size)
 			}
 			return nil, err
 		}, values: fsNoValues}
@@ -273,7 +273,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 		return fsAsyncOperation{run: func() (any, error) {
 			path, err := follow(pathName, false)
 			if err == nil {
-				err = os.Chmod(path, mode)
+				err = m.nodeChmod(path, mode)
 			}
 			return nil, err
 		}, values: fsNoValues}
@@ -283,7 +283,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 		return fsAsyncOperation{run: func() (any, error) {
 			path, err := follow(pathName, false)
 			if err == nil {
-				err = os.Chtimes(path, accessTime, modifyTime)
+				err = m.nodeChtimes(path, accessTime, modifyTime)
 			}
 			return nil, err
 		}, values: fsNoValues}
@@ -294,7 +294,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 			if err != nil {
 				return nil, err
 			}
-			return os.MkdirTemp(filepath.Dir(path), filepath.Base(path)+"*")
+			return m.nodeMkdirTemp(path)
 		}, values: fsSingleValue}
 	case "open":
 		pathName := fsArgument(arguments, 0).String()
@@ -305,15 +305,15 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 			if err != nil {
 				return nil, err
 			}
-			return r.fsOpenPath(path, flags, mode)
+			return m.fsOpenPath(path, flags, mode)
 		}, values: fsSingleValue}
 	case "close":
 		fd := int(fsArgument(arguments, 0).ToInteger())
-		return fsAsyncOperation{run: func() (any, error) { return nil, r.fsClose(fd) }, values: fsNoValues}
+		return fsAsyncOperation{run: func() (any, error) { return nil, m.fsClose(fd) }, values: fsNoValues}
 	case "fstat":
 		fd := int(fsArgument(arguments, 0).ToInteger())
 		return fsAsyncOperation{run: func() (any, error) {
-			file, err := r.fsFile(fd)
+			file, err := m.fsFile(fd)
 			if err != nil {
 				return nil, err
 			}
@@ -324,7 +324,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 	case "fsync":
 		fd := int(fsArgument(arguments, 0).ToInteger())
 		return fsAsyncOperation{run: func() (any, error) {
-			file, err := r.fsFile(fd)
+			file, err := m.fsFile(fd)
 			if err == nil {
 				err = file.Sync()
 			}
@@ -333,23 +333,17 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 	case "read":
 		fd := int(fsArgument(arguments, 0).ToInteger())
 		target := fsArgument(arguments, 1)
-		bufferLength := len(buffer.Bytes(vm, target))
-		offset := 0
-		if value := fsArgument(arguments, 2); !goja.IsUndefined(value) {
-			offset = int(value.ToInteger())
-		}
-		length := bufferLength - offset
-		if value := fsArgument(arguments, 3); !goja.IsUndefined(value) {
-			length = int(value.ToInteger())
-		}
+		offset := int(fsArgument(arguments, 2).ToInteger())
+		length := int(fsArgument(arguments, 3).ToInteger())
 		positionValue := fsArgument(arguments, 4)
 		hasPosition := !goja.IsNull(positionValue) && !goja.IsUndefined(positionValue)
 		position := positionValue.ToInteger()
+		bufferLength := len(buffer.Bytes(vm, target))
 		if offset < 0 || length < 0 || offset+length > bufferLength {
 			panic(vm.NewTypeError("buffer range is out of bounds"))
 		}
 		return fsAsyncOperation{run: func() (any, error) {
-			file, err := r.fsFile(fd)
+			file, err := m.fsFile(fd)
 			if err != nil {
 				return nil, err
 			}
@@ -375,14 +369,8 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 		data := append([]byte(nil), buffer.Bytes(vm, target)...)
 		positionValue := fsArgument(arguments, 4)
 		if _, isString := target.Export().(string); !isString {
-			offset := 0
-			if value := fsArgument(arguments, 2); !goja.IsUndefined(value) {
-				offset = int(value.ToInteger())
-			}
-			length := len(data) - offset
-			if value := fsArgument(arguments, 3); !goja.IsUndefined(value) {
-				length = int(value.ToInteger())
-			}
+			offset := int(fsArgument(arguments, 2).ToInteger())
+			length := int(fsArgument(arguments, 3).ToInteger())
 			if offset < 0 || length < 0 || offset+length > len(data) {
 				panic(vm.NewTypeError("buffer range is out of bounds"))
 			}
@@ -393,7 +381,7 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 		hasPosition := !goja.IsNull(positionValue) && !goja.IsUndefined(positionValue)
 		position := positionValue.ToInteger()
 		return fsAsyncOperation{run: func() (any, error) {
-			file, err := r.fsFile(fd)
+			file, err := m.fsFile(fd)
 			if err != nil {
 				return nil, err
 			}
@@ -415,19 +403,10 @@ func (r *Runtime) prepareFSAsync(vm *goja.Runtime, name string, arguments []goja
 	}
 }
 
-func (r *Runtime) fsOpenPath(path, flags string, mode os.FileMode) (int, error) {
-	file, err := os.OpenFile(path, fsOpenFlags(flags), mode)
+func (m *Module) fsOpenPath(path, flags string, mode os.FileMode) (int, error) {
+	file, err := m.nodeOpenFile(path, fsOpenFlags(flags), mode)
 	if err != nil {
 		return 0, err
 	}
-	resourceID := r.addNodeResource(func() { _ = file.Close() })
-	if resourceID == 0 {
-		return 0, errors.New("JavaScript runtime is closed")
-	}
-	r.fileMu.Lock()
-	r.fileID++
-	fd := r.fileID
-	r.files[fd] = nodeFileHandle{file: file, resourceID: resourceID}
-	r.fileMu.Unlock()
-	return fd, nil
+	return m.registerFile(file)
 }

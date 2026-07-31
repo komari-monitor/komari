@@ -1,6 +1,6 @@
 //go:build linux
 
-package jsruntime
+package metrics
 
 import (
 	"bufio"
@@ -13,10 +13,10 @@ import (
 	"time"
 )
 
-func readNodeSystemMetrics() (nodeSystemMetrics, error) {
+func ReadSystem() (System, error) {
 	info := syscall.Sysinfo_t{}
 	if err := syscall.Sysinfo(&info); err != nil {
-		return nodeSystemMetrics{}, err
+		return System{}, err
 	}
 	unit := uint64(info.Unit)
 	if unit == 0 {
@@ -24,25 +24,25 @@ func readNodeSystemMetrics() (nodeSystemMetrics, error) {
 	}
 	release, err := os.ReadFile("/proc/sys/kernel/osrelease")
 	if err != nil {
-		return nodeSystemMetrics{}, err
+		return System{}, err
 	}
 	version, err := os.ReadFile("/proc/sys/kernel/version")
 	if err != nil {
-		return nodeSystemMetrics{}, err
+		return System{}, err
 	}
 	cpus, err := linuxCPUs()
 	if err != nil {
-		return nodeSystemMetrics{}, err
+		return System{}, err
 	}
 	const loadScale = 1 << 16
-	return nodeSystemMetrics{
-		release: strings.TrimSpace(string(release)), version: strings.TrimSpace(string(version)), uptime: float64(info.Uptime),
-		loadavg:  [3]float64{float64(info.Loads[0]) / loadScale, float64(info.Loads[1]) / loadScale, float64(info.Loads[2]) / loadScale},
-		totalMem: uint64(info.Totalram) * unit, freeMem: uint64(info.Freeram) * unit, cpus: cpus,
+	return System{
+		Release: strings.TrimSpace(string(release)), Version: strings.TrimSpace(string(version)), Uptime: float64(info.Uptime),
+		LoadAvg:  [3]float64{float64(info.Loads[0]) / loadScale, float64(info.Loads[1]) / loadScale, float64(info.Loads[2]) / loadScale},
+		TotalMem: uint64(info.Totalram) * unit, FreeMem: uint64(info.Freeram) * unit, CPUs: cpus,
 	}, nil
 }
 
-func linuxCPUs() ([]nodeCPUInfo, error) {
+func linuxCPUs() ([]CPUInfo, error) {
 	cpuInfo, err := os.ReadFile("/proc/cpuinfo")
 	if err != nil {
 		return nil, err
@@ -95,39 +95,39 @@ func linuxCPUs() ([]nodeCPUInfo, error) {
 	if count == 0 {
 		return nil, fmt.Errorf("no CPU entries in /proc/stat")
 	}
-	result := make([]nodeCPUInfo, count)
+	result := make([]CPUInfo, count)
 	for index := range result {
 		modelIndex := index
 		if modelIndex >= len(models) {
 			modelIndex = len(models) - 1
 		}
-		result[index] = nodeCPUInfo{model: models[modelIndex], speed: speeds[modelIndex], times: times[index]}
+		result[index] = CPUInfo{Model: models[modelIndex], Speed: speeds[modelIndex], Times: times[index]}
 	}
 	return result, nil
 }
 
-func readNodeProcessMetrics() (nodeProcessMetrics, error) {
+func ReadProcess() (Process, error) {
 	usage := syscall.Rusage{}
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
-		return nodeProcessMetrics{}, err
+		return Process{}, err
 	}
 	statm, err := os.ReadFile("/proc/self/statm")
 	if err != nil {
-		return nodeProcessMetrics{}, err
+		return Process{}, err
 	}
 	fields := strings.Fields(string(statm))
 	if len(fields) < 2 {
-		return nodeProcessMetrics{}, fmt.Errorf("invalid /proc/self/statm")
+		return Process{}, fmt.Errorf("invalid /proc/self/statm")
 	}
 	residentPages, err := strconv.ParseUint(fields[1], 10, 64)
 	if err != nil {
-		return nodeProcessMetrics{}, err
+		return Process{}, err
 	}
-	return nodeProcessMetrics{
-		userCPU:   time.Duration(usage.Utime.Sec)*time.Second + time.Duration(usage.Utime.Usec)*time.Microsecond,
-		systemCPU: time.Duration(usage.Stime.Sec)*time.Second + time.Duration(usage.Stime.Usec)*time.Microsecond,
-		maxRSS:    uint64(usage.Maxrss), rss: residentPages * uint64(os.Getpagesize()),
-		minorPageFault: int64(usage.Minflt), majorPageFault: int64(usage.Majflt), fsRead: int64(usage.Inblock), fsWrite: int64(usage.Oublock),
-		voluntarySwitches: int64(usage.Nvcsw), involuntarySwitches: int64(usage.Nivcsw),
+	return Process{
+		UserCPU:   time.Duration(usage.Utime.Sec)*time.Second + time.Duration(usage.Utime.Usec)*time.Microsecond,
+		SystemCPU: time.Duration(usage.Stime.Sec)*time.Second + time.Duration(usage.Stime.Usec)*time.Microsecond,
+		MaxRSS:    uint64(usage.Maxrss), RSS: residentPages * uint64(os.Getpagesize()),
+		MinorPageFault: int64(usage.Minflt), MajorPageFault: int64(usage.Majflt), FSRead: int64(usage.Inblock), FSWrite: int64(usage.Oublock),
+		VoluntarySwitches: int64(usage.Nvcsw), InvoluntarySwitches: int64(usage.Nivcsw),
 	}, nil
 }

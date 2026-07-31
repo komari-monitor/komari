@@ -1,4 +1,4 @@
-package jsruntime
+package fetch
 
 const fetchAPISource = `
 (function () {

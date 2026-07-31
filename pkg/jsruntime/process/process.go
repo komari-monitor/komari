@@ -1,4 +1,4 @@
-package jsruntime
+package process
 
 import (
 	"fmt"
@@ -6,14 +6,43 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/komari-monitor/komari/pkg/jsruntime/events"
+	"github.com/komari-monitor/komari/pkg/jsruntime/fs"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/metrics"
 	"github.com/komari-monitor/komari/utils"
 )
 
-func (r *Runtime) loadProcessModule(vm *goja.Runtime, module *goja.Object) {
-	process := newEventEmitter(vm)
+type nodeNextTick struct {
+	callback  goja.Callable
+	arguments []goja.Value
+}
+
+type Module struct {
+	runtime     *bridge.Runtime
+	fs          *fs.Module
+	allowExec   bool
+	startedAt   time.Time
+	reportError func(*goja.Runtime, []goja.Value)
+
+	nextTickMu        sync.Mutex
+	nextTicks         []nodeNextTick
+	nextTickScheduled bool
+	nextTickDraining  bool
+	nextTickTurn      goja.Callable
+	nextTickSchedule  goja.Callable
+}
+
+func New(runtime *bridge.Runtime, filesystem *fs.Module, allowExec bool, startedAt time.Time, reportError func(*goja.Runtime, []goja.Value)) *Module {
+	return &Module{runtime: runtime, fs: filesystem, allowExec: allowExec, startedAt: startedAt, reportError: reportError}
+}
+
+func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
+	process := events.NewEmitter(vm)
 	environment := make(map[string]string)
 	for _, item := range os.Environ() {
 		parts := strings.SplitN(item, "=", 2)
@@ -27,8 +56,8 @@ func (r *Runtime) loadProcessModule(vm *goja.Runtime, module *goja.Object) {
 	_ = process.Set("execPath", os.Args[0])
 	_ = process.Set("pid", os.Getpid())
 	_ = process.Set("ppid", os.Getppid())
-	_ = process.Set("platform", nodePlatform())
-	_ = process.Set("arch", nodeArch())
+	_ = process.Set("platform", metrics.Platform())
+	_ = process.Set("arch", metrics.Arch())
 	_ = process.Set("version", "v"+strings.TrimPrefix(runtime.Version(), "go"))
 	_ = process.Set("versions", map[string]string{"node": "0.0.0-goja", "go": runtime.Version(), "komari": utils.CurrentVersion, "hash": utils.VersionHash})
 	_ = process.Set("release", map[string]string{"name": "node", "sourceUrl": "", "headersUrl": ""})
@@ -36,45 +65,36 @@ func (r *Runtime) loadProcessModule(vm *goja.Runtime, module *goja.Object) {
 	_ = process.Set("exitCode", 0)
 	_ = process.Set("connected", false)
 	_ = process.Set("config", map[string]any{})
-	_ = process.Set("cwd", func() string { return r.nodeCwd })
+	_ = process.Set("cwd", func() string { return m.fs.Cwd() })
 	_ = process.Set("chdir", func(path string) {
-		resolved, err := r.resolveNodePath(path, true)
-		if err != nil {
+		if err := m.fs.Chdir(path); err != nil {
 			panic(vm.NewGoError(err))
 		}
-		info, err := os.Stat(resolved)
-		if err != nil || !info.IsDir() {
-			if err == nil {
-				err = fmt.Errorf("not a directory: %s", path)
-			}
-			panic(vm.NewGoError(err))
-		}
-		r.nodeCwd = resolved
 	})
-	_ = process.Set("uptime", func() float64 { return time.Since(nodeProcessStartedAt).Seconds() })
+	_ = process.Set("uptime", func() float64 { return time.Since(m.startedAt).Seconds() })
 	memoryUsage := vm.ToValue(func() map[string]uint64 {
 		var memory runtime.MemStats
 		runtime.ReadMemStats(&memory)
-		usage, err := readNodeProcessMetrics()
+		usage, err := metrics.ReadProcess()
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
-		return map[string]uint64{"rss": usage.rss, "heapTotal": memory.HeapSys, "heapUsed": memory.HeapAlloc, "external": memory.OtherSys, "arrayBuffers": 0}
+		return map[string]uint64{"rss": usage.RSS, "heapTotal": memory.HeapSys, "heapUsed": memory.HeapAlloc, "external": memory.OtherSys, "arrayBuffers": 0}
 	}).ToObject(vm)
 	_ = memoryUsage.Set("rss", func() uint64 {
-		usage, err := readNodeProcessMetrics()
+		usage, err := metrics.ReadProcess()
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
-		return usage.rss
+		return usage.RSS
 	})
 	_ = process.Set("memoryUsage", memoryUsage)
 	_ = process.Set("cpuUsage", func(call goja.FunctionCall) goja.Value {
-		usage, err := readNodeProcessMetrics()
+		usage, err := metrics.ReadProcess()
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
-		userMicros, systemMicros := usage.userCPU.Microseconds(), usage.systemCPU.Microseconds()
+		userMicros, systemMicros := usage.UserCPU.Microseconds(), usage.SystemCPU.Microseconds()
 		if previous := call.Argument(0); !goja.IsUndefined(previous) && !goja.IsNull(previous) {
 			object := previous.ToObject(vm)
 			userMicros -= object.Get("user").ToInteger()
@@ -83,19 +103,19 @@ func (r *Runtime) loadProcessModule(vm *goja.Runtime, module *goja.Object) {
 		return vm.ToValue(map[string]int64{"user": max(userMicros, 0), "system": max(systemMicros, 0)})
 	})
 	_ = process.Set("resourceUsage", func() map[string]any {
-		usage, err := readNodeProcessMetrics()
+		usage, err := metrics.ReadProcess()
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 		return map[string]any{
-			"userCPUTime": usage.userCPU.Microseconds(), "systemCPUTime": usage.systemCPU.Microseconds(), "maxRSS": usage.maxRSS,
-			"minorPageFault": usage.minorPageFault, "majorPageFault": usage.majorPageFault,
-			"fsRead": usage.fsRead, "fsWrite": usage.fsWrite,
-			"voluntaryContextSwitches": usage.voluntarySwitches, "involuntaryContextSwitches": usage.involuntarySwitches,
+			"userCPUTime": usage.UserCPU.Microseconds(), "systemCPUTime": usage.SystemCPU.Microseconds(), "maxRSS": usage.MaxRSS,
+			"minorPageFault": usage.MinorPageFault, "majorPageFault": usage.MajorPageFault,
+			"fsRead": usage.FSRead, "fsWrite": usage.FSWrite,
+			"voluntaryContextSwitches": usage.VoluntarySwitches, "involuntaryContextSwitches": usage.InvoluntarySwitches,
 		}
 	})
 	hrtime := vm.ToValue(func(call goja.FunctionCall) goja.Value {
-		now := time.Since(r.startedAt)
+		now := time.Since(m.startedAt)
 		seconds := int64(now / time.Second)
 		nanoseconds := int64(now % time.Second)
 		if previous := call.Argument(0); !goja.IsUndefined(previous) {
@@ -111,7 +131,7 @@ func (r *Runtime) loadProcessModule(vm *goja.Runtime, module *goja.Object) {
 		}
 		return vm.ToValue([]int64{seconds, nanoseconds})
 	}).ToObject(vm)
-	_ = hrtime.Set("bigint", func() *big.Int { return big.NewInt(time.Since(r.startedAt).Nanoseconds()) })
+	_ = hrtime.Set("bigint", func() *big.Int { return big.NewInt(time.Since(m.startedAt).Nanoseconds()) })
 	_ = process.Set("hrtime", hrtime)
 	_ = process.Set("nextTick", func(call goja.FunctionCall) goja.Value {
 		callback, ok := goja.AssertFunction(call.Argument(0))
@@ -119,20 +139,17 @@ func (r *Runtime) loadProcessModule(vm *goja.Runtime, module *goja.Object) {
 			panic(vm.NewTypeError("callback must be a function"))
 		}
 		arguments := append([]goja.Value(nil), call.Arguments[1:]...)
-		r.loop.SetTimeout(func(vm *goja.Runtime) {
-			r.runAsyncJob(vm, "process.nextTick", func() error {
-				_, err := callback(goja.Undefined(), arguments...)
-				return err
-			})
-		}, 0)
+		m.enqueueNextTick(vm, nodeNextTick{callback: callback, arguments: arguments})
 		return goja.Undefined()
 	})
 	_ = process.Set("emitWarning", func(call goja.FunctionCall) goja.Value {
-		r.writeConsole(consoleError, []goja.Value{vm.ToValue("Warning: " + call.Argument(0).String())}, false)
+		if m.reportError != nil {
+			m.reportError(vm, []goja.Value{vm.ToValue("Warning: " + call.Argument(0).String())})
+		}
 		return goja.Undefined()
 	})
 	_ = process.Set("kill", func(pid int, signal string) bool {
-		if !r.allowExec {
+		if !m.allowExec {
 			panic(vm.NewGoError(fmt.Errorf("process.kill requires AllowExec")))
 		}
 		process, err := os.FindProcess(pid)
@@ -158,11 +175,14 @@ func (r *Runtime) loadProcessModule(vm *goja.Runtime, module *goja.Object) {
 	_ = process.Set("stdout", processStream(vm, os.Stdout, true))
 	_ = process.Set("stderr", processStream(vm, os.Stderr, true))
 	_ = process.Set("stdin", processStream(vm, nil, false))
+	if err := m.initNextTickScheduler(vm); err != nil {
+		panic(vm.NewGoError(err))
+	}
 	_ = module.Set("exports", process)
 }
 
 func processStream(vm *goja.Runtime, output *os.File, writable bool) *goja.Object {
-	stream := newEventEmitter(vm)
+	stream := events.NewEmitter(vm)
 	_ = stream.Set("isTTY", false)
 	_ = stream.Set("fd", -1)
 	_ = stream.Set("write", func(call goja.FunctionCall) goja.Value {

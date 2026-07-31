@@ -1,4 +1,4 @@
-package jsruntime
+package xhr
 
 const xhrAPISource = `
 (function () {

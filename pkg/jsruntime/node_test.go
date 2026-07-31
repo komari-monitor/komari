@@ -2,6 +2,8 @@ package jsruntime
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -171,6 +173,67 @@ func TestNodeFSSymlinkOperationsDoNotFollowFinalLink(t *testing.T) {
 	}
 }
 
+func TestNodeFSClosedRootNeverFallsBackToHostPath(t *testing.T) {
+	root := t.TempDir()
+	baseDir := filepath.Join(root, "base")
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(filepath.Join(baseDir, "parent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	jsRuntime, err := New(`function verify() { return true; }`, Options{
+		NodeJS: true, BaseDir: baseDir, Console: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+
+	resolved, err := jsRuntime.resolveNodePath(filepath.Join("parent", "escaped.txt"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsRuntime.fsModule.Close()
+	if err := os.Rename(filepath.Join(baseDir, "parent"), filepath.Join(baseDir, "original-parent")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(baseDir, "parent")); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	if err := jsRuntime.nodeWriteFile(resolved, []byte("escape"), 0o600); err == nil {
+		t.Fatal("closed filesystem accepted a path operation")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escaped.txt")); !os.IsNotExist(err) {
+		t.Fatalf("closed filesystem fell back outside BaseDir: %v", err)
+	}
+}
+
+func TestNodeFSAccessModeIsValidated(t *testing.T) {
+	jsRuntime, err := New(`
+		async function verify() {
+			const fs = require("fs");
+			fs.writeFileSync("access.txt", "ok");
+			let syncInvalid = false;
+			try { fs.accessSync("access.txt", 8); }
+			catch (error) { syncInvalid = error.code === "EINVAL"; }
+			const asyncInvalid = await new Promise((resolve) => fs.access("access.txt", 8, (error) => resolve(error && error.code === "EINVAL")));
+			const exists = await new Promise((resolve) => fs.access("access.txt", fs.constants.F_OK, (error) => resolve(!error)));
+			return syncInvalid && asyncInvalid && exists;
+		}
+	`, Options{NodeJS: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 3 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+	if err := jsRuntime.Call("verify"); err != nil {
+		t.Fatalf("fs.access mode validation failed: %v", err)
+	}
+}
+
 func TestNodeFSCallbackAndPromiseShapes(t *testing.T) {
 	runtime, err := New(`
 		async function verify() {
@@ -251,14 +314,73 @@ func TestNodeResourceRegistrationAfterCloseClosesImmediately(t *testing.T) {
 	}
 }
 
+func TestNodeRootRejectsParentSymlinkSwap(t *testing.T) {
+	baseDir := t.TempDir()
+	parent := filepath.Join(baseDir, "parent")
+	outside := t.TempDir()
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jsRuntime, err := New(`function verify() { return true; }`, Options{NodeJS: true, BaseDir: baseDir, Console: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+	resolved, err := jsRuntime.resolveNodePath(filepath.Join("parent", "escaped.txt"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parent, filepath.Join(baseDir, "original-parent")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	if err := jsRuntime.nodeWriteFile(resolved, []byte("escape"), 0o600); err == nil {
+		t.Fatal("rooted write followed a swapped parent symlink")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escaped.txt")); !os.IsNotExist(err) {
+		t.Fatalf("write escaped BaseDir: %v", err)
+	}
+}
+
+func TestNodeFSErrorsExposeNodeFields(t *testing.T) {
+	jsRuntime, err := New(`
+		async function verify() {
+			try {
+				await require("fs").promises.readFile("missing.txt");
+				return false;
+			} catch (error) {
+				return error.name === "Error" && error.code === "ENOENT" &&
+					typeof error.errno === "number" && error.errno < 0 && typeof error.syscall === "string" &&
+					typeof error.path === "string";
+			}
+		}
+	`, Options{NodeJS: true, BaseDir: t.TempDir(), Console: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+	if err := jsRuntime.Call("verify"); err != nil {
+		t.Fatalf("fs error shape is not Node-compatible: %v", err)
+	}
+}
+
 func TestNodePathCrossPlatformSemantics(t *testing.T) {
 	runtime, err := New(`
 		function verify() {
 			const path = require("path");
 			return path.extname("a.") === "." && path.extname("a..") === "." && path.extname(".hidden") === "" &&
-				path.posix.normalize("a\\b") === "a\\b" &&
+				path.posix.basename("/") === "" && path.posix.parse("/").base === "" && path.posix.parse("foo").dir === "" &&
+				path.posix.normalize("a\\b") === "a\\b" && path.posix.normalize("foo/bar//") === "foo/bar/" &&
+				path.posix.join("foo", "bar/") === "foo/bar/" &&
+				path.posix.relative("/", "/a") === "a" && path.posix.relative("/a", "/") === ".." &&
 				path.posix.resolve("a").endsWith("/a") &&
 				path.win32.normalize("C:/foo/../bar/a.") === "C:\\bar\\a." &&
+				path.win32.basename("C:foo") === "foo" && path.win32.parse("C:foo").base === "foo" &&
+				path.win32.parse("\\\\server\\share\\").root === "\\\\server\\share\\" &&
+				path.win32.resolve("C:\\base", "C:foo") === "C:\\base\\foo" &&
+				path.win32.resolve("C:\\base", "\\foo") === "C:\\foo" &&
 				path.win32.join("C:\\a", "b") === "C:\\a\\b" && path.win32.isAbsolute("C:\\a") &&
 				path.win32.resolve("C:\\a") === "C:\\a" &&
 				path.win32.relative("C:\\a\\b", "C:\\a\\c") === "..\\c" &&
@@ -272,6 +394,75 @@ func TestNodePathCrossPlatformSemantics(t *testing.T) {
 	defer runtime.Close()
 	if err := runtime.Call("verify"); err != nil {
 		t.Fatalf("path compatibility failed: %v", err)
+	}
+}
+
+func TestProcessNextTickPrecedesPromiseMicrotasks(t *testing.T) {
+	jsRuntime, err := New(`
+		function verify() {
+			const order = [];
+			Promise.resolve().then(() => {
+				order.push("promise-1");
+				process.nextTick(() => order.push("tick-2"));
+			});
+			Promise.resolve().then(() => order.push("promise-2"));
+			process.nextTick(() => order.push("tick-1"));
+			return new Promise((resolve) => setImmediate(() => resolve(order.join(",") === "tick-1,promise-1,promise-2,tick-2")));
+		}
+	`, Options{NodeJS: true, BaseDir: t.TempDir(), Console: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+	if err := jsRuntime.Call("verify"); err != nil {
+		t.Fatalf("process.nextTick ordering failed: %v", err)
+	}
+}
+
+func TestProcessNextTickPrecedesPromisesInAsyncHostCallback(t *testing.T) {
+	jsRuntime, err := New(`
+		function verify() {
+			return new Promise((resolve) => {
+				require("fs").exists("missing.txt", () => {
+					const order = [];
+					Promise.resolve().then(() => order.push("promise"));
+					process.nextTick(() => order.push("tick"));
+					setImmediate(() => resolve(order.join(",") === "tick,promise"));
+				});
+			});
+		}
+	`, Options{NodeJS: true, BaseDir: t.TempDir(), Console: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+	if err := jsRuntime.Call("verify"); err != nil {
+		t.Fatalf("process.nextTick ordering in an async host callback failed: %v", err)
+	}
+}
+
+func TestFetchResponseBodyLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write([]byte("response-too-large"))
+	}))
+	defer server.Close()
+
+	jsRuntime, err := New(`
+		async function verify(url) {
+			try {
+				await fetch(url);
+				return false;
+			} catch (error) {
+				return error.name === "TypeError" && String(error).includes("HTTP body exceeds 8 bytes");
+			}
+		}
+	`, Options{Console: io.Discard, Timeout: time.Second, MaxHTTPBodyBytes: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+	if err := jsRuntime.Call("verify", server.URL); err != nil {
+		t.Fatalf("fetch response limit failed: %v", err)
 	}
 }
 
@@ -339,6 +530,115 @@ func TestChildProcessPermissionAndExecution(t *testing.T) {
 	}
 }
 
+func TestChildProcessOutputLimitAndExitCode(t *testing.T) {
+	jsRuntime, err := New(`
+		function execFile(command, environment, maxBuffer) {
+			return new Promise((resolve) => {
+				require("child_process").execFile(
+					command,
+					["-test.run=^TestNodeChildProcessHelper$"],
+					{ env: environment, encoding: "utf8", maxBuffer },
+					(error, stdout) => resolve({ error, stdout })
+				);
+			});
+		}
+		async function verify(command, outputEnvironment, exitEnvironment) {
+			const limited = await execFile(command, outputEnvironment, 4096);
+			const commandLimited = await execFile(command, outputEnvironment, 64);
+			const exited = await execFile(command, exitEnvironment, 4096);
+			const valid = limited.error && limited.error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" &&
+				String(limited.error).includes("stdout maxBuffer length exceeded") && limited.stdout.length === 128 &&
+				commandLimited.error && commandLimited.error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" && commandLimited.stdout.length === 64 &&
+				exited.error && exited.error.code === 7;
+			if (!valid) {
+				throw new Error(JSON.stringify({
+					limitedError: String(limited.error), limitedCode: limited.error && limited.error.code,
+					limitedLength: limited.stdout && limited.stdout.length,
+					commandLimitedError: String(commandLimited.error), commandLimitedLength: commandLimited.stdout && commandLimited.stdout.length,
+					exitedError: String(exited.error), exitedCode: exited.error && exited.error.code
+				}));
+			}
+			return true;
+		}
+	`, Options{
+		NodeJS: true, AllowExec: true, BaseDir: t.TempDir(), Console: io.Discard,
+		Timeout: 3 * time.Second, MaxChildOutputBytes: 128,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+	if jsRuntime.maxChildOutputBytes != 128 {
+		t.Fatalf("MaxChildOutputBytes = %d, want 128", jsRuntime.maxChildOutputBytes)
+	}
+	if err := jsRuntime.Call(
+		"verify",
+		os.Args[0],
+		childHelperEnvironment("output"),
+		childHelperEnvironment("exit"),
+	); err != nil {
+		t.Fatalf("child_process output limit or exit code failed: %v", err)
+	}
+}
+
+func TestChildProcessSyncTimeoutLeavesRuntimeUsable(t *testing.T) {
+	jsRuntime, err := New(`
+		function verify(command, environment) {
+			try {
+				require("child_process").execFileSync(
+					command,
+					["-test.run=^TestNodeChildProcessHelper$"],
+					{ env: environment, timeout: 40 }
+				);
+				return false;
+			} catch (_) {
+				return true;
+			}
+		}
+		function healthy() { return eval("6 * 7") === 42; }
+	`, Options{NodeJS: true, AllowExec: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+	if err := jsRuntime.Call("verify", os.Args[0], childHelperEnvironment("sleep")); err != nil {
+		t.Fatalf("child_process sync timeout failed: %v", err)
+	}
+	if err := jsRuntime.Call("healthy"); err != nil {
+		t.Fatalf("runtime was unusable after child_process sync timeout: %v", err)
+	}
+}
+
+func TestRuntimeCloseClearsNodeFileDescriptors(t *testing.T) {
+	jsRuntime, err := New(`
+		function verify() {
+			require("fs").openSync("held.txt", "w");
+			return true;
+		}
+	`, Options{NodeJS: true, BaseDir: t.TempDir(), Console: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jsRuntime.Call("verify"); err != nil {
+		jsRuntime.Close()
+		t.Fatal(err)
+	}
+	jsRuntime.fileMu.Lock()
+	openBeforeClose := len(jsRuntime.files)
+	jsRuntime.fileMu.Unlock()
+	if openBeforeClose != 1 {
+		jsRuntime.Close()
+		t.Fatalf("expected one open descriptor, got %d", openBeforeClose)
+	}
+	jsRuntime.Close()
+	jsRuntime.fileMu.Lock()
+	openAfterClose := len(jsRuntime.files)
+	jsRuntime.fileMu.Unlock()
+	if openAfterClose != 0 {
+		t.Fatalf("Runtime.Close left %d descriptors registered", openAfterClose)
+	}
+}
+
 func TestNodeNetAndHTTPServers(t *testing.T) {
 	runtime, err := New(`
 		function verifyNet() {
@@ -384,6 +684,56 @@ func TestNodeNetAndHTTPServers(t *testing.T) {
 	}
 }
 
+func TestNodeCloseCancelsPendingListen(t *testing.T) {
+	jsRuntime, err := New(`
+		function verify(moduleName) {
+			const api = require(moduleName);
+			return new Promise((resolve) => {
+				let listened = false;
+				const servers = [];
+				for (let index = 0; index < 32; index++) {
+					const server = api.createServer();
+					servers.push(server);
+					server.on("listening", () => { listened = true; });
+					server.listen(0, "127.0.0.1");
+					let duplicateRejected = false;
+					try { server.listen(0, "127.0.0.1"); }
+					catch (_) { duplicateRejected = true; }
+					if (!duplicateRejected) return resolve(false);
+					server.close();
+				}
+				setTimeout(() => resolve(!listened && servers.every((server) => server.address() === null)), 100);
+			});
+		}
+		function verifyReuse(moduleName) {
+			const api = require(moduleName);
+			return new Promise((resolve) => {
+				const server = api.createServer();
+				let staleCallbackCalls = 0;
+				server.listen(0, "127.0.0.1", () => { staleCallbackCalls++; });
+				server.close();
+				setTimeout(() => {
+					server.listen(0, "127.0.0.1", () => {
+						server.close(() => resolve(staleCallbackCalls === 0));
+					});
+				}, 20);
+			});
+		}
+	`, Options{NodeJS: true, AllowListen: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 3 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+	for _, moduleName := range []string{"net", "http"} {
+		if err := jsRuntime.Call("verify", moduleName); err != nil {
+			t.Fatalf("%s pending listen was not cancelled: %v", moduleName, err)
+		}
+		if err := jsRuntime.Call("verifyReuse", moduleName); err != nil {
+			t.Fatalf("%s server retained a cancelled listen callback: %v", moduleName, err)
+		}
+	}
+}
+
 func TestNodeListenPermission(t *testing.T) {
 	runtime, err := New(`
 		function verify() {
@@ -408,5 +758,36 @@ func TestEvalRemainsInterruptible(t *testing.T) {
 	defer runtime.Close()
 	if err := runtime.Call("verify"); err == nil || !strings.Contains(err.Error(), "timeout") {
 		t.Fatalf("expected eval timeout, got %v", err)
+	}
+}
+
+const childHelperModeEnvironment = "KOMARI_JSRUNTIME_CHILD_HELPER_MODE"
+
+func childHelperEnvironment(mode string) map[string]string {
+	environment := make(map[string]string)
+	for _, item := range os.Environ() {
+		name, value, found := strings.Cut(item, "=")
+		if found && name != "" {
+			environment[name] = value
+		}
+	}
+	environment[childHelperModeEnvironment] = mode
+	return environment
+}
+
+func TestNodeChildProcessHelper(t *testing.T) {
+	switch os.Getenv(childHelperModeEnvironment) {
+	case "":
+		return
+	case "output":
+		_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 4096))
+		os.Exit(0)
+	case "exit":
+		os.Exit(7)
+	case "sleep":
+		time.Sleep(5 * time.Second)
+		os.Exit(0)
+	default:
+		os.Exit(2)
 	}
 }

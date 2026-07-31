@@ -1,4 +1,4 @@
-package jsruntime
+package fs
 
 import (
 	"errors"
@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/dop251/goja"
 	"github.com/dop251/goja_nodejs/buffer"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/filepathutil"
 )
 
 type nodeFileHandle struct {
@@ -30,15 +33,127 @@ const (
 	nodePathNoFollowFinal
 )
 
-func (r *Runtime) resolveNodePath(name string, allowMissing bool) (string, error) {
-	return r.resolveNodePathAt(name, r.nodeCwd, allowMissing, nodePathFollowFinal)
+type Module struct {
+	runtime            *bridge.Runtime
+	nodeRoot           string
+	allowAllFileAccess bool
+	nodeFSRoot         *os.Root
+	lifecycleMu        sync.RWMutex
+
+	cwdMu   sync.RWMutex
+	nodeCwd string
+
+	fileMu       sync.Mutex
+	fileID       int
+	files        map[int]nodeFileHandle
+	closed       bool
+	onFileOpen   func(int, *os.File, uint64)
+	onFileClose  func(int)
+	externalFile func(int) (*os.File, bool)
 }
 
-func (r *Runtime) resolveNodePathNoFollow(name string, allowMissing bool) (string, error) {
-	return r.resolveNodePathAt(name, r.nodeCwd, allowMissing, nodePathNoFollowFinal)
+func New(runtime *bridge.Runtime, root, cwd string, allowAllFileAccess bool) (*Module, error) {
+	m := &Module{
+		runtime:            runtime,
+		nodeRoot:           root,
+		nodeCwd:            cwd,
+		allowAllFileAccess: allowAllFileAccess,
+		fileID:             2,
+		files:              make(map[int]nodeFileHandle),
+	}
+	if root != "" && !allowAllFileAccess {
+		rootHandle, err := os.OpenRoot(root)
+		if err != nil {
+			return nil, fmt.Errorf("open JavaScript BaseDir for fs: %w", err)
+		}
+		m.nodeFSRoot = rootHandle
+	}
+	return m, nil
 }
 
-func (r *Runtime) resolveNodePathAt(name, cwd string, allowMissing bool, mode nodePathMode) (string, error) {
+func (m *Module) Cwd() string {
+	m.cwdMu.RLock()
+	cwd := m.nodeCwd
+	m.cwdMu.RUnlock()
+	return cwd
+}
+
+func (m *Module) Resolve(name string, allowMissing bool) (string, error) {
+	return m.resolveNodePathAt(name, m.Cwd(), allowMissing, nodePathFollowFinal)
+}
+
+func (m *Module) Chdir(name string) error {
+	resolved, err := m.Resolve(name, false)
+	if err != nil {
+		return err
+	}
+	info, err := m.nodeStat(resolved, true)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", name)
+	}
+	m.cwdMu.Lock()
+	m.nodeCwd = resolved
+	m.cwdMu.Unlock()
+	return nil
+}
+
+func (m *Module) Close() {
+	m.lifecycleMu.Lock()
+	if m.closed {
+		m.lifecycleMu.Unlock()
+		return
+	}
+	m.closed = true
+	if m.nodeFSRoot != nil {
+		_ = m.nodeFSRoot.Close()
+	}
+	m.lifecycleMu.Unlock()
+
+	m.fileMu.Lock()
+	handles := make([]nodeFileHandle, 0, len(m.files))
+	for fd, handle := range m.files {
+		handles = append(handles, handle)
+		delete(m.files, fd)
+	}
+	m.fileMu.Unlock()
+	for _, handle := range handles {
+		m.runtime.RemoveResource(handle.resourceID)
+		_ = handle.file.Close()
+	}
+}
+
+func (m *Module) OpenFileCount() int {
+	m.fileMu.Lock()
+	count := len(m.files)
+	m.fileMu.Unlock()
+	return count
+}
+
+func (m *Module) SetFileHooks(onOpen func(int, *os.File, uint64), onClose func(int)) {
+	m.fileMu.Lock()
+	m.onFileOpen = onOpen
+	m.onFileClose = onClose
+	m.fileMu.Unlock()
+}
+
+func (m *Module) SetExternalFileLookup(lookup func(int) (*os.File, bool)) {
+	m.fileMu.Lock()
+	m.externalFile = lookup
+	m.fileMu.Unlock()
+}
+
+func (m *Module) resolveNodePath(name string, allowMissing bool) (string, error) {
+	return m.resolveNodePathAt(name, m.Cwd(), allowMissing, nodePathFollowFinal)
+}
+
+func (m *Module) resolveNodePathNoFollow(name string, allowMissing bool) (string, error) {
+	return m.resolveNodePathAt(name, m.Cwd(), allowMissing, nodePathNoFollowFinal)
+}
+
+func (m *Module) resolveNodePathAt(name, cwd string, allowMissing bool, mode nodePathMode) (string, error) {
 	if name == "" {
 		return "", errors.New("path is empty")
 	}
@@ -47,10 +162,10 @@ func (r *Runtime) resolveNodePathAt(name, cwd string, allowMissing bool, mode no
 		resolved = filepath.Join(cwd, resolved)
 	}
 	resolved = filepath.Clean(resolved)
-	if r.allowAllFileAccess {
+	if m.allowAllFileAccess || m.nodeRoot == "" {
 		return resolved, nil
 	}
-	if !pathWithinBaseDir(r.nodeRoot, resolved) {
+	if !filepathutil.WithinBase(m.nodeRoot, resolved) {
 		return "", fmt.Errorf("path escapes BaseDir: %s", name)
 	}
 	pathToResolve := resolved
@@ -59,7 +174,7 @@ func (r *Runtime) resolveNodePathAt(name, cwd string, allowMissing bool, mode no
 	}
 	actual, err := filepath.EvalSymlinks(pathToResolve)
 	if err == nil {
-		if !pathWithinBaseDir(r.nodeRoot, actual) {
+		if !filepathutil.WithinBase(m.nodeRoot, actual) {
 			return "", fmt.Errorf("path symlink escapes BaseDir: %s", name)
 		}
 		if mode == nodePathNoFollowFinal {
@@ -79,7 +194,7 @@ func (r *Runtime) resolveNodePathAt(name, cwd string, allowMissing bool, mode no
 		parent = next
 		actualParent, parentErr := filepath.EvalSymlinks(parent)
 		if parentErr == nil {
-			if !pathWithinBaseDir(r.nodeRoot, actualParent) {
+			if !filepathutil.WithinBase(m.nodeRoot, actualParent) {
 				return "", fmt.Errorf("path parent symlink escapes BaseDir: %s", name)
 			}
 			return resolved, nil
@@ -90,43 +205,47 @@ func (r *Runtime) resolveNodePathAt(name, cwd string, allowMissing bool, mode no
 	}
 }
 
-func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
+func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 	exports := vm.NewObject()
+	syncMethods := make(map[string]goja.Callable)
 	setSync := func(name string, function any) {
-		_ = exports.Set(name, function)
+		value := vm.ToValue(function)
+		_ = exports.Set(name, value)
+		callable, _ := goja.AssertFunction(value)
+		syncMethods[name] = callable
 	}
 
 	setSync("readFileSync", func(call goja.FunctionCall) goja.Value {
-		path, err := r.resolveNodePath(call.Argument(0).String(), false)
+		path, err := m.resolveNodePath(call.Argument(0).String(), false)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
-		data, err := os.ReadFile(path)
+		data, err := m.nodeReadFile(path)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 		return encodeFSData(vm, data, fsEncoding(call.Argument(1)))
 	})
 	setSync("writeFileSync", func(call goja.FunctionCall) goja.Value {
-		path, err := r.resolveNodePath(call.Argument(0).String(), true)
+		path, err := m.resolveNodePathNoFollow(call.Argument(0).String(), true)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 		data := buffer.Bytes(vm, call.Argument(1))
-		if err := os.WriteFile(path, data, fsMode(call.Argument(2), 0o666)); err != nil {
+		if err := m.nodeWriteFile(path, data, fsMode(call.Argument(2), 0o666)); err != nil {
 			panic(vm.NewGoError(err))
 		}
 		return goja.Undefined()
 	})
 	setSync("appendFileSync", func(call goja.FunctionCall) goja.Value {
-		path, err := r.resolveNodePath(call.Argument(0).String(), true)
+		path, err := m.resolveNodePath(call.Argument(0).String(), true)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
-		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, fsMode(call.Argument(2), 0o666))
+		file, err := m.nodeOpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, fsMode(call.Argument(2), 0o666))
 		if err == nil {
-			_, err = file.Write(buffer.Bytes(vm, call.Argument(1)))
-			_ = file.Close()
+			_, writeErr := file.Write(buffer.Bytes(vm, call.Argument(1)))
+			err = errors.Join(writeErr, file.Close())
 		}
 		if err != nil {
 			panic(vm.NewGoError(err))
@@ -134,30 +253,33 @@ func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
 		return goja.Undefined()
 	})
 	setSync("existsSync", func(name string) bool {
-		path, err := r.resolveNodePath(name, false)
+		path, err := m.resolveNodePath(name, false)
 		if err != nil {
 			return false
 		}
-		_, err = os.Stat(path)
+		_, err = m.nodeStat(path, true)
 		return err == nil
 	})
-	setSync("accessSync", func(name string) {
-		path, err := r.resolveNodePath(name, false)
+	setSync("accessSync", func(call goja.FunctionCall) goja.Value {
+		name := call.Argument(0).String()
+		mode := fsAccessMode(call.Argument(1))
+		path, err := m.resolveNodePath(name, false)
 		if err == nil {
-			_, err = os.Stat(path)
+			err = m.nodeAccess(path, mode)
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(nodeErrorObject(vm, err, "access"))
 		}
+		return goja.Undefined()
 	})
-	setSync("statSync", func(call goja.FunctionCall) goja.Value { return r.fsStat(vm, call.Argument(0).String(), true) })
-	setSync("lstatSync", func(call goja.FunctionCall) goja.Value { return r.fsStat(vm, call.Argument(0).String(), false) })
+	setSync("statSync", func(call goja.FunctionCall) goja.Value { return m.fsStat(vm, call.Argument(0).String(), true) })
+	setSync("lstatSync", func(call goja.FunctionCall) goja.Value { return m.fsStat(vm, call.Argument(0).String(), false) })
 	setSync("readdirSync", func(call goja.FunctionCall) goja.Value {
-		path, err := r.resolveNodePath(call.Argument(0).String(), false)
+		path, err := m.resolveNodePath(call.Argument(0).String(), false)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
-		entries, err := os.ReadDir(path)
+		entries, err := m.nodeReadDir(path)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
@@ -173,15 +295,15 @@ func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
 		return vm.ToValue(result)
 	})
 	setSync("mkdirSync", func(call goja.FunctionCall) goja.Value {
-		path, err := r.resolveNodePath(call.Argument(0).String(), true)
+		path, err := m.resolveNodePathNoFollow(call.Argument(0).String(), true)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 		recursive := fsBooleanOption(call.Argument(1), "recursive")
 		if recursive {
-			err = os.MkdirAll(path, fsMode(call.Argument(1), 0o777))
+			err = m.nodeMkdir(path, fsMode(call.Argument(1), 0o777), true)
 		} else {
-			err = os.Mkdir(path, fsMode(call.Argument(1), 0o777))
+			err = m.nodeMkdir(path, fsMode(call.Argument(1), 0o777), false)
 		}
 		if err != nil {
 			panic(vm.NewGoError(err))
@@ -189,14 +311,14 @@ func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
 		return goja.Undefined()
 	})
 	setSync("rmSync", func(call goja.FunctionCall) goja.Value {
-		path, err := r.resolveNodePathNoFollow(call.Argument(0).String(), true)
+		path, err := m.resolveNodePathNoFollow(call.Argument(0).String(), true)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 		if fsBooleanOption(call.Argument(1), "recursive") {
-			err = os.RemoveAll(path)
+			err = m.nodeRemove(path, true)
 		} else {
-			err = os.Remove(path)
+			err = m.nodeRemove(path, false)
 		}
 		if err != nil && !fsBooleanOption(call.Argument(1), "force") {
 			panic(vm.NewGoError(err))
@@ -204,30 +326,30 @@ func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
 		return goja.Undefined()
 	})
 	setSync("unlinkSync", func(name string) {
-		path, err := r.resolveNodePathNoFollow(name, false)
+		path, err := m.resolveNodePathNoFollow(name, false)
 		if err == nil {
-			err = os.Remove(path)
+			err = m.nodeRemove(path, false)
 		}
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 	})
 	setSync("rmdirSync", func(name string) {
-		path, err := r.resolveNodePathNoFollow(name, false)
+		path, err := m.resolveNodePathNoFollow(name, false)
 		if err == nil {
-			err = os.Remove(path)
+			err = m.nodeRemove(path, false)
 		}
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 	})
 	setSync("renameSync", func(oldName, newName string) {
-		oldPath, err := r.resolveNodePathNoFollow(oldName, false)
+		oldPath, err := m.resolveNodePathNoFollow(oldName, false)
 		if err == nil {
 			var newPath string
-			newPath, err = r.resolveNodePathNoFollow(newName, true)
+			newPath, err = m.resolveNodePathNoFollow(newName, true)
 			if err == nil {
-				err = os.Rename(oldPath, newPath)
+				err = m.nodeRename(oldPath, newPath)
 			}
 		}
 		if err != nil {
@@ -235,21 +357,21 @@ func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
 		}
 	})
 	setSync("copyFileSync", func(sourceName, targetName string) {
-		if err := r.copyNodeFile(sourceName, targetName); err != nil {
+		if err := m.copyNodeFile(sourceName, targetName); err != nil {
 			panic(vm.NewGoError(err))
 		}
 	})
 	setSync("realpathSync", func(name string) string {
-		path, err := r.resolveNodePath(name, false)
+		path, err := m.resolveNodePath(name, false)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 		return path
 	})
 	setSync("readlinkSync", func(name string) string {
-		path, err := r.resolveNodePathNoFollow(name, false)
+		path, err := m.resolveNodePathNoFollow(name, false)
 		if err == nil {
-			path, err = os.Readlink(path)
+			path, err = m.nodeReadlink(path)
 		}
 		if err != nil {
 			panic(vm.NewGoError(err))
@@ -257,12 +379,12 @@ func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
 		return path
 	})
 	setSync("symlinkSync", func(targetName, linkName string) {
-		target, err := r.resolveNodePath(targetName, true)
+		target, err := m.resolveNodePath(targetName, true)
 		if err == nil {
 			var link string
-			link, err = r.resolveNodePathNoFollow(linkName, true)
+			link, err = m.resolveNodePathNoFollow(linkName, true)
 			if err == nil {
-				err = os.Symlink(target, link)
+				err = m.nodeSymlink(target, link)
 			}
 		}
 		if err != nil {
@@ -270,50 +392,50 @@ func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
 		}
 	})
 	setSync("truncateSync", func(name string, size int64) {
-		path, err := r.resolveNodePath(name, false)
+		path, err := m.resolveNodePath(name, false)
 		if err == nil {
-			err = os.Truncate(path, size)
+			err = m.nodeTruncate(path, size)
 		}
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 	})
 	setSync("chmodSync", func(name string, mode uint32) {
-		path, err := r.resolveNodePath(name, false)
+		path, err := m.resolveNodePath(name, false)
 		if err == nil {
-			err = os.Chmod(path, os.FileMode(mode))
+			err = m.nodeChmod(path, os.FileMode(mode))
 		}
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 	})
 	setSync("utimesSync", func(name string, accessTime, modifyTime any) {
-		path, err := r.resolveNodePath(name, false)
+		path, err := m.resolveNodePath(name, false)
 		if err == nil {
-			err = os.Chtimes(path, fsTime(accessTime), fsTime(modifyTime))
+			err = m.nodeChtimes(path, fsTime(accessTime), fsTime(modifyTime))
 		}
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 	})
 	setSync("mkdtempSync", func(prefix string) string {
-		path, err := r.resolveNodePath(prefix, true)
+		path, err := m.resolveNodePathNoFollow(prefix, true)
 		if err == nil {
-			path, err = os.MkdirTemp(filepath.Dir(path), filepath.Base(path)+"*")
+			path, err = m.nodeMkdirTemp(path)
 		}
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
 		return path
 	})
-	setSync("openSync", func(call goja.FunctionCall) goja.Value { return vm.ToValue(r.fsOpen(vm, call)) })
+	setSync("openSync", func(call goja.FunctionCall) goja.Value { return vm.ToValue(m.fsOpen(vm, call)) })
 	setSync("closeSync", func(fd int) {
-		if err := r.fsClose(fd); err != nil {
+		if err := m.fsClose(fd); err != nil {
 			panic(vm.NewGoError(err))
 		}
 	})
 	setSync("fstatSync", func(fd int) goja.Value {
-		file, err := r.fsFile(fd)
+		file, err := m.fsFile(fd)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
@@ -324,7 +446,7 @@ func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
 		return fsStatObject(vm, info)
 	})
 	setSync("fsyncSync", func(fd int) {
-		file, err := r.fsFile(fd)
+		file, err := m.fsFile(fd)
 		if err == nil {
 			err = file.Sync()
 		}
@@ -332,15 +454,15 @@ func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
 			panic(vm.NewGoError(err))
 		}
 	})
-	setSync("readSync", func(call goja.FunctionCall) goja.Value { return vm.ToValue(r.fsRead(vm, call)) })
-	setSync("writeSync", func(call goja.FunctionCall) goja.Value { return vm.ToValue(r.fsWrite(vm, call)) })
+	setSync("readSync", func(call goja.FunctionCall) goja.Value { return vm.ToValue(m.fsRead(vm, call)) })
+	setSync("writeSync", func(call goja.FunctionCall) goja.Value { return vm.ToValue(m.fsWrite(vm, call)) })
 
 	for _, asyncName := range []string{
 		"readFile", "writeFile", "appendFile", "access", "stat", "lstat", "readdir", "mkdir", "rm",
 		"unlink", "rmdir", "rename", "copyFile", "realpath", "readlink", "symlink", "truncate",
 		"chmod", "utimes", "mkdtemp", "open", "close", "fstat", "fsync", "read", "write",
 	} {
-		_ = exports.Set(asyncName, r.fsAsync(vm, asyncName))
+		_ = exports.Set(asyncName, m.fsAsync(vm, asyncName))
 	}
 	_ = exports.Set("exists", func(call goja.FunctionCall) goja.Value {
 		callback, ok := goja.AssertFunction(call.Argument(1))
@@ -348,22 +470,26 @@ func (r *Runtime) loadFSModule(vm *goja.Runtime, module *goja.Object) {
 			panic(vm.NewTypeError("callback must be a function"))
 		}
 		name := call.Argument(0).String()
-		cwd := r.nodeCwd
 		go func() {
-			path, err := r.resolveNodePathAt(name, cwd, false, nodePathFollowFinal)
+			path, err := m.resolveNodePath(name, false)
 			if err == nil {
-				_, err = os.Stat(path)
+				_, err = m.nodeStat(path, true)
 			}
-			r.loop.RunOnLoop(func(vm *goja.Runtime) { _, _ = callback(goja.Undefined(), vm.ToValue(err == nil)) })
+			m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+				_ = m.runtime.RunJob(vm, "fs.exists", func() error {
+					_, callbackErr := callback(goja.Undefined(), vm.ToValue(err == nil))
+					return callbackErr
+				})
+			})
 		}()
 		return goja.Undefined()
 	})
 	_ = exports.Set("constants", map[string]int{"F_OK": 0, "R_OK": 4, "W_OK": 2, "X_OK": 1, "COPYFILE_EXCL": 1})
-	r.attachFSPromises(vm, exports)
+	m.attachFSPromises(vm, exports)
 	_ = module.Set("exports", exports)
 }
 
-func (r *Runtime) fsAsync(vm *goja.Runtime, name string) func(goja.FunctionCall) goja.Value {
+func (m *Module) fsAsync(vm *goja.Runtime, name string) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		if len(call.Arguments) == 0 {
 			panic(vm.NewTypeError("callback must be a function"))
@@ -373,26 +499,28 @@ func (r *Runtime) fsAsync(vm *goja.Runtime, name string) func(goja.FunctionCall)
 			panic(vm.NewTypeError("callback must be a function"))
 		}
 		arguments := append([]goja.Value(nil), call.Arguments[:len(call.Arguments)-1]...)
-		operation := r.prepareFSAsync(vm, name, arguments)
+		operation := m.prepareFSAsync(vm, name, arguments)
 		go func() {
 			result, err := operation.run()
-			r.loop.RunOnLoop(func(vm *goja.Runtime) {
-				r.runAsyncJob(vm, "fs."+name, func() error {
+			if !m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+				_ = m.runtime.RunJob(vm, "fs."+name, func() error {
 					if err != nil {
-						_, callbackErr := callback(goja.Undefined(), vm.NewGoError(err))
+						_, callbackErr := callback(goja.Undefined(), nodeErrorObject(vm, err, "fs."+name))
 						return callbackErr
 					}
 					values := append([]goja.Value{goja.Null()}, operation.values(vm, result)...)
 					_, callbackErr := callback(goja.Undefined(), values...)
 					return callbackErr
 				})
-			})
+			}) {
+				return
+			}
 		}()
 		return goja.Undefined()
 	}
 }
 
-func (r *Runtime) attachFSPromises(vm *goja.Runtime, exports *goja.Object) {
+func (m *Module) attachFSPromises(vm *goja.Runtime, exports *goja.Object) {
 	factory, err := vm.RunString(`(function(fs) {
 		const methods = ["readFile","writeFile","appendFile","access","stat","lstat","readdir","mkdir","rm","unlink","rmdir","rename","copyFile","realpath","readlink","symlink","truncate","chmod","utimes","mkdtemp","close","fstat","fsync"];
 		const promises = {};
@@ -402,7 +530,7 @@ func (r *Runtime) attachFSPromises(vm *goja.Runtime, exports *goja.Object) {
 		const fileHandle = (fd) => ({
 			fd,
 			close: () => promises.close(fd),
-			stat: (...args) => promises.fstat(fd, ...args),
+			stat: () => promises.fstat(fd),
 			sync: () => promises.fsync(fd),
 			read: (...args) => promises.read(fd, ...args),
 			write: (...args) => promises.write(fd, ...args)
@@ -421,23 +549,13 @@ func (r *Runtime) attachFSPromises(vm *goja.Runtime, exports *goja.Object) {
 	_ = exports.Set("promises", promises)
 }
 
-func (r *Runtime) fsStat(vm *goja.Runtime, name string, follow bool) goja.Value {
-	var path string
-	var err error
-	if follow {
-		path, err = r.resolveNodePath(name, false)
-	} else {
-		path, err = r.resolveNodePathNoFollow(name, false)
-	}
+func (m *Module) fsStat(vm *goja.Runtime, name string, follow bool) goja.Value {
+	path, err := m.resolveNodePathAt(name, m.Cwd(), false, map[bool]nodePathMode{true: nodePathFollowFinal, false: nodePathNoFollowFinal}[follow])
 	if err != nil {
 		panic(vm.NewGoError(err))
 	}
 	var info os.FileInfo
-	if follow {
-		info, err = os.Stat(path)
-	} else {
-		info, err = os.Lstat(path)
-	}
+	info, err = m.nodeStat(path, follow)
 	if err != nil {
 		panic(vm.NewGoError(err))
 	}
@@ -506,7 +624,7 @@ func fsEncoding(value goja.Value) string {
 	}
 	if object, ok := value.(*goja.Object); ok {
 		encoding := object.Get("encoding")
-		if encoding == nil || goja.IsUndefined(encoding) || goja.IsNull(encoding) {
+		if goja.IsUndefined(encoding) || goja.IsNull(encoding) {
 			return ""
 		}
 		return encoding.String()
@@ -540,6 +658,13 @@ func fsMode(value goja.Value, fallback os.FileMode) os.FileMode {
 	return os.FileMode(value.ToInteger())
 }
 
+func fsAccessMode(value goja.Value) int {
+	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+		return 0
+	}
+	return int(value.ToInteger())
+}
+
 func fsBooleanOption(value goja.Value, name string) bool {
 	if object, ok := value.(*goja.Object); ok {
 		property := object.Get(name)
@@ -566,21 +691,21 @@ func fsTime(value any) time.Time {
 	}
 }
 
-func (r *Runtime) copyNodeFile(sourceName, targetName string) error {
-	source, err := r.resolveNodePath(sourceName, false)
+func (m *Module) copyNodeFile(sourceName, targetName string) error {
+	source, err := m.resolveNodePath(sourceName, false)
 	if err != nil {
 		return err
 	}
-	target, err := r.resolveNodePath(targetName, true)
+	target, err := m.resolveNodePath(targetName, true)
 	if err != nil {
 		return err
 	}
-	input, err := os.Open(source)
+	input, err := m.nodeOpenFile(source, os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
 	defer input.Close()
-	output, err := os.Create(target)
+	output, err := m.nodeOpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o666)
 	if err != nil {
 		return err
 	}
@@ -589,16 +714,70 @@ func (r *Runtime) copyNodeFile(sourceName, targetName string) error {
 	return errors.Join(copyErr, closeErr)
 }
 
-func (r *Runtime) fsOpen(vm *goja.Runtime, call goja.FunctionCall) int {
-	path, err := r.resolveNodePath(call.Argument(0).String(), true)
+func (m *Module) fsOpen(vm *goja.Runtime, call goja.FunctionCall) int {
+	path, err := m.resolveNodePath(call.Argument(0).String(), true)
 	if err != nil {
 		panic(vm.NewGoError(err))
 	}
-	fd, err := r.fsOpenPath(path, call.Argument(1).String(), fsMode(call.Argument(2), 0o666))
+	flags := fsOpenFlags(call.Argument(1).String())
+	file, err := m.nodeOpenFile(path, flags, fsMode(call.Argument(2), 0o666))
+	if err != nil {
+		panic(vm.NewGoError(err))
+	}
+	fd, err := m.registerFile(file)
 	if err != nil {
 		panic(vm.NewGoError(err))
 	}
 	return fd
+}
+
+func (m *Module) registerFile(file *os.File) (int, error) {
+	if file == nil {
+		return 0, errors.New("file is nil")
+	}
+	m.lifecycleMu.RLock()
+	if m.closed {
+		m.lifecycleMu.RUnlock()
+		_ = file.Close()
+		return 0, errors.New("JavaScript runtime is closed")
+	}
+	m.fileMu.Lock()
+	m.fileID++
+	fd := m.fileID
+	m.fileMu.Unlock()
+
+	var resourceID uint64
+	resourceID = m.runtime.AddResource(func() {
+		m.removeFileResource(resourceID)
+		_ = file.Close()
+	})
+	if resourceID == 0 {
+		m.lifecycleMu.RUnlock()
+		return 0, errors.New("JavaScript runtime is closed")
+	}
+
+	m.fileMu.Lock()
+	m.files[fd] = nodeFileHandle{file: file, resourceID: resourceID}
+	if m.onFileOpen != nil {
+		m.onFileOpen(fd, file, resourceID)
+	}
+	m.fileMu.Unlock()
+	m.lifecycleMu.RUnlock()
+	return fd, nil
+}
+
+func (m *Module) removeFileResource(resourceID uint64) {
+	if resourceID == 0 {
+		return
+	}
+	m.fileMu.Lock()
+	for fd, handle := range m.files {
+		if handle.resourceID == resourceID {
+			delete(m.files, fd)
+			break
+		}
+	}
+	m.fileMu.Unlock()
 }
 
 func fsOpenFlags(flags string) int {
@@ -624,32 +803,45 @@ func fsOpenFlags(flags string) int {
 	}
 }
 
-func (r *Runtime) fsFile(fd int) (*os.File, error) {
-	r.fileMu.Lock()
-	defer r.fileMu.Unlock()
-	handle, ok := r.files[fd]
-	if !ok {
-		return nil, fmt.Errorf("bad file descriptor: %d", fd)
+func (m *Module) fsFile(fd int) (*os.File, error) {
+	m.fileMu.Lock()
+	handle, ok := m.files[fd]
+	lookup := m.externalFile
+	m.fileMu.Unlock()
+	if ok {
+		return handle.file, nil
 	}
-	return handle.file, nil
+	if lookup != nil {
+		if file, exists := lookup(fd); exists {
+			return file, nil
+		}
+	}
+	return nil, fmt.Errorf("bad file descriptor: %d", fd)
 }
 
-func (r *Runtime) fsClose(fd int) error {
-	r.fileMu.Lock()
-	handle, ok := r.files[fd]
+func (m *Module) fsClose(fd int) error {
+	m.fileMu.Lock()
+	handle, ok := m.files[fd]
 	if ok {
-		delete(r.files, fd)
+		delete(m.files, fd)
 	}
-	r.fileMu.Unlock()
+	m.fileMu.Unlock()
 	if !ok {
 		return fmt.Errorf("bad file descriptor: %d", fd)
 	}
-	r.removeNodeResource(handle.resourceID)
+	m.runtime.RemoveResource(handle.resourceID)
+	if m.onFileClose != nil {
+		m.onFileClose(fd)
+	}
 	return handle.file.Close()
 }
 
-func (r *Runtime) fsRead(vm *goja.Runtime, call goja.FunctionCall) int {
-	file, err := r.fsFile(int(call.Argument(0).ToInteger()))
+func (m *Module) WriteResolved(path string, data []byte, mode os.FileMode) error {
+	return m.nodeWriteFile(path, data, mode)
+}
+
+func (m *Module) fsRead(vm *goja.Runtime, call goja.FunctionCall) int {
+	file, err := m.fsFile(int(call.Argument(0).ToInteger()))
 	if err != nil {
 		panic(vm.NewGoError(err))
 	}
@@ -659,7 +851,7 @@ func (r *Runtime) fsRead(vm *goja.Runtime, call goja.FunctionCall) int {
 	length := int(call.Argument(3).ToInteger())
 	position := call.Argument(4)
 	if offset < 0 || length < 0 || offset+length > len(data) {
-		panic(vm.NewGoError(fmt.Errorf("buffer range is out of bounds")))
+		panic(vm.NewTypeError("buffer range is out of bounds"))
 	}
 	if !goja.IsNull(position) && !goja.IsUndefined(position) {
 		_, err = file.Seek(position.ToInteger(), io.SeekStart)
@@ -674,8 +866,8 @@ func (r *Runtime) fsRead(vm *goja.Runtime, call goja.FunctionCall) int {
 	return count
 }
 
-func (r *Runtime) fsWrite(vm *goja.Runtime, call goja.FunctionCall) int {
-	file, err := r.fsFile(int(call.Argument(0).ToInteger()))
+func (m *Module) fsWrite(vm *goja.Runtime, call goja.FunctionCall) int {
+	file, err := m.fsFile(int(call.Argument(0).ToInteger()))
 	if err != nil {
 		panic(vm.NewGoError(err))
 	}

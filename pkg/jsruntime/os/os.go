@@ -1,4 +1,4 @@
-package jsruntime
+package os
 
 import (
 	"net"
@@ -8,22 +8,23 @@ import (
 	"unsafe"
 
 	"github.com/dop251/goja"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/metrics"
 )
 
-func (r *Runtime) loadOSModule(vm *goja.Runtime, module *goja.Object) {
+func Load(vm *goja.Runtime, module *goja.Object) {
 	exports := vm.NewObject()
 	hostname, _ := os.Hostname()
 	home, _ := os.UserHomeDir()
 	currentUser, _ := user.Current()
-	systemMetrics := func() nodeSystemMetrics {
-		metrics, err := readNodeSystemMetrics()
+	systemMetrics := func() metrics.System {
+		result, err := metrics.ReadSystem()
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
-		return metrics
+		return result
 	}
-	_ = exports.Set("arch", func() string { return nodeArch() })
-	_ = exports.Set("platform", func() string { return nodePlatform() })
+	_ = exports.Set("arch", func() string { return metrics.Arch() })
+	_ = exports.Set("platform", func() string { return metrics.Platform() })
 	_ = exports.Set("type", func() string {
 		switch runtime.GOOS {
 		case "windows":
@@ -42,8 +43,8 @@ func (r *Runtime) loadOSModule(vm *goja.Runtime, module *goja.Object) {
 			return runtime.GOOS
 		}
 	})
-	_ = exports.Set("release", func() string { return systemMetrics().release })
-	_ = exports.Set("version", func() string { return systemMetrics().version })
+	_ = exports.Set("release", func() string { return systemMetrics().Release })
+	_ = exports.Set("version", func() string { return systemMetrics().Version })
 	_ = exports.Set("machine", func() string { return runtime.GOARCH })
 	_ = exports.Set("hostname", func() string { return hostname })
 	_ = exports.Set("homedir", func() string { return home })
@@ -57,12 +58,12 @@ func (r *Runtime) loadOSModule(vm *goja.Runtime, module *goja.Object) {
 	})
 	_ = exports.Set("EOL", map[bool]string{true: "\r\n", false: "\n"}[runtime.GOOS == "windows"])
 	_ = exports.Set("devNull", map[bool]string{true: `\\.\nul`, false: "/dev/null"}[runtime.GOOS == "windows"])
-	_ = exports.Set("uptime", func() float64 { return systemMetrics().uptime })
-	_ = exports.Set("loadavg", func() []float64 { metrics := systemMetrics(); return metrics.loadavg[:] })
-	_ = exports.Set("totalmem", func() uint64 { return systemMetrics().totalMem })
-	_ = exports.Set("freemem", func() uint64 { return systemMetrics().freeMem })
+	_ = exports.Set("uptime", func() float64 { return systemMetrics().Uptime })
+	_ = exports.Set("loadavg", func() []float64 { result := systemMetrics(); return result.LoadAvg[:] })
+	_ = exports.Set("totalmem", func() uint64 { return systemMetrics().TotalMem })
+	_ = exports.Set("freemem", func() uint64 { return systemMetrics().FreeMem })
 	_ = exports.Set("availableParallelism", runtime.NumCPU)
-	_ = exports.Set("cpus", func() []map[string]any { return cpuInfoValues(systemMetrics().cpus) })
+	_ = exports.Set("cpus", func() []map[string]any { return metrics.CPUInfoValues(systemMetrics().CPUs) })
 	_ = exports.Set("userInfo", func() map[string]any {
 		if currentUser == nil {
 			return map[string]any{"uid": -1, "gid": -1, "username": "", "homedir": home, "shell": ""}
@@ -95,24 +96,4 @@ func nodeNetworkInterfaces() map[string][]map[string]any {
 		}
 	}
 	return result
-}
-
-func nodeArch() string {
-	switch runtime.GOARCH {
-	case "amd64":
-		return "x64"
-	case "386":
-		return "ia32"
-	case "arm64":
-		return "arm64"
-	default:
-		return runtime.GOARCH
-	}
-}
-
-func nodePlatform() string {
-	if runtime.GOOS == "windows" {
-		return "win32"
-	}
-	return runtime.GOOS
 }
