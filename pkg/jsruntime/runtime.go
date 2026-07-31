@@ -57,14 +57,15 @@ type Options struct {
 	Console io.Writer
 	// RequireLoader loads CommonJS module source. If nil, files are loaded from
 	// disk. Unless AllowAllFileAccess is true, every path passed to this loader
-	// is confined to BaseDir, or the current directory in NodeJS mode.
+	// is confined to BaseDir, or the current directory when BaseDir is empty.
 	RequireLoader require.SourceLoader
 	// ConfigureRequire registers approved native modules on the runtime's
 	// private CommonJS registry before the script is evaluated.
 	ConfigureRequire func(*require.Registry)
 	// BaseDir is the root used to resolve relative CommonJS modules and
 	// node_modules. The directory must exist. Module paths cannot escape it
-	// unless AllowAllFileAccess is true.
+	// unless AllowAllFileAccess is true. When BaseDir is empty, the current
+	// directory is used.
 	BaseDir string
 	// NodeJS enables the Node.js compatibility modules. Filesystem operations
 	// are confined to BaseDir, or the current directory when BaseDir is empty.
@@ -137,10 +138,10 @@ func New(script string, options Options) (*Runtime, error) {
 		return nil, err
 	}
 	fileRoot := baseDir
-	if options.NodeJS && fileRoot == "" {
+	if fileRoot == "" {
 		fileRoot, err = resolveBaseDir(".")
 		if err != nil {
-			return nil, fmt.Errorf("resolve Node.js filesystem root: %w", err)
+			return nil, fmt.Errorf("resolve JavaScript filesystem root: %w", err)
 		}
 	}
 	maxHTTPBodyBytes := options.MaxHTTPBodyBytes
@@ -165,8 +166,8 @@ func New(script string, options Options) (*Runtime, error) {
 			require.WithGlobalFolders(filepath.Join(fileRoot, "node_modules")),
 		)
 	}
-	// Keep the loader indirection so the Node.js filesystem module can become
-	// the canonical rooted loader after it owns the os.Root handle.
+	// Keep the loader indirection so the filesystem module can become the
+	// canonical rooted loader after it owns the os.Root handle.
 	var activeLoader require.SourceLoader = loader
 	registryOptions = append(registryOptions, require.WithLoader(func(modulePath string) ([]byte, error) {
 		return activeLoader(modulePath)
@@ -477,6 +478,8 @@ func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline
 	if err != nil {
 		if errors.Is(err, errExecutionTimeout) {
 			finish(errExecutionTimeout)
+		} else if code, ok := bridge.ExitCodeFromError(err); ok {
+			finish(exitCodeError(code))
 		} else {
 			finish(fmt.Errorf("JavaScript error: %v", err))
 		}
@@ -499,6 +502,10 @@ func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline
 		return goja.Undefined()
 	})
 	onRejected := vm.ToValue(func(call goja.FunctionCall) goja.Value {
+		if code, ok := bridge.ExitCodeFromValue(call.Argument(0)); ok {
+			finish(exitCodeError(code))
+			return goja.Undefined()
+		}
 		finish(fmt.Errorf("Promise rejected: %v", call.Argument(0)))
 		return goja.Undefined()
 	})
@@ -506,6 +513,15 @@ func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline
 		finish(fmt.Errorf("failed to observe Promise: %v", err))
 		return
 	}
+}
+
+// exitCodeError converts a script-requested process exit into a result.
+// Exit code 0 is a normal termination; nonzero codes are failures.
+func exitCodeError(code int64) error {
+	if code == 0 {
+		return nil
+	}
+	return fmt.Errorf("JavaScript process exited with code %d", code)
 }
 
 func truthyResult(name string, value goja.Value) error {

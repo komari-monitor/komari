@@ -80,6 +80,9 @@ func (r *Runtime) RunJob(vm *goja.Runtime, name string, job func() error) error 
 		return r.RunTurn(vm, job)
 	})
 	if err != nil {
+		if code, ok := ExitCodeFromError(err); ok && code == 0 {
+			return nil
+		}
 		r.callbackMu.RLock()
 		report := r.report
 		r.callbackMu.RUnlock()

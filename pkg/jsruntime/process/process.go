@@ -169,7 +169,7 @@ func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 	_ = process.Set("exit", func(call goja.FunctionCall) goja.Value {
 		code := call.Argument(0).ToInteger()
 		_ = process.Set("exitCode", code)
-		panic(vm.NewGoError(fmt.Errorf("process.exit(%d) requested", code)))
+		panic(vm.NewGoError(&bridge.ExitRequestedError{Code: code}))
 	})
 	_ = process.Set("abort", func() { panic(vm.NewGoError(fmt.Errorf("process.abort() requested"))) })
 	_ = process.Set("stdout", processStream(vm, "stdout", os.Stdout, true))

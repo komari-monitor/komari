@@ -604,13 +604,19 @@ const httpClientSource = `
 				incoming.complete = true; incoming.aborted = false; incoming.setEncoding = () => { throw new Error("http.IncomingMessage.setEncoding is not supported by jsruntime; the body is fully buffered"); }; incoming.pause = () => { throw new Error("http.IncomingMessage.pause is not supported by jsruntime; the body is fully buffered"); }; incoming.resume = () => { throw new Error("http.IncomingMessage.resume is not supported by jsruntime; the body is fully buffered"); };
 				this.emit("response", incoming); const bytes = new Uint8Array(await response.arrayBuffer());
 				setTimeout(() => { if (bytes.length) incoming.emit("data", bytes); incoming.emit("end"); incoming.emit("close"); this.emit("close"); }, 0);
-			}, (error) => { this.emit("error", error); this.emit("close"); });
+			}, (error) => { emitRequestError(this, error); this.emit("close"); });
 			if (callback) callback(); return this;
 		}
 		abort() { this.destroyed = true; this._controller.abort(); this.emit("abort"); }
-		destroy(error) { this.destroyed = true; this._controller.abort(error); if (error) this.emit("error", error); this.emit("close"); return this; }
+		destroy(error) { this.destroyed = true; this._controller.abort(error); if (error) emitRequestError(this, error); this.emit("close"); return this; }
 		setTimeout(ms, callback) { if (callback) this.once("timeout", callback); setTimeout(() => this.emit("timeout"), ms); return this; }
 		setNoDelay() { throw new Error("http.ClientRequest.setNoDelay is not supported by jsruntime"); } setSocketKeepAlive() { throw new Error("http.ClientRequest.setSocketKeepAlive is not supported by jsruntime"); }
+	}
+	// Unhandled "error" events are rethrown on the next turn so the host
+	// error reporter logs them instead of losing them in the Promise machinery.
+	function emitRequestError(request, error) {
+		try { request.emit("error", error); }
+		catch (unhandled) { setTimeout(() => { throw unhandled; }, 0); }
 	}
 	function request(input, options, callback) { if (typeof options === "function") { callback = options; options = {}; } return new ClientRequest(input, options, callback); }
 	function get(input, options, callback) { const req = request(input, options, callback); req.end(); return req; }

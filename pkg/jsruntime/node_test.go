@@ -1,6 +1,7 @@
 package jsruntime
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -122,6 +123,89 @@ func TestNodeRequireUsesCurrentDirectoryAsImplicitBaseDir(t *testing.T) {
 	defer runtime.Close()
 	if err := runtime.Call("verify"); err != nil {
 		t.Fatalf("implicit Node.js BaseDir confinement failed: %v", err)
+	}
+}
+
+func TestProcessExitZeroIsNormalTermination(t *testing.T) {
+	baseDir := t.TempDir()
+	newRuntime := func(script string) *Runtime {
+		t.Helper()
+		runtime, err := New(script, Options{NodeJS: true, BaseDir: baseDir, Console: io.Discard, Timeout: time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(runtime.Close)
+		return runtime
+	}
+
+	if err := newRuntime(`
+		function sendMessage() { process.exit(0); }
+	`).Call("sendMessage"); err != nil {
+		t.Fatalf("process.exit(0) should be a normal termination: %v", err)
+	}
+	if err := newRuntime(`
+		async function sendMessage() { process.exit(0); }
+	`).Call("sendMessage"); err != nil {
+		t.Fatalf("async process.exit(0) should be a normal termination: %v", err)
+	}
+
+	failure, err := New(`
+		function sendMessage() { process.exit(3); }
+	`, Options{NodeJS: true, BaseDir: baseDir, Console: io.Discard, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer failure.Close()
+	if err := failure.Call("sendMessage"); err == nil || !strings.Contains(err.Error(), "exited with code 3") {
+		t.Fatalf("process.exit(3) should fail with the exit code, got: %v", err)
+	}
+}
+
+func TestAsyncProcessExitZeroIsNotReportedAsFailure(t *testing.T) {
+	var output bytes.Buffer
+	runtime, err := New(`
+		function sendMessage() {
+			setTimeout(() => process.exit(0), 0);
+			return true;
+		}
+	`, Options{NodeJS: true, BaseDir: t.TempDir(), Console: &output, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if err := runtime.Call("sendMessage"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if strings.Contains(output.String(), "callback failed") {
+		t.Fatalf("process.exit(0) in a timer was reported as a failure: %s", output.String())
+	}
+}
+
+func TestHTTPClientRequestErrorWithoutListenerStillCloses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := server.URL
+	server.Close()
+
+	var output bytes.Buffer
+	runtime, err := New(`
+		function sendMessage(url) {
+			return new Promise((resolve) => {
+				const request = require("http").get(url);
+				request.on("close", () => resolve(true));
+			});
+		}
+	`, Options{NodeJS: true, BaseDir: t.TempDir(), Console: &output, Timeout: 3 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if err := runtime.Call("sendMessage", url); err != nil {
+		t.Fatalf("request close did not fire after connection failure: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if !strings.Contains(output.String(), "setTimeout callback failed") {
+		t.Fatalf("unhandled request error was not surfaced: %s", output.String())
 	}
 }
 

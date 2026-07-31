@@ -127,7 +127,7 @@ func TestRequireLoadsAndCachesCommonJSModule(t *testing.T) {
 			return first === second && first.value === 42 && globalThis.__moduleLoads === 1;
 		}
 	`, filepath.ToSlash(modulePath), filepath.ToSlash(modulePath))
-	runtime, err := New(script, Options{Console: io.Discard, Timeout: time.Second})
+	runtime, err := New(script, Options{Console: io.Discard, Timeout: time.Second, BaseDir: filepath.Dir(modulePath)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +135,36 @@ func TestRequireLoadsAndCachesCommonJSModule(t *testing.T) {
 
 	if err := runtime.Call("sendMessage"); err != nil {
 		t.Fatalf("CommonJS require failed: %v", err)
+	}
+}
+
+func TestRequireDefaultsToCurrentDirectoryWhenBaseDirEmpty(t *testing.T) {
+	root := t.TempDir()
+	baseDir := filepath.Join(root, "base")
+	if err := os.Mkdir(baseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "inside.js"), []byte(`module.exports = "inside";`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "outside.js"), []byte(`module.exports = "outside";`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(baseDir)
+
+	runtime, err := New(`
+		function sendMessage() {
+			let denied = false;
+			try { require("../outside.js"); } catch (error) { denied = String(error).includes("escapes"); }
+			return require("./inside.js") === "inside" && denied;
+		}
+	`, Options{Console: io.Discard, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if err := runtime.Call("sendMessage"); err != nil {
+		t.Fatalf("implicit current-directory BaseDir confinement failed: %v", err)
 	}
 }
 
