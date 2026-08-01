@@ -3,6 +3,7 @@ package plugin
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,7 +16,9 @@ import (
 // InstallZip validates a plugin ZIP and extracts it into DataDir/<short>.
 // The archive must contain komari-plugin.json at its root. Archive limits
 // mirror the theme package format; path-traversal entries reject the whole
-// package instead of being skipped.
+// package instead of being skipped. Reinstalling over a running plugin
+// unloads it first and restores it to its persisted enabled state when the
+// extraction succeeds.
 func InstallZip(zipPath string) (models.Plugin, error) {
 	var info models.Plugin
 	r, err := zip.OpenReader(zipPath)
@@ -61,6 +64,10 @@ func InstallZip(zipPath string) (models.Plugin, error) {
 		return info, err
 	}
 
+	if err := global.unload(info.Short); err != nil && !errors.Is(err, errNotLoaded) {
+		return info, fmt.Errorf("failed to unload running plugin %q before reinstall: %w", info.Short, err)
+	}
+
 	dir := filepath.Join(DataDir, info.Short)
 	if err := os.RemoveAll(dir); err != nil {
 		return info, fmt.Errorf("failed to remove existing plugin directory: %v", err)
@@ -80,6 +87,11 @@ func InstallZip(zipPath string) (models.Plugin, error) {
 		if _, err := os.Stat(filepath.Join(dir, page.File)); err != nil {
 			_ = os.RemoveAll(dir)
 			return info, fmt.Errorf("plugin page %s does not exist", page.File)
+		}
+	}
+	if global.stateStore().get(info.Short).Enabled {
+		if err := global.restartPlugin(info.Short); err != nil {
+			return info, fmt.Errorf("plugin reinstalled but reload failed: %w", err)
 		}
 	}
 	return info, nil

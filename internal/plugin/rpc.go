@@ -13,13 +13,15 @@ import (
 
 // registerRPC registers a plugin-owned RPC method. The handler is a
 // JavaScript function receiving the JSON-RPC params and returning the result
-// (or throwing an Error with optional code/data). Called while the manager
-// write lock is held during plugin load.
+// (or throwing an Error with optional code/data). Called from the plugin's
+// own event loop during script evaluation; it takes the manager lock itself.
 func (m *Manager) registerRPC(short, method string, handler goja.Callable) error {
 	method = strings.TrimSpace(method)
 	if method == "" || strings.HasPrefix(method, "rpc.") {
 		return fmt.Errorf("invalid RPC method name %q", method)
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	inst, ok := m.instances[short]
 	if !ok {
 		return fmt.Errorf("plugin %q is not loaded", short)
@@ -72,7 +74,12 @@ func (m *Manager) rpcHandler(short, method string) rpc.Handler {
 					errCh <- jsErrorToRPCError(vm, callErr)
 					return nil // error is captured, do not double-report
 				}
-				resultCh <- value.Export()
+				exported, exportErr := exportJSValue(value)
+				if exportErr != nil {
+					errCh <- &rpc.JsonRpcError{Code: rpc.InternalError, Message: exportErr.Error()}
+					return nil
+				}
+				resultCh <- exported
 				return nil
 			})
 		})
@@ -90,6 +97,19 @@ func (m *Manager) rpcHandler(short, method string) rpc.Handler {
 			return nil, &rpc.JsonRpcError{Code: rpc.DeadlineExceeded, Message: "plugin RPC handler timed out"}
 		}
 	}
+}
+
+// exportJSValue exports a goja value into a JSON-RPC result. Circular
+// structures and other export failures become an error instead of panicking
+// inside the event loop.
+func exportJSValue(value goja.Value) (result any, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = nil
+			err = fmt.Errorf("export JavaScript value: %v", recovered)
+		}
+	}()
+	return value.Export(), nil
 }
 
 // jsErrorToRPCError converts a thrown JavaScript error into a JSON-RPC error,
@@ -110,7 +130,9 @@ func jsErrorToRPCError(vm *goja.Runtime, err error) *rpc.JsonRpcError {
 				message = value.String()
 			}
 			if value := obj.Get("data"); value != nil && !goja.IsUndefined(value) {
-				data = value.Export()
+				if exported, exportErr := exportJSValue(value); exportErr == nil {
+					data = exported
+				}
 			}
 		}
 	}

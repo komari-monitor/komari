@@ -165,6 +165,10 @@ func (m *Manager) runResponseHook(r *http.Request, bw *bufferedResponseWriter, h
 	if timedOut {
 		return errors.New("plugin response hook timed out")
 	}
+	if bw.passedThrough() {
+		_, _ = m.logStore(h.short).Write([]byte(
+			fmt.Sprintf("[plugin] response exceeded the %d-byte hook buffer limit and was sent to the client unmodified\n", maxHookBufferBytes)))
+	}
 	return hookErr
 }
 
@@ -281,11 +285,19 @@ type bufferedResponseWriter struct {
 	streaming   bool // switched to passthrough after the first Flush()
 	forwarded   bool // status/headers already sent to the underlying writer
 	hijacked    bool
+	limit       int  // maximum buffered body bytes before passthrough
+	passthrough bool // buffering abandoned because the body exceeded limit
 	underlying  http.ResponseWriter
 }
 
 func newBufferedResponseWriter(w http.ResponseWriter) *bufferedResponseWriter {
-	return &bufferedResponseWriter{header: make(http.Header), underlying: w}
+	return &bufferedResponseWriter{header: make(http.Header), limit: maxHookBufferBytes, underlying: w}
+}
+
+func (b *bufferedResponseWriter) passedThrough() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.passthrough
 }
 
 func (b *bufferedResponseWriter) Header() http.Header { return b.header }
@@ -312,15 +324,31 @@ func (b *bufferedResponseWriter) WriteHeader(code int) {
 
 func (b *bufferedResponseWriter) Write(p []byte) (int, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.streaming {
+		b.mu.Unlock()
 		return b.underlying.Write(p)
 	}
 	if !b.wroteHeader {
 		b.statusCode = http.StatusOK
 		b.wroteHeader = true
 	}
-	return b.body.Write(p)
+	if b.body.Len()+len(p) > b.limit {
+		// Response is too large to rewrite: switch to passthrough mode and
+		// forward status/headers and the buffered body to the real writer
+		// immediately. Response hooks can no longer modify this response.
+		status, header, buffered := b.statusCode, b.header.Clone(), b.body.Bytes()
+		b.streaming = true
+		b.forwarded = true
+		b.passthrough = true
+		b.mu.Unlock()
+		b.writeThrough(status, header)
+		_, _ = b.underlying.Write(buffered)
+		_, _ = b.underlying.Write(p)
+		return len(p), nil
+	}
+	_, err := b.body.Write(p)
+	b.mu.Unlock()
+	return len(p), err
 }
 
 func (b *bufferedResponseWriter) status() int {

@@ -48,6 +48,11 @@ const (
 	stateFileName = "state.json"
 )
 
+// maxHookBufferBytes caps how much of a response the hook chain buffers
+// for rewriting. Larger responses pass through to the client unmodified;
+// it is a variable so tests can lower it.
+var maxHookBufferBytes = 32 << 20
+
 const (
 	maxPluginArchiveFiles  = 10000
 	maxPluginFileSize      = 128 << 20
@@ -196,16 +201,12 @@ func (m *Manager) instanceFor(short string) *Instance {
 	return m.instances[short]
 }
 
-// load runs a plugin inside its own jsruntime instance. The caller must hold
-// no Manager locks that block the event loop; script evaluation and the
-// load() hook run while m.mu is held, and registerServerModule routes are
-// registered through the engine under the same lock.
+// load runs a plugin inside its own jsruntime instance. The manager lock is
+// only held while the instance map is mutated; script evaluation and the
+// load() hook run without it so the plugin can call server.call (which takes
+// a manager read lock through rpcHandler) without deadlocking. On failure the
+// instance is dropped and its hooks and RPC methods are cleaned up.
 func (m *Manager) load(short string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.instances[short]; ok {
-		return fmt.Errorf("plugin %q is already loaded", short)
-	}
 	dir := filepath.Join(DataDir, short)
 	info, err := readManifest(dir)
 	if err != nil {
@@ -224,7 +225,13 @@ func (m *Manager) load(short string) error {
 	_, _ = logs.Write([]byte("[plugin] loading " + short + "\n"))
 
 	inst := &Instance{info: info, dir: dir, handlers: make(map[string]goja.Callable)}
+	m.mu.Lock()
+	if _, ok := m.instances[short]; ok {
+		m.mu.Unlock()
+		return fmt.Errorf("plugin %q is already loaded", short)
+	}
 	m.instances[short] = inst
+	m.mu.Unlock()
 
 	opts := jsruntime.Options{
 		BaseDir:             dir,
@@ -245,7 +252,7 @@ func (m *Manager) load(short string) error {
 	}
 	rt, err := jsruntime.New(string(script), opts)
 	if err != nil {
-		delete(m.instances, short)
+		m.dropInstance(short, inst)
 		return fmt.Errorf("initialize plugin %q: %w", short, err)
 	}
 	inst.mu.Lock()
@@ -255,21 +262,61 @@ func (m *Manager) load(short string) error {
 	if rt.HasFunction("load") {
 		if err := rt.CallVoid("load"); err != nil {
 			rt.Close()
-			delete(m.instances, short)
+			m.dropInstance(short, inst)
 			return fmt.Errorf("plugin %q load() failed: %w", short, err)
 		}
+	}
+	m.mu.Lock()
+	stillLoaded := m.instances[short] == inst
+	m.mu.Unlock()
+	if !stillLoaded {
+		// A concurrent unload claimed this instance while it was loading.
+		rt.Close()
+		return fmt.Errorf("plugin %q was unloaded while loading", short)
 	}
 	_, _ = logs.Write([]byte("[plugin] loaded " + short + "\n"))
 	return nil
 }
 
-func (m *Manager) unload(short string) error {
+// dropInstance removes a failed load from the manager: it detaches the
+// instance, unregisters its RPC methods, and clears its route slots and
+// hooks. Gin route slots from the failed load stay inert, mirroring the
+// unload behavior. The caller must not hold any Manager lock.
+func (m *Manager) dropInstance(short string, inst *Instance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.instances[short] != inst {
+		return // replaced by a newer load or already unloaded
+	}
+	delete(m.instances, short)
+	inst.mu.Lock()
+	for method := range inst.rpcMethods {
+		rpc.Unregister(method)
+	}
+	inst.runtime = nil
+	inst.host = nil
+	clear(inst.handlers)
+	clear(inst.rpcMethods)
+	inst.mu.Unlock()
+	m.removeHooksLocked(short)
+}
+
+// unload stops one plugin. The instance is claimed (removed from the map)
+// under the manager lock, then the unload() hook runs without any lock so
+// the script can still call other registered RPC methods. After the hook the
+// remaining state is detached under the lock and the runtime is closed.
+// Calls to server.call made from unload() itself are rejected with a clean
+// "not loaded" error instead of deadlocking.
+func (m *Manager) unload(short string) error {
+	m.mu.Lock()
 	inst, ok := m.instances[short]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("%w: %q", errNotLoaded, short)
 	}
+	delete(m.instances, short)
+	m.mu.Unlock()
+
 	inst.mu.RLock()
 	rt := inst.runtime
 	inst.mu.RUnlock()
@@ -280,8 +327,8 @@ func (m *Manager) unload(short string) error {
 				unloadErr = fmt.Errorf("plugin %q unload() failed: %w", short, err)
 			}
 		}
-		rt.Close()
 	}
+	m.mu.Lock()
 	inst.mu.Lock()
 	for method := range inst.rpcMethods {
 		rpc.Unregister(method)
@@ -291,8 +338,11 @@ func (m *Manager) unload(short string) error {
 	clear(inst.handlers)
 	clear(inst.rpcMethods)
 	inst.mu.Unlock()
-	delete(m.instances, short)
 	m.removeHooksLocked(short)
+	m.mu.Unlock()
+	if rt != nil {
+		rt.Close()
+	}
 	_, _ = m.logStore(short).Write([]byte("[plugin] unloaded " + short + "\n"))
 	return unloadErr
 }
@@ -325,6 +375,15 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 		if err := m.unload(short); err != nil && !errors.Is(err, errNotLoaded) {
 			st.LastError = err.Error()
 		}
+		m.stateStore().set(short, st)
+		return nil
+	}
+	if m.instanceFor(short) != nil {
+		// Already running: enabling is idempotent. Re-running load() would
+		// fail with "already loaded" and auto-disable the plugin.
+		st := m.stateStore().get(short)
+		st.Enabled = true
+		st.LastError = ""
 		m.stateStore().set(short, st)
 		return nil
 	}
@@ -384,6 +443,28 @@ func (m *Manager) loadAll() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// restartPlugin brings a plugin back to its persisted enabled state after a
+// reinstall. A failed reload or a changed approval hash auto-disables the
+// plugin and keeps the error visible, mirroring the startup load path.
+func (m *Manager) restartPlugin(short string) error {
+	st := m.stateStore().get(short)
+	info, err := readManifest(filepath.Join(DataDir, short))
+	if err != nil {
+		return m.disableWithError(short, st, err)
+	}
+	if permissionsRequireApproval(info.Permissions) &&
+		st.ApprovedPermissionsHash != approvalPermissionsHash(info.Permissions) {
+		return m.disableWithError(short, st, ErrPermissionApprovalRequired)
+	}
+	if err := m.load(short); err != nil {
+		return m.disableWithError(short, st, err)
+	}
+	st.Enabled = true
+	st.LastError = ""
+	m.stateStore().set(short, st)
+	return nil
 }
 
 // disableWithError persists the auto-disable state for one plugin and wraps
@@ -517,9 +598,11 @@ func (m *Manager) hooksOf(kind hookKind) []*hookEntry {
 	return snapshot
 }
 
-// registerHook appends a hook. Called while the manager write lock is held
-// during plugin load.
+// registerHook appends a hook. Called from the plugin's own event loop
+// during script evaluation; it takes the manager lock itself.
 func (m *Manager) registerHook(short string, kind hookKind, fn goja.Callable) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	inst := m.instances[short]
 	if inst == nil {
 		return

@@ -141,17 +141,23 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 }
 
 // callParams converts JS arguments into JSON-RPC params: no params, a single
-// value, or a positional array.
+// value, or a positional array. Values that cannot be exported (for example
+// circular objects) are skipped so the call rejects instead of panicking.
 func callParams(call goja.FunctionCall) any {
 	switch n := len(call.Arguments); {
 	case n <= 1:
 		return nil
 	case n == 2:
-		return call.Argument(1).Export()
+		exported, _ := exportJSValue(call.Argument(1))
+		return exported
 	default:
 		params := make([]any, 0, n-1)
 		for i := 1; i < n; i++ {
-			params = append(params, call.Argument(i).Export())
+			exported, err := exportJSValue(call.Argument(i))
+			if err != nil {
+				return nil
+			}
+			params = append(params, exported)
 		}
 		return params
 	}
@@ -167,10 +173,13 @@ func jsRPCError(vm *goja.Runtime, e *rpc.JsonRpcError) *goja.Object {
 }
 
 // registerRoute registers (or reuses) a gin route slot for one plugin. It is
-// called while the manager write lock is held during plugin load, so it must
-// not take Manager locks itself.
+// called from the plugin's own event loop during script evaluation and takes
+// the manager lock itself. The critical section is short and never waits on
+// the event loop, so no lock cycle is possible.
 func (m *Manager) registerRoute(short, method, path string, handler goja.Callable) (err error) {
 	key := method + " " + path
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	inst, ok := m.instances[short]
 	if !ok {
 		return fmt.Errorf("plugin %q is not loaded", short)
