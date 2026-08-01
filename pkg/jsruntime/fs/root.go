@@ -29,20 +29,44 @@ var errFilesystemClosed = errors.New("JavaScript filesystem is closed")
 
 const nodeAccessMask = 1 | 2 | 4
 
-func (m *Module) acquireFilesystem() (*os.Root, func(), error) {
+// filesystemFor returns the confined root that owns name together with the
+// path relative to that root, or a nil root when access is unrestricted. The
+// lifecycle read lock is held for the duration of the caller's operation; the
+// returned unlock function must be called once when the operation completes.
+// Callers must not hold any other Module lock.
+func (m *Module) filesystemFor(name string) (*rootedDir, string, func(), error) {
 	m.lifecycleMu.RLock()
 	if m.closed {
 		m.lifecycleMu.RUnlock()
-		return nil, nil, errFilesystemClosed
+		return nil, "", nil, errFilesystemClosed
 	}
-	return m.nodeFSRoot, m.lifecycleMu.RUnlock, nil
-}
-
-func (m *Module) nodeRelativePath(name string) (string, error) {
 	if m.nodeFSRoot == nil {
-		return name, nil
+		return nil, name, m.lifecycleMu.RUnlock, nil
 	}
-	return filepathutil.RelativeToBase(m.nodeRoot, name)
+	if filepathutil.WithinBase(m.nodeRoot, name) {
+		relative, err := filepathutil.RelativeToBase(m.nodeRoot, name)
+		if err != nil {
+			m.lifecycleMu.RUnlock()
+			return nil, "", nil, err
+		}
+		return &rootedDir{path: m.nodeRoot, handle: m.nodeFSRoot}, relative, m.lifecycleMu.RUnlock, nil
+	}
+	for _, extra := range m.extraRoots {
+		if extra.handle == nil {
+			continue
+		}
+		if filepathutil.WithinBase(extra.path, name) {
+			relative, err := filepathutil.RelativeToBase(extra.path, name)
+			if err != nil {
+				m.lifecycleMu.RUnlock()
+				return nil, "", nil, err
+			}
+			entry := extra
+			return &entry, relative, m.lifecycleMu.RUnlock, nil
+		}
+	}
+	m.lifecycleMu.RUnlock()
+	return nil, "", nil, fmt.Errorf("path escapes BaseDir: %s", name)
 }
 
 func nodePathError(operation, name string, err error) error {
@@ -60,7 +84,7 @@ func nodePathError(operation, name string, err error) error {
 }
 
 func (m *Module) nodeOpenFile(name string, flags int, mode os.FileMode) (*os.File, error) {
-	root, unlock, err := m.acquireFilesystem()
+	root, relative, unlock, err := m.filesystemFor(name)
 	if err != nil {
 		return nil, err
 	}
@@ -68,11 +92,7 @@ func (m *Module) nodeOpenFile(name string, flags int, mode os.FileMode) (*os.Fil
 	if root == nil {
 		return os.OpenFile(name, flags, mode)
 	}
-	relative, err := m.nodeRelativePath(name)
-	if err != nil {
-		return nil, err
-	}
-	file, err := root.OpenFile(relative, flags, mode.Perm())
+	file, err := root.handle.OpenFile(relative, flags, mode.Perm())
 	return file, nodePathError("open", name, err)
 }
 
@@ -115,7 +135,7 @@ func (m *Module) nodeWriteFile(name string, data []byte, mode os.FileMode) error
 }
 
 func (m *Module) nodeStat(name string, follow bool) (os.FileInfo, error) {
-	root, unlock, err := m.acquireFilesystem()
+	root, relative, unlock, err := m.filesystemFor(name)
 	if err != nil {
 		return nil, err
 	}
@@ -126,15 +146,11 @@ func (m *Module) nodeStat(name string, follow bool) (os.FileInfo, error) {
 		}
 		return os.Lstat(name)
 	}
-	relative, err := m.nodeRelativePath(name)
-	if err != nil {
-		return nil, err
-	}
 	if follow {
-		info, statErr := root.Stat(relative)
+		info, statErr := root.handle.Stat(relative)
 		return info, nodePathError("stat", name, statErr)
 	}
-	info, statErr := root.Lstat(relative)
+	info, statErr := root.handle.Lstat(relative)
 	return info, nodePathError("lstat", name, statErr)
 }
 
@@ -163,7 +179,7 @@ func (m *Module) nodeReadDir(name string) ([]fs.DirEntry, error) {
 }
 
 func (m *Module) nodeMkdir(name string, mode os.FileMode, recursive bool) error {
-	root, unlock, err := m.acquireFilesystem()
+	root, relative, unlock, err := m.filesystemFor(name)
 	if err != nil {
 		return err
 	}
@@ -174,20 +190,16 @@ func (m *Module) nodeMkdir(name string, mode os.FileMode, recursive bool) error 
 		}
 		return os.Mkdir(name, mode)
 	}
-	relative, err := m.nodeRelativePath(name)
-	if err != nil {
-		return err
-	}
 	if recursive {
-		err = root.MkdirAll(relative, mode.Perm())
+		err = root.handle.MkdirAll(relative, mode.Perm())
 	} else {
-		err = root.Mkdir(relative, mode.Perm())
+		err = root.handle.Mkdir(relative, mode.Perm())
 	}
 	return nodePathError("mkdir", name, err)
 }
 
 func (m *Module) nodeRemove(name string, recursive bool) error {
-	root, unlock, err := m.acquireFilesystem()
+	root, relative, unlock, err := m.filesystemFor(name)
 	if err != nil {
 		return err
 	}
@@ -198,20 +210,18 @@ func (m *Module) nodeRemove(name string, recursive bool) error {
 		}
 		return os.Remove(name)
 	}
-	relative, err := m.nodeRelativePath(name)
-	if err != nil {
-		return err
-	}
 	if recursive {
-		err = root.RemoveAll(relative)
+		err = root.handle.RemoveAll(relative)
 	} else {
-		err = root.Remove(relative)
+		err = root.handle.Remove(relative)
 	}
 	return nodePathError("remove", name, err)
 }
 
+// nodeRename requires both paths to live under the same confined root; a
+// rename across the BaseDir/storage boundary is rejected.
 func (m *Module) nodeRename(oldName, newName string) error {
-	root, unlock, err := m.acquireFilesystem()
+	root, oldRelative, unlock, err := m.filesystemFor(oldName)
 	if err != nil {
 		return err
 	}
@@ -219,19 +229,15 @@ func (m *Module) nodeRename(oldName, newName string) error {
 	if root == nil {
 		return os.Rename(oldName, newName)
 	}
-	oldRelative, err := m.nodeRelativePath(oldName)
+	newRelative, err := filepathutil.RelativeToBase(root.path, newName)
 	if err != nil {
-		return err
+		return nodePathError("rename", newName, err)
 	}
-	newRelative, err := m.nodeRelativePath(newName)
-	if err != nil {
-		return err
-	}
-	return nodePathError("rename", oldName, root.Rename(oldRelative, newRelative))
+	return nodePathError("rename", oldName, root.handle.Rename(oldRelative, newRelative))
 }
 
 func (m *Module) nodeReadlink(name string) (string, error) {
-	root, unlock, err := m.acquireFilesystem()
+	root, relative, unlock, err := m.filesystemFor(name)
 	if err != nil {
 		return "", err
 	}
@@ -239,17 +245,13 @@ func (m *Module) nodeReadlink(name string) (string, error) {
 	if root == nil {
 		return os.Readlink(name)
 	}
-	relative, err := m.nodeRelativePath(name)
-	if err != nil {
-		return "", err
-	}
-	target, err := root.Readlink(relative)
+	target, err := root.handle.Readlink(relative)
 	return target, nodePathError("readlink", name, err)
 }
 
 func (m *Module) nodeSymlink(targetName, linkName string) error {
 	target := filepath.FromSlash(targetName)
-	root, unlock, err := m.acquireFilesystem()
+	root, relativeLink, unlock, err := m.filesystemFor(linkName)
 	if err != nil {
 		return err
 	}
@@ -262,17 +264,13 @@ func (m *Module) nodeSymlink(targetName, linkName string) error {
 		effectiveTarget = filepath.Join(filepath.Dir(linkName), effectiveTarget)
 	}
 	effectiveTarget = filepath.Clean(effectiveTarget)
-	if !filepathutil.WithinBase(m.nodeRoot, effectiveTarget) {
+	if !m.withinAnyRoot(effectiveTarget) {
 		return fmt.Errorf("path symlink escapes BaseDir: %s", targetName)
 	}
 	if filepath.IsAbs(target) {
 		target, _ = filepath.Rel(filepath.Dir(linkName), effectiveTarget)
 	}
-	relativeLink, err := m.nodeRelativePath(linkName)
-	if err != nil {
-		return err
-	}
-	return nodePathError("symlink", linkName, root.Symlink(target, relativeLink))
+	return nodePathError("symlink", linkName, root.handle.Symlink(target, relativeLink))
 }
 
 func (m *Module) nodeTruncate(name string, size int64) error {
@@ -294,7 +292,7 @@ func (m *Module) nodeChmod(name string, mode os.FileMode) error {
 }
 
 func (m *Module) nodeChtimes(name string, accessTime, modifyTime time.Time) error {
-	root, unlock, err := m.acquireFilesystem()
+	root, relative, unlock, err := m.filesystemFor(name)
 	if err != nil {
 		return err
 	}
@@ -302,11 +300,7 @@ func (m *Module) nodeChtimes(name string, accessTime, modifyTime time.Time) erro
 	if root == nil {
 		return os.Chtimes(name, accessTime, modifyTime)
 	}
-	relative, err := m.nodeRelativePath(name)
-	if err != nil {
-		return err
-	}
-	file, err := root.OpenFile(relative, os.O_RDONLY, 0)
+	file, err := root.handle.OpenFile(relative, os.O_RDONLY, 0)
 	if err != nil {
 		return nodePathError("open", name, err)
 	}
@@ -315,7 +309,7 @@ func (m *Module) nodeChtimes(name string, accessTime, modifyTime time.Time) erro
 }
 
 func (m *Module) nodeMkdirTemp(prefix string) (string, error) {
-	root, unlock, err := m.acquireFilesystem()
+	root, _, unlock, err := m.filesystemFor(prefix)
 	if err != nil {
 		return "", err
 	}

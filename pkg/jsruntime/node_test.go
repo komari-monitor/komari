@@ -100,6 +100,63 @@ func TestNodeFileAccessConfinementAndAllowAll(t *testing.T) {
 	}
 }
 
+func TestStorageDirIsConfinedAdditionalRoot(t *testing.T) {
+	root := t.TempDir()
+	baseDir := filepath.Join(root, "base")
+	storageDir := filepath.Join(root, "plugin-data")
+	otherStorage := filepath.Join(root, "plugin-data-other")
+	for _, dir := range []string{baseDir, storageDir, otherStorage} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runtime, err := New(`
+		const fs = require("fs");
+		const path = require("path");
+		fs.writeFileSync(path.join(__storageDir__, "saved.txt"), "hello", "utf8");
+		async function verify() {
+			if (await fs.promises.readFile(path.join(__storageDir__, "saved.txt"), "utf8") !== "hello") {
+				return "storage data not readable";
+			}
+			if (typeof __storageDir__ !== "string" || __storageDir__.length === 0) {
+				return "__storageDir__ missing";
+			}
+			let wroteBase = false;
+			try { fs.writeFileSync("in-base.txt", "x"); wroteBase = true; } catch (error) {}
+			if (!wroteBase) {
+				return "BaseDir no longer writable";
+			}
+			let baseReachedStorage = false;
+			try { fs.readFileSync(path.join("..", path.basename(__storageDir__), "saved.txt"), "utf8"); }
+			catch (error) { baseReachedStorage = true; }
+			if (!baseReachedStorage) {
+				return "BaseDir reached the storage dir";
+			}
+			let escapedStorage = false;
+			try { fs.writeFileSync(path.join(__storageDir__, "..", "escaped.txt"), "x"); }
+			catch (error) { escapedStorage = true; }
+			if (!escapedStorage) {
+				return "escaped the storage dir";
+			}
+			let reachedOtherStorage = false;
+			try { fs.writeFileSync(path.join(__storageDir__, "..", "plugin-data-other", "x.txt"), "x"); }
+			catch (error) { reachedOtherStorage = true; }
+			if (!reachedOtherStorage) {
+				return "reached another plugin storage dir";
+			}
+			return true;
+		}
+	`, Options{NodeJS: true, BaseDir: baseDir, StorageDir: storageDir, Console: io.Discard, Timeout: 3 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if err := runtime.Call("verify"); err != nil {
+		t.Fatalf("storage dir confinement failed: %v", err)
+	}
+}
+
 func TestNodeRequireUsesCurrentDirectoryAsImplicitBaseDir(t *testing.T) {
 	root := t.TempDir()
 	baseDir := filepath.Join(root, "base")

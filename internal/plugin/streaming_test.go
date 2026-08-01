@@ -28,7 +28,7 @@ func encodeTestJPEG(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-// TestBuiltinStyleStreamingWithResponseHooks 模拟内置 /api/mjpeg_live 风格的流式
+// TestBuiltinStyleStreamingWithResponseHooks 模拟普通 Gin handler 风格的流式
 // 路由（直接写 c.Writer + Flush）在存在 response hook 时仍然能把数据推给客户端。
 // 回归：bufferedResponseWriter 此前会吞掉所有 Write，直到 handler 返回（流式
 // handler 永不返回），客户端因此收不到任何数据（黑屏）。

@@ -83,6 +83,15 @@ type Options struct {
 	// AllowAllFileAccess allows require and fs paths to escape BaseDir. The
 	// default confines both module and filesystem access to BaseDir.
 	AllowAllFileAccess bool
+	// ExtraRoots adds additional filesystem roots confined like BaseDir:
+	// scripts may read and write under them, and paths cannot escape them
+	// unless AllowAllFileAccess is true. Each root must exist and is resolved
+	// with symlinks. Module (require) resolution stays confined to BaseDir.
+	ExtraRoots []string
+	// StorageDir is an additional confined filesystem root for long-term
+	// data that survives plugin reinstallation. It must exist and is exposed
+	// to scripts as the __storageDir__ global when NodeJS is enabled.
+	StorageDir string
 	// MaxHTTPBodyBytes limits buffered fetch responses and HTTP server request
 	// bodies. Values less than one use a 32 MiB default.
 	MaxHTTPBodyBytes int64
@@ -105,6 +114,7 @@ type Runtime struct {
 	nodeJS              bool
 	maxHTTPBodyBytes    int64
 	maxChildOutputBytes int
+	storageDir          string
 	consoleMod          *console.Module
 	timersMod           *timers.Module
 	fetchMod            *fetch.Module
@@ -150,6 +160,10 @@ func New(script string, options Options) (*Runtime, error) {
 			return nil, fmt.Errorf("resolve JavaScript filesystem root: %w", err)
 		}
 	}
+	extraRoots, storageDir, err := resolveExtraRoots(options.ExtraRoots, options.StorageDir)
+	if err != nil {
+		return nil, err
+	}
 	maxHTTPBodyBytes := options.MaxHTTPBodyBytes
 	if maxHTTPBodyBytes < 1 {
 		maxHTTPBodyBytes = defaultMaxHTTPBodyBytes
@@ -193,6 +207,7 @@ func New(script string, options Options) (*Runtime, error) {
 		nodeJS:              options.NodeJS,
 		maxHTTPBodyBytes:    maxHTTPBodyBytes,
 		maxChildOutputBytes: maxChildOutputBytes,
+		storageDir:          storageDir,
 		resources:           make(map[uint64]func()),
 		fileID:              2,
 		files:               make(map[int]nodeFileHandle),
@@ -200,7 +215,7 @@ func New(script string, options Options) (*Runtime, error) {
 	runtime.consoleMod = console.New(options.Console)
 	runtime.timersMod = timers.New(host)
 	runtime.fetchMod = fetch.New(host, client, maxHTTPBodyBytes)
-	filesystem, fsErr := fs.New(host, fileRoot, fileRoot, options.AllowAllFileAccess)
+	filesystem, fsErr := fs.New(host, fileRoot, fileRoot, extraRoots, options.AllowAllFileAccess)
 	if fsErr != nil {
 		runtimeLoop.Terminate()
 		return nil, fsErr
@@ -295,25 +310,57 @@ func New(script string, options Options) (*Runtime, error) {
 }
 
 func resolveBaseDir(path string) (string, error) {
+	return resolveRoot("BaseDir", path)
+}
+
+func resolveRoot(label, path string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve JavaScript BaseDir: %w", err)
+		return "", fmt.Errorf("resolve JavaScript %s: %w", label, err)
 	}
 	resolved, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
-		return "", fmt.Errorf("resolve JavaScript BaseDir: %w", err)
+		return "", fmt.Errorf("resolve JavaScript %s: %w", label, err)
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {
-		return "", fmt.Errorf("stat JavaScript BaseDir: %w", err)
+		return "", fmt.Errorf("stat JavaScript %s: %w", label, err)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("JavaScript BaseDir is not a directory: %s", resolved)
+		return "", fmt.Errorf("JavaScript %s is not a directory: %s", label, resolved)
 	}
 	return filepath.Clean(resolved), nil
+}
+
+// resolveExtraRoots resolves the extra confined roots and the storage dir.
+// The storage dir is appended to the roots so __storageDir__ access shares
+// the same confinement.
+func resolveExtraRoots(extraRoots []string, storageDir string) (roots []string, resolvedStorage string, err error) {
+	if storageDir != "" {
+		resolved, resolveErr := resolveRoot("storage dir", storageDir)
+		if resolveErr != nil {
+			return nil, "", resolveErr
+		}
+		resolvedStorage = resolved
+		roots = append(roots, resolved)
+	}
+	for _, extra := range extraRoots {
+		if extra == "" {
+			continue
+		}
+		resolved, resolveErr := resolveRoot("extra root", extra)
+		if resolveErr != nil {
+			return nil, "", resolveErr
+		}
+		if resolved == resolvedStorage {
+			continue
+		}
+		roots = append(roots, resolved)
+	}
+	return roots, resolvedStorage, nil
 }
 
 func baseDirPathResolver(baseDir string) require.PathResolver {

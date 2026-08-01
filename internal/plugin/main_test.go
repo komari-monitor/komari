@@ -20,13 +20,15 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// withTempDataDir redirects DataDir and resets the global manager for the
-// duration of a test.
+// withTempDataDir redirects DataDir and StorageDir and resets the global
+// manager for the duration of a test.
 func withTempDataDir(t *testing.T) {
 	t.Helper()
 	oldDir := DataDir
+	oldStorage := StorageDir
 	oldGlobal := global
 	DataDir = t.TempDir()
+	StorageDir = t.TempDir()
 	mgr := &Manager{
 		instances: make(map[string]*Instance),
 		routes:    make(map[string]map[string]bool),
@@ -36,6 +38,7 @@ func withTempDataDir(t *testing.T) {
 	t.Cleanup(func() { _ = mgr.closeAll() }) // release runtimes before TempDir removal
 	t.Cleanup(func() {
 		DataDir = oldDir
+		StorageDir = oldStorage
 		global = oldGlobal
 	})
 }

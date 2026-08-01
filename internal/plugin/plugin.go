@@ -1,9 +1,11 @@
 // Package plugin manages Komari plugins: ZIP packages with a
 // komari-plugin.json manifest, mirroring the theme package format. A plugin
 // runs in its own jsruntime instance confined to its data/plugin/<short>
-// directory, declares runtime permissions in its manifest, and receives the
-// host-injected "server" module (server.route / server.call). Plugins run
-// with admin authority inside the system.
+// directory, plus its long-term data directory data/plugin-data/<short>
+// exposed as __storageDir__ (which survives plugin updates), declares runtime
+// permissions in its manifest, and receives the host-injected "server" module
+// (server.route / server.call). Plugins run with admin authority inside the
+// system.
 //
 // Lifecycle: plugins are installed as directories under DataDir. The
 // persisted state file (state.json) records which plugins are enabled, which
@@ -37,6 +39,13 @@ import (
 // DataDir is the on-disk root for installed plugins, mirroring the theme
 // directory layout. It is a variable so tests can redirect it.
 var DataDir = "./data/plugin"
+
+// StorageDir is the on-disk root for long-term plugin data. Each plugin gets
+// StorageDir/<short>. The directory is confined into the plugin runtime as
+// __storageDir__ and survives plugin reinstalls: update removes only
+// DataDir/<short> (the code from the ZIP) while StorageDir/<short> persists.
+// Deleting a plugin removes both.
+var StorageDir = "./data/plugin-data"
 
 const (
 	manifestFile = "komari-plugin.json"
@@ -233,8 +242,15 @@ func (m *Manager) load(short string) error {
 	m.instances[short] = inst
 	m.mu.Unlock()
 
+	storageDir := filepath.Join(StorageDir, short)
+	if err := os.MkdirAll(storageDir, 0755); err != nil {
+		m.dropInstance(short, inst)
+		return fmt.Errorf("create plugin storage dir: %w", err)
+	}
+
 	opts := jsruntime.Options{
 		BaseDir:             dir,
+		StorageDir:          storageDir,
 		NodeJS:              info.Permissions.Node,
 		AllowExec:           info.Permissions.AllowExec,
 		AllowListen:         info.Permissions.AllowListen,
@@ -521,6 +537,9 @@ func (m *Manager) delete(short string) error {
 		return err
 	}
 	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(StorageDir, short)); err != nil {
 		return err
 	}
 	m.stateStore().delete(short)

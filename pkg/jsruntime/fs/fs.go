@@ -35,11 +35,19 @@ const (
 	nodePathNoFollowFinal
 )
 
+// rootedDir is one confined filesystem root: the resolved absolute path and
+// the os.Root handle used for actual file operations.
+type rootedDir struct {
+	path   string
+	handle *os.Root
+}
+
 type Module struct {
 	runtime            *bridge.Runtime
 	nodeRoot           string
 	allowAllFileAccess bool
 	nodeFSRoot         *os.Root
+	extraRoots         []rootedDir
 	lifecycleMu        sync.RWMutex
 
 	cwdMu   sync.RWMutex
@@ -54,7 +62,10 @@ type Module struct {
 	externalFile func(int) (*os.File, bool)
 }
 
-func New(runtime *bridge.Runtime, root, cwd string, allowAllFileAccess bool) (*Module, error) {
+// New creates the filesystem module confined to root (BaseDir) plus any extra
+// roots. When allowAllFileAccess is true every root is opened but ignored so
+// paths resolve against the real filesystem.
+func New(runtime *bridge.Runtime, root, cwd string, extraRoots []string, allowAllFileAccess bool) (*Module, error) {
 	m := &Module{
 		runtime:            runtime,
 		nodeRoot:           root,
@@ -69,6 +80,19 @@ func New(runtime *bridge.Runtime, root, cwd string, allowAllFileAccess bool) (*M
 			return nil, fmt.Errorf("open JavaScript BaseDir for fs: %w", err)
 		}
 		m.nodeFSRoot = rootHandle
+	}
+	if !allowAllFileAccess {
+		for _, extra := range extraRoots {
+			if extra == "" || extra == root {
+				continue
+			}
+			handle, err := os.OpenRoot(extra)
+			if err != nil {
+				m.Close()
+				return nil, fmt.Errorf("open JavaScript extra root %s for fs: %w", extra, err)
+			}
+			m.extraRoots = append(m.extraRoots, rootedDir{path: extra, handle: handle})
+		}
 	}
 	return m, nil
 }
@@ -111,6 +135,11 @@ func (m *Module) Close() {
 	m.closed = true
 	if m.nodeFSRoot != nil {
 		_ = m.nodeFSRoot.Close()
+	}
+	for _, extra := range m.extraRoots {
+		if extra.handle != nil {
+			_ = extra.handle.Close()
+		}
 	}
 	m.lifecycleMu.Unlock()
 
@@ -167,7 +196,7 @@ func (m *Module) resolveNodePathAt(name, cwd string, allowMissing bool, mode nod
 	if m.allowAllFileAccess || m.nodeRoot == "" {
 		return resolved, nil
 	}
-	if !filepathutil.WithinBase(m.nodeRoot, resolved) {
+	if !m.withinAnyRoot(resolved) {
 		return "", fmt.Errorf("path escapes BaseDir: %s", name)
 	}
 	pathToResolve := resolved
@@ -176,7 +205,7 @@ func (m *Module) resolveNodePathAt(name, cwd string, allowMissing bool, mode nod
 	}
 	actual, err := filepath.EvalSymlinks(pathToResolve)
 	if err == nil {
-		if !filepathutil.WithinBase(m.nodeRoot, actual) {
+		if !m.withinAnyRoot(actual) {
 			return "", fmt.Errorf("path symlink escapes BaseDir: %s", name)
 		}
 		if mode == nodePathNoFollowFinal {
@@ -196,7 +225,7 @@ func (m *Module) resolveNodePathAt(name, cwd string, allowMissing bool, mode nod
 		parent = next
 		actualParent, parentErr := filepath.EvalSymlinks(parent)
 		if parentErr == nil {
-			if !filepathutil.WithinBase(m.nodeRoot, actualParent) {
+			if !m.withinAnyRoot(actualParent) {
 				return "", fmt.Errorf("path parent symlink escapes BaseDir: %s", name)
 			}
 			return resolved, nil
@@ -205,6 +234,20 @@ func (m *Module) resolveNodePathAt(name, cwd string, allowMissing bool, mode nod
 			return "", parentErr
 		}
 	}
+}
+
+// withinAnyRoot reports whether path stays inside BaseDir or one of the
+// extra confined roots.
+func (m *Module) withinAnyRoot(path string) bool {
+	if filepathutil.WithinBase(m.nodeRoot, path) {
+		return true
+	}
+	for _, extra := range m.extraRoots {
+		if filepathutil.WithinBase(extra.path, path) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {

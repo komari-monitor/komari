@@ -52,6 +52,11 @@ func (r *Runtime) injectNodeGlobals() error {
 	if err := r.vm.Set("__filename", filepath.Join(cwd, "script.js")); err != nil {
 		return fmt.Errorf("inject __filename: %w", err)
 	}
+	if r.storageDir != "" {
+		if err := r.vm.Set("__storageDir__", r.storageDir); err != nil {
+			return fmt.Errorf("inject __storageDir__: %w", err)
+		}
+	}
 	return nil
 }
 
