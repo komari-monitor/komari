@@ -26,6 +26,7 @@ import (
 	_ "github.com/dop251/goja_nodejs/util"
 	childprocess "github.com/komari-monitor/komari/pkg/jsruntime/child_process"
 	"github.com/komari-monitor/komari/pkg/jsruntime/console"
+	cryptomodule "github.com/komari-monitor/komari/pkg/jsruntime/crypto"
 	"github.com/komari-monitor/komari/pkg/jsruntime/fetch"
 	"github.com/komari-monitor/komari/pkg/jsruntime/fs"
 	httpmodule "github.com/komari-monitor/komari/pkg/jsruntime/http"
@@ -113,6 +114,7 @@ type Runtime struct {
 	childProcessModule  *childprocess.Module
 	netModule           *netmodule.Module
 	httpModule          *httpmodule.Module
+	cryptoModule        *cryptomodule.Module
 	resourceMu          sync.Mutex
 	resourceID          uint64
 	resources           map[uint64]func()
@@ -221,6 +223,7 @@ func New(script string, options Options) (*Runtime, error) {
 		runtime.childProcessModule = childprocess.New(host, filesystem, options.AllowExec, maxChildOutputBytes)
 		runtime.netModule = netmodule.New(host, options.AllowListen)
 		runtime.httpModule = httpmodule.New(host, options.AllowListen, maxHTTPBodyBytes)
+		runtime.cryptoModule = cryptomodule.New(host)
 		runtime.registerNodeModules(registry)
 	}
 	host.SetTurnRunner(func(vm *goja.Runtime, job func() error) error {

@@ -184,7 +184,7 @@ registry.RegisterNativeModule("node:path", loader)
 
 全局变量：`Buffer`、`process`、`global`、`__dirname`、`__filename`。
 
-模块：`events`、`path`、`os`、`process`、`fs`、`child_process`、`net`、`http`、`stream`（含 `stream/promises`）。
+模块：`events`、`path`、`os`、`process`、`fs`、`child_process`、`net`、`http`、`stream`（含 `stream/promises`）、`crypto`。
 这些模块同时支持 `require("name")` 和 `require("node:name")`。
 
 `__filename` 是合成的 `<runtime cwd>/script.js`，顶层脚本本身不是 CommonJS wrapper，
@@ -867,6 +867,115 @@ function serveOnce() {
 }
 ```
 
+### `crypto`
+
+模块同时注册为 `crypto` 与 `node:crypto`，仅 `NodeJS: true` 时可用。实现基于 Go 标准库和
+`golang.org/x/crypto`；常见用法与 Node.js 一致，边界行为差异见下文。
+
+| 类别 | 接口 | 状态 |
+| --- | --- | --- |
+| 摘要 | `createHash`、`createHmac`、`hash()`、`Hash`/`Hmac`、`update/digest/copy`、`getHashes()` | `可用` |
+| 随机数 | `randomBytes`、`randomFillSync`、`randomFill`、`randomInt`、`randomUUID`、`getRandomValues` | `可用` |
+| 密钥派生 | `pbkdf2Sync`/`pbkdf2`、`scryptSync`/`scrypt` | `可用` |
+| 对称加密 | `createCipheriv`/`createDecipheriv`、`Cipher`/`Decipher`（AES-CBC/CTR/ECB/GCM、ChaCha20-Poly1305） | `部分实现` |
+| 签名验签 | `createSign`/`createVerify`、`sign`/`verify`（RSA PKCS1v15、ECDSA、Ed25519，PEM 密钥） | `部分实现` |
+| 其他 | `timingSafeEqual`、`getCiphers()`、`constants`（RSA padding 常量） | `可用` |
+
+#### Hash 与 HMAC
+
+支持的摘要算法（`getHashes()` 返回）：`md5`、`sha1`、`sha224`、`sha256`、`sha384`、
+`sha512`、`sha512-224`、`sha512-256`、`sha3-224`、`sha3-256`、`sha3-384`、`sha3-512`、
+`ripemd160`（及 `ripemd`/`rmd160` 别名）、`blake2b512`、`blake2s256`。未知算法抛
+`TypeError: Digest method not supported`。
+
+```js
+const crypto = require("node:crypto");
+const digest = crypto.createHash("sha256").update("komari").digest("hex");
+const mac = crypto.createHmac("sha256", "secret").update("body").digest("base64");
+const oneShot = crypto.hash("sha256", "komari", "hex");
+```
+
+- `update(data[, inputEncoding])` 的 inputEncoding 支持 `utf8`/`hex`/`base64`/`base64url`/
+  `latin1`/`binary`/`ascii`/`utf16le`；缺省按 utf8 处理字符串。
+- `digest([outputEncoding])` 缺省返回 Buffer；`copy()` 返回可继续 `update` 的副本。
+- digest 之后继续 `update`/`digest` 抛 `ERR_CRYPTO_HASH_FINALIZED`。
+
+#### 随机数、UUID 与恒时比较
+
+- `randomBytes(size[, callback])`：`0 <= size <= 2^31-1`。
+- `randomFillSync(buffer[, offset[, size]])` 与 `randomFill(buffer[, offset[, size]][, callback])`：
+  TypedArray 的 offset/size 以元素为单位，DataView 以字节为单位（与 Node 一致）。
+- `randomInt([min,] max[, callback])`：`max` 必须是不超过 2^48 的安全整数。
+- `randomUUID()`：生成 v4 UUID。
+- `getRandomValues(typedArray)`：仅接受整数 TypedArray（含 BigInt64/BigUint64），
+  超过 64 KiB 抛 `QuotaExceededError`。
+- `timingSafeEqual(a, b)`：长度不一致抛 `ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH`。
+
+#### PBKDF2 与 scrypt
+
+```js
+const key = crypto.pbkdf2Sync("password", salt, 100000, 32, "sha256");
+const key2 = crypto.scryptSync("password", salt, 32, { N: 16384, r: 8, p: 1 });
+```
+
+- `pbkdf2`/`pbkdf2Sync` 的 digest 参数必填；迭代次数 1..2^31-1，keylen 0..2^31-1。
+- `scrypt`/`scryptSync` 默认 `N=16384, r=8, p=1, maxmem=32 MiB`，选项同时接受
+  `N/r/p` 与 `cost/blockSize/parallelization` 别名；参数非法或内存超限抛
+  `ERR_CRYPTO_INVALID_SCRYPT_PARAMS`。
+- 异步版本把 CPU 计算放在事件循环外执行，不阻塞该 runtime 的其他任务。
+
+#### 对称加密
+
+支持算法：`aes-128/192/256-cbc`、`aes-128/192/256-ctr`、`aes-128/192/256-ecb`、
+`aes-128/192/256-gcm`、`chacha20-poly1305`，以及 `aes128`/`aes192`/`aes256`
+（= CBC 别名）。`getCiphers()` 返回当前支持的列表。
+
+```js
+const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+cipher.setAAD(associatedData);
+const encrypted = Buffer.concat([cipher.update(plain), cipher.final()]);
+const tag = cipher.getAuthTag();
+
+const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+decipher.setAAD(associatedData);
+decipher.setAuthTag(tag);
+const plain = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+```
+
+- CBC/ECB 默认 PKCS#7 填充，可用 `setAutoPadding(false)` 关闭；无填充时块长度不整会在
+  `final()` 抛错。
+- GCM/ChaCha20-Poly1305 支持 `setAAD`、`setAuthTag`（解密）、`getAuthTag`（加密）。
+- 与 Node 的主要差异：
+  - GCM/ChaCha20-Poly1305 的 `update()` 返回空 Buffer，所有数据在 `final()` 一次性返回；
+    Node 中 `update()` 会逐步返回密文。使用 `Buffer.concat([update(), final()])` 的常见
+    写法不受影响，认证标签仍只从 `getAuthTag()` 获取。
+  - GCM 的 `authTagLength` 仅支持 12-16（Node 支持 4-16）；`chacha20-poly1305` 只支持
+    默认 16。GCM 使用非 12 字节 IV 时 `authTagLength` 必须为 16。
+  - 密钥长度与 IV 长度校验同 Node（`ERR_CRYPTO_INVALID_KEYLEN`、`ERR_CRYPTO_INVALID_IV`），
+    未知算法抛 `ERR_CRYPTO_UNKNOWN_CIPHER`。
+
+#### 签名与验签
+
+```js
+const signature = crypto.sign("RSA-SHA256", data, privateKeyPem);
+const ok = crypto.verify("RSA-SHA256", data, publicKeyPem, signature);
+
+const signer = crypto.createSign("sha256");
+signer.update(data);
+const sig = signer.sign(privateKeyPem, "base64");
+const valid = crypto.createVerify("sha256").update(data).verify(publicKeyPem, sig, "base64");
+```
+
+- 算法名：摘要名（如 `sha256`，按密钥类型自动选择 RSA PKCS1v15 或 ECDSA）、
+  `RSA-<digest>`、`ecdsa-with-<digest>`、`ed25519`；`sign(null, ...)`/`verify(null, ...)`
+  也可用于 Ed25519。未知算法抛 `ERR_CRYPTO_INVALID_DIGEST`。
+- 密钥为 PEM 字符串或 Buffer：私钥支持 PKCS#1/PKCS#8/SEC1，公钥支持 PKIX/PKCS#1，
+  也接受私钥 PEM 并自动取其公钥部分。
+- `sign`/`verify` 最后一个参数为函数时走异步回调。
+- Ed25519 密钥配摘要算法抛 `ERR_OSSL_INVALID_DIGEST`；验签失败返回 `false` 而不是抛错。
+- 未实现：`generateKeyPairSync`、`KeyObject`/`createPrivateKey`/`createPublicKey`、
+  `generateKeyPair`、RSA-OAEP 加解密、RSA-PSS、`DiffieHellman`/`ECDH`、`webcrypto`/
+  `SubtleCrypto`，以及签名 `padding`/`saltLength` 选项。
 ## 固定值与调用抛错汇总
 
 下表列出容易被误认为“完整可用”的占位接口；没有真实语义的方法调用会明确抛错。
@@ -897,6 +1006,11 @@ function serveOnce() {
 | HTTP `Agent.destroy`、ClientRequest `flushHeaders/setNoDelay/setSocketKeepAlive` | 调用抛错。 |
 | ServerResponse `writeContinue` | 调用抛错；`flushHeaders` 只更新状态，不实际 flush。 |
 
+| GCM/ChaCha20-Poly1305 update() | 返回空 Buffer，数据在 final() 一次性返回；Node 中 update() 逐步返回密文。Buffer.concat([update(), final()]) 写法不受影响。 |
+| GCM authTagLength | 仅支持 12-16（Node 支持 4-16）；chacha20-poly1305 仅支持默认 16，其他值抛 ERR_CRYPTO_INVALID_AUTH_TAG。 |
+| GCM 非 12 字节 IV | 可用，但此时 authTagLength 必须为 16，否则构造抛错。 |
+| sign/verify 密钥 | 仅接受 PEM 字符串/Buffer；KeyObject、generateKeyPairSync、RSA-PSS 与 padding/saltLength 选项未实现。 |
+
 ## 常见但未实现的接口
 
 | 类别 | 未实现示例 |
@@ -904,7 +1018,7 @@ function serveOnce() {
 | 浏览器 DOM | `window`、`document`、DOM node、`navigator`、`location`、storage、canvas。 |
 | 浏览器网络 | `WebSocket`、`EventSource`、Service Worker、完整 Streams、WebRTC、WebCrypto。 |
 | 模块系统 | ESM `import/export`、动态 `import()`、顶层 CommonJS `module/exports`，以及 `require.resolve/cache/extensions/main`。 |
-| Node 核心模块 | `https`、`crypto`、`tls`、`dns`、`dgram`、`zlib`、`worker_threads`、`cluster`、`readline`、`assert` 等。 |
+| Node 核心模块 | `https`、`tls`、`dns`、`dgram`、`zlib`、`worker_threads`、`cluster`、`readline`、`assert` 等。 |
 | 完整 fs | watcher、opendir、cp、link、statfs 和完整 FileHandle。 |
 | 完整 net/http | Unix/pipe/TLS、构造器族、真实 backpressure、Agent 池、upgrade/trailer。 |
 | timer handle | `ref/unref/refresh/hasRef`。 |
@@ -923,3 +1037,4 @@ Go 进程。当前可用于约束单次执行的机制只有 `Timeout`、HTTP bo
 3. 所有 runtime 都应 `defer runtime.Close()`，否则 listener、socket、文件和 timer 可能继续存活。
 4. 引入 npm/CommonJS 包前先核对它依赖的 Node 核心模块。纯 JavaScript 不代表能在当前兼容子集运行。
 5. 调用会抛错的方法或依赖固定值前，应把它视为“不支持”，不要把存在的方法名当成能力检测。
+

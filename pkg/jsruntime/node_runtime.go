@@ -28,6 +28,7 @@ func (r *Runtime) registerNodeModules(registry *require.Registry) {
 	r.registerNodeModule(registry, "http", r.httpModule.Load)
 	r.registerNodeModule(registry, "stream", streammodule.Load)
 	r.registerNodeModule(registry, "stream/promises", streammodule.LoadPromises)
+	r.registerNodeModule(registry, "crypto", r.cryptoModule.Load)
 }
 
 func (r *Runtime) registerNodeModule(registry *require.Registry, name string, loader require.ModuleLoader) {
