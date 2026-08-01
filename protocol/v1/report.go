@@ -1,6 +1,9 @@
 package v1
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Message struct {
 	Type      string `json:"type"`
@@ -21,9 +24,11 @@ type Report struct {
 	Swap        RamReport         `json:"swap"`
 	Load        LoadReport        `json:"load"`
 	Disk        DiskReport        `json:"disk"`
+	Disks       []DiskMount       `json:"disks,omitempty"`
 	Network     NetworkReport     `json:"network"`
 	Connections ConnectionsReport `json:"connections"`
 	GPU         *GPUDetailReport  `json:"gpu,omitempty"`
+	Extensions  ReportExtensions  `json:"extensions,omitempty"`
 	Uptime      int64             `json:"uptime"`
 	Process     int               `json:"process"`
 	Message     string            `json:"message"`
@@ -73,6 +78,21 @@ type DiskReport struct {
 	Total int64 `json:"total"`
 	Used  int64 `json:"used"`
 }
+
+// DiskMount describes the latest usage reported for one mounted filesystem.
+// Aggregate disk usage remains available in Report.Disk for compatibility.
+type DiskMount struct {
+	Name       string `json:"name,omitempty"`
+	Device     string `json:"device,omitempty"`
+	Mountpoint string `json:"mountpoint"`
+	Filesystem string `json:"filesystem,omitempty"`
+	Total      int64  `json:"total"`
+	Used       int64  `json:"used"`
+}
+
+// ReportExtensions carries optional, namespaced latest-status data. Extension
+// values are JSON objects and are not written to the historical metric store.
+type ReportExtensions map[string]json.RawMessage
 
 type NetworkReport struct {
 	Up        int64 `json:"up"`

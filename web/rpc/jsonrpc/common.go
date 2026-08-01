@@ -333,6 +333,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		Temp           float32             `json:"temp"`
 		Disk           int64               `json:"disk"`
 		DiskTotal      int64               `json:"disk_total"`
+		Disks          []v1.DiskMount      `json:"disks,omitempty"`
 		NetIn          int64               `json:"net_in"`
 		NetOut         int64               `json:"net_out"`
 		NetTotalUp     int64               `json:"net_total_up"`
@@ -343,6 +344,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		Online         bool                `json:"online"`
 		Uptime         int64               `json:"uptime"`
 		Ping           map[string]pingStat `json:"ping"`
+		Extensions     v1.ReportExtensions `json:"extensions,omitempty"`
 	}
 
 	respMap := make(map[string]recordLike, len(latest))
@@ -370,6 +372,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 			Temp:           0,
 			Disk:           rep.Disk.Used,
 			DiskTotal:      rep.Disk.Total,
+			Disks:          rep.Disks,
 			NetIn:          rep.Network.Down,
 			NetOut:         rep.Network.Up,
 			NetTotalUp:     rep.Network.TotalUp,
@@ -380,6 +383,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 			Online:         onlineSet[uuid],
 			Uptime:         rep.Uptime,
 			Ping:           stats,
+			Extensions:     rep.Extensions,
 		}
 		respMap[uuid] = rl
 	}
