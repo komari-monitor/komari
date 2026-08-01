@@ -871,6 +871,9 @@ func TestNodeChildProcessHelper(t *testing.T) {
 	case "sleep":
 		time.Sleep(5 * time.Second)
 		os.Exit(0)
+	case "echo":
+		_, _ = io.Copy(os.Stdout, os.Stdin)
+		os.Exit(0)
 	default:
 		os.Exit(2)
 	}

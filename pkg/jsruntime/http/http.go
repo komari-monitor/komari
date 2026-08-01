@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
 	"net"
 	"net/http"
@@ -32,6 +33,10 @@ type Module struct {
 	runtime      *bridge.Runtime
 	allowListen  bool
 	maxBodyBytes int64
+
+	streamMu       sync.Mutex
+	createIncoming goja.Callable
+	createResponse goja.Callable
 }
 
 func New(runtime *bridge.Runtime, allowListen bool, maxBodyBytes int64) *Module {
@@ -106,15 +111,14 @@ func (m *Module) newHTTPServer(vm *goja.Runtime) *goja.Object {
 			}
 			m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
 				_ = m.runtime.RunJob(vm, "http.IncomingMessage body", func() error {
+					push, _ := goja.AssertFunction(incoming.Get("push"))
 					if len(body) > 0 {
-						if emitErr := events.Emit(vm, incoming, "data", buffer.WrapBytes(vm, append([]byte(nil), body...))); emitErr != nil {
-							return emitErr
+						if _, pushErr := push(incoming, buffer.WrapBytes(vm, append([]byte(nil), body...))); pushErr != nil {
+							return pushErr
 						}
 					}
-					if emitErr := events.Emit(vm, incoming, "end"); emitErr != nil {
-						return emitErr
-					}
-					return events.Emit(vm, incoming, "close")
+					_, pushErr := push(incoming, goja.Null())
+					return pushErr
 				})
 			}, 0)
 		})
@@ -325,7 +329,12 @@ func (state *nodeHTTPResponse) finish(status int, body []byte) {
 }
 
 func (m *Module) httpIncomingMessage(vm *goja.Runtime, request *http.Request, body []byte) *goja.Object {
-	incoming := events.NewEmitter(vm)
+	m.initHTTPStreams(vm)
+	value, err := m.createIncoming(goja.Undefined())
+	if err != nil {
+		panic(err)
+	}
+	incoming := value.ToObject(vm)
 	headers := make(map[string]string, len(request.Header))
 	rawHeaders := make([]string, 0, len(request.Header)*2)
 	for name, values := range request.Header {
@@ -344,19 +353,12 @@ func (m *Module) httpIncomingMessage(vm *goja.Runtime, request *http.Request, bo
 	_ = incoming.Set("httpVersionMinor", request.ProtoMinor)
 	_ = incoming.Set("complete", true)
 	_ = incoming.Set("aborted", false)
-	_ = incoming.Set("readable", len(body) > 0)
 	_ = incoming.Set("socket", httpSocketInfo(vm, request))
 	_ = incoming.Set("connection", incoming.Get("socket"))
-	_ = incoming.Set("setEncoding", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("http.IncomingMessage.setEncoding is not supported by jsruntime; the body is fully buffered")))
+	_ = incoming.Set("_destroy", func(err goja.Value, callback goja.Callable) {
+		_ = request.Body.Close()
+		_, _ = callback(goja.Undefined(), err)
 	})
-	_ = incoming.Set("pause", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("http.IncomingMessage.pause is not supported by jsruntime; the body is fully buffered")))
-	})
-	_ = incoming.Set("resume", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("http.IncomingMessage.resume is not supported by jsruntime; the body is fully buffered")))
-	})
-	_ = incoming.Set("destroy", func() { _ = request.Body.Close() })
 	return incoming
 }
 
@@ -379,13 +381,42 @@ func httpSocketInfo(vm *goja.Runtime, request *http.Request) *goja.Object {
 }
 
 func (m *Module) httpServerResponse(vm *goja.Runtime, state *nodeHTTPResponse) *goja.Object {
-	response := events.NewEmitter(vm)
+	m.initHTTPStreams(vm)
+	hooks := vm.NewObject()
+	_ = hooks.Set("write", func(response *goja.Object, chunk goja.Value, callback goja.Callable) {
+		state.mu.Lock()
+		_, _ = state.body.Write(buffer.Bytes(vm, chunk))
+		state.mu.Unlock()
+		_ = response.Set("headersSent", true)
+		if callback != nil {
+			_, _ = callback(goja.Undefined())
+		}
+	})
+	_ = hooks.Set("finish", func(response *goja.Object, callback goja.Callable) {
+		state.mu.Lock()
+		state.statusCode = int(response.Get("statusCode").ToInteger())
+		state.statusText = response.Get("statusMessage").String()
+		if !state.ended {
+			state.ended = true
+			close(state.done)
+		}
+		state.mu.Unlock()
+		_ = response.Set("headersSent", true)
+		if callback != nil {
+			_, _ = callback(goja.Undefined())
+		}
+	})
+	_ = hooks.Set("destroy", func(*goja.Object) {
+		state.finish(0, nil)
+	})
+	value, err := m.createResponse(goja.Undefined(), hooks)
+	if err != nil {
+		panic(err)
+	}
+	response := value.ToObject(vm)
 	_ = response.Set("statusCode", http.StatusOK)
 	_ = response.Set("statusMessage", "")
 	_ = response.Set("headersSent", false)
-	_ = response.Set("writableEnded", false)
-	_ = response.Set("writableFinished", false)
-	_ = response.Set("destroyed", false)
 	_ = response.Set("sendDate", true)
 	_ = response.Set("setHeader", func(name string, value goja.Value) *goja.Object {
 		state.mu.Lock()
@@ -449,42 +480,7 @@ func (m *Module) httpServerResponse(vm *goja.Runtime, state *nodeHTTPResponse) *
 	_ = response.Set("writeContinue", func() {
 		panic(vm.NewGoError(fmt.Errorf("http.ServerResponse.writeContinue is not supported by jsruntime; the Go server never sends 100 Continue")))
 	})
-	_ = response.Set("write", func(call goja.FunctionCall) goja.Value {
-		state.mu.Lock()
-		_, _ = state.body.Write(buffer.Bytes(vm, call.Argument(0)))
-		state.mu.Unlock()
-		_ = response.Set("headersSent", true)
-		if callback, ok := goja.AssertFunction(call.Argument(2)); ok {
-			_, _ = callback(goja.Undefined())
-		}
-		return vm.ToValue(true)
-	})
-	_ = response.Set("end", func(call goja.FunctionCall) goja.Value {
-		state.mu.Lock()
-		if len(call.Arguments) > 0 && !goja.IsUndefined(call.Argument(0)) && !goja.IsNull(call.Argument(0)) {
-			_, _ = state.body.Write(buffer.Bytes(vm, call.Argument(0)))
-		}
-		state.statusCode = int(response.Get("statusCode").ToInteger())
-		state.statusText = response.Get("statusMessage").String()
-		if !state.ended {
-			state.ended = true
-			close(state.done)
-		}
-		state.mu.Unlock()
-		_ = response.Set("headersSent", true)
-		_ = response.Set("writableEnded", true)
-		_ = response.Set("writableFinished", true)
-		if callback, ok := goja.AssertFunction(call.Argument(2)); ok {
-			_, _ = callback(goja.Undefined())
-		}
-		_ = events.Emit(vm, response, "finish")
-		return response
-	})
-	_ = response.Set("destroy", func() {
-		_ = response.Set("destroyed", true)
-		state.finish(0, nil)
-		_ = events.Emit(vm, response, "close")
-	})
+
 	_ = response.Set("setTimeout", func(milliseconds int64, callback goja.Value) *goja.Object {
 		if function, ok := goja.AssertFunction(callback); ok {
 			m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
@@ -573,53 +569,33 @@ func validHTTPToken(value string) bool {
 	return true
 }
 
-const httpClientSource = `
-(function (EventEmitter, fetch, AbortController, Blob) {
-	"use strict";
-	class Agent { constructor(options) { this.options = options || {}; this.keepAlive = Boolean(this.options.keepAlive); this.maxSockets = this.options.maxSockets || Infinity; } destroy() { throw new Error("http.Agent.destroy is not supported by jsruntime; no connection pool"); } }
-	class ClientRequest extends EventEmitter {
-		constructor(input, options, callback) {
-			super(); this._chunks = []; this._controller = new AbortController(); this.destroyed = false; this.finished = false;
-			if (typeof input === "object" && input !== null) { options = input; input = undefined; }
-			options = options || {}; this.method = String(options.method || "GET").toUpperCase(); this._headers = new Headers(options.headers);
-			this.url = input === undefined ? String(options.protocol || "http:") + "//" + String(options.hostname || options.host || "localhost") + (options.port ? ":" + options.port : "") + String(options.path || "/") : String(input);
-			if (typeof callback === "function") this.once("response", callback);
-		}
-		setHeader(name, value) { this._headers.set(name, value); }
-		getHeader(name) { return this._headers.get(name); }
-		getHeaders() { return Object.fromEntries(this._headers); }
-		getHeaderNames() { return Array.from(this._headers.keys()); }
-		hasHeader(name) { return this._headers.has(name); }
-		removeHeader(name) { this._headers.delete(name); }
-		flushHeaders() { throw new Error("http.ClientRequest.flushHeaders is not supported by jsruntime; headers are buffered until end()"); }
-		write(chunk, encoding, callback) { this._chunks.push(chunk); if (typeof encoding === "function") callback = encoding; if (callback) callback(); return true; }
-		end(chunk, encoding, callback) {
-			if (chunk !== undefined && chunk !== null && typeof chunk !== "function") this._chunks.push(chunk);
-			if (typeof chunk === "function") callback = chunk; else if (typeof encoding === "function") callback = encoding;
-			this.finished = true;
-			const body = this._chunks.length ? new Blob(this._chunks) : undefined;
-			fetch(this.url, { method: this.method, headers: this._headers, body, signal: this._controller.signal }).then(async (response) => {
-				const incoming = new EventEmitter(); incoming.statusCode = response.status; incoming.statusMessage = response.statusText;
-				incoming.headers = Object.fromEntries(response.headers); incoming.rawHeaders = Array.from(response.headers).flat(); incoming.httpVersion = "1.1";
-				incoming.complete = true; incoming.aborted = false; incoming.setEncoding = () => { throw new Error("http.IncomingMessage.setEncoding is not supported by jsruntime; the body is fully buffered"); }; incoming.pause = () => { throw new Error("http.IncomingMessage.pause is not supported by jsruntime; the body is fully buffered"); }; incoming.resume = () => { throw new Error("http.IncomingMessage.resume is not supported by jsruntime; the body is fully buffered"); };
-				this.emit("response", incoming); const bytes = new Uint8Array(await response.arrayBuffer());
-				setTimeout(() => { if (bytes.length) incoming.emit("data", bytes); incoming.emit("end"); incoming.emit("close"); this.emit("close"); }, 0);
-			}, (error) => { emitRequestError(this, error); this.emit("close"); });
-			if (callback) callback(); return this;
-		}
-		abort() { this.destroyed = true; this._controller.abort(); this.emit("abort"); }
-		destroy(error) { this.destroyed = true; this._controller.abort(error); if (error) emitRequestError(this, error); this.emit("close"); return this; }
-		setTimeout(ms, callback) { if (callback) this.once("timeout", callback); setTimeout(() => this.emit("timeout"), ms); return this; }
-		setNoDelay() { throw new Error("http.ClientRequest.setNoDelay is not supported by jsruntime"); } setSocketKeepAlive() { throw new Error("http.ClientRequest.setSocketKeepAlive is not supported by jsruntime"); }
+//go:embed client.js
+var httpClientSource string
+
+//go:embed streams.js
+var httpStreamsSource string
+
+// initHTTPStreams loads the embedded factory that builds IncomingMessage
+// (Readable) and ServerResponse (Writable) instances from the stream module.
+func (m *Module) initHTTPStreams(vm *goja.Runtime) {
+	m.streamMu.Lock()
+	defer m.streamMu.Unlock()
+	if m.createIncoming != nil {
+		return
 	}
-	// Unhandled "error" events are rethrown on the next turn so the host
-	// error reporter logs them instead of losing them in the Promise machinery.
-	function emitRequestError(request, error) {
-		try { request.emit("error", error); }
-		catch (unhandled) { setTimeout(() => { throw unhandled; }, 0); }
+	factoryValue, err := vm.RunString(httpStreamsSource)
+	if err != nil {
+		panic(vm.NewGoError(fmt.Errorf("load http streams: %w", err)))
 	}
-	function request(input, options, callback) { if (typeof options === "function") { callback = options; options = {}; } return new ClientRequest(input, options, callback); }
-	function get(input, options, callback) { const req = request(input, options, callback); req.end(); return req; }
-	return { request, get, Agent, ClientRequest, globalAgent: new Agent(), IncomingMessage: EventEmitter, ServerResponse: EventEmitter };
-})
-`
+	factory, _ := goja.AssertFunction(factoryValue)
+	value, err := factory(goja.Undefined(), require.Require(vm, "stream"))
+	if err != nil {
+		panic(err)
+	}
+	object := value.ToObject(vm)
+	m.createIncoming, _ = goja.AssertFunction(object.Get("createIncomingMessage"))
+	m.createResponse, _ = goja.AssertFunction(object.Get("createServerResponse"))
+	if m.createIncoming == nil || m.createResponse == nil {
+		panic(vm.NewGoError(fmt.Errorf("http streams factory is incomplete")))
+	}
+}

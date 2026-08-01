@@ -1,6 +1,7 @@
 package jsruntime
 
 import (
+	_ "embed"
 	"fmt"
 
 	"github.com/komari-monitor/komari/pkg/jsruntime/xhr"
@@ -26,15 +27,11 @@ func (r *Runtime) injectGlobals() error {
 	if err := xhr.Inject(r.vm); err != nil {
 		return fmt.Errorf("inject XMLHttpRequest: %w", err)
 	}
-	if _, err := r.vm.RunString(`
-		globalThis.queueMicrotask = function queueMicrotask(callback) {
-			if (typeof callback !== "function") {
-				throw new TypeError("queueMicrotask callback must be a function");
-			}
-			Promise.resolve().then(callback);
-		};
-	`); err != nil {
+	if _, err := r.vm.RunString(queueMicrotaskSource); err != nil {
 		return fmt.Errorf("inject queueMicrotask: %w", err)
 	}
 	return nil
 }
+
+//go:embed globals.js
+var queueMicrotaskSource string

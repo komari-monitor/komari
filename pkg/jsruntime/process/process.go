@@ -1,6 +1,7 @@
 package process
 
 import (
+	_ "embed"
 	"fmt"
 	"math/big"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/dop251/goja_nodejs/buffer"
+	"github.com/dop251/goja_nodejs/require"
 	"github.com/komari-monitor/komari/pkg/jsruntime/events"
 	"github.com/komari-monitor/komari/pkg/jsruntime/fs"
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
@@ -172,37 +175,49 @@ func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 		panic(vm.NewGoError(&bridge.ExitRequestedError{Code: code}))
 	})
 	_ = process.Set("abort", func() { panic(vm.NewGoError(fmt.Errorf("process.abort() requested"))) })
-	_ = process.Set("stdout", processStream(vm, "stdout", os.Stdout, true))
-	_ = process.Set("stderr", processStream(vm, "stderr", os.Stderr, true))
-	_ = process.Set("stdin", processStream(vm, "stdin", nil, false))
+	m.attachProcessStreams(vm, process)
 	if err := m.initNextTickScheduler(vm); err != nil {
 		panic(vm.NewGoError(err))
 	}
 	_ = module.Set("exports", process)
 }
 
-func processStream(vm *goja.Runtime, name string, output *os.File, writable bool) *goja.Object {
-	stream := events.NewEmitter(vm)
-	_ = stream.Set("isTTY", false)
-	_ = stream.Set("fd", -1)
-	_ = stream.Set("write", func(call goja.FunctionCall) goja.Value {
-		if !writable || output == nil {
+//go:embed stdio.js
+var stdioSource string
+
+// attachProcessStreams wires process.stdout/stderr as Writable streams and
+// process.stdin as a Readable stream backed by the jsruntime stream module.
+func (m *Module) attachProcessStreams(vm *goja.Runtime, process *goja.Object) {
+	factoryValue, err := vm.RunString(stdioSource)
+	if err != nil {
+		panic(vm.NewGoError(fmt.Errorf("load process stdio: %w", err)))
+	}
+	factory, _ := goja.AssertFunction(factoryValue)
+	hooks := vm.NewObject()
+	_ = hooks.Set("write", func(name string, chunk goja.Value, callback goja.Callable) {
+		var output *os.File
+		switch name {
+		case "stdout":
+			output = os.Stdout
+		case "stderr":
+			output = os.Stderr
+		default:
 			panic(vm.NewGoError(fmt.Errorf("process.%s.write is not supported by jsruntime; the stream is not connected", name)))
 		}
-		_, _ = fmt.Fprint(output, call.Argument(0).String())
-		if callback, ok := goja.AssertFunction(call.Argument(2)); ok {
+		_, _ = output.Write(buffer.Bytes(vm, chunk))
+		if callback != nil {
 			_, _ = callback(goja.Undefined())
 		}
-		return vm.ToValue(true)
 	})
-	_ = stream.Set("setEncoding", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("process.%s.setEncoding is not supported by jsruntime; streams have no encoding state", name)))
-	})
-	_ = stream.Set("resume", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("process.%s.resume is not supported by jsruntime; streams have no backpressure state", name)))
-	})
-	_ = stream.Set("pause", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("process.%s.pause is not supported by jsruntime; streams have no backpressure state", name)))
-	})
-	return stream
+	streams, err := factory(goja.Undefined(), require.Require(vm, "stream"), hooks)
+	if err != nil {
+		panic(err)
+	}
+	streamsObject := streams.ToObject(vm)
+	for _, name := range []string{"stdout", "stderr", "stdin"} {
+		stream := streamsObject.Get(name).ToObject(vm)
+		_ = stream.Set("isTTY", false)
+		_ = stream.Set("fd", -1)
+		_ = process.Set(name, stream)
+	}
 }

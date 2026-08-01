@@ -9,6 +9,7 @@ import (
 	"github.com/dop251/goja_nodejs/require"
 	"github.com/komari-monitor/komari/pkg/jsruntime/events"
 	osmodule "github.com/komari-monitor/komari/pkg/jsruntime/os"
+	streammodule "github.com/komari-monitor/komari/pkg/jsruntime/stream"
 )
 
 type nodeFileHandle struct {
@@ -25,6 +26,8 @@ func (r *Runtime) registerNodeModules(registry *require.Registry) {
 	r.registerNodeModule(registry, "child_process", r.childProcessModule.Load)
 	r.registerNodeModule(registry, "net", r.netModule.Load)
 	r.registerNodeModule(registry, "http", r.httpModule.Load)
+	r.registerNodeModule(registry, "stream", streammodule.Load)
+	r.registerNodeModule(registry, "stream/promises", streammodule.LoadPromises)
 }
 
 func (r *Runtime) registerNodeModule(registry *require.Registry, name string, loader require.ModuleLoader) {

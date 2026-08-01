@@ -3,6 +3,7 @@ package child_process
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -11,11 +12,11 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/dop251/goja"
 	"github.com/dop251/goja_nodejs/buffer"
+	"github.com/dop251/goja_nodejs/require"
 	"github.com/komari-monitor/komari/pkg/jsruntime/events"
 	"github.com/komari-monitor/komari/pkg/jsruntime/fs"
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
@@ -231,17 +232,6 @@ func (m *Module) childOutputLimit(options childCommandOptions) int {
 
 func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string, options childCommandOptions) *goja.Object {
 	child := events.NewEmitter(vm)
-	stdout := events.NewEmitter(vm)
-	stderr := events.NewEmitter(vm)
-	_ = child.Set("stdout", stdout)
-	_ = child.Set("stderr", stderr)
-	_ = child.Set("stdio", []any{goja.Null(), stdout, stderr})
-	_ = child.Set("pid", goja.Undefined())
-	_ = child.Set("exitCode", goja.Null())
-	_ = child.Set("signalCode", goja.Null())
-	_ = child.Set("killed", false)
-	_ = child.Set("connected", false)
-
 	cmd, cancel := childExecCommand(command, arguments, options)
 	cmd.Dir = options.cwd
 	cmd.Env = options.env
@@ -251,7 +241,17 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 	if err := errors.Join(stdinErr, stdoutErr, stderrErr); err != nil {
 		panic(vm.NewGoError(err))
 	}
-	_ = child.Set("stdin", childStdin(vm, stdin, m.runtime))
+	stdinStream, stdout, stderr := m.childStreams(vm, stdin)
+	_ = child.Set("stdout", stdout)
+	_ = child.Set("stderr", stderr)
+	_ = child.Set("stdin", stdinStream)
+	_ = child.Set("stdio", []any{stdinStream, stdout, stderr})
+	_ = child.Set("pid", goja.Undefined())
+	_ = child.Set("exitCode", goja.Null())
+	_ = child.Set("signalCode", goja.Null())
+	_ = child.Set("killed", false)
+	_ = child.Set("connected", false)
+
 	if err := cmd.Start(); err != nil {
 		cancel()
 		m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
@@ -326,21 +326,29 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 	return child
 }
 
-func childStdin(vm *goja.Runtime, stdin io.WriteCloser, runtime *bridge.Runtime) *goja.Object {
-	stream := events.NewEmitter(vm)
+//go:embed stdio.js
+var childStdioSource string
+
+// childStreams creates the Writable stdin and Readable stdout/stderr streams
+// for one spawned child process. The Go side owns the underlying pipes and
+// serializes writes through a per-child queue.
+func (m *Module) childStreams(vm *goja.Runtime, stdin io.WriteCloser) (*goja.Object, *goja.Object, *goja.Object) {
+	factoryValue, err := vm.RunString(childStdioSource)
+	if err != nil {
+		panic(vm.NewGoError(fmt.Errorf("load child_process stdio: %w", err)))
+	}
+	factory, _ := goja.AssertFunction(factoryValue)
+	hooks := vm.NewObject()
 	var writes writequeue.Queue
-	_ = stream.Set("writable", true)
-	_ = stream.Set("destroyed", false)
-	_ = stream.Set("write", func(call goja.FunctionCall) goja.Value {
-		data := append([]byte(nil), buffer.Bytes(vm, call.Argument(0))...)
-		callback := childCallback(call)
+	_ = hooks.Set("stdinWrite", func(chunk goja.Value, callback goja.Callable) {
+		data := append([]byte(nil), buffer.Bytes(vm, chunk)...)
 		writes.Submit(func() {
 			_, err := stdin.Write(data)
 			if callback == nil {
 				return
 			}
-			runtime.RunOnLoop(func(vm *goja.Runtime) {
-				_ = runtime.RunJob(vm, "child_process.stdin.write", func() error {
+			m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+				_ = m.runtime.RunJob(vm, "child_process.stdin.write", func() error {
 					if err != nil {
 						_, callbackErr := callback(goja.Undefined(), vm.NewGoError(err))
 						return callbackErr
@@ -350,26 +358,12 @@ func childStdin(vm *goja.Runtime, stdin io.WriteCloser, runtime *bridge.Runtime)
 				})
 			})
 		})
-		return vm.ToValue(true)
 	})
-	_ = stream.Set("end", func(call goja.FunctionCall) goja.Value {
-		var data []byte
-		_, firstArgumentIsCallback := goja.AssertFunction(call.Argument(0))
-		if len(call.Arguments) > 0 && !firstArgumentIsCallback && !goja.IsUndefined(call.Argument(0)) && !goja.IsNull(call.Argument(0)) {
-			data = append([]byte(nil), buffer.Bytes(vm, call.Argument(0))...)
-		}
-		callback := childCallback(call)
+	_ = hooks.Set("stdinEnd", func(callback goja.Callable) {
 		writes.Submit(func() {
-			var err error
-			if len(data) > 0 {
-				_, err = stdin.Write(data)
-			}
-			if closeErr := stdin.Close(); err == nil {
-				err = closeErr
-			}
-			runtime.RunOnLoop(func(vm *goja.Runtime) {
-				_ = runtime.RunJob(vm, "child_process.stdin.end", func() error {
-					_ = stream.Set("writable", false)
+			err := stdin.Close()
+			m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+				_ = m.runtime.RunJob(vm, "child_process.stdin.end", func() error {
 					if callback != nil {
 						if err != nil {
 							_, callbackErr := callback(goja.Undefined(), vm.NewGoError(err))
@@ -382,13 +376,33 @@ func childStdin(vm *goja.Runtime, stdin io.WriteCloser, runtime *bridge.Runtime)
 				})
 			})
 		})
-		return goja.Undefined()
 	})
-	_ = stream.Set("destroy", func() {
+	_ = hooks.Set("stdinDestroy", func() {
 		go func() { _ = stdin.Close() }()
-		_ = stream.Set("destroyed", true)
 	})
-	return stream
+	streams, err := factory(goja.Undefined(), require.Require(vm, "stream"), hooks)
+	if err != nil {
+		panic(err)
+	}
+	streamsObject := streams.ToObject(vm)
+	createStdin, _ := goja.AssertFunction(streamsObject.Get("createStdin"))
+	createOutput, _ := goja.AssertFunction(streamsObject.Get("createOutput"))
+	if createStdin == nil || createOutput == nil {
+		panic(vm.NewGoError(fmt.Errorf("child_process stdio factory is incomplete")))
+	}
+	stdinValue, err := createStdin(goja.Undefined())
+	if err != nil {
+		panic(err)
+	}
+	stdoutValue, err := createOutput(goja.Undefined())
+	if err != nil {
+		panic(err)
+	}
+	stderrValue, err := createOutput(goja.Undefined())
+	if err != nil {
+		panic(err)
+	}
+	return stdinValue.ToObject(vm), stdoutValue.ToObject(vm), stderrValue.ToObject(vm)
 }
 
 func childCallback(call goja.FunctionCall) goja.Callable {
@@ -401,8 +415,11 @@ func childCallback(call goja.FunctionCall) goja.Callable {
 }
 
 func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goja.Object, encoding string) {
-	var currentEncoding atomic.Value
-	currentEncoding.Store(encoding)
+	push, _ := goja.AssertFunction(stream.Get("push"))
+	setEncoding, _ := goja.AssertFunction(stream.Get("setEncoding"))
+	if encoding != "" && setEncoding != nil {
+		_, _ = setEncoding(stream, vm.ToValue(encoding))
+	}
 	go func() {
 		data := make([]byte, 32*1024)
 		for {
@@ -412,8 +429,10 @@ func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goj
 				delivered := make(chan struct{})
 				if !m.runtime.RunOnLoop(func(vm *goja.Runtime) {
 					defer close(delivered)
-					value := encodeChildOutput(vm, chunk, currentEncoding.Load().(string))
-					_ = m.runtime.RunJob(vm, "child_process stream", func() error { return events.Emit(vm, stream, "data", value) })
+					_ = m.runtime.RunJob(vm, "child_process stream", func() error {
+						_, pushErr := push(stream, buffer.WrapBytes(vm, chunk))
+						return pushErr
+					})
 				}) {
 					return
 				}
@@ -422,26 +441,14 @@ func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goj
 			if err != nil {
 				m.runtime.RunOnLoop(func(vm *goja.Runtime) {
 					_ = m.runtime.RunJob(vm, "child_process stream close", func() error {
-						_ = stream.Set("readable", false)
-						if emitErr := events.Emit(vm, stream, "end"); emitErr != nil {
-							return emitErr
-						}
-						return events.Emit(vm, stream, "close")
+						_, pushErr := push(stream, goja.Null())
+						return pushErr
 					})
 				})
 				return
 			}
 		}
 	}()
-	_ = stream.Set("readable", true)
-	_ = stream.Set("destroyed", false)
-	_ = stream.Set("setEncoding", func(value string) *goja.Object { currentEncoding.Store(value); return stream })
-	_ = stream.Set("pause", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("child_process stream pause is not supported by jsruntime; output is delivered as events without backpressure")))
-	})
-	_ = stream.Set("resume", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("child_process stream resume is not supported by jsruntime; output is delivered as events without backpressure")))
-	})
 }
 
 func (m *Module) execChild(vm *goja.Runtime, command string, arguments []string, options childCommandOptions, callback goja.Callable) *goja.Object {

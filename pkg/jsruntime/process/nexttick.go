@@ -1,6 +1,7 @@
 package process
 
 import (
+	_ "embed"
 	"errors"
 	"fmt"
 
@@ -8,20 +9,7 @@ import (
 )
 
 func (m *Module) initNextTickScheduler(vm *goja.Runtime) error {
-	factoryValue, err := vm.RunString(`(function(nativeDrain) {
-		let resolveCheckpoint;
-		function prepare() {
-			const checkpoint = new Promise((resolve) => { resolveCheckpoint = resolve; });
-			checkpoint.then(nativeDrain);
-		}
-		function schedule() {
-			const resolve = resolveCheckpoint;
-			prepare();
-			resolve();
-		}
-		prepare();
-		return { schedule, run(job) { schedule(); return job(); } };
-	})`)
+	factoryValue, err := vm.RunString(nextTickSchedulerSource)
 	if err != nil {
 		return fmt.Errorf("create process.nextTick scheduler: %w", err)
 	}
@@ -94,3 +82,6 @@ func (m *Module) RunTurn(vm *goja.Runtime, job func() error) error {
 	_, turnErr := m.nextTickTurn(goja.Undefined(), jobValue)
 	return errors.Join(jobErr, turnErr)
 }
+
+//go:embed nexttick.js
+var nextTickSchedulerSource string

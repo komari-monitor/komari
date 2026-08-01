@@ -184,7 +184,7 @@ registry.RegisterNativeModule("node:path", loader)
 
 全局变量：`Buffer`、`process`、`global`、`__dirname`、`__filename`。
 
-模块：`events`、`path`、`os`、`process`、`fs`、`child_process`、`net`、`http`。
+模块：`events`、`path`、`os`、`process`、`fs`、`child_process`、`net`、`http`、`stream`（含 `stream/promises`）。
 这些模块同时支持 `require("name")` 和 `require("node:name")`。
 
 `__filename` 是合成的 `<runtime cwd>/script.js`，顶层脚本本身不是 CommonJS wrapper，
@@ -400,6 +400,121 @@ events.once("ready", (value) => console.log(value));
 events.emit("ready", "ok");
 ```
 
+### `stream`
+
+提供 Node.js 风格的流抽象：`Readable`、`Writable`、`Duplex`、`Transform`、
+`PassThrough`、`Stream`，以及 `pipeline`、`finished`、`addAbortSignal`、
+`isErrored`、`isReadable`、`getDefaultHighWaterMark`。模块同时注册为
+`stream` 与 `node:stream`；Promise 版在 `stream/promises` 与 `node:stream/promises`，
+也通过 `require("stream").promises` 暴露。
+
+#### Readable
+
+```js
+const { Readable } = require("stream");
+const source = new Readable({
+  read() {
+    this.push("komari");
+    this.push(null); // 结束
+  },
+});
+source.on("data", (chunk) => console.log(chunk.toString()));
+source.on("end", () => console.log("end"));
+```
+
+支持的成员：`push`、`unshift`、`read(size)`、`pause/resume/isPaused`、
+`pipe/unpipe`、`setEncoding`、`destroy`、`on/once/removeListener` 的
+`data/readable/end/close/error` 事件、`[Symbol.asyncIterator]`、
+静态 `Readable.from(iterable, options)` 与 `Readable.isDisturbed(stream)`，
+属性 `readableFlowing/readableEnded/readableLength/readableHighWaterMark/
+readableObjectMode/readableEncoding/readableAborted/readableDidRead/errored/destroyed`。
+
+- `Readable.from` 默认 `objectMode: true`，字符串作为单个 chunk 输出。
+- 可消费同步或异步 iterable；异步生产者在 `_read` 返回后通过 `push` 继续。
+- `read(size)` 在非 objectMode 下会拼接多个内部 chunk 凑足字节数，多余部分放回缓冲。
+- async iterator 返回带 `next()/return()` 的标准对象；注意当前 goja 版本不支持
+  `for await...of` 与 async generator 语法，脚本里需手动循环调用 `next()`。
+
+#### Writable
+
+```js
+const { Writable } = require("stream");
+const dest = new Writable({
+  write(chunk, encoding, callback) {
+    console.log(chunk.toString());
+    callback(); // 完成后必须调用，否则背压不会继续
+  },
+});
+dest.write("a");
+dest.end("b");
+dest.on("finish", () => console.log("done"));
+```
+
+支持的成员：`write`、`end`、`cork/uncork`、`setDefaultEncoding`、`destroy`、
+`_write`、`_final`，事件 `drain/finish/close/error`，属性
+`writableEnded/writableFinished/writableLength/writableHighWaterMark/
+writableObjectMode/writableCorked/writableNeedDrain/errored/destroyed`。
+
+- `write()` 在内部缓冲达到 `highWaterMark` 时返回 `false` 并置 `writableNeedDrain`，
+  完成后发出 `drain`；`pipe` 会据此暂停/恢复源。
+- `cork()` 期间写入暂存，`uncork()` 后统一下发。
+- `end()` 会先写完剩余数据，再调用 `_final`（Transform 里即 `_flush`），最后发 `finish`。
+
+#### Duplex / Transform / PassThrough
+
+```js
+const { Transform } = require("stream");
+const upper = new Transform({
+  transform(chunk, encoding, callback) {
+    callback(null, chunk.toString().toUpperCase());
+  },
+});
+```
+
+- `Duplex` 同时具备 readable 与 writable 两侧；`allowHalfOpen` 控制一侧结束后是否
+  自动结束另一侧（Transform 默认 `false`，与 Node 一致）。
+- `Transform` 支持 `_transform(chunk, encoding, callback)` 与 `_flush(callback)`；
+  `_flush` 结束前可 `push` 最后一批数据。
+- `PassThrough` 原样转发。
+
+#### pipeline 与 finished
+
+```js
+const { Readable, Writable, pipeline, finished } = require("stream");
+
+// callback 形式
+pipeline(Readable.from(["a", "b"]), new Writable({ write(c, e, cb) { cb(); } }), (error) => {
+  if (error) console.error(error);
+});
+// Promise 形式（不传 callback）
+await pipeline(Readable.from(["a", "b"]), new Writable({ write(c, e, cb) { cb(); } }));
+
+await finished(readable, { cleanup: true }); // 等 readable 结束
+```
+
+- `pipeline(source, [transforms...], destination, callback?)` 支持多个参数或数组；
+  第一个参数可以是 stream、iterable，或返回 iterable 的函数。不传 callback 时返回
+  Promise。发生错误时会销毁链上所有 stream 并 reject/回调错误；目标提前关闭视为
+  `premature close`。与 Node 一致，单个 stream 单独调用 `pipeline(stream)` 会报错。
+- `finished(stream, options?, callback?)` 监听 `error/end/finish/close`；
+  不传 callback 时返回 Promise（Node 的 callback 版本则返回清理函数）。
+  `cleanup: true` 会在结束后移除监听器；`signal` 接受 AbortSignal。
+- `addAbortSignal(signal, stream)` 在信号 abort 时销毁 stream。
+
+#### 与 Node.js 的主要差异
+
+- 事件循环由 goja 驱动，内部调度使用 `process.nextTick`；数据流是异步分发的。
+- 没有 Web Streams：`stream/web`、`ReadableStream/WritableStream/TransformStream`、
+  `Readable.toWeb/fromWeb`、`Writable.toWeb/fromWeb`、`Duplex.fromWeb/toWeb`、
+  `compose`、`duplexPair` 未实现。
+- `highWaterMark` 是阈值而非硬限制；objectMode 下按对象个数计算。
+- 错误是普通 `Error/TypeError`，不带 Node 的 `ERR_STREAM_*` 错误码。
+- `pipeline` 的 `{ signal }` 选项参数未实现；用 `addAbortSignal` 或自行监听。
+- `fs.createReadStream/createWriteStream`、`process.stdout/stderr/stdin`、
+  `child_process` 的 `stdin/stdout/stderr`、`http` 的 `IncomingMessage`（Readable）
+  与 `ServerResponse`（Writable）都已接入真实 stream 实例，可配合 `pipe`、
+  `pipeline`、`finished` 使用。`net.Socket` 仍是独立实现，未接入 stream 模块。
+
 ### `fs`
 
 所有相对路径从 `process.cwd()` 解析。默认 cwd 是 `BaseDir`；`process.chdir()` 只修改当前
@@ -439,6 +554,22 @@ fd  close()  stat()  sync()  read()  write()
 `read()` 解析为 `{ bytesRead, buffer }`，`write()` 解析为
 `{ bytesWritten, buffer }`。
 
+#### 流式接口
+
+```text
+createReadStream(path[, options])  createWriteStream(path[, options])
+```
+
+返回真实的 `stream.Readable` / `stream.Writable` 实例，支持 `data/end/finish/
+close/error/open` 事件、`pipe()`、`pipeline()`、`finished()` 和背压。
+
+- `createReadStream` 支持 `highWaterMark`、`encoding`、`start`、`end`（含端）和
+  `autoClose`；每次读取都会按 `position` 定位，未消费时不会继续读入。
+- `createWriteStream` 支持 `flags`（默认 `"w"`）、`mode`、`highWaterMark`、
+  `autoClose`；写入按顺序串行落盘，`end()` 后先关闭 fd 再发 `finish`。
+- 文件打开/读写基于 callback 版 `fs`，在 goroutine 中执行；错误会通过 `error`
+  事件发出并销毁 stream。
+
 #### 对象和常量
 
 - `Stats` 提供 size/mode/time 字段以及 `isFile/isDirectory/isSymbolicLink/
@@ -459,7 +590,7 @@ fd  close()  stat()  sync()  read()  write()
   当前主要处理 `mode`，不完整支持 Node 的 `encoding/flag/flush` options。
 - `copyFile` 暂不执行 `COPYFILE_EXCL` mode；`symlink` 不处理 Windows type 参数。
 - `mkdir({recursive:true})` 不返回首个创建目录；部分 option/encoding 边界与 Node 不同。
-- `createReadStream/createWriteStream/watch/watchFile/unwatchFile/opendir/cp/link/statfs/lutimes`
+- `watch/watchFile/unwatchFile/opendir/cp/link/statfs/lutimes`
   及完整 FileHandle API 未实现。
 
 ```js
@@ -542,8 +673,9 @@ stdout  stderr  stdin
 - `process.kill()` 需要 `AllowExec`。只有 `SIGKILL` 映射到 Kill，其他 signal 统一按
   `os.Interrupt` 处理。
 - `process.exit()` 和 `abort()` 只抛出 JavaScript/Go error，不会退出 Komari 进程。
-- stdout/stderr 会同步写宿主流，可能阻塞当前事件循环；stdin 不可读写。三个 stream 的
-  `fd` 固定为 `-1`、`isTTY` 固定为 `false`，`setEncoding/pause/resume` 没有真实流控制语义。
+- `stdout/stderr` 是 `stream.Writable` 实例，写入会同步写宿主流，可能阻塞当前事件循环；
+  `stdin` 是 `stream.Readable` 实例但未连接，永不产生数据。三个 stream 的 `fd` 固定为
+  `-1`、`isTTY` 固定为 `false`。
 
 ```js
 function runtimeInfo() {
@@ -569,10 +701,13 @@ function runtimeInfo() {
 `cwd` 受 `BaseDir` 限制；请求的 timeout 和 maxBuffer 只能收紧 Go 侧全局上限，不能放大。
 `stdio/input/detached/uid/gid/windowsHide/windowsVerbatimArguments/serialization` 等未实现。
 
-- `spawn()` 的 stdin `write/end` 通过后台写队列执行；stdout/stderr 通过 `data/end/close` 事件读取。
+- `spawn()` 的 `stdin` 是 `stream.Writable`（写入经后台写队列串行执行，`end()` 后关闭管道），
+  `stdout/stderr` 是 `stream.Readable`，支持 `data/end/close` 事件、`setEncoding`、
+  `pipe()`/`pipeline()`/`finished()`；`encoding` option 会预置解码。
 - `exec()`/`execFile()` 返回的是简化 child，只保证 pid、kill 和 exit/close/error 等事件，
   不像当前 `spawn()` 结果那样暴露完整的 stdin/stdout/stderr 属性。
-- stdout/stderr 的 `pause/resume` 调用会明确抛错；没有 backpressure、pipe 和完整 stream 状态。
+- child 输出当前没有跨 goroutine 的 backpressure：如果消费者长时间不读，输出会在
+  readable 缓冲中累积。
 - ChildProcess `ref/unref` 调用会明确抛错（事件循环由宿主驱动，没有引用计数语义）。
 - `connected` 固定为 `false`，`send()` 固定返回 `false` 并向 callback 报告 IPC 未启用；
   `disconnect()` 只发事件，没有 IPC channel。
@@ -673,19 +808,21 @@ HTTPS URL。
 
 #### IncomingMessage 与 ServerResponse
 
-IncomingMessage 可用属性和方法：
+IncomingMessage 是 `stream.Readable` 实例，可用属性和方法：
 
 ```text
 method  url  headers  headersDistinct  rawHeaders
 httpVersion  httpVersionMajor  httpVersionMinor
 complete  aborted  readable  socket  connection
 setEncoding()  pause()  resume()  destroy()
+push()/read()/pipe() 等 Readable 成员
 ```
 
-body 已经完整读入内存，随后最多发出一个 `data`，再发出 `end/close`。
-`complete` 在交给 JavaScript 时固定为 `true`；`setEncoding/pause/resume` 调用会明确抛错。
+body 已完整读入内存，在 handler 返回后以缓冲形式推入 stream，再发出 `end/close`，
+因此 `data` 可能不止一个 chunk（按 `highWaterMark` 分割）。`complete` 固定为 `true`；
+`setEncoding/pause/resume` 与 `read()` 拉取模式均可用。
 
-ServerResponse 可用成员：
+ServerResponse 是 `stream.Writable` 实例，可用成员：
 
 ```text
 statusCode  statusMessage  headersSent  writableEnded  writableFinished
@@ -693,9 +830,12 @@ destroyed  sendDate
 setHeader  appendHeader  getHeader  getHeaders  getHeaderNames
 hasHeader  removeHeader  writeHead  flushHeaders  writeContinue
 write  end  destroy  setTimeout
+cork()/uncork() 等 Writable 成员
 ```
 
-response body 会缓冲到 `end()`。`flushHeaders()` 只更新状态，`writeContinue()` 调用会明确抛错，
+`write()`/`end()` 走 Writable 语义（`write()` 返回 boolean，`end()` 触发
+`finish`，随后 `close`）；response body 会缓冲到 `end()`。`flushHeaders()` 只更新状态，
+`writeContinue()` 调用会明确抛错，
 `sendDate` 和自定义 `statusMessage` 不控制 Go `net/http` 的实际 wire 行为。
 
 #### ClientRequest
@@ -745,9 +885,9 @@ function serveOnce() {
 | `os.constants.errno` | 固定空对象；signals 只有 3 项。 |
 | `process.versions.node` | 固定 `"0.0.0-goja"`。 |
 | `process.connected`、`process.config` | 固定 `false`、空对象。 |
-| process stream `fd/isTTY` 与 `setEncoding/pause/resume/write` | `fd=-1`、`isTTY=false`；`setEncoding/pause/resume` 和未连接的 stdin `write` 调用抛错。 |
+| process stream `fd/isTTY` | `fd=-1`、`isTTY=false`；`stdin` 未连接，作为 Readable 存在但永不产生数据。 |
 | ChildProcess `connected/send/ref/unref/disconnect` | 无 IPC；`connected` 固定 `false`，`send()` 向 callback 报告 IPC 未启用，`ref/unref` 调用抛错，`disconnect()` 只发事件。 |
-| child stdout/stderr `pause/resume` | 调用抛错。 |
+
 | `net.getDefaultAutoSelectFamily()` | 固定 `true`。 |
 | `net.setDefaultAutoSelectFamily()` | 调用抛错。 |
 | `net.Server.closeAllConnections/closeIdleConnections` | 调用抛错（连接未逐个跟踪）。 |
@@ -764,8 +904,8 @@ function serveOnce() {
 | 浏览器 DOM | `window`、`document`、DOM node、`navigator`、`location`、storage、canvas。 |
 | 浏览器网络 | `WebSocket`、`EventSource`、Service Worker、完整 Streams、WebRTC、WebCrypto。 |
 | 模块系统 | ESM `import/export`、动态 `import()`、顶层 CommonJS `module/exports`，以及 `require.resolve/cache/extensions/main`。 |
-| Node 核心模块 | `https`、`crypto`、`stream`、`tls`、`dns`、`dgram`、`zlib`、`worker_threads`、`cluster`、`readline`、`assert` 等。 |
-| 完整 fs | stream、watcher、opendir、cp、link、statfs 和完整 FileHandle。 |
+| Node 核心模块 | `https`、`crypto`、`tls`、`dns`、`dgram`、`zlib`、`worker_threads`、`cluster`、`readline`、`assert` 等。 |
+| 完整 fs | watcher、opendir、cp、link、statfs 和完整 FileHandle。 |
 | 完整 net/http | Unix/pipe/TLS、构造器族、真实 backpressure、Agent 池、upgrade/trailer。 |
 | timer handle | `ref/unref/refresh/hasRef`。 |
 | 插件资源隔离 | 没有单 runtime CPU、内存、goroutine、网络或文件 IO 统计，也没有 Docker/cgroup 式额度限制。 |

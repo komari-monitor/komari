@@ -1,6 +1,7 @@
 package fs
 
 import (
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/dop251/goja"
 	"github.com/dop251/goja_nodejs/buffer"
+	"github.com/dop251/goja_nodejs/require"
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/filepathutil"
 )
@@ -486,6 +488,7 @@ func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 	})
 	_ = exports.Set("constants", map[string]int{"F_OK": 0, "R_OK": 4, "W_OK": 2, "X_OK": 1, "COPYFILE_EXCL": 1})
 	m.attachFSPromises(vm, exports)
+	m.attachFSStreams(vm, exports)
 	_ = module.Set("exports", exports)
 }
 
@@ -521,23 +524,7 @@ func (m *Module) fsAsync(vm *goja.Runtime, name string) func(goja.FunctionCall) 
 }
 
 func (m *Module) attachFSPromises(vm *goja.Runtime, exports *goja.Object) {
-	factory, err := vm.RunString(`(function(fs) {
-		const methods = ["readFile","writeFile","appendFile","access","stat","lstat","readdir","mkdir","rm","unlink","rmdir","rename","copyFile","realpath","readlink","symlink","truncate","chmod","utimes","mkdtemp","close","fstat","fsync"];
-		const promises = {};
-		for (const name of methods) promises[name] = (...args) => new Promise((resolve, reject) => fs[name](...args, (error, value) => error ? reject(error) : resolve(value)));
-		promises.read = (...args) => new Promise((resolve, reject) => fs.read(...args, (error, bytesRead, buffer) => error ? reject(error) : resolve({ bytesRead, buffer })));
-		promises.write = (...args) => new Promise((resolve, reject) => fs.write(...args, (error, bytesWritten, buffer) => error ? reject(error) : resolve({ bytesWritten, buffer })));
-		const fileHandle = (fd) => ({
-			fd,
-			close: () => promises.close(fd),
-			stat: () => promises.fstat(fd),
-			sync: () => promises.fsync(fd),
-			read: (...args) => promises.read(fd, ...args),
-			write: (...args) => promises.write(fd, ...args)
-		});
-		promises.open = (...args) => new Promise((resolve, reject) => fs.open(...args, (error, fd) => error ? reject(error) : resolve(fileHandle(fd))));
-		return promises;
-	})`)
+	factory, err := vm.RunString(fsPromisesSource)
 	if err != nil {
 		panic(vm.NewGoError(err))
 	}
@@ -886,4 +873,29 @@ func (m *Module) fsWrite(vm *goja.Runtime, call goja.FunctionCall) int {
 		panic(vm.NewGoError(err))
 	}
 	return count
+}
+
+//go:embed promises.js
+var fsPromisesSource string
+
+//go:embed streams.js
+var fsStreamsSource string
+
+// attachFSStreams registers fs.createReadStream and fs.createWriteStream,
+// implemented on top of the jsruntime stream module and the callback-based
+// fs file operations.
+func (m *Module) attachFSStreams(vm *goja.Runtime, exports *goja.Object) {
+	factoryValue, err := vm.RunString(fsStreamsSource)
+	if err != nil {
+		panic(vm.NewGoError(fmt.Errorf("load fs streams: %w", err)))
+	}
+	factory, _ := goja.AssertFunction(factoryValue)
+	value, err := factory(goja.Undefined(), exports, require.Require(vm, "stream"), require.Require(vm, "buffer"))
+	if err != nil {
+		panic(err)
+	}
+	object := value.ToObject(vm)
+	for _, name := range []string{"createReadStream", "createWriteStream"} {
+		_ = exports.Set(name, object.Get(name))
+	}
 }
