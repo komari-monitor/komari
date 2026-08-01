@@ -43,8 +43,6 @@ const (
 	defaultMaxChildOutputBytes       = 1 << 20
 )
 
-var errExecutionTimeout = errors.New("JavaScript execution timeout")
-
 // Options controls the host capabilities exposed to a JavaScript runtime.
 type Options struct {
 	// HTTPClient is used by fetch and XMLHttpRequest. If nil, a client with
@@ -62,6 +60,12 @@ type Options struct {
 	// ConfigureRequire registers approved native modules on the runtime's
 	// private CommonJS registry before the script is evaluated.
 	ConfigureRequire func(*require.Registry)
+	// ConfigureHost runs after the standard modules are registered and before
+	// ConfigureRequire. It receives the runtime's host services and private
+	// CommonJS registry so the host can register native modules (for example
+	// a host-injected server object) and schedule JavaScript turns on the
+	// event loop from other goroutines.
+	ConfigureHost func(*Host, *require.Registry)
 	// BaseDir is the root used to resolve relative CommonJS modules and
 	// node_modules. The directory must exist. Module paths cannot escape it
 	// unless AllowAllFileAccess is true. When BaseDir is empty, the current
@@ -178,6 +182,7 @@ func New(script string, options Options) (*Runtime, error) {
 		eventloop.WithRegistry(registry),
 	)
 	host := bridge.New(runtimeLoop, timeout)
+	publicHost := &Host{runtime: host}
 	startedAt := time.Now()
 	runtime := &Runtime{
 		loop:                runtimeLoop,
@@ -227,6 +232,9 @@ func New(script string, options Options) (*Runtime, error) {
 	host.SetErrorReporter(func(vm *goja.Runtime, name string, reportErr error) {
 		runtime.consoleMod.Report(vm, name, reportErr)
 	})
+	if options.ConfigureHost != nil {
+		options.ConfigureHost(publicHost, registry)
+	}
 	if options.ConfigureRequire != nil {
 		options.ConfigureRequire(registry)
 	}
@@ -258,7 +266,7 @@ func New(script string, options Options) (*Runtime, error) {
 			initialized <- err
 			return
 		}
-		err := runWithDeadline(vm, time.Now().Add(timeout), func() error {
+		err := bridge.RunWithDeadline(vm, time.Now().Add(timeout), func() error {
 			sourceName := "script.js"
 			if baseDir != "" {
 				sourceName = filepath.Join(baseDir, sourceName)
@@ -410,6 +418,17 @@ func (r *Runtime) HasFunction(name string) bool {
 // Call invokes a named JavaScript function and accepts either a truthy
 // synchronous result or a Promise resolving to a truthy value.
 func (r *Runtime) Call(name string, args ...any) error {
+	return r.call(name, true, args...)
+}
+
+// CallVoid invokes a named JavaScript function and reports errors without
+// requiring a truthy result. It is used for side-effect entry points such as
+// plugin load()/unload() hooks.
+func (r *Runtime) CallVoid(name string, args ...any) error {
+	return r.call(name, false, args...)
+}
+
+func (r *Runtime) call(name string, requireTruthy bool, args ...any) error {
 	if r == nil {
 		return errors.New("JavaScript runtime is nil")
 	}
@@ -431,10 +450,10 @@ func (r *Runtime) Call(name string, args ...any) error {
 
 	if !r.loop.RunOnLoop(func(vm *goja.Runtime) {
 		if time.Now().After(deadline) {
-			finish(errExecutionTimeout)
+			finish(bridge.ErrExecutionTimeout)
 			return
 		}
-		r.callOnLoop(vm, name, args, deadline, finish)
+		r.callOnLoop(vm, name, args, deadline, finish, requireTruthy)
 	}) {
 		return errors.New("JavaScript event loop is not running")
 	}
@@ -445,12 +464,12 @@ func (r *Runtime) Call(name string, args ...any) error {
 	case err := <-result:
 		return err
 	case <-timer.C:
-		finish(errExecutionTimeout)
+		finish(bridge.ErrExecutionTimeout)
 		return fmt.Errorf("JavaScript execution timeout after %s", r.timeout)
 	}
 }
 
-func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline time.Time, finish func(error)) {
+func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline time.Time, finish func(error), requireTruthy bool) {
 	function := vm.Get(name)
 	if function == nil || goja.IsUndefined(function) {
 		finish(fmt.Errorf("%s function not defined in script", name))
@@ -468,7 +487,7 @@ func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline
 	}
 
 	var callResult goja.Value
-	err := runWithDeadline(vm, deadline, func() error {
+	err := bridge.RunWithDeadline(vm, deadline, func() error {
 		return r.host.RunTurn(vm, func() error {
 			var err error
 			callResult, err = call(goja.Undefined(), values...)
@@ -476,8 +495,8 @@ func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline
 		})
 	})
 	if err != nil {
-		if errors.Is(err, errExecutionTimeout) {
-			finish(errExecutionTimeout)
+		if errors.Is(err, bridge.ErrExecutionTimeout) {
+			finish(bridge.ErrExecutionTimeout)
 		} else if code, ok := bridge.ExitCodeFromError(err); ok {
 			finish(exitCodeError(code))
 		} else {
@@ -488,7 +507,7 @@ func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline
 
 	_, ok = callResult.Export().(*goja.Promise)
 	if !ok {
-		finish(truthyResult(name, callResult))
+		finish(okResult(name, requireTruthy, callResult))
 		return
 	}
 
@@ -498,7 +517,7 @@ func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline
 		return
 	}
 	onFulfilled := vm.ToValue(func(call goja.FunctionCall) goja.Value {
-		finish(truthyResult(name, call.Argument(0)))
+		finish(okResult(name, requireTruthy, call.Argument(0)))
 		return goja.Undefined()
 	})
 	onRejected := vm.ToValue(func(call goja.FunctionCall) goja.Value {
@@ -524,44 +543,16 @@ func exitCodeError(code int64) error {
 	return fmt.Errorf("JavaScript process exited with code %d", code)
 }
 
+func okResult(name string, requireTruthy bool, value goja.Value) error {
+	if !requireTruthy {
+		return nil
+	}
+	return truthyResult(name, value)
+}
+
 func truthyResult(name string, value goja.Value) error {
 	if value != nil && value.ToBoolean() {
 		return nil
 	}
 	return fmt.Errorf("%s returned false", name)
-}
-
-// runWithDeadline interrupts synchronous JavaScript that exceeds deadline.
-// Promise waiting is handled by Call without blocking the event loop.
-func runWithDeadline(vm *goja.Runtime, deadline time.Time, fn func() error) error {
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		return errExecutionTimeout
-	}
-
-	var running atomic.Bool
-	var timedOut atomic.Bool
-	running.Store(true)
-	timerDone := make(chan struct{})
-	timer := time.AfterFunc(remaining, func() {
-		defer close(timerDone)
-		if running.CompareAndSwap(true, false) {
-			timedOut.Store(true)
-			vm.Interrupt(errExecutionTimeout)
-		}
-	})
-
-	err := fn()
-	if running.CompareAndSwap(true, false) {
-		if !timer.Stop() {
-			<-timerDone
-		}
-	} else {
-		<-timerDone
-		vm.ClearInterrupt()
-	}
-	if timedOut.Load() {
-		return errExecutionTimeout
-	}
-	return err
 }

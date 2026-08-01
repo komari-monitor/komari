@@ -16,8 +16,8 @@ import (
 	"sync"
 
 	"github.com/dop251/goja"
+	"github.com/komari-monitor/komari/pkg/jsruntime/httpbody"
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
-	"github.com/komari-monitor/komari/pkg/jsruntime/internal/httpbody"
 )
 
 type abortSignalState struct {

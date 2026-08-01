@@ -23,7 +23,7 @@ import (
 const (
 	defaultThemeMarketURL = "https://raw.githubusercontent.com/komari-monitor/theme-market/main/v1.json"
 	marketCatalogMaxSize  = 2 << 20
-	marketThemeMaxSize    = 100 << 20
+	marketPackageMaxSize  = 100 << 20
 	marketCacheTTL        = 10 * time.Minute
 )
 
@@ -103,7 +103,7 @@ func normalizeThemeMarketSource(source ThemeMarketSource) (ThemeMarketSource, er
 	return source, nil
 }
 
-func newThemeMarketSourceID() (string, error) {
+func newMarketSourceID() (string, error) {
 	buf := make([]byte, 12)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
@@ -132,7 +132,7 @@ func CreateThemeMarketSource(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	source.ID, err = newThemeMarketSourceID()
+	source.ID, err = newMarketSourceID()
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to create source ID")
 		return
@@ -312,7 +312,7 @@ func InstallThemeFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "This theme does not provide an installable package")
 		return
 	}
-	data, err := downloadThemeMarketURL(selected.Download, marketThemeMaxSize)
+	data, err := downloadMarketURL(selected.Download, marketPackageMaxSize)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Failed to download theme: "+err.Error())
 		return
@@ -364,7 +364,7 @@ func fetchThemeMarketCatalog(source ThemeMarketSource, force bool) ([]ThemeMarke
 			return append([]ThemeMarketTheme(nil), cached.Themes...), nil
 		}
 	}
-	data, err := downloadThemeMarketURL(source.URL, marketCatalogMaxSize)
+	data, err := downloadMarketURL(source.URL, marketCatalogMaxSize)
 	if err != nil {
 		return nil, err
 	}
@@ -407,10 +407,10 @@ func parseThemeMarketCatalog(data []byte) ([]ThemeMarketTheme, error) {
 }
 
 func validateThemeMarketTheme(theme ThemeMarketTheme) error {
-	if !isThemeMarketText(theme.Name) || theme.Short == "" || theme.Version == "" || !isThemeMarketText(theme.Author) {
+	if !isMarketText(theme.Name) || theme.Short == "" || theme.Version == "" || !isMarketText(theme.Author) {
 		return errors.New("name, short, version and author are required")
 	}
-	if !isValidThemeShort(theme.Short) {
+	if !isValidMarketShort(theme.Short) {
 		return errors.New("short contains invalid characters")
 	}
 	if (theme.Download == "") != (theme.SHA256 == "") {
@@ -425,7 +425,7 @@ func validateThemeMarketTheme(theme ThemeMarketTheme) error {
 		if value == "" && (field == "preview" || field == "download") {
 			continue
 		}
-		if err := validateThemeMarketURLSyntax(value); err != nil {
+		if err := validateMarketURLSyntax(value); err != nil {
 			return fmt.Errorf("%s: %w", field, err)
 		}
 	}
@@ -442,7 +442,9 @@ func validateThemeMarketTheme(theme ThemeMarketTheme) error {
 	return nil
 }
 
-func isThemeMarketText(value any) bool {
+// isMarketText reports whether a market entry field is usable: a non-empty
+// string or an i18n object with at least one non-empty value.
+func isMarketText(value any) bool {
 	switch text := value.(type) {
 	case string:
 		return strings.TrimSpace(text) != ""
@@ -456,7 +458,7 @@ func isThemeMarketText(value any) bool {
 	return false
 }
 
-func validateThemeMarketURLSyntax(rawURL string) error {
+func validateMarketURLSyntax(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
 		return errors.New("must be a valid HTTP or HTTPS URL")
@@ -464,7 +466,7 @@ func validateThemeMarketURLSyntax(rawURL string) error {
 	return nil
 }
 
-func downloadThemeMarketURL(rawURL string, maxSize int64) ([]byte, error) {
+func downloadMarketURL(rawURL string, maxSize int64) ([]byte, error) {
 	validate := func(candidate string) error {
 		parsed, err := url.Parse(candidate)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {

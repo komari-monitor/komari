@@ -116,7 +116,7 @@ func DeleteTheme(c *gin.Context) {
 	}
 
 	// 校验主题短名称，防止路径穿越（如 ../）导致删除工作目录外的任意文件
-	if !isValidThemeShort(req.Short) {
+	if !isValidMarketShort(req.Short) {
 		api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
 		return
 	}
@@ -149,7 +149,7 @@ func SetTheme(c *gin.Context) {
 	// 如果不是default主题，检查主题是否存在
 	if themeName != "default" {
 		// 校验主题名称，防止路径穿越（如 ../）访问工作目录外的文件
-		if !isValidThemeShort(themeName) {
+		if !isValidMarketShort(themeName) {
 			api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
 			return
 		}
@@ -223,7 +223,7 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 	}
 
 	// 验证Short字段格式（只允许字母、数字、下划线、连字符）
-	if !isValidThemeShort(themeInfo.Short) {
+	if !isValidMarketShort(themeInfo.Short) {
 		return themeInfo, fmt.Errorf("主题short字段格式无效，只允许字母、数字、下划线和连字符")
 	}
 
@@ -324,8 +324,9 @@ func loadThemeConfig(configPath string) (models.Theme, error) {
 	return themeInfo, nil
 }
 
-// isValidThemeShort 验证主题short字段格式
-func isValidThemeShort(short string) bool {
+// isValidMarketShort validates a market entry short name (shared by the
+// theme and plugin markets).
+func isValidMarketShort(short string) bool {
 	if short == "" || short == "default" {
 		return false
 	}
@@ -521,7 +522,7 @@ func UpdateTheme(c *gin.Context) {
 	}
 
 	// 校验主题短名称，防止路径穿越（如 ../）访问工作目录外的文件
-	if !isValidThemeShort(req.Short) {
+	if !isValidMarketShort(req.Short) {
 		api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
 		return
 	}
@@ -729,7 +730,7 @@ func peekThemeFromZip(zipPath string) (models.Theme, error) {
 		return themeInfo, fmt.Errorf("主题配置缺少必填字段（name、short）")
 	}
 
-	if !isValidThemeShort(themeInfo.Short) {
+	if !isValidMarketShort(themeInfo.Short) {
 		return themeInfo, fmt.Errorf("主题short字段格式无效，只允许字母、数字、下划线和连字符")
 	}
 

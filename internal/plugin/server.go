@@ -1,0 +1,442 @@
+package plugin
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/dop251/goja"
+	"github.com/dop251/goja_nodejs/buffer"
+	"github.com/dop251/goja_nodejs/require"
+	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/pkg/jsruntime"
+	"github.com/komari-monitor/komari/pkg/jsruntime/httpbody"
+	"github.com/komari-monitor/komari/pkg/rpc"
+)
+
+// registerServerModule registers the "server" native module for one plugin
+// instance. The module exposes:
+//
+//	server.route(method, path, handler)   register an HTTP route on the host
+//	                                      engine; handler receives (req, res)
+//	                                      and must call res.end() to finish
+//	server.hook(kind, fn)                 register a request or response hook
+//	server.call(method, params...)        call a registered RPC method with
+//	                                      admin authority; resolves to the RPC
+//	                                      result or rejects with an Error
+//	                                      carrying code/message/data
+//	server.registerRPC(method, handler)   register a plugin-owned RPC method
+//	server.getConfig()                    resolve the saved plugin configuration
+//
+// The host engine keeps a registered route slot after unload; requests then
+// receive 404 until the plugin is loaded again.
+func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.Registry, short string) {
+	registry.RegisterNativeModule("server", func(vm *goja.Runtime, module *goja.Object) {
+		exports := vm.NewObject()
+		_ = exports.Set("route", func(call goja.FunctionCall) goja.Value {
+			method := strings.ToUpper(strings.TrimSpace(call.Argument(0).String()))
+			path := call.Argument(1).String()
+			handler, ok := goja.AssertFunction(call.Argument(2))
+			if method == "" {
+				panic(vm.NewTypeError("server.route requires an HTTP method"))
+			}
+			if path == "" || !strings.HasPrefix(path, "/") {
+				panic(vm.NewTypeError("server.route requires a path starting with /"))
+			}
+			if !ok {
+				panic(vm.NewTypeError("server.route requires a function handler"))
+			}
+			if err := m.registerRoute(short, method, path, handler); err != nil {
+				panic(vm.NewGoError(err))
+			}
+			return goja.Undefined()
+		})
+		_ = exports.Set("call", func(call goja.FunctionCall) goja.Value {
+			method := strings.TrimSpace(call.Argument(0).String())
+			if method == "" {
+				panic(vm.NewTypeError("server.call requires an RPC method name"))
+			}
+			params := callParams(call)
+			promise, resolve, reject := vm.NewPromise()
+			go func() {
+				meta := &rpc.ContextMeta{Permission: rpc.RoleAdmin, Principal: rpc.PrincipalFromRole(rpc.RoleAdmin)}
+				ctx := rpc.NewContextWithMeta(context.Background(), meta)
+				resp := rpc.CallWithContext(ctx, nil, method, params)
+				host.RunOnLoop(func(vm *goja.Runtime) {
+					if resp.Error != nil {
+						_ = reject(jsRPCError(vm, resp.Error))
+						return
+					}
+					_ = resolve(resp.Result)
+				})
+			}()
+			return vm.ToValue(promise)
+		})
+		_ = exports.Set("hook", func(call goja.FunctionCall) goja.Value {
+			kind := strings.ToLower(strings.TrimSpace(call.Argument(0).String()))
+			fn, ok := goja.AssertFunction(call.Argument(1))
+			if kind != "request" && kind != "response" {
+				panic(vm.NewTypeError("server.hook kind must be \"request\" or \"response\""))
+			}
+			if !ok {
+				panic(vm.NewTypeError("server.hook requires a function"))
+			}
+			m.registerHook(short, hookKind(kind), fn)
+			return goja.Undefined()
+		})
+		_ = exports.Set("registerRPC", func(call goja.FunctionCall) goja.Value {
+			method := strings.TrimSpace(call.Argument(0).String())
+			fn, ok := goja.AssertFunction(call.Argument(1))
+			if method == "" {
+				panic(vm.NewTypeError("server.registerRPC requires an RPC method name"))
+			}
+			if !ok {
+				panic(vm.NewTypeError("server.registerRPC requires a function handler"))
+			}
+			if err := m.registerRPC(short, method, fn); err != nil {
+				panic(vm.NewGoError(err))
+			}
+			return goja.Undefined()
+		})
+		_ = exports.Set("getConfig", func(call goja.FunctionCall) goja.Value {
+			promise, resolve, reject := vm.NewPromise()
+			go func() {
+				data, err := GetConfiguration(short)
+				host.RunOnLoop(func(vm *goja.Runtime) {
+					if err != nil {
+						_ = reject(vm.NewGoError(err))
+						return
+					}
+					_ = resolve(data)
+				})
+			}()
+			return vm.ToValue(promise)
+		})
+		_ = module.Set("exports", exports)
+	})
+}
+
+// callParams converts JS arguments into JSON-RPC params: no params, a single
+// value, or a positional array.
+func callParams(call goja.FunctionCall) any {
+	switch n := len(call.Arguments); {
+	case n <= 1:
+		return nil
+	case n == 2:
+		return call.Argument(1).Export()
+	default:
+		params := make([]any, 0, n-1)
+		for i := 1; i < n; i++ {
+			params = append(params, call.Argument(i).Export())
+		}
+		return params
+	}
+}
+
+func jsRPCError(vm *goja.Runtime, e *rpc.JsonRpcError) *goja.Object {
+	obj := vm.NewGoError(fmt.Errorf("%s", e.Message))
+	_ = obj.Set("code", e.Code)
+	if e.Data != nil {
+		_ = obj.Set("data", e.Data)
+	}
+	return obj
+}
+
+// registerRoute registers (or reuses) a gin route slot for one plugin. It is
+// called while the manager write lock is held during plugin load, so it must
+// not take Manager locks itself.
+func (m *Manager) registerRoute(short, method, path string, handler goja.Callable) (err error) {
+	key := method + " " + path
+	inst, ok := m.instances[short]
+	if !ok {
+		return fmt.Errorf("plugin %q is not loaded", short)
+	}
+	if m.engine == nil {
+		return fmt.Errorf("plugin manager has no HTTP engine")
+	}
+	if m.routes[short] == nil {
+		m.routes[short] = make(map[string]bool)
+	}
+	slotExists := m.routes[short][key]
+	inst.mu.Lock()
+	if !slotExists && inst.handlers[key] != nil {
+		inst.mu.Unlock()
+		return nil // already registered in this load
+	}
+	inst.handlers[key] = handler
+	inst.mu.Unlock()
+	if slotExists {
+		return nil // gin slot from an earlier load stays; the handler slot is refreshed
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			inst.mu.Lock()
+			delete(inst.handlers, key)
+			inst.mu.Unlock()
+			err = fmt.Errorf("register route %s %s: %v", method, path, r)
+		}
+	}()
+	m.engine.Handle(method, path, m.routeHandler(short))
+	m.routes[short][key] = true
+	return nil
+}
+
+// routeHandler bridges one gin request into the plugin event loop. The
+// handler receives (req, res); the response is written once res.end() runs
+// or the runtime timeout elapses.
+func (m *Manager) routeHandler(short string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		inst := m.instanceFor(short)
+		if inst == nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		key := c.Request.Method + " " + c.FullPath()
+		inst.mu.RLock()
+		handler := inst.handlers[key]
+		host := inst.host
+		alive := inst.runtime != nil
+		limit := inst.info.Permissions.MaxHTTPBodyBytes
+		inst.mu.RUnlock()
+		if !alive || handler == nil || host == nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		if limit < 1 {
+			limit = defaultMaxHTTPBodyBytes
+		}
+		body, err := httpbody.ReadAll(c.Request.Body, limit)
+		if err != nil {
+			c.Status(http.StatusRequestEntityTooLarge)
+			_, _ = c.Writer.WriteString(err.Error())
+			return
+		}
+
+		state := &routeResponse{
+			headers:    make(http.Header),
+			statusCode: http.StatusOK,
+			done:       make(chan struct{}),
+			chunks:     make(chan []byte, 4),
+			abortCh:    make(chan struct{}),
+		}
+		queued := host.RunOnLoop(func(vm *goja.Runtime) {
+			req := routeRequest(vm, c, body)
+			res := routeResponseObject(vm, state)
+			runErr := host.RunJob(vm, "plugin route "+short, func() error {
+				_, callErr := handler(goja.Undefined(), req, res)
+				return callErr
+			})
+			if runErr != nil {
+				state.finish(http.StatusInternalServerError, nil)
+			}
+		})
+		if !queued {
+			c.Status(http.StatusServiceUnavailable)
+			return
+		}
+
+		writeFinal := func(status int, body []byte) {
+			state.mu.Lock()
+			if status != 0 {
+				state.statusCode = status
+			}
+			if body != nil {
+				_, _ = state.body.Write(body)
+			}
+			for name, values := range state.headers {
+				for _, value := range values {
+					c.Header(name, value)
+				}
+			}
+			statusCode := state.statusCode
+			responseBody := append([]byte(nil), state.body.Bytes()...)
+			state.mu.Unlock()
+			c.Status(statusCode)
+			_, _ = c.Writer.Write(responseBody)
+		}
+
+		// Streaming pump: with res.streaming = true every res.write is sent back
+		// to the client and flushed immediately; normal mode buffers and writes
+		// once at res.end(). When the client disconnects, aborted is set so the
+		// plugin script can stop producing via res.isAborted().
+		idle := time.NewTimer(host.Timeout())
+		defer idle.Stop()
+		committed := false
+		for {
+			select {
+			case chunk := <-state.chunks:
+				if !committed {
+					state.mu.Lock()
+					for name, values := range state.headers {
+						for _, value := range values {
+							c.Header(name, value)
+						}
+					}
+					statusCode := state.statusCode
+					state.mu.Unlock()
+					c.Status(statusCode)
+					committed = true
+				}
+				_, _ = c.Writer.Write(chunk)
+				if flusher, ok := c.Writer.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				if !idle.Stop() {
+					select {
+					case <-idle.C:
+					default:
+					}
+				}
+				idle.Reset(host.Timeout())
+			case <-state.done:
+				if !committed {
+					writeFinal(0, nil)
+				}
+				return
+			case <-c.Request.Context().Done():
+				state.aborted.Store(true)
+				close(state.abortCh)
+				return
+			case <-idle.C:
+				if state.isStreaming() {
+					// Streaming idle timeout: end the stream and notify JS
+					state.aborted.Store(true)
+					close(state.abortCh)
+					return
+				}
+				writeFinal(http.StatusGatewayTimeout, []byte("plugin route handler timed out"))
+				return
+			}
+		}
+	}
+}
+
+// routeResponse is the Go side of the JS response object. It mirrors the
+// minimal nodeHTTPResponse pattern from the jsruntime http module. When
+// res.streaming is enabled, chunks are pushed through a channel and written
+// back to the client immediately instead of being buffered.
+type routeResponse struct {
+	mu         sync.Mutex
+	headers    http.Header
+	body       bytes.Buffer
+	statusCode int
+	ended      bool
+	done       chan struct{}
+
+	streaming bool
+	chunks    chan []byte
+	aborted   atomic.Bool
+	abortCh   chan struct{}
+}
+
+func (state *routeResponse) markStreaming() {
+	state.mu.Lock()
+	state.streaming = true
+	state.mu.Unlock()
+}
+
+func (state *routeResponse) isStreaming() bool {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.streaming
+}
+
+// pushChunk delivers a streamed chunk to the HTTP pump. It returns false
+// when the client connection is gone so the script can stop producing.
+func (state *routeResponse) pushChunk(p []byte) bool {
+	select {
+	case state.chunks <- p:
+		return true
+	case <-state.abortCh:
+		return false
+	}
+}
+
+func (state *routeResponse) finish(status int, body []byte) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.ended {
+		return
+	}
+	if status != 0 {
+		state.statusCode = status
+	}
+	if body != nil {
+		_, _ = state.body.Write(body)
+	}
+	state.ended = true
+	close(state.done)
+}
+
+func routeRequest(vm *goja.Runtime, c *gin.Context, body []byte) *goja.Object {
+	req := hookRequestObject(vm, c.Request, body)
+	_ = req.Set("context", routeRequestContext(vm, c))
+	return req
+}
+
+func routeResponseObject(vm *goja.Runtime, state *routeResponse) *goja.Object {
+	res := vm.NewObject()
+	_ = res.Set("statusCode", http.StatusOK)
+	_ = res.Set("statusMessage", "")
+	_ = res.Set("streaming", false)
+	_ = res.Set("isAborted", func() bool { return state.aborted.Load() })
+	_ = res.Set("setHeader", func(name string, value goja.Value) *goja.Object {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		var values []string
+		if err := vm.ExportTo(value, &values); err == nil {
+			state.headers[name] = values
+		} else {
+			state.headers.Set(name, value.String())
+		}
+		return res
+	})
+	_ = res.Set("getHeader", func(name string) goja.Value {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		values := state.headers.Values(name)
+		if len(values) == 0 {
+			return goja.Undefined()
+		}
+		if len(values) == 1 {
+			return vm.ToValue(values[0])
+		}
+		return vm.ToValue(values)
+	})
+	_ = res.Set("removeHeader", func(name string) {
+		state.mu.Lock()
+		state.headers.Del(name)
+		state.mu.Unlock()
+	})
+	_ = res.Set("write", func(call goja.FunctionCall) goja.Value {
+		data := buffer.Bytes(vm, call.Argument(0))
+		if value := res.Get("streaming"); value != nil && value.ToBoolean() {
+			state.markStreaming()
+			_ = state.pushChunk(data)
+			return vm.ToValue(true)
+		}
+		state.mu.Lock()
+		_, _ = state.body.Write(data)
+		state.mu.Unlock()
+		return vm.ToValue(true)
+	})
+	_ = res.Set("end", func(call goja.FunctionCall) goja.Value {
+		state.mu.Lock()
+		if len(call.Arguments) > 0 && !goja.IsUndefined(call.Argument(0)) && !goja.IsNull(call.Argument(0)) {
+			_, _ = state.body.WriteString(call.Argument(0).String())
+		}
+		state.statusCode = int(res.Get("statusCode").ToInteger())
+		if !state.ended {
+			state.ended = true
+			close(state.done)
+		}
+		state.mu.Unlock()
+		return res
+	})
+	return res
+}

@@ -503,3 +503,67 @@ func TestPromiseRejectionIsReturned(t *testing.T) {
 		t.Fatalf("expected Promise rejection, got %v", err)
 	}
 }
+
+func TestConfigureHostProvidesHostServicesAndModules(t *testing.T) {
+	var host *Host
+	runtime, err := New(`
+		function run() {
+			return require("server").name === "test-server";
+		}
+	`, Options{
+		BaseDir: t.TempDir(),
+		Console: io.Discard,
+		Timeout: time.Second,
+		ConfigureHost: func(h *Host, registry *require.Registry) {
+			host = h
+			registry.RegisterNativeModule("server", func(vm *goja.Runtime, module *goja.Object) {
+				exports := module.Get("exports").ToObject(vm)
+				_ = exports.Set("name", "test-server")
+			})
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	if host == nil {
+		t.Fatal("ConfigureHost was not called")
+	}
+	if err := runtime.Call("run"); err != nil {
+		t.Fatalf("host module not available to script: %v", err)
+	}
+
+	// Host services must be usable from another goroutine while the runtime
+	// is idle: queue a job and wait for it to run on the event loop.
+	ran := make(chan bool, 1)
+	if !host.RunOnLoop(func(vm *goja.Runtime) {
+		ran <- true
+	}) {
+		t.Fatal("RunOnLoop rejected a job on an open runtime")
+	}
+	select {
+	case <-ran:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunOnLoop job did not run")
+	}
+}
+
+func TestCallVoidIgnoresFalsyResult(t *testing.T) {
+	runtime, err := New(`
+		function sideEffect() {
+			console.log("ran");
+		}
+	`, Options{BaseDir: t.TempDir(), Console: io.Discard, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	if err := runtime.CallVoid("sideEffect"); err != nil {
+		t.Fatalf("CallVoid rejected a falsy result: %v", err)
+	}
+	if err := runtime.Call("sideEffect"); err == nil {
+		t.Fatal("Call must still reject a falsy result")
+	}
+}

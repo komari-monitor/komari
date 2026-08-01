@@ -1,0 +1,428 @@
+package plugin
+
+import (
+	"bufio"
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/dop251/goja"
+	"github.com/komari-monitor/komari/pkg/jsruntime"
+	"github.com/komari-monitor/komari/pkg/jsruntime/httpbody"
+)
+
+// hookKind identifies the HTTP hook phase.
+type hookKind string
+
+const (
+	hookRequest  hookKind = "request"
+	hookResponse hookKind = "response"
+)
+
+// hookEntry is one registered JavaScript hook.
+type hookEntry struct {
+	short string
+	kind  hookKind
+	fn    goja.Callable
+	host  *jsruntime.Host
+}
+
+// wrapHandler installs the hook chain around the application handler. WebSocket
+// upgrades pass through untouched because the response cannot be buffered.
+func (m *Manager) wrapHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isUpgradeRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		reqHooks := m.hooksOf(hookRequest)
+		respHooks := m.hooksOf(hookResponse)
+		if len(reqHooks) == 0 && len(respHooks) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		req := r
+		if len(reqHooks) > 0 {
+			body, err := httpbody.ReadAll(r.Body, defaultMaxHTTPBodyBytes)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+				return
+			}
+			for _, hook := range reqHooks {
+				body, err = m.runRequestHook(req, body, hook)
+				if err != nil {
+					m.logHookError(hook, err)
+					http.Error(w, "plugin request hook failed", http.StatusInternalServerError)
+					return
+				}
+			}
+			req = requestWithBody(req, body)
+		}
+
+		if len(respHooks) == 0 {
+			next.ServeHTTP(w, req)
+			return
+		}
+		bw := newBufferedResponseWriter(w)
+		next.ServeHTTP(bw, req)
+		for _, hook := range respHooks {
+			if err := m.runResponseHook(req, bw, hook); err != nil {
+				m.logHookError(hook, err)
+			}
+		}
+		bw.flushTo(w)
+	})
+}
+
+// runRequestHook runs one request hook on its plugin event loop, applies the
+// JS-side modifications to the request, and returns the (possibly replaced)
+// request body.
+func (m *Manager) runRequestHook(r *http.Request, body []byte, h *hookEntry) ([]byte, error) {
+	nextBody := body
+	var hookErr error
+	queued, timedOut := runHookTurn(h.host, "plugin request hook "+h.short, func(vm *goja.Runtime) {
+		reqObj := hookRequestObject(vm, r, nextBody)
+		hookErr = h.host.RunJob(vm, "plugin request hook "+h.short, func() error {
+			_, err := h.fn(goja.Undefined(), reqObj)
+			return err
+		})
+		if hookErr != nil {
+			return
+		}
+		if value := reqObj.Get("method"); value != nil && !goja.IsUndefined(value) {
+			if method := strings.ToUpper(strings.TrimSpace(value.String())); method != "" {
+				r.Method = method
+			}
+		}
+		if value := reqObj.Get("url"); value != nil && !goja.IsUndefined(value) {
+			if raw := strings.TrimSpace(value.String()); raw != "" {
+				if parsed, err := url.Parse(raw); err == nil {
+					r.URL = parsed
+					r.RequestURI = raw
+				}
+			}
+		}
+		if value := reqObj.Get("headers"); value != nil && !goja.IsUndefined(value) {
+			var raw map[string]any
+			if err := vm.ExportTo(value, &raw); err == nil {
+				r.Header = normalizeHeader(raw)
+			}
+		}
+		if value := reqObj.Get("body"); value != nil && !goja.IsUndefined(value) {
+			nextBody = []byte(value.String())
+		}
+	})
+	if !queued {
+		return body, errors.New("plugin runtime is closed")
+	}
+	if timedOut {
+		return body, errors.New("plugin request hook timed out")
+	}
+	return nextBody, hookErr
+}
+
+// runResponseHook runs one response hook on its plugin event loop and applies
+// the JS-side modifications to the captured response.
+func (m *Manager) runResponseHook(r *http.Request, bw *bufferedResponseWriter, h *hookEntry) error {
+	var hookErr error
+	queued, timedOut := runHookTurn(h.host, "plugin response hook "+h.short, func(vm *goja.Runtime) {
+		resObj := hookResponseObject(vm, bw)
+		hookErr = h.host.RunJob(vm, "plugin response hook "+h.short, func() error {
+			_, err := h.fn(goja.Undefined(), hookRequestObject(vm, r, nil), resObj)
+			return err
+		})
+		if hookErr != nil {
+			return
+		}
+		status := bw.status()
+		if value := resObj.Get("statusCode"); value != nil && !goja.IsUndefined(value) {
+			status = int(value.ToInteger())
+		}
+		header := bw.Header().Clone()
+		if value := resObj.Get("headers"); value != nil && !goja.IsUndefined(value) {
+			var raw map[string]any
+			if err := vm.ExportTo(value, &raw); err == nil {
+				header = normalizeHeader(raw)
+			}
+		}
+		responseBody := bw.bodyBytes()
+		if value := resObj.Get("body"); value != nil && !goja.IsUndefined(value) {
+			responseBody = []byte(value.String())
+		}
+		bw.apply(status, header, responseBody)
+	})
+	if !queued {
+		return errors.New("plugin runtime is closed")
+	}
+	if timedOut {
+		return errors.New("plugin response hook timed out")
+	}
+	return hookErr
+}
+
+// runHookTurn queues one hook callback on the plugin event loop and waits
+// for it with the runtime timeout. It reports whether the job was queued and
+// whether it timed out.
+func runHookTurn(host *jsruntime.Host, name string, job func(vm *goja.Runtime)) (queued, timedOut bool) {
+	done := make(chan struct{})
+	if !host.RunOnLoop(func(vm *goja.Runtime) {
+		defer close(done)
+		job(vm)
+	}) {
+		return false, false
+	}
+	select {
+	case <-done:
+		return true, false
+	case <-time.After(host.Timeout()):
+		return true, true
+	}
+}
+
+func (m *Manager) logHookError(h *hookEntry, err error) {
+	_, _ = m.logStore(h.short).Write([]byte("[plugin] hook error: " + err.Error() + "\n"))
+}
+
+// hookRequestObject builds the mutable JS request object.
+func hookRequestObject(vm *goja.Runtime, r *http.Request, body []byte) *goja.Object {
+	req := vm.NewObject()
+	_ = req.Set("method", r.Method)
+	_ = req.Set("url", r.URL.RequestURI())
+	_ = req.Set("headers", headerToMap(r.Header))
+	query := make(map[string]string, len(r.URL.Query()))
+	for name, values := range r.URL.Query() {
+		query[name] = strings.Join(values, ",")
+	}
+	_ = req.Set("query", query)
+	_ = req.Set("body", string(body))
+	_ = req.Set("context", hookRequestContext(vm, r))
+	return req
+}
+
+// hookResponseObject builds the mutable JS response object from the captured
+// response.
+func hookResponseObject(vm *goja.Runtime, bw *bufferedResponseWriter) *goja.Object {
+	res := vm.NewObject()
+	_ = res.Set("statusCode", bw.status())
+	_ = res.Set("statusMessage", "")
+	_ = res.Set("headers", headerToMap(bw.Header()))
+	_ = res.Set("body", string(bw.bodyBytes()))
+	return res
+}
+
+func requestWithBody(r *http.Request, body []byte) *http.Request {
+	clone := r.Clone(r.Context())
+	clone.Body = io.NopCloser(bytes.NewReader(body))
+	clone.ContentLength = int64(len(body))
+	return clone
+}
+
+func normalizeHeader(raw map[string]any) http.Header {
+	header := make(http.Header, len(raw))
+	for name, value := range raw {
+		switch values := value.(type) {
+		case string:
+			header.Set(name, values)
+		case []any:
+			for _, item := range values {
+				header.Add(name, fmt.Sprint(item))
+			}
+		case []string:
+			for _, item := range values {
+				header.Add(name, item)
+			}
+		default:
+			header.Set(name, fmt.Sprint(value))
+		}
+	}
+	return header
+}
+
+func headerToMap(header http.Header) map[string]any {
+	out := make(map[string]any, len(header))
+	for name, values := range header {
+		if len(values) == 1 {
+			out[strings.ToLower(name)] = values[0]
+		} else {
+			out[strings.ToLower(name)] = values
+		}
+	}
+	return out
+}
+
+func isUpgradeRequest(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Connection")), "upgrade") ||
+		strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+// bufferedResponseWriter captures status/headers/body so response hooks can
+// modify them before the real writer receives the final bytes.
+//
+// Streaming responses (SSE / MJPEG / chunked feeds) must not be buffered:
+// their handlers never return, so buffering would hold the client empty
+// forever and grow memory without bound. The first Flush() switches the
+// writer to passthrough mode: buffered status/headers/body are forwarded to
+// the real writer immediately, every later Write/WriteHeader goes straight
+// through, and the response hooks can no longer rewrite the stream.
+type bufferedResponseWriter struct {
+	mu          sync.Mutex
+	header      http.Header
+	statusCode  int
+	body        bytes.Buffer
+	wroteHeader bool
+	streaming   bool // switched to passthrough after the first Flush()
+	forwarded   bool // status/headers already sent to the underlying writer
+	hijacked    bool
+	underlying  http.ResponseWriter
+}
+
+func newBufferedResponseWriter(w http.ResponseWriter) *bufferedResponseWriter {
+	return &bufferedResponseWriter{header: make(http.Header), underlying: w}
+}
+
+func (b *bufferedResponseWriter) Header() http.Header { return b.header }
+
+func (b *bufferedResponseWriter) WriteHeader(code int) {
+	b.mu.Lock()
+	if b.streaming {
+		if b.forwarded || b.hijacked {
+			b.mu.Unlock()
+			return
+		}
+		b.forwarded = true
+		status, header := code, b.header.Clone()
+		b.mu.Unlock()
+		b.writeThrough(status, header)
+		return
+	}
+	if !b.wroteHeader {
+		b.statusCode = code
+		b.wroteHeader = true
+	}
+	b.mu.Unlock()
+}
+
+func (b *bufferedResponseWriter) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.streaming {
+		return b.underlying.Write(p)
+	}
+	if !b.wroteHeader {
+		b.statusCode = http.StatusOK
+		b.wroteHeader = true
+	}
+	return b.body.Write(p)
+}
+
+func (b *bufferedResponseWriter) status() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.wroteHeader {
+		return http.StatusOK
+	}
+	return b.statusCode
+}
+
+func (b *bufferedResponseWriter) bodyBytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.body.Bytes()...)
+}
+
+func (b *bufferedResponseWriter) apply(status int, header http.Header, body []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.streaming {
+		return // already streamed to the client; hooks cannot rewrite it
+	}
+	b.statusCode = status
+	b.wroteHeader = true
+	b.header = header
+	b.body.Reset()
+	_, _ = b.body.Write(body)
+}
+
+func (b *bufferedResponseWriter) flushTo(w http.ResponseWriter) {
+	b.mu.Lock()
+	if b.streaming || b.hijacked {
+		b.mu.Unlock()
+		return // passthrough already forwarded everything
+	}
+	status, body, header := b.statusCode, append([]byte(nil), b.body.Bytes()...), b.header.Clone()
+	b.mu.Unlock()
+	for name, values := range header {
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
+func (b *bufferedResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	b.mu.Lock()
+	b.hijacked = true
+	b.mu.Unlock()
+	hijacker, ok := b.underlying.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("plugin response buffer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (b *bufferedResponseWriter) Flush() {
+	b.mu.Lock()
+	if !b.streaming {
+		// First Flush: switch to passthrough mode and forward the buffered
+		// response to the real writer immediately.
+		b.streaming = true
+		status, body, header := b.statusCode, append([]byte(nil), b.body.Bytes()...), b.header.Clone()
+		b.mu.Unlock()
+		b.writeThrough(status, header)
+		_, _ = b.underlying.Write(body)
+	} else {
+		b.mu.Unlock()
+	}
+	if flusher, ok := b.underlying.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// writeThrough forwards status and headers to the underlying writer once.
+func (b *bufferedResponseWriter) writeThrough(status int, header http.Header) {
+	for name, values := range header {
+		for _, value := range values {
+			b.underlying.Header().Add(name, value)
+		}
+	}
+	b.underlying.WriteHeader(status)
+}
+
+func (b *bufferedResponseWriter) ReadFrom(r io.Reader) (int64, error) {
+	if !b.wroteHeader {
+		b.WriteHeader(http.StatusOK)
+	}
+	return io.Copy(b, r)
+}
+
+func (b *bufferedResponseWriter) CloseNotify() <-chan bool {
+	if notifier, ok := b.underlying.(interface{ CloseNotify() <-chan bool }); ok {
+		return notifier.CloseNotify()
+	}
+	return nil
+}
+
+var (
+	_ http.ResponseWriter = (*bufferedResponseWriter)(nil)
+	_ http.Hijacker       = (*bufferedResponseWriter)(nil)
+	_ http.Flusher        = (*bufferedResponseWriter)(nil)
+)

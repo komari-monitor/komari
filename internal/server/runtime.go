@@ -14,11 +14,12 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/internal/metricstore"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/internal/lifecycle"
+	"github.com/komari-monitor/komari/internal/metricstore"
+	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logger "github.com/komari-monitor/komari/utils/log"
@@ -95,6 +96,15 @@ func (a *App) BuildRouter() error {
 		c.Redirect(http.StatusTemporaryRedirect, "/")
 	})
 	router.Register(r)
+
+	// Plugins are loaded after the router exists so server.route can bind
+	// routes; a failed plugin only disables itself and is logged.
+	plugin.Init(r)
+	if err := plugin.LoadAll(); err != nil {
+		logger.ErrorArgs("server", "Failed to load some plugins:", err)
+	}
+	a.addCleanup("plugins", func(context.Context) error { return plugin.CloseAll() })
+
 	a.registerReloadHandlers(cors)
 	a.reload.Start()
 	a.engine = r
@@ -103,7 +113,7 @@ func (a *App) BuildRouter() error {
 
 // Run starts the normal HTTP server and blocks until shutdown or fatal error.
 func (a *App) Run() error {
-	a.server = &http.Server{Addr: a.listenAddr, Handler: a.engine}
+	a.server = &http.Server{Addr: a.listenAddr, Handler: plugin.WrapHandler(a.engine)}
 	serverErr := make(chan error, 1)
 	logger.Infof("server", "Starting server on %s ...", a.listenAddr)
 	go func() {

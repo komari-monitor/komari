@@ -65,6 +65,7 @@ func main() {
 | `Console` | Komari 应用日志 | 非空时，所有 console 输出写入该 `io.Writer`。 |
 | `RequireLoader` | `require.DefaultSourceLoader` | 自定义 CommonJS 源码加载器。设置 `BaseDir` 且未允许越界时，传给 loader 的路径仍会先经过目录和软链接校验。 |
 | `ConfigureRequire` | `nil` | 在脚本执行前向当前 runtime 的私有 registry 注册或覆盖原生模块。 |
+| `ConfigureHost` | `nil` | 在标准模块注册后、`ConfigureRequire` 前调用，提供 `Host` 宿主服务句柄与私有 registry，供宿主注入模块（如插件的 `require("server")`）并从其它 goroutine 调度事件循环。 |
 | `BaseDir` | 空 | 顶层相对 `require`、`node_modules` 和 Node `fs` 的根目录。非空时必须已存在且是目录。 |
 | `NodeJS` | `false` | 注入 Node 全局变量并注册 `events/path/os/process/fs/child_process/net/http`。 |
 | `AllowExec` | `false` | 允许 `child_process` 和 `process.kill()`。仅在 `NodeJS` 模式下有意义。 |
@@ -79,6 +80,7 @@ func main() {
 | --- | --- | --- |
 | `New(script, options)` | `可用` | 创建独立 VM、注入接口并执行脚本。空脚本、非法 `BaseDir` 或脚本错误会直接返回 error。 |
 | `Call(name, args...)` | `可用` | 调用全局函数；支持同步返回值和 Promise。只有 truthy 返回值或解析为 truthy 的 Promise 才算成功，不向 Go 返回 JS 值。 |
+| `CallVoid(name, args...)` | `可用` | 调用副作用函数（如插件 `load()`/`unload()` 钩子），报告错误但不要求 truthy 返回值。 |
 | `HasFunction(name)` | `可用` | 检查全局属性是否为函数；runtime 关闭后返回 `false`。 |
 | `Close()` | `可用` | 幂等关闭；停止事件循环，并关闭 timer、fetch、文件、socket、listener 和子进程等已登记资源。 |
 
