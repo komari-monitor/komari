@@ -3,6 +3,7 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -33,9 +34,15 @@ import (
 //	server.registerRPC(method, handler)   register a plugin-owned RPC method
 //	server.getConfig()                    resolve the saved plugin configuration
 //
+// server.registerRPC, server.getConfig and filesystem access confined to the
+// plugin directory are always granted without a manifest declaration.
+// server.route, server.hook and server.call require the allowRoutes,
+// allowHooks and allowSystemRPC permissions respectively; a missing
+// permission fails at load time (route/hook) or rejects the call.
+//
 // The host engine keeps a registered route slot after unload; requests then
 // receive 404 until the plugin is loaded again.
-func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.Registry, short string) {
+func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.Registry, inst *Instance) {
 	registry.RegisterNativeModule("server", func(vm *goja.Runtime, module *goja.Object) {
 		exports := vm.NewObject()
 		_ = exports.Set("route", func(call goja.FunctionCall) goja.Value {
@@ -51,7 +58,10 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 			if !ok {
 				panic(vm.NewTypeError("server.route requires a function handler"))
 			}
-			if err := m.registerRoute(short, method, path, handler); err != nil {
+			if !inst.info.Permissions.AllowRoutes {
+				panic(vm.NewTypeError("server.route requires the \"route\" permission (allowRoutes)"))
+			}
+			if err := m.registerRoute(inst.info.Short, method, path, handler); err != nil {
 				panic(vm.NewGoError(err))
 			}
 			return goja.Undefined()
@@ -64,6 +74,12 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 			params := callParams(call)
 			promise, resolve, reject := vm.NewPromise()
 			go func() {
+				if !inst.info.Permissions.AllowSystemRPC {
+					host.RunOnLoop(func(vm *goja.Runtime) {
+						_ = reject(vm.NewGoError(errors.New("server.call requires the \"system RPC\" permission (allowSystemRPC)")))
+					})
+					return
+				}
 				meta := &rpc.ContextMeta{Permission: rpc.RoleAdmin, Principal: rpc.PrincipalFromRole(rpc.RoleAdmin)}
 				ctx := rpc.NewContextWithMeta(context.Background(), meta)
 				resp := rpc.CallWithContext(ctx, nil, method, params)
@@ -86,7 +102,10 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 			if !ok {
 				panic(vm.NewTypeError("server.hook requires a function"))
 			}
-			m.registerHook(short, hookKind(kind), fn)
+			if !inst.info.Permissions.AllowHooks {
+				panic(vm.NewTypeError("server.hook requires the \"hook\" permission (allowHooks)"))
+			}
+			m.registerHook(inst.info.Short, hookKind(kind), fn)
 			return goja.Undefined()
 		})
 		_ = exports.Set("registerRPC", func(call goja.FunctionCall) goja.Value {
@@ -98,7 +117,7 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 			if !ok {
 				panic(vm.NewTypeError("server.registerRPC requires a function handler"))
 			}
-			if err := m.registerRPC(short, method, fn); err != nil {
+			if err := m.registerRPC(inst.info.Short, method, fn); err != nil {
 				panic(vm.NewGoError(err))
 			}
 			return goja.Undefined()
@@ -106,7 +125,7 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 		_ = exports.Set("getConfig", func(call goja.FunctionCall) goja.Value {
 			promise, resolve, reject := vm.NewPromise()
 			go func() {
-				data, err := GetConfiguration(short)
+				data, err := GetConfiguration(inst.info.Short)
 				host.RunOnLoop(func(vm *goja.Runtime) {
 					if err != nil {
 						_ = reject(vm.NewGoError(err))

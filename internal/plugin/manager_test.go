@@ -13,7 +13,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
-const demoManifest = `{"name":"Demo","short":"demo","version":"1.0.0","komari":">=0.0.1","permissions":{"node":true,"timeout":5}}`
+const demoManifest = `{"name":"Demo","short":"demo","version":"1.0.0","komari":">=0.0.1","permissions":{"node":true,"timeout":5,"allowRoutes":true,"allowSystemRPC":true}}`
 
 func TestManagerSwitchRouteCallAndLogs(t *testing.T) {
 	withTempDataDir(t)
@@ -176,7 +176,7 @@ func TestLoadAllSkipsDisabledAndApprovesEnabled(t *testing.T) {
 	}
 
 	// Persist an enabled+approved state, then LoadAll must load it.
-	hash := permissionsHash(models.PluginPermissions{Node: true, TimeoutSeconds: 5})
+	hash := approvalPermissionsHash(models.PluginPermissions{AllowRoutes: true, AllowSystemRPC: true})
 	global.stateStore().set("demo", PluginState{Enabled: true, ApprovedPermissionsHash: hash})
 	if err := LoadAll(); err != nil {
 		t.Fatal(err)

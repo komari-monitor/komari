@@ -39,7 +39,7 @@ func TestBuiltinStyleStreamingWithResponseHooks(t *testing.T) {
 	Init(engine)
 
 	hookZip := writePluginZip(t, map[string]string{
-		"komari-plugin.json": `{"name":"Hook","short":"hook","version":"1.0.0","permissions":{"timeout":5}}`,
+		"komari-plugin.json": `{"name":"Hook","short":"hook","version":"1.0.0","permissions":{"timeout":5,"allowHooks":true}}`,
 		"script.js": `const server = require("server");
 function load() {
   server.hook("response", (req, res) => { res.headers["x-hooked"] = "1"; });
@@ -125,7 +125,7 @@ func TestRouteStreamingMJPEG(t *testing.T) {
 		}
 	`, camera.URL)
 	zipPath := writePluginZip(t, map[string]string{
-		"komari-plugin.json": `{"name":"Mjpeg","short":"mjpeg","version":"1.0.0","permissions":{"node":true,"timeout":5}}`,
+		"komari-plugin.json": `{"name":"Mjpeg","short":"mjpeg","version":"1.0.0","permissions":{"node":true,"timeout":5,"allowRoutes":true}}`,
 		"script.js":          script,
 	})
 	if _, err := InstallZip(zipPath); err != nil {

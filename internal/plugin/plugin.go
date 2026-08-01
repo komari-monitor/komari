@@ -240,7 +240,7 @@ func (m *Manager) load(short string) error {
 			inst.mu.Lock()
 			inst.host = host
 			inst.mu.Unlock()
-			m.registerServerModule(host, registry, short)
+			m.registerServerModule(host, registry, inst)
 		},
 	}
 	rt, err := jsruntime.New(string(script), opts)
@@ -329,9 +329,9 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 		return nil
 	}
 
-	hash := permissionsHash(info.Permissions)
+	hash := approvalPermissionsHash(info.Permissions)
 	st := m.stateStore().get(short)
-	if st.ApprovedPermissionsHash != hash {
+	if permissionsRequireApproval(info.Permissions) && st.ApprovedPermissionsHash != hash {
 		if !approved {
 			return ErrPermissionApprovalRequired
 		}
@@ -373,7 +373,8 @@ func (m *Manager) loadAll() error {
 			errs = append(errs, m.disableWithError(short, st, err))
 			continue
 		}
-		if st.ApprovedPermissionsHash != permissionsHash(info.Permissions) {
+		if permissionsRequireApproval(info.Permissions) &&
+			st.ApprovedPermissionsHash != approvalPermissionsHash(info.Permissions) {
 			errs = append(errs, m.disableWithError(short, st, ErrPermissionApprovalRequired))
 			continue
 		}
@@ -555,10 +556,28 @@ func validShort(short string) bool {
 	return true
 }
 
-// permissionsHash canonicalizes the declared permissions so approval can be
-// compared across plugin upgrades.
-func permissionsHash(p models.PluginPermissions) string {
-	data, _ := json.Marshal(p)
+// permissionsRequireApproval reports whether the manifest declares at least
+// one approval-relevant capability. Plugins without dangerous capabilities
+// (for example only declaring node modules, limits or the timeout) enable
+// without an approval step.
+func permissionsRequireApproval(p models.PluginPermissions) bool {
+	return p.AllowSystemRPC || p.AllowRoutes || p.AllowHooks ||
+		p.AllowExec || p.AllowListen || p.AllowAllFileAccess
+}
+
+// approvalPermissionsHash canonicalizes the approval-relevant permissions so
+// approval can be compared across plugin upgrades. Runtime settings such as
+// node modules, resource limits and the execution timeout are granted by
+// default and do not participate in the approval hash.
+func approvalPermissionsHash(p models.PluginPermissions) string {
+	data, _ := json.Marshal(models.PluginPermissions{
+		AllowSystemRPC:     p.AllowSystemRPC,
+		AllowRoutes:        p.AllowRoutes,
+		AllowHooks:         p.AllowHooks,
+		AllowExec:          p.AllowExec,
+		AllowListen:        p.AllowListen,
+		AllowAllFileAccess: p.AllowAllFileAccess,
+	})
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }

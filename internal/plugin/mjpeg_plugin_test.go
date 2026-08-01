@@ -133,7 +133,7 @@ func TestMjpegPluginNodeBoard(t *testing.T) {
 	// 预装一个带 response hook 的插件，复现真实场景：WrapHandler 会把响应包进
 	// bufferedResponseWriter，流式路由必须能穿过它（回归：黑屏问题）。
 	hookZip := writePluginZip(t, map[string]string{
-		"komari-plugin.json": `{"name":"Hook","short":"hook","version":"1.0.0","permissions":{"timeout":5}}`,
+		"komari-plugin.json": `{"name":"Hook","short":"hook","version":"1.0.0","permissions":{"timeout":5,"allowHooks":true}}`,
 		"script.js": `const server = require("server");
 function load() {
   server.hook("response", (req, res) => { res.headers["x-hooked"] = "1"; });

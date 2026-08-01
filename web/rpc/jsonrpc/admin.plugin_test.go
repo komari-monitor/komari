@@ -27,7 +27,7 @@ func TestMain(m *testing.M) {
 
 func TestAdminSetPluginEnabledPermissionGate(t *testing.T) {
 	withTempPluginDir(t)
-	installTestPlugin(t, `{"name":"Demo","short":"demo","version":"1.0.0"}`, "function load() {}")
+	installTestPlugin(t, `{"name":"Demo","short":"demo","version":"1.0.0","permissions":{"allowRoutes":true}}`, "function load() {}")
 
 	request := func(params map[string]any) (any, *rpc.JsonRpcError) {
 		return adminSetPluginEnabled(nil, &rpc.JsonRpcRequest{

@@ -13,7 +13,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
-const featureManifest = `{"name":"Feat","short":"feat","version":"1.0.0","permissions":{"timeout":5}}`
+const featureManifest = `{"name":"Feat","short":"feat","version":"1.0.0","permissions":{"timeout":5,"allowRoutes":true,"allowHooks":true}}`
 
 func TestHookRequestAndResponse(t *testing.T) {
 	withTempDataDir(t)
@@ -504,5 +504,86 @@ func TestHookRequestContextHasNetworkOnly(t *testing.T) {
 	WrapHandler(engine).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServerModulePermissionEnforcement 验证 server 模块的权限门：
+// server.route/server.hook 缺权限时加载失败；server.call 缺权限时 Promise
+// reject；registerRPC/getConfig 始终可用；无危险权限的插件无需批准即可启用。
+func TestServerModulePermissionEnforcement(t *testing.T) {
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	Init(engine)
+
+	// 无危险权限：直接启用，不要求批准。
+	zipPath := writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"Plain","short":"plain","version":"1.0.0","permissions":{"node":true,"timeout":5}}`,
+		"script.js":          `const server = require("server"); function load() { server.registerRPC("plugin:plain", () => ({ok:true})); }`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("plain", true, false); err != nil {
+		t.Fatalf("plain plugin without dangerous permissions must enable without approval: %v", err)
+	}
+	defer func() { _ = SetEnabled("plain", false, false) }()
+	resp := rpc.CallWithContext(context.Background(), nil, "plugin:plain", nil)
+	if resp.Error != nil {
+		t.Fatalf("default-granted registerRPC failed: %v", resp.Error)
+	}
+
+	// server.route 缺 allowRoutes：加载失败并提示权限名。
+	zipPath = writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"NoRoute","short":"noroute","version":"1.0.0"}`,
+		"script.js": `const server = require("server");
+function load() { server.route("GET", "/x", (req, res) => res.end("x")); }`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("noroute", true, true); err == nil || !strings.Contains(err.Error(), "allowRoutes") {
+		t.Fatalf("server.route without allowRoutes must fail loading: %v", err)
+	}
+
+	// server.hook 缺 allowHooks：加载失败并提示权限名。
+	zipPath = writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"NoHook","short":"nohook","version":"1.0.0"}`,
+		"script.js": `const server = require("server");
+function load() { server.hook("request", (req) => {}); }`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("nohook", true, true); err == nil || !strings.Contains(err.Error(), "allowHooks") {
+		t.Fatalf("server.hook without allowHooks must fail loading: %v", err)
+	}
+
+	// server.call 缺 allowSystemRPC：路由可用但 Promise reject。
+	zipPath = writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"NoRPC","short":"norpc","version":"1.0.0","permissions":{"allowRoutes":true}}`,
+		"script.js": `const server = require("server");
+function load() {
+	server.route("GET", "/call", async (req, res) => {
+		try {
+			await server.call("common:getVersion");
+			res.end("ok");
+		} catch (e) {
+			res.end("denied:" + e.message);
+		}
+	});
+}`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("norpc", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = SetEnabled("norpc", false, false) }()
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/call", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "allowSystemRPC") {
+		t.Fatalf("server.call without allowSystemRPC must reject: status = %d, body = %q", rec.Code, rec.Body.String())
 	}
 }

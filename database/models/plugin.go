@@ -21,16 +21,25 @@ type Plugin struct {
 	Pages         []PluginPage      `json:"pages,omitempty"` // injected admin pages
 }
 
-// PluginPermissions maps one-to-one onto jsruntime.Options. Every field
-// defaults to its zero value: nothing is granted unless declared.
+// PluginPermissions declares the plugin capabilities that require admin
+// approval. Every field defaults to its zero value: nothing is granted
+// unless declared.
+//
+// The following capabilities are always granted and never require approval:
+// reading the plugin's own configuration (server.getConfig), registering
+// plugin-owned RPC methods (server.registerRPC), and reading/writing files
+// inside the plugin directory.
 type PluginPermissions struct {
-	Node                bool  `json:"node"`
-	AllowExec           bool  `json:"allowExec"`
-	AllowListen         bool  `json:"allowListen"`
-	AllowAllFileAccess  bool  `json:"allowAllFileAccess"`
-	MaxHTTPBodyBytes    int64 `json:"maxHTTPBodyBytes"`
-	MaxChildOutputBytes int   `json:"maxChildOutputBytes"`
-	TimeoutSeconds      int   `json:"timeout"` // per-turn execution timeout in seconds
+	Node                bool  `json:"node"`                // Node.js compatibility modules (runtime setting, not approval-relevant)
+	AllowSystemRPC      bool  `json:"allowSystemRPC"`      // server.call: call system RPC methods with admin authority
+	AllowRoutes         bool  `json:"allowRoutes"`         // server.route: register HTTP routes on the host engine
+	AllowHooks          bool  `json:"allowHooks"`          // server.hook: modify HTTP requests/responses
+	AllowExec           bool  `json:"allowExec"`           // child_process: execute child processes
+	AllowListen         bool  `json:"allowListen"`         // net/http servers: listen on local ports
+	AllowAllFileAccess  bool  `json:"allowAllFileAccess"`  // access files outside the plugin directory
+	MaxHTTPBodyBytes    int64 `json:"maxHTTPBodyBytes"`    // runtime limit, not approval-relevant
+	MaxChildOutputBytes int   `json:"maxChildOutputBytes"` // runtime limit, not approval-relevant
+	TimeoutSeconds      int   `json:"timeout"`             // per-turn execution timeout in seconds, not approval-relevant
 }
 
 // PageVisibility controls who can reach a plugin page.
