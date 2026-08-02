@@ -26,11 +26,15 @@ func Register(method string, h Handler) error {
 		return errors.New("method prefix 'rpc.' is reserved")
 	}
 	muHandlers.Lock()
-	defer muHandlers.Unlock()
 	if _, exists := handlers[method]; exists {
+		muHandlers.Unlock()
 		return fmt.Errorf("method already registered: %s", method)
 	}
 	handlers[method] = h
+	muHandlers.Unlock()
+	// Every registered method must be inspectable through rpc.help, including
+	// plugin-owned methods that do not provide explicit metadata.
+	ensureMeta(method)
 	return nil
 }
 

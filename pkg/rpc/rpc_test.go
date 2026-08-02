@@ -29,6 +29,23 @@ func TestRegisterDuplicateAndReserved(t *testing.T) {
 	}
 }
 
+func TestRegisterWithoutMetadataIsDiscoverable(t *testing.T) {
+	method := "sample.noMeta"
+	if err := Register(method, func(context.Context, *JsonRpcRequest) (any, *JsonRpcError) {
+		return map[string]any{"ok": true}, nil
+	}); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	resp := Call(1, "rpc.help", map[string]any{"method": method})
+	if resp.Error != nil {
+		t.Fatalf("rpc.help returned error: %+v", resp.Error)
+	}
+	meta, ok := resp.Result.(*MethodMeta)
+	if !ok || meta.Name != method {
+		t.Fatalf("unexpected metadata: %#v", resp.Result)
+	}
+}
+
 // 内部函数
 func TestInternalMethods(t *testing.T) {
 	res, err := Invoke("rpc.ping", nil)

@@ -1,6 +1,21 @@
 package jsonrpc
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/komari-monitor/komari/pkg/rpc"
+)
+
+func TestRpcHelpUsesQualifiedMethodName(t *testing.T) {
+	resp := rpc.Call(1, "rpc.help", map[string]any{"method": "common:getMe"})
+	if resp.Error != nil {
+		t.Fatalf("rpc.help returned error: %+v", resp.Error)
+	}
+	meta, ok := resp.Result.(*rpc.MethodMeta)
+	if !ok || meta.Name != "common:getMe" {
+		t.Fatalf("unexpected method metadata: %#v", resp.Result)
+	}
+}
 
 // TestPrivateSiteLoginWhitelist 守卫 issue #567:私有站点模式下,登录页渲染所需的
 // 元信息接口必须始终在白名单中,否则匿名用户无法看到登录框。
