@@ -8,6 +8,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
+	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/internal/config"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -95,8 +96,8 @@ func CheckTraffic() {
 
 			msg := fmt.Sprintf("used %d%% (%s / %s), type=%s", curStep, humanBytes(used), humanBytes(c.TrafficLimit), strings.ToLower(c.TrafficLimitType))
 			// 发送通知（内部会检查 NotificationEnabled）
-			_ = messageSender.SendEvent(models.EventMessage{
-				Event:   "Traffic",
+			_ = messageSender.SendNotification(models.EventMessage{
+				Event:   messageevent.Traffic,
 				Clients: []models.Client{c},
 				Time:    time.Now().UTC(),
 				Emoji:   "⚠️",

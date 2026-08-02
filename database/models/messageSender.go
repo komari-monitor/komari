@@ -8,9 +8,9 @@ type MessageSenderProvider struct {
 }
 
 type EventMessage struct {
-	Event   string    `json:"event"`
+	Event   any       `json:"event"`
 	Clients []Client  `json:"clients"`
 	Time    time.Time `json:"time"`
-	Message string    `json:"message"`
-	Emoji   string    `json:"emoji"`
+	Message any       `json:"message"`
+	Emoji   any       `json:"emoji"`
 }

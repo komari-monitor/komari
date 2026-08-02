@@ -110,7 +110,7 @@ func CheckAndAutoRenewal(client models.Client) {
 			auditlog.EventLog("renewal", fmt.Sprintf("Auto-renewed client: %s until %s",
 				client.Name, timeutil.FormatSystemDate(newExpireTime)))
 
-			messageSender.SendEvent(models.EventMessage{
+			_ = messageSender.SendNotification(models.EventMessage{
 				Event:   messageevent.Renew,
 				Clients: []models.Client{client},
 				Time:    time.Now().UTC(),

@@ -21,6 +21,21 @@ func TestParseTemplateFormatsEventTimeInLocalTimezone(t *testing.T) {
 	}
 }
 
+func TestParseTemplateFormatsAnyTypedEventField(t *testing.T) {
+	for _, tc := range []struct {
+		event any
+		want  string
+	}{
+		{event: models.EventMessage{Event: "Offline"}, want: "Offline"},
+		{event: models.EventMessage{Event: 42}, want: "42"},
+		{event: models.EventMessage{Event: nil}, want: ""},
+	} {
+		if got := parseTemplate("{{event}}", tc.event); got != tc.want {
+			t.Fatalf("parseTemplate with Event=%v = %q, want %q", tc.event, got, tc.want)
+		}
+	}
+}
+
 func Test(t *testing.T) {
 	senders := factory.GetAllMessageSenders()
 	if len(senders) == 0 {

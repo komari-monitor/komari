@@ -84,7 +84,7 @@ func (j *JavaScriptSender) ensureRuntime() error {
 // fallbackToTextMessage formats structured events for scripts that only
 // implement sendMessage.
 func (j *JavaScriptSender) fallbackToTextMessage(event models.EventMessage) error {
-	message := fmt.Sprintf("%s%s%s\nEvent: %s\nMessage: %s\nTime: %s",
+	message := fmt.Sprintf("%v%v%v\nEvent: %v\nMessage: %v\nTime: %s",
 		event.Emoji, event.Emoji, event.Emoji,
 		event.Event,
 		event.Message,
@@ -98,14 +98,14 @@ func (j *JavaScriptSender) fallbackToTextMessage(event models.EventMessage) erro
 			}
 			clientNames = append(clientNames, name)
 		}
-		message = fmt.Sprintf("%s%s%s\nEvent: %s\nClients: %s\nMessage: %s\nTime: %s",
+		message = fmt.Sprintf("%v%v%v\nEvent: %v\nClients: %s\nMessage: %v\nTime: %s",
 			event.Emoji, event.Emoji, event.Emoji,
 			event.Event,
 			clientNames,
 			event.Message,
 			event.Time.UTC().Format(time.RFC3339Nano))
 	}
-	return j.SendTextMessage(message, event.Event)
+	return j.SendTextMessage(message, fmt.Sprint(event.Event))
 }
 
 func init() {

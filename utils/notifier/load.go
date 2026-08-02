@@ -200,24 +200,20 @@ func bytesPerSecondToMbps(bytesPerSecond int64) float32 {
 
 // sendLoadNotification 发送负载通知
 func sendLoadNotification(clientUUIDs []string, task models.LoadNotification) {
-	ex_clients := []models.Client{}
-	for _, clientUUID := range clientUUIDs {
-		cl, err := clients.GetClientByUUID(clientUUID)
-		if err == nil {
-			ex_clients = append(ex_clients, cl)
-		}
-	}
-	if len(ex_clients) == 0 {
-		return
+	eventClients := make([]models.Client, 0, len(clientUUIDs))
+	for _, uuid := range clientUUIDs {
+		eventClients = append(eventClients, models.Client{UUID: uuid})
 	}
 	go func() {
-		messageSender.SendEvent(models.EventMessage{
+		if err := messageSender.SendNotification(models.EventMessage{
 			Event:   messageevent.Alert,
-			Clients: ex_clients,
+			Clients: eventClients,
 			Time:    time.Now().UTC(),
 			Emoji:   "⚠️",
 			Message: task.Name,
-		})
+		}); err != nil {
+			logger.Errorf("notifier", "Failed to send load notification for task %d: %v", task.Id, err)
+		}
 	}()
 }
 

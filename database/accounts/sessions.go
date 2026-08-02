@@ -48,7 +48,7 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 			if ipinfo != nil && ipinfo.Name != "" {
 				loc = ipinfo.Name
 			}
-			messageSender.SendEvent(models.EventMessage{
+			_ = messageSender.SendNotification(models.EventMessage{
 				Event:   messageevent.Login,
 				Time:    time.Now().UTC(),
 				Message: fmt.Sprintf("%s: %s (%s)\n%s", login_method, ip, loc, userAgent),

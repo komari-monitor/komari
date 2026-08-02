@@ -11,10 +11,10 @@ import (
 	"context"
 
 	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/internal/config"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/utils/messageSender"
 )
@@ -141,7 +141,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 		emoji = "📅"
 	}
 
-	if err := messageSender.SendEvent(models.EventMessage{
+	if err := messageSender.SendNotification(models.EventMessage{
 		Event:   eventType,
 		Clients: eventClients,
 		Time:    now,
