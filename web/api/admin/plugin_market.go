@@ -39,7 +39,6 @@ type PluginMarketPlugin struct {
 	Version     string `json:"version"`
 	Author      any    `json:"author"`
 	URL         string `json:"url"`
-	Preview     string `json:"preview"`
 	Download    string `json:"download"`
 	SHA256      string `json:"sha256"`
 	Komari      string `json:"komari"`
@@ -406,10 +405,10 @@ func validatePluginMarketPlugin(p PluginMarketPlugin) error {
 	urls := []struct {
 		field string
 		value string
-	}{{"url", p.URL}, {"preview", p.Preview}, {"download", p.Download}}
+	}{{"url", p.URL}, {"download", p.Download}}
 	for _, item := range urls {
 		field, value := item.field, item.value
-		if value == "" && (field == "preview" || field == "download") {
+		if value == "" && field == "download" {
 			continue
 		}
 		if err := validateMarketURLSyntax(value); err != nil {

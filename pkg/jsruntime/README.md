@@ -71,6 +71,8 @@ func main() {
 | `AllowExec` | `false` | 允许 `child_process` 和 `process.kill()`。仅在 `NodeJS` 模式下有意义。 |
 | `AllowListen` | `false` | 允许 `net.Server`、`http.Server` 绑定本地端口。出站连接不受此项限制。 |
 | `AllowAllFileAccess` | `false` | 允许 `require` 和 `fs` 访问 `BaseDir` 外部路径。 |
+| `ExtraRoots` | `nil` | 额外的受限制 `fs` 根目录（与 `BaseDir` 同级约束，多用于挂载只读资源目录）。每个目录必须已存在。`require` 仍只限于 `BaseDir`。 |
+| `StorageDir` | 空 | 长期存储根目录（必须已存在）：与 `BaseDir` 一样被沙箱约束，并额外以绝对路径注入为 `__storageDir__` 全局变量（`NodeJS` 模式下）。更新代码目录不会触碰它。 |
 | `MaxHTTPBodyBytes` | `32 MiB` | 限制 fetch 响应体和 HTTP server 请求体的缓冲大小。 |
 | `MaxChildOutputBytes` | `1 MiB` | 分别限制 `exec`/`execFile` 及同步版本的 stdout 和 stderr。 |
 
@@ -125,6 +127,11 @@ runtime, err := jsruntime.New(`
 默认情况下，路径穿越和指向目录外的软链接都会被拒绝。删除软链接时只删除链接
 本身；`lstat`、`readlink`、`unlink`、`rm` 等不会为了删除而跟随最终链接。
 `AllowAllFileAccess: true` 会关闭这层目录限制，但相对路径仍从 runtime 的当前目录解析。
+
+`ExtraRoots` 与 `StorageDir` 会在 `BaseDir` 之外追加受约束的 `fs` 根目录：目录内的
+读写被放行，越出任一目录仍被拒绝，且不同根目录之间不可通过 `..` 或软链接互访
+（跨根目录的 `renameSync` 会被拒绝）。`StorageDir` 额外以绝对路径注入为
+`__storageDir__` 全局变量（`NodeJS` 模式）。
 
 ### 自定义 registry 与 `BaseDir` 组合
 
