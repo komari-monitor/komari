@@ -116,6 +116,7 @@ type Instance struct {
 	runtime    *jsruntime.Runtime
 	host       *jsruntime.Host
 	handlers   map[string]goja.Callable // "METHOD path" -> current route handler
+	statics    map[string]*staticConfig // mount path -> static folder config
 	rpcMethods map[string]goja.Callable // registered RPC method -> JS handler
 }
 
@@ -248,7 +249,7 @@ func (m *Manager) load(short string) error {
 	logs.Reset()
 	_, _ = logs.Write([]byte("[plugin] loading " + short + "\n"))
 
-	inst := &Instance{info: info, dir: dir, handlers: make(map[string]goja.Callable)}
+	inst := &Instance{info: info, dir: dir, handlers: make(map[string]goja.Callable), statics: make(map[string]*staticConfig)}
 	m.mu.Lock()
 	if _, ok := m.instances[short]; ok {
 		m.mu.Unlock()
@@ -327,6 +328,7 @@ func (m *Manager) dropInstance(short string, inst *Instance) {
 	inst.runtime = nil
 	inst.host = nil
 	clear(inst.handlers)
+	clear(inst.statics)
 	clear(inst.rpcMethods)
 	inst.mu.Unlock()
 	m.removeHooksLocked(short)
@@ -368,6 +370,7 @@ func (m *Manager) unload(short string) error {
 	inst.runtime = nil
 	inst.host = nil
 	clear(inst.handlers)
+	clear(inst.statics)
 	clear(inst.rpcMethods)
 	inst.mu.Unlock()
 	m.removeHooksLocked(short)

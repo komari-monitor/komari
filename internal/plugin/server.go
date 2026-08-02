@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +28,10 @@ import (
 //	server.route(method, path, handler)   register an HTTP route on the host
 //	                                      engine; handler receives (req, res)
 //	                                      and must call res.end() to finish
+//	server.static(path, dir, opts)        serve a folder from the plugin
+//	                                      directory at a mount path; opts.spa
+//	                                      makes unmatched paths fall back to
+//	                                      index.html
 //	server.hook(kind, fn)                 register a request or response hook
 //	server.injectHTML(head, body)         register HTML fragments embedded
 //	                                      into every text/html response:
@@ -68,6 +74,37 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 				panic(vm.NewTypeError("server.route requires the \"route\" permission (allowRoutes)"))
 			}
 			if err := m.registerRoute(inst.info.Short, method, path, handler); err != nil {
+				panic(vm.NewGoError(err))
+			}
+			return goja.Undefined()
+		})
+		_ = exports.Set("static", func(call goja.FunctionCall) goja.Value {
+			mount := strings.TrimSpace(call.Argument(0).String())
+			mount = strings.TrimRight(mount, "/")
+			dir := strings.TrimSpace(call.Argument(1).String())
+			if mount == "" || mount == "/" || !strings.HasPrefix(mount, "/") {
+				panic(vm.NewTypeError("server.static requires a mount path starting with / (and not \"/\")"))
+			}
+			if dir == "" {
+				panic(vm.NewTypeError("server.static requires a folder name"))
+			}
+			if !filepath.IsLocal(dir) {
+				panic(vm.NewTypeError("server.static folder must be a relative path inside the plugin directory"))
+			}
+			if !inst.info.Permissions.AllowRoutes {
+				panic(vm.NewTypeError("server.static requires the \"route\" permission (allowRoutes)"))
+			}
+			var opts map[string]any
+			if !goja.IsUndefined(call.Argument(2)) && !goja.IsNull(call.Argument(2)) {
+				if err := vm.ExportTo(call.Argument(2), &opts); err != nil {
+					panic(vm.NewTypeError("server.static options must be an object like { spa: true }"))
+				}
+			}
+			spa := false
+			if v, ok := opts["spa"]; ok {
+				spa, _ = v.(bool)
+			}
+			if err := m.registerStatic(inst.info.Short, mount, dir, spa); err != nil {
 				panic(vm.NewGoError(err))
 			}
 			return goja.Undefined()
@@ -355,6 +392,123 @@ func (m *Manager) routeHandler(short string) gin.HandlerFunc {
 			}
 		}
 	}
+}
+
+// staticConfig is the current static folder config of one mount path. It is
+// stored on the Instance so the gin slot (which survives unload) always reads
+// the config of the latest load.
+type staticConfig struct {
+	dir string // absolute folder path inside the plugin directory
+	spa bool   // fall back to index.html for unmatched paths
+}
+
+// registerStatic serves a folder from the plugin directory at a mount path.
+// It registers GET and HEAD slots for both the mount path and its wildcard
+// so /ui and /ui/anything both reach the folder. Like registerRoute, the gin
+// slots survive unload (they return 404) and are reused on reload; the
+// handler always resolves the current config from the instance.
+func (m *Manager) registerStatic(short, mount, dir string, spa bool) (err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inst, ok := m.instances[short]
+	if !ok {
+		return fmt.Errorf("plugin %q is not loaded", short)
+	}
+	if m.engine == nil {
+		return fmt.Errorf("plugin manager has no HTTP engine")
+	}
+	absDir := filepath.Join(inst.dir, dir)
+	if !withinDir(absDir, inst.dir) {
+		return fmt.Errorf("static folder %q must be inside the plugin directory", dir)
+	}
+	fi, statErr := os.Stat(absDir)
+	if statErr != nil || !fi.IsDir() {
+		return fmt.Errorf("static folder %q does not exist", dir)
+	}
+	if m.routes[short] == nil {
+		m.routes[short] = make(map[string]bool)
+	}
+	inst.mu.Lock()
+	inst.statics[mount] = &staticConfig{dir: absDir, spa: spa}
+	inst.mu.Unlock()
+
+	key := "STATIC " + mount
+	if m.routes[short][key] {
+		return nil // gin slots from an earlier load stay; the config was refreshed above
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			inst.mu.Lock()
+			delete(inst.statics, mount)
+			inst.mu.Unlock()
+			err = fmt.Errorf("register static %s: %v", mount, r)
+		}
+	}()
+	handler := m.staticHandler(short, mount)
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		m.engine.Handle(method, mount, handler)
+		m.engine.Handle(method, mount+"/*filepath", handler)
+	}
+	m.routes[short][key] = true
+	return nil
+}
+
+// staticHandler serves files from a static folder. Requests to the mount
+// path resolve to index.html; requests into subpaths resolve to the matching
+// file. With spa enabled, any unmatched path (including directories without
+// an index.html) falls back to index.html so client-side routers work.
+func (m *Manager) staticHandler(short, mount string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		inst := m.instanceFor(short)
+		if inst == nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		inst.mu.RLock()
+		cfg := inst.statics[mount]
+		inst.mu.RUnlock()
+		if cfg == nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		name := strings.TrimPrefix(c.Request.URL.Path, mount)
+		name = strings.TrimPrefix(name, "/")
+		target, err := resolveStaticFile(cfg.dir, name)
+		if err != nil {
+			if !cfg.spa {
+				c.Status(http.StatusNotFound)
+				return
+			}
+			target = filepath.Join(cfg.dir, "index.html")
+		}
+		c.File(target)
+	}
+}
+
+// resolveStaticFile maps a request path to a file inside a static folder,
+// rejecting traversal. A directory resolves to its index.html.
+func resolveStaticFile(dir, name string) (string, error) {
+	if name == "" {
+		name = "index.html"
+	}
+	if !filepath.IsLocal(name) {
+		return "", fmt.Errorf("invalid static path %q", name)
+	}
+	full := filepath.Join(dir, name)
+	if !withinDir(full, dir) {
+		return "", fmt.Errorf("invalid static path %q", name)
+	}
+	fi, err := os.Stat(full)
+	if err != nil {
+		return "", err
+	}
+	if fi.IsDir() {
+		full = filepath.Join(full, "index.html")
+		if _, err := os.Stat(full); err != nil {
+			return "", err
+		}
+	}
+	return full, nil
 }
 
 // routeResponse is the Go side of the JS response object. It mirrors the
