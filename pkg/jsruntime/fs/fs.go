@@ -199,6 +199,14 @@ func (m *Module) resolveNodePathAt(name, cwd string, allowMissing bool, mode nod
 	if !m.withinAnyRoot(resolved) {
 		return "", fmt.Errorf("path escapes BaseDir: %s", name)
 	}
+	// No-follow operations on a confined root itself (for example
+	// fs.mkdirSync(__storageDir__, {recursive:true})) operate through the
+	// root handle with the "." relative path, so they never traverse the
+	// parent directory. The parent-symlink check below would always reject
+	// such paths because the parent lies outside the sandbox by definition.
+	if mode == nodePathNoFollowFinal && m.isConfinedRoot(resolved) {
+		return resolved, nil
+	}
 	pathToResolve := resolved
 	if mode == nodePathNoFollowFinal {
 		pathToResolve = filepath.Dir(resolved)
@@ -234,6 +242,20 @@ func (m *Module) resolveNodePathAt(name, cwd string, allowMissing bool, mode nod
 			return "", parentErr
 		}
 	}
+}
+
+// isConfinedRoot reports whether path is exactly one of the confined roots
+// (BaseDir or an extra root) after cleaning.
+func (m *Module) isConfinedRoot(path string) bool {
+	if m.nodeRoot != "" && filepath.Clean(m.nodeRoot) == path {
+		return true
+	}
+	for _, extra := range m.extraRoots {
+		if filepath.Clean(extra.path) == path {
+			return true
+		}
+	}
+	return false
 }
 
 // withinAnyRoot reports whether path stays inside BaseDir or one of the
