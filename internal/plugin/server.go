@@ -47,9 +47,12 @@ import (
 //	                                      carrying code/message/data
 //	server.registerRPC(method, handler)   register a plugin-owned RPC method
 //	server.getConfig()                    resolve the saved plugin configuration
+//	server.cron(expr, fn)                 run fn on the plugin event loop each
+//	                                      time the cron expression fires
 //
-// server.registerRPC, server.getConfig and filesystem access confined to the
-// plugin directory are always granted without a manifest declaration.
+// server.registerRPC, server.getConfig, server.cron and filesystem access
+// confined to the plugin directory are always granted without a manifest
+// declaration.
 // server.route, server.hook, server.injectHTML and server.call require the
 // allowRoutes, allowHooks, allowHTMLInject and allowSystemRPC permissions
 // respectively; a missing permission fails at load time (route/hook/inject)
@@ -171,6 +174,20 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 				panic(vm.NewTypeError("server.injectHTML requires the \"HTML inject\" permission (allowHTMLInject)"))
 			}
 			m.registerInject(inst.info.Short, call.Argument(0).String(), call.Argument(1).String())
+			return goja.Undefined()
+		})
+		_ = exports.Set("cron", func(call goja.FunctionCall) goja.Value {
+			spec := strings.TrimSpace(call.Argument(0).String())
+			fn, ok := goja.AssertFunction(call.Argument(1))
+			if spec == "" {
+				panic(vm.NewTypeError("server.cron requires a cron expression"))
+			}
+			if !ok {
+				panic(vm.NewTypeError("server.cron requires a function handler"))
+			}
+			if err := m.registerCron(inst.info.Short, spec, fn); err != nil {
+				panic(vm.NewGoError(err))
+			}
 			return goja.Undefined()
 		})
 		_ = exports.Set("registerRPC", func(call goja.FunctionCall) goja.Value {

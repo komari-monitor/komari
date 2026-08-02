@@ -32,6 +32,7 @@ import (
 	"github.com/dop251/goja_nodejs/require"
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
@@ -118,6 +119,7 @@ type Instance struct {
 	handlers   map[string]goja.Callable // "METHOD path" -> current route handler
 	statics    map[string]*staticConfig // mount path -> static folder config
 	rpcMethods map[string]goja.Callable // registered RPC method -> JS handler
+	cronJobs   []string                 // scheduler job names, removed on unload
 }
 
 // global is the process-wide plugin manager.
@@ -325,14 +327,25 @@ func (m *Manager) dropInstance(short string, inst *Instance) {
 	for method := range inst.rpcMethods {
 		rpc.Unregister(method)
 	}
+	removeCronJobs(inst.cronJobs)
 	inst.runtime = nil
 	inst.host = nil
 	clear(inst.handlers)
 	clear(inst.statics)
 	clear(inst.rpcMethods)
+	inst.cronJobs = nil
 	inst.mu.Unlock()
 	m.removeHooksLocked(short)
 	m.removeInjectsLocked(short)
+}
+
+// removeCronJobs cancels and forgets the scheduler jobs of one plugin load.
+// It runs with the instance lock held; scheduler.Remove only takes the
+// scheduler's own lock, so no lock cycle is possible.
+func removeCronJobs(names []string) {
+	for _, name := range names {
+		scheduler.Remove(name)
+	}
 }
 
 // unload stops one plugin. The instance is claimed (removed from the map)
@@ -367,11 +380,13 @@ func (m *Manager) unload(short string) error {
 	for method := range inst.rpcMethods {
 		rpc.Unregister(method)
 	}
+	removeCronJobs(inst.cronJobs)
 	inst.runtime = nil
 	inst.host = nil
 	clear(inst.handlers)
 	clear(inst.statics)
 	clear(inst.rpcMethods)
+	inst.cronJobs = nil
 	inst.mu.Unlock()
 	m.removeHooksLocked(short)
 	m.removeInjectsLocked(short)

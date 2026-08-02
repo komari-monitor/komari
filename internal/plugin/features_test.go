@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -228,6 +231,88 @@ func TestDeleteRemovesPlugin(t *testing.T) {
 	}
 	if err := Delete("feat"); err == nil {
 		t.Fatal("second delete should fail")
+	}
+}
+
+// TestCronRunsOnScheduleAndStopsOnUnload 验证 server.cron 按表达式在插件事件
+// 循环上执行 handler，且卸载后任务被移除、不再触发。
+func TestCronRunsOnScheduleAndStopsOnUnload(t *testing.T) {
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	Init(gin.New())
+
+	zipPath := writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"Cron","short":"cron","version":"1.0.0","permissions":{"node":true,"timeout":5}}`,
+		"script.js": `
+			const fs = require("fs");
+			const server = require("server");
+			function load() {
+				server.cron("@every 100ms", () => {
+					fs.appendFileSync("tick.txt", "x");
+				});
+			}
+		`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("cron", true, true); err != nil {
+		t.Fatal(err)
+	}
+
+	tickFile := filepath.Join(DataDir, "cron", "tick.txt")
+	waitFor := func(minTicks int) int {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if data, err := os.ReadFile(tickFile); err == nil && len(data) >= minTicks {
+				return len(data)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("cron did not fire within 5s (need at least %d ticks)", minTicks)
+		return 0
+	}
+	if ticks := waitFor(3); ticks == 0 {
+		t.Fatal("cron fired but wrote no ticks")
+	}
+
+	// 卸载后任务被移除：两个采样窗口之间的计数不得再增长。
+	if err := SetEnabled("cron", false, false); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	first, _ := os.ReadFile(tickFile)
+	time.Sleep(300 * time.Millisecond)
+	second, _ := os.ReadFile(tickFile)
+	if len(second) != len(first) {
+		t.Fatalf("cron kept firing after unload: %d -> %d", len(first), len(second))
+	}
+}
+
+// TestCronInvalidSpecFailsLoad 验证非法 cron 表达式使插件加载失败并自动禁用。
+func TestCronInvalidSpecFailsLoad(t *testing.T) {
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	Init(gin.New())
+
+	zipPath := writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"Cron","short":"cron","version":"1.0.0","permissions":{"node":true,"timeout":5}}`,
+		"script.js": `
+			const server = require("server");
+			function load() {
+				server.cron("not a cron spec", () => {});
+			}
+		`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("cron", true, true); err == nil {
+		t.Fatal("invalid cron spec must fail the load")
+	}
+	infos := List()
+	if len(infos) != 1 || infos[0].Enabled || !strings.Contains(infos[0].LastError, "invalid") {
+		t.Fatalf("state after failed load = %+v", infos)
 	}
 }
 
