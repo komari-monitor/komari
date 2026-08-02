@@ -200,6 +200,9 @@ func bytesPerSecondToMbps(bytesPerSecond int64) float32 {
 
 // sendLoadNotification 发送负载通知
 func sendLoadNotification(clientUUIDs []string, task models.LoadNotification) {
+	if len(clientUUIDs) == 0 {
+		return
+	}
 	eventClients := make([]models.Client, 0, len(clientUUIDs))
 	for _, uuid := range clientUUIDs {
 		eventClients = append(eventClients, models.Client{UUID: uuid})
