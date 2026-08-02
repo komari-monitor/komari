@@ -27,6 +27,11 @@ import (
 //	                                      engine; handler receives (req, res)
 //	                                      and must call res.end() to finish
 //	server.hook(kind, fn)                 register a request or response hook
+//	server.injectHTML(head, body)         register HTML fragments embedded
+//	                                      into every text/html response:
+//	                                      head before </head>, body before
+//	                                      </body> (all pages, including the
+//	                                      admin and terminal pages)
 //	server.call(method, params...)        call a registered RPC method with
 //	                                      admin authority; resolves to the RPC
 //	                                      result or rejects with an Error
@@ -36,9 +41,10 @@ import (
 //
 // server.registerRPC, server.getConfig and filesystem access confined to the
 // plugin directory are always granted without a manifest declaration.
-// server.route, server.hook and server.call require the allowRoutes,
-// allowHooks and allowSystemRPC permissions respectively; a missing
-// permission fails at load time (route/hook) or rejects the call.
+// server.route, server.hook, server.injectHTML and server.call require the
+// allowRoutes, allowHooks, allowHTMLInject and allowSystemRPC permissions
+// respectively; a missing permission fails at load time (route/hook/inject)
+// or rejects the call.
 //
 // The host engine keeps a registered route slot after unload; requests then
 // receive 404 until the plugin is loaded again.
@@ -106,6 +112,13 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 				panic(vm.NewTypeError("server.hook requires the \"hook\" permission (allowHooks)"))
 			}
 			m.registerHook(inst.info.Short, hookKind(kind), fn)
+			return goja.Undefined()
+		})
+		_ = exports.Set("injectHTML", func(call goja.FunctionCall) goja.Value {
+			if !inst.info.Permissions.AllowHTMLInject {
+				panic(vm.NewTypeError("server.injectHTML requires the \"HTML inject\" permission (allowHTMLInject)"))
+			}
+			m.registerInject(inst.info.Short, call.Argument(0).String(), call.Argument(1).String())
 			return goja.Undefined()
 		})
 		_ = exports.Set("registerRPC", func(call goja.FunctionCall) goja.Value {

@@ -113,7 +113,10 @@ func (a *App) BuildRouter() error {
 
 // Run starts the normal HTTP server and blocks until shutdown or fatal error.
 func (a *App) Run() error {
-	a.server = &http.Server{Addr: a.listenAddr, Handler: plugin.WrapHandler(a.engine)}
+	// The HTML injector runs outside the hook chain so it sees the final
+	// response: plugin hooks can still rewrite the body, then the registered
+	// head/body fragments are embedded into every text/html page.
+	a.server = &http.Server{Addr: a.listenAddr, Handler: plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine))}
 	serverErr := make(chan error, 1)
 	logger.Infof("server", "Starting server on %s ...", a.listenAddr)
 	go func() {

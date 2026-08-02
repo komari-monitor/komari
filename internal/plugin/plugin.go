@@ -62,6 +62,11 @@ const (
 // it is a variable so tests can lower it.
 var maxHookBufferBytes = 32 << 20
 
+// maxHTMLInjectBufferBytes caps how much of a text/html response the HTML
+// injector buffers before injecting plugin fragments. Larger responses pass
+// through unmodified; it is a variable so tests can lower it.
+var maxHTMLInjectBufferBytes = 32 << 20
+
 const (
 	maxPluginArchiveFiles  = 10000
 	maxPluginFileSize      = 128 << 20
@@ -94,6 +99,7 @@ type Manager struct {
 	instances map[string]*Instance
 	routes    map[string]map[string]bool // short -> "METHOD path" -> gin slot registered
 	hooks     []*hookEntry               // http request/response hooks in registration order
+	injects   []*injectEntry             // html head/body fragments in registration order
 
 	stateMu sync.Mutex
 	state   *State
@@ -166,6 +172,15 @@ func Delete(short string) error {
 // response hooks run after the handler and may modify status/headers/body.
 func WrapHandler(next http.Handler) http.Handler {
 	return global.wrapHandler(next)
+}
+
+// HTMLInjectHandler installs plugin HTML injection around the application
+// handler. Every text/html response is buffered and gets the fragments
+// registered through server.injectHTML inserted before </head> and </body>;
+// all other responses (JSON, assets, streams, downloads...) pass through to
+// the client unmodified.
+func HTMLInjectHandler(next http.Handler) http.Handler {
+	return global.htmlInjectHandler(next)
 }
 
 func (m *Manager) stateStore() *State {
@@ -315,6 +330,7 @@ func (m *Manager) dropInstance(short string, inst *Instance) {
 	clear(inst.rpcMethods)
 	inst.mu.Unlock()
 	m.removeHooksLocked(short)
+	m.removeInjectsLocked(short)
 }
 
 // unload stops one plugin. The instance is claimed (removed from the map)
@@ -355,6 +371,7 @@ func (m *Manager) unload(short string) error {
 	clear(inst.rpcMethods)
 	inst.mu.Unlock()
 	m.removeHooksLocked(short)
+	m.removeInjectsLocked(short)
 	m.mu.Unlock()
 	if rt != nil {
 		rt.Close()
@@ -644,6 +661,38 @@ func (m *Manager) removeHooksLocked(short string) {
 	m.hooks = kept
 }
 
+// injectsSnapshot returns the registered HTML injection fragments in
+// registration order.
+func (m *Manager) injectsSnapshot() []*injectEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]*injectEntry(nil), m.injects...)
+}
+
+// registerInject appends one plugin's HTML head/body fragments. Called from
+// the plugin's own event loop during script evaluation; it takes the manager
+// lock itself.
+func (m *Manager) registerInject(short, head, body string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.instances[short] == nil {
+		return
+	}
+	m.injects = append(m.injects, &injectEntry{short: short, head: head, body: body})
+}
+
+// removeInjectsLocked drops all injection fragments of one plugin. The
+// caller must hold the manager write lock.
+func (m *Manager) removeInjectsLocked(short string) {
+	kept := m.injects[:0]
+	for _, inject := range m.injects {
+		if inject.short != short {
+			kept = append(kept, inject)
+		}
+	}
+	m.injects = kept
+}
+
 // validShort mirrors the theme short-name rule.
 func validShort(short string) bool {
 	if short == "" || short == "default" {
@@ -663,7 +712,7 @@ func validShort(short string) bool {
 // (for example only declaring node modules, limits or the timeout) enable
 // without an approval step.
 func permissionsRequireApproval(p models.PluginPermissions) bool {
-	return p.AllowSystemRPC || p.AllowRoutes || p.AllowHooks ||
+	return p.AllowSystemRPC || p.AllowRoutes || p.AllowHooks || p.AllowHTMLInject ||
 		p.AllowExec || p.AllowListen || p.AllowAllFileAccess
 }
 
@@ -676,6 +725,7 @@ func approvalPermissionsHash(p models.PluginPermissions) string {
 		AllowSystemRPC:     p.AllowSystemRPC,
 		AllowRoutes:        p.AllowRoutes,
 		AllowHooks:         p.AllowHooks,
+		AllowHTMLInject:    p.AllowHTMLInject,
 		AllowExec:          p.AllowExec,
 		AllowListen:        p.AllowListen,
 		AllowAllFileAccess: p.AllowAllFileAccess,
