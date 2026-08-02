@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,22 +29,136 @@ const (
 
 // hookEntry is one registered JavaScript hook.
 type hookEntry struct {
-	short string
-	kind  hookKind
-	fn    goja.Callable
-	host  *jsruntime.Host
+	short     string
+	kind      hookKind
+	fn        goja.Callable
+	host      *jsruntime.Host
+	matcher   *hookMatcher // nil matches every request
+	bodyLimit int64        // plugin-declared maxHTTPBodyBytes (0 = default)
+}
+
+// hookMatcher optionally restricts a hook to matching requests. A nil
+// matcher matches every request.
+type hookMatcher struct {
+	method string // optional HTTP method; "" matches any
+	path   string // cleaned request path, lowercase
+	prefix bool   // subtree match when the pattern ended with "*"
+}
+
+// parseHookMatcher parses a server.hook path filter: "POST /api/foo",
+// "/api/foo" or "/api/foo/*". The optional leading HTTP method restricts the
+// hook to one request method; a trailing "*" matches the path and its whole
+// subtree; any other pattern is an exact path match.
+func parseHookMatcher(pattern string) (*hookMatcher, error) {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return nil, errors.New("hook path must not be empty")
+	}
+	m := &hookMatcher{}
+	if method, rest, ok := strings.Cut(pattern, " "); ok {
+		method = strings.ToUpper(strings.TrimSpace(method))
+		if isHTTPMethod(method) {
+			m.method = method
+			pattern = strings.TrimSpace(rest)
+		}
+	}
+	if !strings.HasPrefix(pattern, "/") {
+		return nil, fmt.Errorf("hook path %q must start with /", pattern)
+	}
+	if strings.HasSuffix(pattern, "*") {
+		m.prefix = true
+		pattern = strings.TrimSuffix(pattern, "*")
+	}
+	pattern = strings.TrimRight(pattern, "/")
+	if pattern == "" {
+		if m.prefix {
+			return m, nil // "/*" matches every path
+		}
+		return nil, fmt.Errorf("hook path %q is invalid", pattern)
+	}
+	if !filepath.IsLocal(strings.TrimPrefix(pattern, "/")) {
+		return nil, fmt.Errorf("hook path %q contains invalid segments", pattern)
+	}
+	m.path = strings.ToLower(pattern)
+	return m, nil
+}
+
+// matches reports whether the request matches the filter. A nil matcher
+// matches everything.
+func (m *hookMatcher) matches(r *http.Request) bool {
+	if m == nil {
+		return true
+	}
+	if m.method != "" && r.Method != m.method {
+		return false
+	}
+	path := r.URL.Path
+	if path == "" {
+		path = "/"
+	}
+	path = strings.ToLower(path)
+	if m.prefix {
+		return path == m.path || strings.HasPrefix(path, m.path+"/")
+	}
+	return path == m.path
+}
+
+// isHTTPMethod reports whether s is a known HTTP request method.
+func isHTTPMethod(s string) bool {
+	switch s {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
+// matches reports whether the hook applies to the request: no matcher, or a
+// matching filter.
+func (h *hookEntry) matches(r *http.Request) bool {
+	return h.matcher == nil || h.matcher.matches(r)
+}
+
+// filterHooks drops the hooks whose matcher does not match the request.
+func filterHooks(hooks []*hookEntry, r *http.Request) []*hookEntry {
+	kept := hooks[:0]
+	for _, hook := range hooks {
+		if hook.matches(r) {
+			kept = append(kept, hook)
+		}
+	}
+	return kept
+}
+
+// maxHookBodyLimit returns the body read limit for the request hooks that
+// will run: the largest plugin-declared maxHTTPBodyBytes, or the default
+// when no hook declares a limit.
+func maxHookBodyLimit(hooks []*hookEntry) int64 {
+	var limit int64
+	for _, hook := range hooks {
+		if hook.bodyLimit > limit {
+			limit = hook.bodyLimit
+		}
+	}
+	if limit < 1 {
+		return defaultMaxHTTPBodyBytes
+	}
+	return limit
 }
 
 // wrapHandler installs the hook chain around the application handler. WebSocket
 // upgrades pass through untouched because the response cannot be buffered.
+// Hooks with a path/method filter only run for matching requests; unfiltered
+// requests skip both the hook chain and its body buffering.
 func (m *Manager) wrapHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isUpgradeRequest(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		reqHooks := m.hooksOf(hookRequest)
-		respHooks := m.hooksOf(hookResponse)
+		reqHooks := filterHooks(m.hooksOf(hookRequest), r)
+		respHooks := filterHooks(m.hooksOf(hookResponse), r)
 		if len(reqHooks) == 0 && len(respHooks) == 0 {
 			next.ServeHTTP(w, r)
 			return
@@ -51,7 +166,7 @@ func (m *Manager) wrapHandler(next http.Handler) http.Handler {
 
 		req := r
 		if len(reqHooks) > 0 {
-			body, err := httpbody.ReadAll(r.Body, defaultMaxHTTPBodyBytes)
+			body, err := httpbody.ReadAll(r.Body, maxHookBodyLimit(reqHooks))
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
 				return
@@ -372,11 +487,19 @@ func (b *bufferedResponseWriter) apply(status int, header http.Header, body []by
 	if b.streaming {
 		return // already streamed to the client; hooks cannot rewrite it
 	}
+	bodyChanged := !bytes.Equal(body, b.body.Bytes())
 	b.statusCode = status
 	b.wroteHeader = true
 	b.header = header
 	b.body.Reset()
 	_, _ = b.body.Write(body)
+	if bodyChanged {
+		// The rewritten body differs from the original response; a
+		// Content-Length copied from it is now stale and would truncate or
+		// hang the client. Drop it so Go recomputes the length (or falls
+		// back to chunked encoding).
+		b.header.Del("Content-Length")
+	}
 }
 
 func (b *bufferedResponseWriter) flushTo(w http.ResponseWriter) {

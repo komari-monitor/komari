@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -585,5 +586,172 @@ function load() {
 	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/call", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "allowSystemRPC") {
 		t.Fatalf("server.call without allowSystemRPC must reject: status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHookFiltering 验证 server.hook(kind, matcher, fn) 的路径/方法过滤：
+// 不匹配的请求完全跳过 hook 链（不做 body 缓冲），匹配的请求按规则执行。
+func TestHookFiltering(t *testing.T) {
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	check := func(name, header string) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			if c.GetHeader(header) == "" {
+				c.String(http.StatusBadRequest, "missing "+header)
+				return
+			}
+			c.String(http.StatusOK, name)
+		}
+	}
+	engine.GET("/ping", func(c *gin.Context) { c.String(http.StatusOK, "no-hook") })
+	engine.GET("/hooked", check("hooked", "x-hooked"))
+	engine.GET("/hooked/sub", check("hooked", "x-hooked"))
+	engine.GET("/hookedx", func(c *gin.Context) { c.String(http.StatusOK, "no-hook") })
+	engine.POST("/exact", check("exact", "x-exact"))
+	engine.GET("/exact", func(c *gin.Context) { c.String(http.StatusOK, "no-hook") })
+	engine.GET("/prefix/sub", check("prefix", "x-prefix"))
+	engine.GET("/prefixx", func(c *gin.Context) { c.String(http.StatusOK, "no-hook") })
+	engine.GET("/resp/a", func(c *gin.Context) { c.String(http.StatusOK, "r") })
+	Init(engine)
+
+	zipPath := writePluginZip(t, map[string]string{
+		"komari-plugin.json": featureManifest,
+		"script.js": `
+			const server = require("server");
+			function load() {
+				server.hook("request", "/hooked/*", (req) => { req.headers["x-hooked"] = "yes"; });
+				server.hook("request", "POST /exact", (req) => { req.headers["x-exact"] = "yes"; });
+				server.hook("request", "/prefix/*", (req) => { req.headers["x-prefix"] = "yes"; });
+				server.hook("response", "/resp/*", (req, res) => { res.body = res.body + "|resp"; });
+			}
+		`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("feat", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = SetEnabled("feat", false, false) }()
+	wrapped := WrapHandler(engine)
+
+	serve := func(method, path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+		return rec
+	}
+	assert := func(method, path, want string) {
+		rec := serve(method, path)
+		if rec.Code != http.StatusOK || rec.Body.String() != want {
+			t.Fatalf("%s %s = %d %q, want %q", method, path, rec.Code, rec.Body.String(), want)
+		}
+	}
+	assert(http.MethodGet, "/ping", "no-hook")
+	assert(http.MethodGet, "/hooked", "hooked")
+	assert(http.MethodGet, "/hooked/sub", "hooked")
+	assert(http.MethodGet, "/hookedx", "no-hook")
+	assert(http.MethodPost, "/exact", "exact")
+	assert(http.MethodGet, "/exact", "no-hook")
+	assert(http.MethodGet, "/prefix/sub", "prefix")
+	assert(http.MethodGet, "/prefixx", "no-hook")
+	assert(http.MethodGet, "/resp/a", "r|resp")
+	assert(http.MethodGet, "/ping", "no-hook")
+}
+
+// TestHookResponseContentLength 验证响应钩子改写 body 后不会留下失效的
+// Content-Length（否则客户端会截断/挂起）；未改 body 时保留原长度。
+func TestHookResponseContentLength(t *testing.T) {
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.GET("/changed", func(c *gin.Context) {
+		c.Header("Content-Length", strconv.Itoa(len("abcdef")))
+		c.String(http.StatusOK, "abcdef")
+	})
+	engine.GET("/kept", func(c *gin.Context) {
+		c.Header("Content-Length", strconv.Itoa(len("abcdef")))
+		c.String(http.StatusOK, "abcdef")
+	})
+	Init(engine)
+
+	zipPath := writePluginZip(t, map[string]string{
+		"komari-plugin.json": featureManifest,
+		"script.js": `
+			const server = require("server");
+			function load() {
+				server.hook("response", (req, res) => {
+					if (req.url === "/changed") { res.body = "modified body"; }
+				});
+			}
+		`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("feat", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = SetEnabled("feat", false, false) }()
+	wrapped := WrapHandler(engine)
+
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/changed", nil))
+	if rec.Body.String() != "modified body" {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+	if cl := rec.Header().Get("Content-Length"); cl != "" {
+		t.Fatalf("stale Content-Length %q kept after body rewrite", cl)
+	}
+
+	rec2 := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/kept", nil))
+	if rec2.Body.String() != "abcdef" || rec2.Header().Get("Content-Length") != "6" {
+		t.Fatalf("unmodified body: len header = %q, body = %q", rec2.Header().Get("Content-Length"), rec2.Body.String())
+	}
+}
+
+// TestHookBodyLimit 验证请求钩子按插件声明的 maxHTTPBodyBytes 读取请求体：
+// 超过限制的请求返回 413，而非沿用全局默认 32 MiB。
+func TestHookBodyLimit(t *testing.T) {
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.POST("/echo", func(c *gin.Context) {
+		if c.GetHeader("x-hooked") != "yes" {
+			c.String(http.StatusBadRequest, "missing x-hooked")
+			return
+		}
+		c.String(http.StatusOK, "ok")
+	})
+	Init(engine)
+
+	zipPath := writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"Limit","short":"limit","version":"1.0.0","permissions":{"allowHooks":true,"maxHTTPBodyBytes":256,"timeout":5}}`,
+		"script.js": `
+			const server = require("server");
+			function load() {
+				server.hook("request", (req) => { req.headers["x-hooked"] = "yes"; });
+			}
+		`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("limit", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = SetEnabled("limit", false, false) }()
+	wrapped := WrapHandler(engine)
+
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader(strings.Repeat("x", 128))))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("small body = %d, want 200", rec.Code)
+	}
+	rec2 := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader(strings.Repeat("x", 1024))))
+	if rec2.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("large body = %d %q, want 413", rec2.Code, rec2.Body.String())
 	}
 }

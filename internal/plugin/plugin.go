@@ -638,8 +638,10 @@ func (m *Manager) hooksOf(kind hookKind) []*hookEntry {
 }
 
 // registerHook appends a hook. Called from the plugin's own event loop
-// during script evaluation; it takes the manager lock itself.
-func (m *Manager) registerHook(short string, kind hookKind, fn goja.Callable) {
+// during script evaluation; it takes the manager lock itself. matcher is
+// nil for unfiltered hooks; the plugin-declared body limit is captured at
+// registration so unloaded plugins never contribute a stale limit.
+func (m *Manager) registerHook(short string, kind hookKind, fn goja.Callable, matcher *hookMatcher) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	inst := m.instances[short]
@@ -648,8 +650,9 @@ func (m *Manager) registerHook(short string, kind hookKind, fn goja.Callable) {
 	}
 	inst.mu.RLock()
 	host := inst.host
+	bodyLimit := inst.info.Permissions.MaxHTTPBodyBytes
 	inst.mu.RUnlock()
-	m.hooks = append(m.hooks, &hookEntry{short: short, kind: kind, fn: fn, host: host})
+	m.hooks = append(m.hooks, &hookEntry{short: short, kind: kind, fn: fn, host: host, matcher: matcher, bodyLimit: bodyLimit})
 }
 
 // removeHooksLocked drops all hooks of one plugin. The caller must hold the

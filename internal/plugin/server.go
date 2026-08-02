@@ -32,7 +32,10 @@ import (
 //	                                      directory at a mount path; opts.spa
 //	                                      makes unmatched paths fall back to
 //	                                      index.html
-//	server.hook(kind, fn)                 register a request or response hook
+//	server.hook(kind, fn)                 register a request or response hook;
+//	                                      an optional "METHOD /path", "/path"
+//	                                      or "/path/*" filter limits the hook
+//	                                      to matching requests
 //	server.injectHTML(head, body)         register HTML fragments embedded
 //	                                      into every text/html response:
 //	                                      head before </head>, body before
@@ -138,17 +141,29 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 		})
 		_ = exports.Set("hook", func(call goja.FunctionCall) goja.Value {
 			kind := strings.ToLower(strings.TrimSpace(call.Argument(0).String()))
-			fn, ok := goja.AssertFunction(call.Argument(1))
 			if kind != "request" && kind != "response" {
 				panic(vm.NewTypeError("server.hook kind must be \"request\" or \"response\""))
-			}
-			if !ok {
-				panic(vm.NewTypeError("server.hook requires a function"))
 			}
 			if !inst.info.Permissions.AllowHooks {
 				panic(vm.NewTypeError("server.hook requires the \"hook\" permission (allowHooks)"))
 			}
-			m.registerHook(inst.info.Short, hookKind(kind), fn)
+			// server.hook(kind, fn) or server.hook(kind, matcher, fn) where
+			// matcher is "METHOD /path", "/path" or "/path/*".
+			fnValue := call.Argument(1)
+			var matcher *hookMatcher
+			if goja.IsString(fnValue) {
+				parsed, err := parseHookMatcher(fnValue.String())
+				if err != nil {
+					panic(vm.NewTypeError(err.Error()))
+				}
+				matcher = parsed
+				fnValue = call.Argument(2)
+			}
+			fn, ok := goja.AssertFunction(fnValue)
+			if !ok {
+				panic(vm.NewTypeError("server.hook requires a function handler"))
+			}
+			m.registerHook(inst.info.Short, hookKind(kind), fn, matcher)
 			return goja.Undefined()
 		})
 		_ = exports.Set("injectHTML", func(call goja.FunctionCall) goja.Value {
