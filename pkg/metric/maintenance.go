@@ -98,6 +98,10 @@ func (s *Store) CheckpointWAL(ctx context.Context) error {
 // ReclaimSpace 执行后端专用的阻塞式空间回收操作。该方法会与其他维护调用
 // 串行执行，并阻止 Close 在操作过程中关闭连接池。
 func (s *Store) ReclaimSpace(ctx context.Context) error {
+	// Space reclamation is an explicit, non-cancellable operation. In
+	// particular VACUUM cannot be resumed safely from a short request deadline;
+	// once admitted, it runs to completion or returns a database error.
+	ctx = context.Background()
 	s.maintenanceMu.Lock()
 	defer s.maintenanceMu.Unlock()
 
@@ -112,6 +116,9 @@ func (s *Store) ReclaimSpace(ctx context.Context) error {
 
 	switch s.cfg.Driver {
 	case DriverSQLite:
+		if err := s.reencodeLegacyDigests(ctx); err != nil {
+			return err
+		}
 		if err := sqliteCheckpoint(ctx, s.db); err != nil {
 			return err
 		}

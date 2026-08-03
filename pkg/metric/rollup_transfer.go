@@ -174,6 +174,12 @@ func (s *Store) ImportRollups(ctx context.Context, rollups []PersistedRollup) er
 		digest := append([]byte(nil), rollup.Digest...)
 		if rollup.Min == rollup.Max {
 			digest = nil
+		} else {
+			d, err := DecodeTDigest(digest)
+			if err != nil {
+				return fmt.Errorf("rollup %d: decode digest: %w", i, err)
+			}
+			digest = encodeStoredTDigest(d)
 		}
 		rows = append(rows, normalizedRollupRow{
 			seriesID: seriesID, resolutionID: resolutionID, labelID: labelID,

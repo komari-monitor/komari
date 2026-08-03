@@ -62,18 +62,12 @@ func InspectStorage(ctx context.Context) (StorageInfo, error) {
 // It takes the exclusive operation lock, so a table/file rewrite cannot run
 // concurrently with report writes or compaction.
 func ReclaimSpace(ctx context.Context) (MaintenanceResult, error) {
-	if !storeOperations.TryAcquire() {
-		storeMu.RLock()
-		defer storeMu.RUnlock()
-		if store == nil {
-			return MaintenanceResult{}, ErrStoreNotInitialized
-		}
-		return MaintenanceResult{
-			Driver:          store.Driver(),
-			Action:          store.MaintenanceAction(),
-			BeforeSizeError: ErrStoreBusy,
-			AfterSizeError:  ErrStoreBusy,
-		}, ErrStoreBusy
+	// Reclamation is intentionally non-cancellable. It waits for all active
+	// operations, then keeps the store gate until digest conversion, VACUUM,
+	// and the final checkpoint have completed.
+	_ = ctx
+	if err := storeOperations.Acquire(context.Background()); err != nil {
+		return MaintenanceResult{}, err
 	}
 	defer storeOperations.Release()
 
@@ -88,8 +82,9 @@ func ReclaimSpace(ctx context.Context) (MaintenanceResult, error) {
 		Driver: activeStore.Driver(),
 		Action: activeStore.MaintenanceAction(),
 	}
-	result.Before, result.BeforeSizeError = activeStore.StorageSize(ctx)
-	maintenanceErr := activeStore.ReclaimSpace(ctx)
-	result.After, result.AfterSizeError = activeStore.StorageSize(ctx)
+	maintenanceCtx := context.Background()
+	result.Before, result.BeforeSizeError = activeStore.StorageSize(maintenanceCtx)
+	maintenanceErr := activeStore.ReclaimSpace(maintenanceCtx)
+	result.After, result.AfterSizeError = activeStore.StorageSize(maintenanceCtx)
 	return result, maintenanceErr
 }

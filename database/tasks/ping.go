@@ -2,11 +2,12 @@ package tasks
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 )
@@ -106,22 +107,41 @@ func GetAllPingTasks() ([]models.PingTask, error) {
 func GetPingTasksByClient(uuid string) []models.PingTask {
 	db := dbcore.GetDBInstance()
 	var tasks []models.PingTask
-	if err := db.Where("clients LIKE ?", `%"`+uuid+`"%`).Find(&tasks).Error; err != nil {
+	if err := db.Where("clients LIKE ?", `%"`+uuid+`"%`).Order("weight ASC").Order("id ASC").Find(&tasks).Error; err != nil {
 		return nil
 	}
 	return tasks
 }
 
 func UpdatePingTaskOrder(order map[uint]int) error {
+	if len(order) == 0 {
+		return nil
+	}
+
 	db := dbcore.GetDBInstance()
 	err := db.Transaction(func(tx *gorm.DB) error {
-		for id, weight := range order {
+		// Validate all ids before changing any weights. The update response is
+		// not a reliable existence check because some drivers report zero rows
+		// when the new value equals the current value.
+		ids := make([]uint, 0, len(order))
+		for id := range order {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+		var existing int64
+		if err := tx.Model(&models.PingTask{}).Where("id IN ?", ids).Count(&existing).Error; err != nil {
+			return err
+		}
+		if existing != int64(len(ids)) {
+			return gorm.ErrRecordNotFound
+		}
+
+		for _, id := range ids {
+			weight := order[id]
 			result := tx.Model(&models.PingTask{}).Where("id = ?", id).Update("weight", weight)
 			if result.Error != nil {
 				return result.Error
-			}
-			if result.RowsAffected == 0 {
-				return gorm.ErrRecordNotFound
 			}
 		}
 		return nil

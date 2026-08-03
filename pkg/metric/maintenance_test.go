@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -122,6 +123,77 @@ func TestCleanupOrphanedMetricData(t *testing.T) {
 		if count != 0 {
 			t.Fatalf("orphan rows remain in %s: %d", table, count)
 		}
+	}
+}
+
+func TestSQLiteReclaimSpaceReencodesLegacyDigestsOnce(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore(t)
+	if err := store.CreateMetric(ctx, Definition{Name: "latency", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	digest := NewTDigest(30)
+	for i := 0; i < 1000; i++ {
+		digest.Add(float64(i%73), 1)
+	}
+	rollup := PersistedRollup{
+		MetricName: "latency", EntityID: "node-a", Resolution: time.Minute, Bucket: base,
+		Count: 1000, Sum: 0, SumSq: 0, Min: 0, Max: 72,
+		FirstValue: 0, FirstTime: base, LastValue: 50, LastTime: base.Add(59 * time.Second),
+		Digest: digest.Encode(), CreatedAt: base.Add(time.Minute),
+	}
+	for i := 0; i < 1000; i++ {
+		rollup.Sum += float64(i % 73)
+		rollup.SumSq += float64(i%73) * float64(i%73)
+	}
+	if err := store.ImportRollups(ctx, []PersistedRollup{rollup}); err != nil {
+		t.Fatalf("import rollup: %v", err)
+	}
+	var rowID int64
+	if err := store.db.QueryRowContext(ctx, fmt.Sprintf("SELECT rowid FROM %s", store.tables.rollups)).Scan(&rowID); err != nil {
+		t.Fatalf("find rollup rowid: %v", err)
+	}
+	legacy := digest.Encode()
+	if _, err := store.db.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET digest = ? WHERE rowid = ?", store.tables.rollups), legacy, rowID); err != nil {
+		t.Fatalf("seed legacy digest: %v", err)
+	}
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := store.ReclaimSpace(canceledCtx); err != nil {
+		t.Fatalf("reclaim with canceled context: %v", err)
+	}
+	var converted []byte
+	if err := store.db.QueryRowContext(ctx, fmt.Sprintf("SELECT digest FROM %s WHERE rowid = ?", store.tables.rollups), rowID).Scan(&converted); err != nil {
+		t.Fatalf("read converted digest: %v", err)
+	}
+	if isLegacyRawTDigest(converted) {
+		t.Fatalf("legacy digest was not re-encoded: %q", converted[:2])
+	}
+	convertedDigest, err := DecodeTDigest(converted)
+	if err != nil || math.Abs(convertedDigest.Quantile(0.95)-digest.Quantile(0.95)) > 1e-9 {
+		t.Fatalf("converted digest changed percentile semantics: %v", err)
+	}
+	var phase string
+	if err := store.db.QueryRowContext(ctx, fmt.Sprintf("SELECT phase FROM %s WHERE state_key = ?", store.tables.state), digestReencodeStateKey).Scan(&phase); err != nil {
+		t.Fatalf("read re-encode state: %v", err)
+	}
+	if phase != digestReencodeComplete {
+		t.Fatalf("re-encode state = %q, want %q", phase, digestReencodeComplete)
+	}
+	// Completion makes future reclamations skip the historical scan. This row
+	// can only be produced by a legacy/manual import path in practice.
+	if _, err := store.db.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET digest = ? WHERE rowid = ?", store.tables.rollups), legacy, rowID); err != nil {
+		t.Fatalf("restore test legacy digest: %v", err)
+	}
+	if err := store.ReclaimSpace(ctx); err != nil {
+		t.Fatalf("second reclaim: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, fmt.Sprintf("SELECT digest FROM %s WHERE rowid = ?", store.tables.rollups), rowID).Scan(&converted); err != nil {
+		t.Fatalf("read retained legacy digest: %v", err)
+	}
+	if !isLegacyRawTDigest(converted) {
+		t.Fatal("completed migration unexpectedly scanned legacy rows again")
 	}
 }
 

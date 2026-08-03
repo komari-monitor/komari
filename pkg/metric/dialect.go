@@ -59,6 +59,7 @@ type tables struct {
 	// rollups 是降采样 rollup 表。
 	rollups    string
 	watermarks string
+	state      string
 }
 
 // newDialect returns the SQL dialect implementation for a backend.

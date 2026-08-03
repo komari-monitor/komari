@@ -1380,7 +1380,7 @@ func (s *Store) rebuildDailyRollups(ctx context.Context) error {
 }
 
 func dropNormalizedTables(ctx context.Context, s *Store) error {
-	for _, name := range []string{s.tables.points, s.tables.watermarks, s.tables.rollups, s.tables.series, s.tables.labels, s.tables.resolutions, s.tables.definitions} {
+	for _, name := range []string{s.tables.points, s.tables.watermarks, s.tables.rollups, s.tables.series, s.tables.labels, s.tables.resolutions, s.tables.definitions, s.tables.state} {
 		if _, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+name); err != nil {
 			return err
 		}
@@ -1400,12 +1400,12 @@ func (s *Store) replaceLegacyTables(ctx context.Context, shadow *Store) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, name := range []string{s.tables.points, s.tables.watermarks, s.tables.rollups, s.tables.series, s.tables.labels, s.tables.resolutions, s.tables.definitions} {
+	for _, name := range []string{s.tables.points, s.tables.watermarks, s.tables.rollups, s.tables.series, s.tables.labels, s.tables.resolutions, s.tables.definitions, s.tables.state} {
 		if _, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS "+name); err != nil {
 			return err
 		}
 	}
-	pairs := [][2]string{{shadow.tables.definitions, s.tables.definitions}, {shadow.tables.series, s.tables.series}, {shadow.tables.labels, s.tables.labels}, {shadow.tables.resolutions, s.tables.resolutions}, {shadow.tables.rollups, s.tables.rollups}}
+	pairs := [][2]string{{shadow.tables.definitions, s.tables.definitions}, {shadow.tables.series, s.tables.series}, {shadow.tables.labels, s.tables.labels}, {shadow.tables.resolutions, s.tables.resolutions}, {shadow.tables.rollups, s.tables.rollups}, {shadow.tables.state, s.tables.state}}
 	for _, pair := range pairs {
 		if _, err := tx.ExecContext(ctx, renameTableSQL(s.cfg.Driver, pair[0], pair[1])); err != nil {
 			return err
@@ -1440,12 +1440,18 @@ func (s *Store) replaceLegacyMySQLTables(ctx context.Context, shadow *Store) err
 			legacy = append(legacy, [2]string{source, backup})
 		}
 	}
+	// The maintenance state belongs to the rebuilt normalized schema. Drop the
+	// old cursor before the atomic rename so a rebuild starts with fresh state.
+	if _, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+s.tables.state); err != nil {
+		return err
+	}
 	pairs := append(legacy, [][2]string{
 		{shadow.tables.definitions, s.tables.definitions},
 		{shadow.tables.series, s.tables.series},
 		{shadow.tables.labels, s.tables.labels},
 		{shadow.tables.resolutions, s.tables.resolutions},
 		{shadow.tables.rollups, s.tables.rollups},
+		{shadow.tables.state, s.tables.state},
 	}...)
 	parts := make([]string, 0, len(pairs))
 	for _, pair := range pairs {

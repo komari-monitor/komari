@@ -118,6 +118,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 			labels:      tableName(cfg.TablePrefix, "label_sets"),
 			rollups:     tableName(cfg.TablePrefix, "rollups"),
 			watermarks:  tableName(cfg.TablePrefix, "compaction_watermarks"),
+			state:       tableName(cfg.TablePrefix, "store_state"),
 		},
 		raw:        make(map[rawSeriesKey]*rawSeries),
 		hot:        make(map[hotRollupKey]*rollupBucket),
@@ -1228,7 +1229,7 @@ func (s *Store) CleanupExpired(ctx context.Context, now time.Time) (int64, error
 	defer func() { _ = tx.Rollback() }()
 
 	type cleanupGroupKey struct {
-		interval   time.Duration
+		interval    time.Duration
 		beforeMilli int64
 		all         bool
 	}

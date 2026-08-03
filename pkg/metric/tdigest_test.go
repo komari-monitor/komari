@@ -99,3 +99,35 @@ func TestTDigestEncodeRoundTrip(t *testing.T) {
 		t.Fatalf("decode nil: %v", err)
 	}
 }
+
+func TestStoredTDigestCompressionRoundTrip(t *testing.T) {
+	td := NewTDigest(30)
+	for i := 0; i < 4000; i++ {
+		td.Add(float64(i%97)+float64(i%11)/10, 1)
+	}
+	legacy := td.Encode()
+	stored := encodeStoredTDigest(td)
+	if len(stored) == 0 || stored[0] != 'T' || (stored[1] != storedDigestTypeZstd && stored[1] != storedDigestTypeRaw) {
+		t.Fatalf("unexpected stored digest envelope: %q", stored[:minInt(len(stored), 3)])
+	}
+	back, err := DecodeTDigest(stored)
+	if err != nil {
+		t.Fatalf("decode stored digest: %v", err)
+	}
+	for _, q := range []float64{0.05, 0.5, 0.95, 0.99} {
+		if math.Abs(back.Quantile(q)-td.Quantile(q)) > 1e-9 {
+			t.Fatalf("stored q=%v mismatch: %v vs %v", q, back.Quantile(q), td.Quantile(q))
+		}
+	}
+	legacyBack, err := DecodeTDigest(legacy)
+	if err != nil || math.Abs(legacyBack.Quantile(0.95)-td.Quantile(0.95)) > 1e-9 {
+		t.Fatalf("legacy digest compatibility failed: %v", err)
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

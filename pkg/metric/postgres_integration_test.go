@@ -541,6 +541,7 @@ func dropIntegrationTables(t *testing.T, store *Store, prefix string) {
 		prefix + "rebuild_label_sets",
 		prefix + "rebuild_resolutions",
 		prefix + "rebuild_definitions",
+		prefix + "rebuild_store_state",
 		prefix + "compaction_watermarks_legacy",
 		prefix + "points_legacy",
 		prefix + "rollups_legacy",
@@ -555,6 +556,7 @@ func dropIntegrationTables(t *testing.T, store *Store, prefix string) {
 		prefix + "label_sets",
 		prefix + "resolutions",
 		prefix + "definitions",
+		prefix + "store_state",
 	} {
 		if _, err := store.db.Exec("DROP TABLE IF EXISTS " + name); err != nil {
 			t.Fatalf("drop integration table %s: %v", name, err)

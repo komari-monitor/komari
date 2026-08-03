@@ -60,6 +60,11 @@ func (s *Store) normalizedSchemaStatements() []string {
 			FOREIGN KEY (resolution_id) REFERENCES %s(id) ON DELETE CASCADE,
 			FOREIGN KEY (label_id) REFERENCES %s(id) ON DELETE CASCADE
 		)`, s.tables.rollups, d.blobType(), s.tables.series, s.tables.resolutions, s.tables.labels),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+			state_key VARCHAR(64) PRIMARY KEY, phase VARCHAR(32) NOT NULL,
+			upper_rowid BIGINT NOT NULL, cursor_rowid BIGINT NOT NULL,
+			updated_at_milli BIGINT NOT NULL
+		)`, s.tables.state),
 	}
 }
 

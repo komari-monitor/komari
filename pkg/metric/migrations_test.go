@@ -115,6 +115,7 @@ func schemaTestStore(driver Driver, prefix string) *Store {
 			labels:      prefix + "label_sets",
 			resolutions: prefix + "resolutions",
 			rollups:     prefix + "rollups",
+			state:       prefix + "store_state",
 		},
 	}
 }

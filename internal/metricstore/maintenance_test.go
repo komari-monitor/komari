@@ -40,7 +40,7 @@ func TestInspectAndReclaimStorage(t *testing.T) {
 	}
 }
 
-func TestReclaimSpaceReportsBusyStore(t *testing.T) {
+func TestReclaimSpaceWaitsForStore(t *testing.T) {
 	s, err := metric.Open(context.Background(), metric.SQLite(":memory:"))
 	if err != nil {
 		t.Fatalf("open metric store: %v", err)
@@ -50,17 +50,34 @@ func TestReclaimSpaceReportsBusyStore(t *testing.T) {
 	if err := storeOperations.AcquireShared(context.Background()); err != nil {
 		t.Fatalf("acquire shared store operation gate: %v", err)
 	}
-	defer storeOperations.ReleaseShared()
-
-	result, err := ReclaimSpace(context.Background())
-	if !errors.Is(err, ErrStoreBusy) {
-		t.Fatalf("reclaim error = %v, want %v", err, ErrStoreBusy)
+	done := make(chan struct{})
+	var result MaintenanceResult
+	var reclaimErr error
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	go func() {
+		result, reclaimErr = ReclaimSpace(canceledCtx)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("reclaim returned while another operation held the gate")
+	case <-time.After(25 * time.Millisecond):
+	}
+	storeOperations.ReleaseShared()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reclaim did not resume after the gate was released")
+	}
+	if reclaimErr != nil {
+		t.Fatalf("reclaim error: %v", reclaimErr)
 	}
 	if result.Driver != metric.DriverSQLite || result.Action != metric.MaintenanceVacuum {
-		t.Fatalf("busy result lost store metadata: %#v", result)
+		t.Fatalf("reclaim result lost store metadata: %#v", result)
 	}
-	if !errors.Is(result.BeforeSizeError, ErrStoreBusy) || !errors.Is(result.AfterSizeError, ErrStoreBusy) {
-		t.Fatalf("busy result should mark both measurements unavailable: %#v", result)
+	if result.BeforeSizeError != nil || result.AfterSizeError != nil {
+		t.Fatalf("unexpected size errors: before=%v after=%v", result.BeforeSizeError, result.AfterSizeError)
 	}
 	compactCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

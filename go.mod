@@ -10,6 +10,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/klauspost/compress v1.17.11
 	github.com/mattn/go-sqlite3 v1.14.27
 	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/patrickmn/go-cache v2.1.0+incompatible

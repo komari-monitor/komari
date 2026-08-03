@@ -66,6 +66,20 @@ func TestRestructureRebuildsLegacyPointsIntoNormalizedSchema(t *testing.T) {
 	if rebuildIndexes != 0 {
 		t.Fatalf("rebuild indexes left after table switch: %d", rebuildIndexes)
 	}
+	var rebuildStateTables int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE ?`, s.cfg.TablePrefix+"rebuild_store_state").Scan(&rebuildStateTables); err != nil {
+		t.Fatalf("count rebuild state tables: %v", err)
+	}
+	if rebuildStateTables != 0 {
+		t.Fatalf("rebuild store state table left after table switch: %d", rebuildStateTables)
+	}
+	var stateTables int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, s.tables.state).Scan(&stateTables); err != nil {
+		t.Fatalf("find normalized store state table: %v", err)
+	}
+	if stateTables != 1 {
+		t.Fatalf("normalized store state table count = %d, want 1", stateTables)
+	}
 	for _, index := range s.normalizedIndexes() {
 		var count int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index.name).Scan(&count); err != nil {

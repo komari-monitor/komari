@@ -306,6 +306,11 @@ func DecodeTDigest(b []byte) (*TDigest, error) {
 	if len(b) == 0 {
 		return NewTDigest(defaultTDigestCompression), nil
 	}
+	decoded, err := decodeStoredTDigest(b)
+	if err != nil {
+		return nil, err
+	}
+	b = decoded
 	if len(b) < 3+8*4+4 || b[0] != tdigestMagic0 || b[1] != tdigestMagic1 {
 		return nil, errors.New("metric: invalid t-digest blob")
 	}

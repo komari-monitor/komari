@@ -317,7 +317,7 @@ func (b *rollupBucket) encodedDigest() []byte {
 	if b.digest == nil {
 		return nil
 	}
-	return b.digest.Encode()
+	return encodeStoredTDigest(b.digest)
 }
 
 // digestFromRollup reconstructs an omitted constant-bucket sketch exactly. An

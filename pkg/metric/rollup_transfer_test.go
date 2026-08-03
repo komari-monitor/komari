@@ -1,7 +1,6 @@
 package metric
 
 import (
-	"bytes"
 	"context"
 	"math"
 	"path/filepath"
@@ -78,8 +77,12 @@ func TestRollupTransferRoundTrip(t *testing.T) {
 			t.Fatalf("constant rollup at %s retained a digest", rollup.Resolution)
 		}
 	}
-	if len(exported[1].Digest) == 0 || !bytes.Equal(exported[1].Digest, variableDigest.Encode()) {
+	if len(exported[1].Digest) == 0 {
 		t.Fatal("non-constant minute rollup did not preserve its digest")
+	}
+	exportedDigest, err := DecodeTDigest(exported[1].Digest)
+	if err != nil || math.Abs(exportedDigest.Quantile(0.95)-variableDigest.Quantile(0.95)) > 1e-12 {
+		t.Fatalf("non-constant minute rollup changed digest semantics: err=%v", err)
 	}
 
 	if err := target.ImportRollups(ctx, exported); err != nil {
