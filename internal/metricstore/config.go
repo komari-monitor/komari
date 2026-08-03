@@ -15,7 +15,6 @@ const (
 	DefaultRollupRawRetention = 10 * time.Minute
 	DefaultRollupFinestTier   = time.Minute
 	defaultRollupPointLimit   = 600
-	checkpointRetryTimeout    = 250 * time.Millisecond
 )
 
 // MetricStoreConfig 保存 metric store 配置。

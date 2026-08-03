@@ -105,8 +105,8 @@ func TestRestructureRebuildsLegacyPointsIntoNormalizedSchema(t *testing.T) {
 		s.tables.rollups, s.tables.series, s.tables.resolutions), "cpu", (24 * time.Hour).Milliseconds()).Scan(&dailyRows); err != nil {
 		t.Fatalf("count rebuilt daily rollups: %v", err)
 	}
-	if dailyRows != 2 {
-		t.Fatalf("rebuilt daily rollup rows = %d, want old and recent days", dailyRows)
+	if dailyRows != 1 {
+		t.Fatalf("rebuilt daily rollup rows = %d, want preserved sealed legacy day", dailyRows)
 	}
 	var rawTables int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, s.tables.points).Scan(&rawTables); err != nil {

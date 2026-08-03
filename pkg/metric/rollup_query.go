@@ -11,6 +11,14 @@ import (
 // interval. The hot minute is folded in separately so recent charts never wait
 // for another report before their final real bucket becomes visible.
 func (s *Store) AggregateRollup(ctx context.Context, query AggregateQuery, resolution time.Duration) ([]AggregatePoint, error) {
+	return s.aggregateRollupAt(ctx, query, resolution, time.Now().UTC())
+}
+
+// aggregateRollupAt reads a sealed rollup prefix at the requested backing
+// resolution, then recursively falls back through finer tiers for the
+// ten-minute late-arrival tail. Series passes its supplied now value here so
+// callers receive a stable view while AggregateRollup keeps its public API.
+func (s *Store) aggregateRollupAt(ctx context.Context, query AggregateQuery, resolution time.Duration, now time.Time) ([]AggregatePoint, error) {
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
@@ -21,15 +29,14 @@ func (s *Store) AggregateRollup(ctx context.Context, query AggregateQuery, resol
 	defer s.rollupViewMu.RUnlock()
 	q := query.Query.normalized()
 	needDigest := isPercentile(query.Aggregation)
-	rows, err := s.scanRollupRowsBetween(ctx, q.MetricName, q.EntityID, q.Tags, resolution.Milliseconds(), bucketStartMillis(q.Start.UnixMilli(), resolution.Milliseconds()), q.End.UnixMilli(), needDigest)
+	policy, err := s.metricRollupPolicy(ctx, q.MetricName)
 	if err != nil {
 		return nil, err
 	}
-	hot, err := s.hotRollupRows(q.MetricName, q.EntityID, q.Tags, q.Start, q.End, needDigest)
+	rows, err := s.hybridRollupRows(ctx, q, policy, resolution, now.UTC(), needDigest)
 	if err != nil {
 		return nil, err
 	}
-	rows = append(rows, hot...)
 	if query.Aggregation == AggRate {
 		points := representativePoints(q.MetricName, rows)
 		return pageBuckets(mustAggregatePoints(points, query), query.BucketLimit, query.BucketOffset), nil
@@ -40,6 +47,73 @@ func (s *Store) AggregateRollup(ctx context.Context, query AggregateQuery, resol
 		return nil, err
 	}
 	return pageBuckets(result, query.BucketLimit, query.BucketOffset), nil
+}
+
+// hybridRollupRows reads each part of a range once. A parent bucket becomes
+// eligible only after its end is outside coarseRollupGrace; the remainder is
+// represented by the immediate finer tier until minute buckets, where hot
+// in-memory observations complete the view.
+func (s *Store) hybridRollupRows(ctx context.Context, query Query, policy RollupPolicy, resolution time.Duration, now time.Time, needDigest bool) ([]storedRollup, error) {
+	if len(policy.Tiers) == 0 {
+		return nil, nil
+	}
+	index := -1
+	for i, tier := range policy.Tiers {
+		if tier.Interval <= resolution && resolution%tier.Interval == 0 {
+			index = i
+		}
+	}
+	if index < 0 {
+		return s.scanRollupRowsBetween(ctx, query.MetricName, query.EntityID, query.Tags, resolution.Milliseconds(), bucketStartMillis(query.Start.UnixMilli(), resolution.Milliseconds()), query.End.UnixMilli(), needDigest)
+	}
+	return s.hybridRollupRowsAtTier(ctx, query, policy, index, query.Start.UTC().UnixMilli(), query.End.UTC().UnixMilli(), now, needDigest)
+}
+
+func (s *Store) hybridRollupRowsAtTier(ctx context.Context, query Query, policy RollupPolicy, index int, startMilli, endMilli int64, now time.Time, needDigest bool) ([]storedRollup, error) {
+	if startMilli > endMilli {
+		return nil, nil
+	}
+	tier := policy.Tiers[index]
+	intervalMilli := tier.Interval.Milliseconds()
+	// The greatest bucket start whose end is at least coarseRollupGrace behind
+	// now. Buckets after it are still mutable in the in-memory parent map.
+	sealedThrough := bucketStartMillis(now.Add(-coarseRollupGrace-tier.Interval).UnixMilli(), intervalMilli)
+	rows := make([]storedRollup, 0)
+	if startMilli <= sealedThrough {
+		upper := sealedThrough
+		if upper > endMilli {
+			upper = endMilli
+		}
+		sealed, err := s.scanRollupRowsBetween(ctx, query.MetricName, query.EntityID, query.Tags, intervalMilli, bucketStartMillis(startMilli, intervalMilli), upper, needDigest)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, sealed...)
+	}
+
+	tailStart := startMilli
+	if tailStart <= sealedThrough {
+		tailStart = sealedThrough + intervalMilli
+	}
+	if tailStart > endMilli {
+		return rows, nil
+	}
+	if index == 0 {
+		minute, err := s.scanRollupRowsBetween(ctx, query.MetricName, query.EntityID, query.Tags, intervalMilli, bucketStartMillis(tailStart, intervalMilli), endMilli, needDigest)
+		if err != nil {
+			return nil, err
+		}
+		hot, err := s.hotRollupRows(query.MetricName, query.EntityID, query.Tags, fromMillis(tailStart), fromMillis(endMilli), needDigest)
+		if err != nil {
+			return nil, err
+		}
+		return append(rows, append(minute, hot...)...), nil
+	}
+	tail, err := s.hybridRollupRowsAtTier(ctx, query, policy, index-1, tailStart, endMilli, now, needDigest)
+	if err != nil {
+		return nil, err
+	}
+	return append(rows, tail...), nil
 }
 
 func mustAggregatePoints(points []Point, query AggregateQuery) []AggregatePoint {
@@ -246,13 +320,17 @@ func (s *Store) CompatibleSeriesInterval(start, now time.Time, interval time.Dur
 }
 
 func bestRollupTier(policy RollupPolicy, interval time.Duration, start, now time.Time) *RollupTier {
+	var best *RollupTier
 	for i := range policy.Tiers {
 		tier := &policy.Tiers[i]
 		if interval >= tier.Interval && interval%tier.Interval == 0 && !now.Add(-tier.Retention).After(start) {
-			return tier
+			// Prefer the coarsest backing tier compatible with the requested
+			// output width. hybridRollupRows fills its unsealed tail from finer
+			// tiers, so this reduces reads without sacrificing recent data.
+			best = tier
 		}
 	}
-	return nil
+	return best
 }
 
 func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time) ([]AggregatePoint, error) {
@@ -262,23 +340,30 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
-	preferred := s.cfg.RollupPolicy.Tiers[0].Interval
-	if tier := bestRollupTier(s.cfg.RollupPolicy, query.Interval, query.Start.UTC(), now.UTC()); tier != nil {
+	policy, err := s.metricRollupPolicy(ctx, query.MetricName)
+	if err != nil {
+		return nil, err
+	}
+	if len(policy.Tiers) == 0 {
+		return []AggregatePoint{}, nil
+	}
+	preferred := policy.Tiers[0].Interval
+	if tier := bestRollupTier(policy, query.Interval, query.Start.UTC(), now.UTC()); tier != nil {
 		preferred = tier.Interval
 	} else {
-		for i := len(s.cfg.RollupPolicy.Tiers) - 1; i >= 0; i-- {
-			tier := s.cfg.RollupPolicy.Tiers[i]
+		for i := len(policy.Tiers) - 1; i >= 0; i-- {
+			tier := policy.Tiers[i]
 			if query.Interval >= tier.Interval && query.Interval%tier.Interval == 0 {
 				preferred = tier.Interval
 				break
 			}
 		}
 	}
-	resolution, err := s.coveringSeriesResolution(ctx, query.Query.normalized(), preferred)
+	resolution, err := s.coveringSeriesResolutionForPolicy(ctx, query.Query.normalized(), preferred, policy)
 	if err != nil {
 		return nil, err
 	}
-	return s.AggregateRollup(ctx, query, resolution)
+	return s.aggregateRollupAt(ctx, query, resolution, now.UTC())
 }
 
 // coveringSeriesResolution falls back to a coarser retained tier only when
@@ -287,7 +372,10 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 // written 1m tier. Returning the coarser summary preserves the entire query
 // rather than presenting a false gap at that boundary.
 func (s *Store) coveringSeriesResolution(ctx context.Context, query Query, preferred time.Duration) (time.Duration, error) {
-	policy := s.cfg.RollupPolicy
+	return s.coveringSeriesResolutionForPolicy(ctx, query, preferred, s.cfg.RollupPolicy)
+}
+
+func (s *Store) coveringSeriesResolutionForPolicy(ctx context.Context, query Query, preferred time.Duration, policy RollupPolicy) (time.Duration, error) {
 	selected := preferred
 	earliest, latest, found, err := s.rollupTimeBounds(ctx, query, preferred)
 	if err != nil {

@@ -202,6 +202,20 @@ func TestSQLiteInDirCreatesDirectoryAndAppliesPragmas(t *testing.T) {
 	if synchronous != 0 {
 		t.Fatalf("expected performance profile synchronous=OFF(0), got %d", synchronous)
 	}
+	var autoCheckpoint int
+	if err := store.db.QueryRowContext(ctx, "PRAGMA wal_autocheckpoint").Scan(&autoCheckpoint); err != nil {
+		t.Fatalf("query wal autocheckpoint: %v", err)
+	}
+	if autoCheckpoint != 4000 {
+		t.Fatalf("wal autocheckpoint = %d, want 4000", autoCheckpoint)
+	}
+	var journalSizeLimit int64
+	if err := store.db.QueryRowContext(ctx, "PRAGMA journal_size_limit").Scan(&journalSizeLimit); err != nil {
+		t.Fatalf("query journal size limit: %v", err)
+	}
+	if journalSizeLimit != 16*1024*1024 {
+		t.Fatalf("journal size limit = %d, want %d", journalSizeLimit, 16*1024*1024)
+	}
 }
 
 // TestSQLiteConnectionHookConfiguresExpandedAndRotatedReaders verifies that

@@ -161,8 +161,8 @@ func DefaultConfig(driver Driver, dsn string) Config {
 			CacheSizeKB:           16 * 1024,
 			TempStoreMemory:       false,
 			MMapSizeBytes:         32 * 1024 * 1024,
-			WALAutoCheckpoint:     1000,
-			JournalSizeLimitBytes: 4 * 1024 * 1024,
+			WALAutoCheckpoint:     4000,
+			JournalSizeLimitBytes: 16 * 1024 * 1024,
 		},
 		RollupPolicy: RollupPolicy{
 			RawRetention: 10 * time.Minute,

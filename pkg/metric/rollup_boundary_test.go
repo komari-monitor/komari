@@ -336,7 +336,7 @@ func TestSeriesHybridIncludesPartialCoarseBucketAtRawCutoff(t *testing.T) {
 	policy := RollupPolicy{
 		RawRetention: 10 * time.Minute,
 		Tiers: []RollupTier{
-			{Interval: time.Minute, Retention: 20 * time.Minute},
+			{Interval: time.Minute, Retention: 2 * time.Hour},
 			{Interval: time.Hour, Retention: 24 * time.Hour},
 		},
 	}
@@ -368,5 +368,66 @@ func TestSeriesHybridIncludesPartialCoarseBucketAtRawCutoff(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Count != 2 || math.Abs(got[0].Value-55) > 1e-9 {
 		t.Fatalf("expected coarse rollup and recent raw point, got %#v", got)
+	}
+}
+
+func TestSeriesAndAggregateRollupBridgeSealedCoarseTail(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{Tiers: []RollupTier{
+		{Interval: time.Minute, Retention: 24 * time.Hour},
+		{Interval: 5 * time.Minute, Retention: 7 * 24 * time.Hour},
+	}, Compression: 30}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "sealed-tail", RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	write := func(now time.Time, points ...Point) {
+		t.Helper()
+		prepared, err := prepareMetricPoints(points)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebuild := s.writeRawPointsAt(prepared, now)
+		if err := s.writePreparedHotRollups(ctx, prepared, now, rebuild); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(base.Add(6*time.Minute),
+		Point{MetricName: "sealed-tail", EntityID: "n1", Timestamp: base.Add(30 * time.Second), Value: 1},
+		Point{MetricName: "sealed-tail", EntityID: "n1", Timestamp: base.Add(4 * time.Minute), Value: 20},
+	)
+	write(base.Add(13*time.Minute), Point{MetricName: "sealed-tail", EntityID: "n1", Timestamp: base.Add(12 * time.Minute), Value: 50})
+	if written, err := s.FlushCoarse(ctx, base.Add(16*time.Minute)); err != nil || written != 1 {
+		t.Fatalf("seal first five-minute bucket = %d, %v; want 1, nil", written, err)
+	}
+	query := AggregateQuery{
+		Query:       Query{MetricName: "sealed-tail", EntityID: "n1", Start: base, End: base.Add(15*time.Minute - time.Millisecond)},
+		Aggregation: AggSum,
+		Interval:    15 * time.Minute,
+	}
+	for _, result := range []struct {
+		name string
+		read func() ([]AggregatePoint, error)
+	}{
+		{name: "series", read: func() ([]AggregatePoint, error) { return s.Series(ctx, query, base.Add(16*time.Minute)) }},
+		{name: "aggregate", read: func() ([]AggregatePoint, error) { return s.aggregateRollupAt(ctx, query, 5*time.Minute, base.Add(16*time.Minute)) }},
+	} {
+		points, err := result.read()
+		if err != nil {
+			t.Fatalf("%s: %v", result.name, err)
+		}
+		if len(points) != 1 || points[0].Count != 3 || points[0].Value != 71 {
+			t.Fatalf("%s bridged values = %#v, want count=3 sum=71", result.name, points)
+		}
+	}
+	rateQuery := query
+	rateQuery.Aggregation = AggRate
+	rate, err := s.Series(ctx, rateQuery, base.Add(16*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rate) != 1 || math.Abs(rate[0].Value-0.0625) > 1e-9 {
+		t.Fatalf("bridged rate = %#v, want 0.0625", rate)
 	}
 }

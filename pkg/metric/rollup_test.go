@@ -26,6 +26,18 @@ func newRollupStore(t *testing.T, policy RollupPolicy) *Store {
 	return store
 }
 
+func writeRollupPointsAt(t *testing.T, ctx context.Context, s *Store, now time.Time, points ...Point) {
+	t.Helper()
+	prepared, err := prepareMetricPoints(points)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuild := s.writeRawPointsAt(prepared, now)
+	if err := s.writePreparedHotRollups(ctx, prepared, now, rebuild); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLatestBeforeUsesRawAndRollupData(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{
@@ -86,9 +98,7 @@ func TestArbitraryPercentileOverRaw(t *testing.T) {
 	for i := 1; i <= 100; i++ { // values 1..100 in one bucket
 		batch = append(batch, Point{MetricName: "lat", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * 500 * time.Millisecond), Value: float64(i)})
 	}
-	if err := s.WriteBatch(ctx, batch); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeRollupPointsAt(t, ctx, s, base.Add(5*time.Minute), batch...)
 	for _, tc := range []struct {
 		agg  Aggregation
 		want float64
@@ -207,9 +217,7 @@ func TestCompactBuildsFinestTier(t *testing.T) {
 	for i := 0; i < 120; i++ {
 		batch = append(batch, Point{MetricName: "m", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Second), Value: float64(i)})
 	}
-	if err := s.WriteBatch(ctx, batch); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeRollupPointsAt(t, ctx, s, base.Add(5*time.Minute), batch...)
 	now := base.Add(10 * time.Minute)
 	written, err := s.Compact(ctx, now)
 	if err != nil {
@@ -283,9 +291,7 @@ func TestCompactCascadeFineToCoarse(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		batch = append(batch, Point{MetricName: "c", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Second), Value: float64(i)})
 	}
-	if err := s.WriteBatch(ctx, batch); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeRollupPointsAt(t, ctx, s, base.Add(5*time.Minute), batch...)
 	if _, err := s.Compact(ctx, base.Add(time.Hour)); err != nil {
 		t.Fatalf("compact: %v", err)
 	}
@@ -337,9 +343,7 @@ func TestCompactDoesNotOverwriteCoarseRollupWithPartialFineRows(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		batch = append(batch, Point{MetricName: "partial", EntityID: "n1", Timestamp: base.Add(time.Duration(i) * time.Second), Value: 1})
 	}
-	if err := s.WriteBatch(ctx, batch); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeRollupPointsAt(t, ctx, s, base.Add(5*time.Minute), batch...)
 	if _, err := s.Compact(ctx, base.Add(15*time.Minute)); err != nil {
 		t.Fatalf("compact initial: %v", err)
 	}
@@ -375,8 +379,8 @@ func TestCompactDoesNotOverwriteCoarseRollupWithPartialFineRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rollup after late: %v", err)
 	}
-	if len(late) != 1 || late[0].Count != 301 {
-		t.Fatalf("late fine delta should merge into retained coarse bucket: %#v", late)
+	if len(late) != 1 || late[0].Count != 300 {
+		t.Fatalf("sealed coarse bucket was rewritten by a late minute: %#v", late)
 	}
 	if _, err := s.Compact(ctx, base.Add(20*time.Minute)); err != nil {
 		t.Fatalf("compact late again: %v", err)
@@ -385,8 +389,8 @@ func TestCompactDoesNotOverwriteCoarseRollupWithPartialFineRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rollup after repeated compact: %v", err)
 	}
-	if len(again) != 1 || again[0].Count != 301 {
-		t.Fatalf("repeated compact should not merge the same late delta twice: %#v", again)
+	if len(again) != 1 || again[0].Count != 300 {
+		t.Fatalf("repeated compact rewrote sealed coarse bucket: %#v", again)
 	}
 }
 
@@ -404,9 +408,7 @@ func TestCompactMergesLateFineDeltaLargerThanCoarseBucket(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
-	if err := s.Write(ctx, Point{MetricName: "latebig", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 1}); err != nil {
-		t.Fatalf("write original: %v", err)
-	}
+	writeRollupPointsAt(t, ctx, s, base.Add(time.Minute), Point{MetricName: "latebig", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 1})
 	if _, err := s.Compact(ctx, base.Add(15*time.Minute)); err != nil {
 		t.Fatalf("compact initial: %v", err)
 	}
@@ -429,8 +431,8 @@ func TestCompactMergesLateFineDeltaLargerThanCoarseBucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
-	if len(got) != 1 || got[0].Count != 3 {
-		t.Fatalf("late delta should merge even when larger than existing bucket, got %#v", got)
+	if len(got) != 1 || got[0].Count != 1 {
+		t.Fatalf("late data rewrote the sealed coarse bucket: %#v", got)
 	}
 }
 
@@ -651,9 +653,7 @@ func TestSeriesStartBeforeLongestRetentionReturnsAvailableRollup(t *testing.T) {
 
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	pointTime := now.Add(-80 * 24 * time.Hour).Add(15 * time.Minute)
-	if err := s.Write(ctx, Point{MetricName: "long-window", EntityID: "n1", Timestamp: pointTime, Value: 42}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeRollupPointsAt(t, ctx, s, pointTime.Add(time.Minute), Point{MetricName: "long-window", EntityID: "n1", Timestamp: pointTime, Value: 42})
 	if _, err := s.Compact(ctx, now); err != nil {
 		t.Fatalf("compact: %v", err)
 	}
@@ -948,6 +948,63 @@ func TestCompactRemovesRollupsFromRedundantTiers(t *testing.T) {
 	}
 }
 
+func TestCleanupExpiredRemovesExpiredAndInvalidTiers(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{Tiers: []RollupTier{
+		{Interval: time.Minute, Retention: 24 * time.Hour},
+		{Interval: 5 * time.Minute, Retention: 7 * 24 * time.Hour},
+		{Interval: time.Hour, Retention: 30 * 24 * time.Hour},
+		{Interval: 24 * time.Hour, Retention: 365 * 24 * time.Hour},
+	}, Compression: 30}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "cleanup-tier", RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	tagsHash, tagsJSON, err := tagsFingerprint(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tier := range policy.Tiers {
+		buckets := make(map[rollupKey]*rollupBucket)
+		for _, at := range []time.Time{now.Add(-48 * time.Hour), now.Add(-time.Hour)} {
+			bucket := newRollupBucket(policy.compression())
+			bucket.tagsHash, bucket.tagsJSON = tagsHash, tagsJSON
+			bucket.labelsHash, bucket.labelsJSON = emptyLabelsHash, "{}"
+			bucket.addPoint(1, at.UnixMilli())
+			key := rollupKey{entityID: "n1", tagsHash: tagsHash, labelsHash: emptyLabelsHash, bucket: bucketStartMillis(at.UnixMilli(), tier.Interval.Milliseconds())}
+			buckets[key] = bucket
+		}
+		if _, err := s.writeRollupBucketsTx(ctx, "cleanup-tier", tier.Interval, buckets, tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CleanupExpired(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, tier := range policy.Tiers {
+		rows, err := s.scanRollupRows(ctx, s.reader(), "cleanup-tier", tier.Interval)
+		if err != nil {
+			t.Fatalf("scan %s: %v", tier.Interval, err)
+		}
+		want := 0
+		if tier.Interval == time.Minute {
+			want = 1
+		}
+		if len(rows) != want {
+			t.Fatalf("%s rows after cleanup = %d, want %d", tier.Interval, len(rows), want)
+		}
+	}
+}
+
 // TestCompactIdempotent verifies Compact is idempotent for unchanged windows.
 //
 // TestCompactIdempotent 验证 Compact 对未变化窗口保持幂等。
@@ -1011,9 +1068,7 @@ func TestCompactWithRawRetentionOnlyWritesChangedBuckets(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
-	if err := s.Write(ctx, Point{MetricName: "incremental", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 1}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeRollupPointsAt(t, ctx, s, base.Add(time.Minute), Point{MetricName: "incremental", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 1})
 
 	now := base.Add(10 * time.Minute)
 	first, err := s.Compact(ctx, now)
@@ -1041,11 +1096,11 @@ func TestCompactWithRawRetentionOnlyWritesChangedBuckets(t *testing.T) {
 	if late != 0 {
 		t.Fatalf("late compact rewrote %d buckets, want 0", late)
 	}
-	got, err := s.AggregateRollup(ctx, AggregateQuery{
+	got, err := s.aggregateRollupAt(ctx, AggregateQuery{
 		Query:       Query{MetricName: "incremental", EntityID: "n1", Start: base, End: base.Add(5*time.Minute - time.Nanosecond)},
 		Aggregation: AggSum,
 		Interval:    5 * time.Minute,
-	}, 5*time.Minute)
+	}, 5*time.Minute, now.Add(2*time.Minute))
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
@@ -1078,8 +1133,8 @@ func TestCompactHonorsMetricRetentionForCoarsestTier(t *testing.T) {
 		{MetricName: "retained", EntityID: "n1", Timestamp: now.Add(-50 * 24 * time.Hour), Value: 3},
 		{MetricName: "longer-retained", EntityID: "n1", Timestamp: now.Add(-100 * 24 * time.Hour), Value: 4},
 	}
-	if err := s.WriteBatch(ctx, points); err != nil {
-		t.Fatalf("write: %v", err)
+	for _, point := range points {
+		writeRollupPointsAt(t, ctx, s, point.Timestamp.Add(time.Minute), point)
 	}
 	if _, err := s.Compact(ctx, now); err != nil {
 		t.Fatalf("compact: %v", err)

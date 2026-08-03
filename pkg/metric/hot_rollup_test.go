@@ -3,6 +3,7 @@ package metric
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -237,7 +238,10 @@ func TestLateLabelReplacementRebuildsPersistedCascade(t *testing.T) {
 	write(Point{MetricName: "cascade-replace", EntityID: "n1", Timestamp: at, Value: 1, Labels: map[string]string{"source": "old"}})
 	write(Point{MetricName: "cascade-replace", EntityID: "n1", Timestamp: at, Value: 7, Labels: map[string]string{"source": "new"}})
 
-	for _, tier := range policy.Tiers {
+	if _, err := s.FlushCoarse(ctx, at.Truncate(24*time.Hour).Add(24*time.Hour+coarseRollupGrace)); err != nil {
+		t.Fatalf("seal replacement parents: %v", err)
+	}
+	for _, tier := range policy.Tiers[:3] {
 		start := bucketStartMillis(at.UnixMilli(), tier.Interval.Milliseconds())
 		rows, err := s.scanRollupRowsBetween(ctx, "cascade-replace", "n1", nil, tier.Interval.Milliseconds(), start, start, true)
 		if err != nil {
@@ -250,6 +254,182 @@ func TestLateLabelReplacementRebuildsPersistedCascade(t *testing.T) {
 		if err != nil || labels["source"] != "new" {
 			t.Fatalf("%s replacement labels = %#v, %v", tier.Interval, labels, err)
 		}
+	}
+}
+
+func TestOneDayRetentionStagesOnlyMinuteAndFiveMinute(t *testing.T) {
+	ctx := context.Background()
+	policy := DefaultConfig(DriverSQLite, ":memory:").RollupPolicy
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "one-day", RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	prepared, err := prepareMetricPoints([]Point{{MetricName: "one-day", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuild := s.writeRawPointsAt(prepared, base.Add(2*time.Minute))
+	if err := s.writePreparedHotRollups(ctx, prepared, base.Add(2*time.Minute), rebuild); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tier := range policy.Tiers {
+		rows, err := s.scanRollupRows(ctx, s.reader(), "one-day", tier.Interval)
+		if err != nil {
+			t.Fatalf("scan %s before parent seal: %v", tier.Interval, err)
+		}
+		want := 0
+		if tier.Interval == time.Minute {
+			want = 1
+		}
+		if len(rows) != want {
+			t.Fatalf("%s rows before parent seal = %d, want %d", tier.Interval, len(rows), want)
+		}
+	}
+	if written, err := s.FlushCoarse(ctx, base.Add(15*time.Minute)); err != nil || written != 1 {
+		t.Fatalf("seal five-minute parent = %d, %v; want 1, nil", written, err)
+	}
+	for _, tier := range policy.Tiers {
+		rows, err := s.scanRollupRows(ctx, s.reader(), "one-day", tier.Interval)
+		if err != nil {
+			t.Fatalf("scan %s after parent seal: %v", tier.Interval, err)
+		}
+		want := 0
+		switch tier.Interval {
+		case time.Minute, 5 * time.Minute:
+			want = 1
+		}
+		if len(rows) != want {
+			t.Fatalf("%s rows after parent seal = %d, want %d", tier.Interval, len(rows), want)
+		}
+	}
+}
+
+func TestLongRetentionCoarseRollupsSealOnce(t *testing.T) {
+	ctx := context.Background()
+	policy := DefaultConfig(DriverSQLite, ":memory:").RollupPolicy
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "long-lived", RetentionDays: 120}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	prepared, err := prepareMetricPoints([]Point{{MetricName: "long-lived", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuild := s.writeRawPointsAt(prepared, base.Add(2*time.Minute))
+	if err := s.writePreparedHotRollups(ctx, prepared, base.Add(2*time.Minute), rebuild); err != nil {
+		t.Fatal(err)
+	}
+	if written, err := s.FlushCoarse(ctx, base.Add(15*time.Minute)); err != nil || written != 1 {
+		t.Fatalf("seal five-minute parent = %d, %v; want 1, nil", written, err)
+	}
+	if written, err := s.FlushCoarse(ctx, base.Truncate(24*time.Hour).Add(24*time.Hour+coarseRollupGrace)); err != nil || written != 2 {
+		t.Fatalf("seal hourly and daily parents = %d, %v; want 2, nil", written, err)
+	}
+	if written, err := s.FlushCoarse(ctx, base.Add(48*time.Hour)); err != nil || written != 0 {
+		t.Fatalf("repeat coarse seal = %d, %v; want 0, nil", written, err)
+	}
+	for _, tier := range policy.Tiers {
+		rows, err := s.scanRollupRows(ctx, s.reader(), "long-lived", tier.Interval)
+		if err != nil {
+			t.Fatalf("scan %s: %v", tier.Interval, err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%s rows = %d, want one sealed row", tier.Interval, len(rows))
+		}
+	}
+}
+
+func TestLateReplacementChangesSealedPercentile(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{Tiers: []RollupTier{
+		{Interval: time.Minute, Retention: 24 * time.Hour},
+		{Interval: 5 * time.Minute, Retention: 7 * 24 * time.Hour},
+	}, Compression: 30}
+	s := newRollupStore(t, policy)
+	if err := s.CreateMetric(ctx, Definition{Name: "late-percentile", RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	write := func(points ...Point) {
+		t.Helper()
+		prepared, err := prepareMetricPoints(points)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebuild := s.writeRawPointsAt(prepared, base.Add(2*time.Minute))
+		if err := s.writePreparedHotRollups(ctx, prepared, base.Add(2*time.Minute), rebuild); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(
+		Point{MetricName: "late-percentile", EntityID: "n1", Timestamp: base.Add(5 * time.Second), Value: 1},
+		Point{MetricName: "late-percentile", EntityID: "n1", Timestamp: base.Add(20 * time.Second), Value: 20},
+		Point{MetricName: "late-percentile", EntityID: "n1", Timestamp: base.Add(30 * time.Second), Value: 50},
+	)
+	write(Point{MetricName: "late-percentile", EntityID: "n1", Timestamp: base.Add(30 * time.Second), Value: 100})
+	if _, err := s.FlushCoarse(ctx, base.Add(15*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	series, err := s.Series(ctx, AggregateQuery{
+		Query:       Query{MetricName: "late-percentile", EntityID: "n1", Start: base, End: base.Add(5*time.Minute - time.Millisecond)},
+		Aggregation: AggP95,
+		Interval:    5 * time.Minute,
+	}, base.Add(16*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(series) != 1 || series[0].Count != 3 || series[0].Value < 90 {
+		t.Fatalf("late percentile replacement = %#v, want count=3 p95 near 100", series)
+	}
+}
+
+func TestRestartDropsUnsealedCoarseParents(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{Tiers: []RollupTier{
+		{Interval: time.Minute, Retention: 24 * time.Hour},
+		{Interval: 5 * time.Minute, Retention: 7 * 24 * time.Hour},
+	}, Compression: 30}
+	path := filepath.Join(t.TempDir(), "restart.db")
+	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	s, err := Open(ctx, SQLite(path, WithRollupPolicy(policy)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateMetric(ctx, Definition{Name: "restart-parent", RetentionDays: 30}); err != nil {
+		_ = s.Close()
+		t.Fatal(err)
+	}
+	prepared, err := prepareMetricPoints([]Point{{MetricName: "restart-parent", EntityID: "n1", Timestamp: base.Add(10 * time.Second), Value: 7}})
+	if err != nil {
+		_ = s.Close()
+		t.Fatal(err)
+	}
+	rebuild := s.writeRawPointsAt(prepared, base.Add(2*time.Minute))
+	if err := s.writePreparedHotRollups(ctx, prepared, base.Add(2*time.Minute), rebuild); err != nil {
+		_ = s.Close()
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(ctx, SQLite(path, WithRollupPolicy(policy)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if written, err := reopened.FlushCoarse(ctx, base.Add(15*time.Minute)); err != nil || written != 0 {
+		t.Fatalf("reopened coarse flush = %d, %v; want 0, nil", written, err)
+	}
+	rows, err := reopened.scanRollupRows(ctx, reopened.reader(), "restart-parent", 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("unsealed parent survived restart: %#v", rows)
 	}
 }
 
@@ -533,7 +713,7 @@ func TestSeriesFallsBackWhenPreferredPolicyTierHasNoRows(t *testing.T) {
 		t.Fatalf("create metric: %v", err)
 	}
 	now := time.Date(2026, 7, 24, 12, 30, 0, 0, time.UTC)
-	at := now.Add(-30 * time.Minute)
+	at := now.Add(-2 * time.Hour)
 	tagsHash, tagsJSON, err := tagsFingerprint(nil)
 	if err != nil {
 		t.Fatalf("fingerprint tags: %v", err)
@@ -556,7 +736,7 @@ func TestSeriesFallsBackWhenPreferredPolicyTierHasNoRows(t *testing.T) {
 	}
 
 	got, err := s.Series(ctx, AggregateQuery{
-		Query:       Query{MetricName: "missing-fine-tier", EntityID: "n1", Start: now.Add(-time.Hour), End: now},
+		Query:       Query{MetricName: "missing-fine-tier", EntityID: "n1", Start: now.Add(-3 * time.Hour), End: now},
 		Aggregation: AggAvg,
 		Interval:    time.Minute,
 	}, now)
@@ -650,11 +830,26 @@ func TestDeleteBeforeKeepsBucketsThatStraddleCutoff(t *testing.T) {
 		t.Fatalf("create metric: %v", err)
 	}
 	day := time.Now().UTC().Truncate(24 * time.Hour).Add(-48 * time.Hour)
-	if err := s.WriteBatch(ctx, []Point{
-		{MetricName: "retention-boundary", EntityID: "n1", Timestamp: day.Add(12 * time.Hour), Value: 10},
-		{MetricName: "retention-boundary", EntityID: "n1", Timestamp: day.Add(20 * time.Hour), Value: 20},
-	}); err != nil {
-		t.Fatalf("write daily boundary points: %v", err)
+	tagsHash, tagsJSON, err := tagsFingerprint(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daily := newRollupBucket(policy.compression())
+	daily.tagsHash, daily.tagsJSON = tagsHash, tagsJSON
+	daily.labelsHash, daily.labelsJSON = emptyLabelsHash, "{}"
+	daily.addPoint(10, day.Add(12*time.Hour).UnixMilli())
+	daily.addPoint(20, day.Add(20*time.Hour).UnixMilli())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := rollupKey{entityID: "n1", tagsHash: tagsHash, labelsHash: emptyLabelsHash, bucket: day.UnixMilli()}
+	if _, err := s.writeRollupBucketsTx(ctx, "retention-boundary", 24*time.Hour, map[rollupKey]*rollupBucket{key: daily}, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := s.DeleteBefore(ctx, "retention-boundary", day.Add(18*time.Hour)); err != nil {
 		t.Fatalf("delete before cutoff: %v", err)

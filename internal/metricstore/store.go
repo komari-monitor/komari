@@ -21,8 +21,6 @@ var (
 	storeInitMu       sync.Mutex
 	storeOperations   = newStoreOperationGate()
 	compactOperations = newStoreOperationGate()
-	compactAt         int
-	checkpointPending bool
 )
 
 var ErrCompactInProgress = errors.New("metric store compact already in progress")

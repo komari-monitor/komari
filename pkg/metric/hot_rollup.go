@@ -57,6 +57,10 @@ func (s *Store) writePreparedHotRollups(ctx context.Context, prepared []prepared
 	} else {
 		_, err = s.flushClosedHotRollups(ctx, now)
 	}
+	if err != nil {
+		return err
+	}
+	_, err = s.flushClosedCoarseRollups(ctx, now)
 	return err
 }
 
@@ -99,7 +103,7 @@ func (s *Store) flushClosedHotRollupsUnderView(ctx context.Context, now time.Tim
 	if len(closed) == 0 {
 		return 0, nil
 	}
-	if err := s.persistHotRollups(ctx, closed); err != nil {
+	if err := s.persistHotRollups(ctx, closed, now); err != nil {
 		s.restoreHotRollups(closed)
 		return 0, err
 	}
@@ -121,7 +125,7 @@ func (s *Store) flushAllHotRollups(ctx context.Context) error {
 	if len(all) == 0 {
 		return nil
 	}
-	if err := s.persistHotRollups(ctx, all); err != nil {
+	if err := s.persistHotRollups(ctx, all, time.Now().UTC()); err != nil {
 		s.restoreHotRollups(all)
 		return err
 	}
@@ -169,10 +173,11 @@ func (s *Store) restoreHotRollups(closed []hotRollup) {
 	}
 }
 
-func (s *Store) persistHotRollups(ctx context.Context, closed []hotRollup) error {
+func (s *Store) persistHotRollups(ctx context.Context, closed []hotRollup, now time.Time) error {
 	type metricBuckets struct {
 		merge   map[rollupKey]*rollupBucket
 		replace map[rollupKey]*rollupBucket
+		policy  RollupPolicy
 	}
 	byMetric := make(map[string]*metricBuckets)
 	for _, item := range closed {
@@ -200,14 +205,33 @@ func (s *Store) persistHotRollups(ctx context.Context, closed []hotRollup) error
 	defer func() { _ = tx.Rollback() }()
 	for _, name := range names {
 		buckets := byMetric[name]
-		if _, err := s.writeTierCascadeTx(ctx, name, buckets.merge, tx); err != nil {
+		policy, err := s.metricRollupPolicyTx(ctx, name, tx)
+		if err != nil {
 			return err
 		}
-		if err := s.replaceMinuteRollupsTx(ctx, name, buckets.replace, tx); err != nil {
+		buckets.policy = policy
+		if _, err := s.writeTierCascadeTx(ctx, name, policy, buckets.merge, tx); err != nil {
+			return err
+		}
+		if err := s.replaceMinuteRollupsTx(ctx, name, policy, buckets.replace, tx); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, name := range names {
+		buckets := byMetric[name]
+		minute := make(map[rollupKey]*rollupBucket, len(buckets.merge)+len(buckets.replace))
+		for key, bucket := range buckets.merge {
+			minute[key] = bucket
+		}
+		for key, bucket := range buckets.replace {
+			minute[key] = bucket
+		}
+		s.addMinuteParents(name, buckets.policy, minute, now)
+	}
+	return nil
 }
 
 func (s *Store) hotRollupRows(metricName, entityID string, tags map[string]string, start, end time.Time, needDigest bool) ([]storedRollup, error) {

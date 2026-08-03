@@ -2,9 +2,7 @@ package metricstore
 
 import (
 	"context"
-	"database/sql"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -42,54 +40,6 @@ func TestInspectAndReclaimStorage(t *testing.T) {
 	}
 }
 
-func TestRetryMetricWALCheckpointDefersBusyReader(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "checkpoint.db")
-	s, err := metric.Open(ctx, metric.SQLite(path, metric.WithSQLiteWALAutoCheckpoint(1_000_000)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-	if err := s.CreateMetric(ctx, metric.Definition{Name: "before", Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
-		t.Fatal(err)
-	}
-
-	reader, err := sql.Open("sqlite3", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = reader.Close() })
-	tx, err := reader.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var definitions int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_definitions`).Scan(&definitions); err != nil {
-		_ = tx.Rollback()
-		t.Fatal(err)
-	}
-	if err := s.CreateMetric(ctx, metric.Definition{Name: "after", Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
-		_ = tx.Rollback()
-		t.Fatal(err)
-	}
-
-	previousPending := checkpointPending
-	checkpointPending = true
-	t.Cleanup(func() { checkpointPending = previousPending })
-	retryMetricWALCheckpoint(ctx, s)
-	if !checkpointPending {
-		_ = tx.Rollback()
-		t.Fatal("busy reader unexpectedly cleared pending checkpoint")
-	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatal(err)
-	}
-	retryMetricWALCheckpoint(ctx, s)
-	if checkpointPending {
-		t.Fatal("checkpoint remained pending after reader released")
-	}
-}
-
 func TestReclaimSpaceReportsBusyStore(t *testing.T) {
 	s, err := metric.Open(context.Background(), metric.SQLite(":memory:"))
 	if err != nil {
@@ -123,6 +73,9 @@ func TestReclaimSpaceReportsBusyStore(t *testing.T) {
 	defer compactOperations.Release()
 	if _, err := Compact(context.Background(), time.Now()); !errors.Is(err, ErrCompactInProgress) {
 		t.Fatalf("overlapping compact error = %v, want %v", err, ErrCompactInProgress)
+	}
+	if _, err := CleanupExpired(context.Background(), time.Now()); !errors.Is(err, ErrCompactInProgress) {
+		t.Fatalf("overlapping retention cleanup error = %v, want %v", err, ErrCompactInProgress)
 	}
 }
 

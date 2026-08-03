@@ -197,6 +197,9 @@ func registerScheduledWork() {
 	if err := scheduler.AddContextFunc("metrics:compact", "@every 5m", true, compactMetricStore); err != nil {
 		logger.ErrorArgs("server", "Failed to add metric compact scheduled task:", err)
 	}
+	if err := scheduler.AddContextFunc("metrics:retention", "@every 1h", true, cleanupMetricStore); err != nil {
+		logger.ErrorArgs("server", "Failed to add metric retention scheduled task:", err)
+	}
 	if err := scheduler.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
 		logger.ErrorArgs("server", "Failed to add traffic notification task:", err)
 	}
@@ -230,5 +233,21 @@ func compactMetricStore(ctx context.Context) {
 	}
 	if written > 0 {
 		logger.Infof("server", "Metric store compacted %d rollup buckets", written)
+	}
+}
+
+func cleanupMetricStore(ctx context.Context) {
+	cleanupCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+	deleted, err := metricstore.CleanupExpired(cleanupCtx, time.Now().UTC())
+	if errors.Is(err, metricstore.ErrCompactInProgress) {
+		return
+	}
+	if err != nil {
+		logger.Errorf("server", "Failed to clean expired metric data after deleting %d rows: %v", deleted, err)
+		return
+	}
+	if deleted > 0 {
+		logger.Infof("server", "Metric retention cleanup deleted %d rows", deleted)
 	}
 }

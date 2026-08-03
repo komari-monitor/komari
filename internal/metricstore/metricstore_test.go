@@ -353,14 +353,11 @@ func TestCompactCleansPointsOutsideFixedRawWindow(t *testing.T) {
 
 	storeMu.Lock()
 	oldStore := store
-	oldCompactAt := compactAt
 	store = s
-	compactAt = 0
 	storeMu.Unlock()
 	defer func() {
 		storeMu.Lock()
 		store = oldStore
-		compactAt = oldCompactAt
 		storeMu.Unlock()
 		_ = s.Close()
 	}()
@@ -382,7 +379,7 @@ func TestCompactCleansPointsOutsideFixedRawWindow(t *testing.T) {
 	}
 }
 
-func TestCompactContinuesAfterOneMetricFails(t *testing.T) {
+func TestRetentionCleanupReportsDeleteFailure(t *testing.T) {
 	ctx := context.Background()
 	dsn := filepath.Join(t.TempDir(), "compact.db")
 	s, err := metric.Open(ctx, metric.SQLite(dsn,
@@ -423,19 +420,16 @@ func TestCompactContinuesAfterOneMetricFails(t *testing.T) {
 
 	storeMu.Lock()
 	previousStore := store
-	previousCompactAt := compactAt
 	store = s
-	compactAt = 0
 	storeMu.Unlock()
 	t.Cleanup(func() {
 		storeMu.Lock()
 		store = previousStore
-		compactAt = previousCompactAt
 		storeMu.Unlock()
 	})
 
-	if _, err := Compact(ctx, now); err == nil {
-		t.Fatal("expected malformed metric to fail compaction")
+	if _, err := CleanupExpired(ctx, now); err == nil {
+		t.Fatal("expected retention cleanup to report the forced delete failure")
 	}
 	points, err := s.Query(ctx, metric.Query{
 		MetricName: "b.healthy",
@@ -447,44 +441,7 @@ func TestCompactContinuesAfterOneMetricFails(t *testing.T) {
 		t.Fatalf("query healthy rollups: %v", err)
 	}
 	if len(points) != 0 {
-		t.Fatalf("healthy metric was blocked by another metric failure: %#v", points)
-	}
-}
-
-func TestCompactKeepsRotatingCursorAfterFullCycle(t *testing.T) {
-	ctx := context.Background()
-	s, err := metric.Open(ctx, metric.SQLite(":memory:",
-		metric.WithMaxOpenConns(1),
-		metric.WithRollupPolicy(defaultRollupPolicy()),
-	))
-	if err != nil {
-		t.Fatalf("open metric store: %v", err)
-	}
-	for _, name := range []string{"a.metric", "b.metric", "c.metric"} {
-		if err := s.UpsertMetric(ctx, metric.Definition{Name: name, Type: metric.TypeGauge}); err != nil {
-			t.Fatalf("upsert metric %s: %v", name, err)
-		}
-	}
-
-	storeMu.Lock()
-	oldStore := store
-	oldCompactAt := compactAt
-	store = s
-	compactAt = 1
-	storeMu.Unlock()
-	defer func() {
-		storeMu.Lock()
-		store = oldStore
-		compactAt = oldCompactAt
-		storeMu.Unlock()
-		_ = s.Close()
-	}()
-
-	if _, err := Compact(ctx, time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)); err != nil {
-		t.Fatalf("compact: %v", err)
-	}
-	if compactAt != 1 {
-		t.Fatalf("compact cursor = %d, want 1 after a complete rotated cycle", compactAt)
+		t.Fatalf("retention cleanup unexpectedly changed healthy metric data: %#v", points)
 	}
 }
 
@@ -503,14 +460,11 @@ func TestGetRecordsByClientAndTimeReadsRollupsAfterRawCompaction(t *testing.T) {
 
 	storeMu.Lock()
 	oldStore := store
-	oldCompactAt := compactAt
 	store = s
-	compactAt = 0
 	storeMu.Unlock()
 	defer func() {
 		storeMu.Lock()
 		store = oldStore
-		compactAt = oldCompactAt
 		storeMu.Unlock()
 		_ = s.Close()
 	}()

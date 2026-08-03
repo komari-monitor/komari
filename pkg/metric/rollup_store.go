@@ -23,7 +23,9 @@ type storedRollup struct {
 	bucketData *rollupBucket
 }
 
-// Compact seals closed minute buckets and enforces raw and rollup retention.
+// Compact seals closed minute buckets, materializes due in-memory parents, and
+// enforces retention for explicit callers. The server's frequent compact task
+// uses Flush and FlushCoarse only; retention runs on its own hourly schedule.
 func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
@@ -32,20 +34,19 @@ func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defs, err := s.ListMetrics(ctx)
+	coarse, err := s.FlushCoarse(ctx, now)
 	if err != nil {
-		return 0, err
+		return written, err
 	}
-	for _, def := range defs {
-		if _, err := s.CompactMetric(ctx, def.Name, now); err != nil {
-			return 0, err
-		}
+	written += coarse
+	if _, err := s.CleanupExpired(ctx, now); err != nil {
+		return written, err
 	}
 	return written, nil
 }
 
 // Flush seals closed in-memory minute buckets and trims the exact raw window,
-// without running persisted retention.
+// without running persisted retention or materializing coarse parents.
 // It is used by the scheduled compactor so a series that stops reporting is
 // still persisted even when no later report arrives to close its last minute.
 func (s *Store) Flush(ctx context.Context, now time.Time) (int, error) {
@@ -61,7 +62,11 @@ func (s *Store) Flush(ctx context.Context, now time.Time) (int, error) {
 	defer s.ingestMu.Unlock()
 	now = now.UTC()
 	s.trimRawWindow(now)
-	return s.flushClosedHotRollups(ctx, now)
+	written, err := s.flushClosedHotRollups(ctx, now)
+	if err != nil {
+		return 0, err
+	}
+	return written, nil
 }
 
 func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.Time) (int, error) {
@@ -84,38 +89,22 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	return 0, tx.Commit()
 }
 
-// writeTierCascadeTx writes a sealed minute summary and its coarser summaries
-// in one transaction. This makes every retained tier queryable immediately,
-// avoiding a delayed-compaction coverage gap at 1h, 6h, 7d, 30d, or 60d.
-func (s *Store) writeTierCascadeTx(ctx context.Context, metricName string, minute map[rollupKey]*rollupBucket, tx *sql.Tx) (int, error) {
-	policy := s.cfg.RollupPolicy
+// writeTierCascadeTx persists the durable minute tier. Coarser parents are
+// accumulated in memory and materialized only after their late-arrival grace.
+func (s *Store) writeTierCascadeTx(ctx context.Context, metricName string, policy RollupPolicy, minute map[rollupKey]*rollupBucket, tx *sql.Tx) (int, error) {
 	if len(policy.Tiers) == 0 {
 		return 0, nil
 	}
-	current := minute
-	written := 0
-	cache := newRollupDictionaryCache()
-	for i, tier := range policy.Tiers {
-		if i > 0 {
-			current = buildCoarserBucketsFromDelta(current, tier.Interval, policy.compression())
-		}
-		n, err := s.mergeRollupBucketsWithDictionaryTx(ctx, metricName, tier.Interval, current, cache, tx)
-		if err != nil {
-			return written, err
-		}
-		written += n
-	}
-	return written, nil
+	return s.mergeRollupBucketsWithDictionaryTx(ctx, metricName, policy.Tiers[0].Interval, minute, newRollupDictionaryCache(), tx)
 }
 
 // replaceMinuteRollupsTx overwrites rebuilt minute buckets, then recomputes
 // only their affected ancestors from the stored finer tier. This keeps late
 // raw upserts idempotent even though t-digests cannot remove observations.
-func (s *Store) replaceMinuteRollupsTx(ctx context.Context, metricName string, replacements map[rollupKey]*rollupBucket, tx *sql.Tx) error {
-	if len(replacements) == 0 || len(s.cfg.RollupPolicy.Tiers) == 0 {
+func (s *Store) replaceMinuteRollupsTx(ctx context.Context, metricName string, policy RollupPolicy, replacements map[rollupKey]*rollupBucket, tx *sql.Tx) error {
+	if len(replacements) == 0 || len(policy.Tiers) == 0 {
 		return nil
 	}
-	policy := s.cfg.RollupPolicy
 	cache := newRollupDictionaryCache()
 	keys := make([]rollupKey, 0, len(replacements))
 	for key := range replacements {
@@ -135,35 +124,6 @@ func (s *Store) replaceMinuteRollupsTx(ctx context.Context, metricName string, r
 		}
 	}
 
-	affected := keys
-	for i := 1; i < len(policy.Tiers); i++ {
-		fine, coarse := policy.Tiers[i-1], policy.Tiers[i]
-		parents := make(map[rollupKey]struct{}, len(affected))
-		for _, key := range affected {
-			key.bucket = bucketStartMillis(key.bucket, coarse.Interval.Milliseconds())
-			parents[key] = struct{}{}
-		}
-		affected = affected[:0]
-		for key := range parents {
-			affected = append(affected, key)
-		}
-		sortRollupKeys(affected)
-		for _, key := range affected {
-			bucket, err := s.rebuildRollupBucketTx(ctx, metricName, fine.Interval, coarse.Interval, key, tx)
-			if err != nil {
-				return err
-			}
-			if bucket == nil {
-				if err := s.deleteRollupBucketTx(ctx, metricName, coarse.Interval, key, tx); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := s.upsertRollupWithDictionaryTx(ctx, metricName, coarse.Interval, key, bucket, cache, tx); err != nil {
-				return err
-			}
-		}
-	}
 	return nil
 }
 

@@ -71,6 +71,11 @@ type Store struct {
 	hotMu      sync.RWMutex
 	hot        map[hotRollupKey]*rollupBucket
 	hotReplace map[hotRollupKey]struct{}
+	// coarseMu protects in-memory parent buckets. Coarser tiers are only
+	// materialized once their source window has remained closed long enough for
+	// the raw late-arrival window to pass.
+	coarseMu sync.Mutex
+	coarse   map[coarseRollupKey]*coarseRollup
 	// mu protects closed state.
 	//
 	// mu 保护 closed 状态。
@@ -117,6 +122,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		raw:        make(map[rawSeriesKey]*rawSeries),
 		hot:        make(map[hotRollupKey]*rollupBucket),
 		hotReplace: make(map[hotRollupKey]struct{}),
+		coarse:     make(map[coarseRollupKey]*coarseRollup),
 	}
 
 	if cfg.DB != nil {
@@ -246,10 +252,10 @@ func prepareSQLiteConfig(cfg Config) (Config, error) {
 		cfg.SQLite.MMapSizeBytes = 32 * 1024 * 1024
 	}
 	if cfg.SQLite.WALAutoCheckpoint == 0 {
-		cfg.SQLite.WALAutoCheckpoint = 1000
+		cfg.SQLite.WALAutoCheckpoint = 4000
 	}
 	if cfg.SQLite.JournalSizeLimitBytes == 0 {
-		cfg.SQLite.JournalSizeLimitBytes = 4 * 1024 * 1024
+		cfg.SQLite.JournalSizeLimitBytes = 16 * 1024 * 1024
 	}
 
 	if cfg.DB == nil {
@@ -375,6 +381,11 @@ func (s *Store) Close() error {
 	s.rawMu.Lock()
 	s.raw = nil
 	s.rawMu.Unlock()
+	// Coarse summaries deliberately remain process-local until their window is
+	// sealed. The configured behavior drops an unsealed parent on shutdown.
+	s.coarseMu.Lock()
+	s.coarse = nil
+	s.coarseMu.Unlock()
 	if s.ownedReadDB && s.readDB != nil {
 		if err := s.readDB.Close(); err != nil {
 			firstErr = err
@@ -578,7 +589,8 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	}
 	_, rawErr := s.deleteRawPoints(name, "", nil)
 	_, hotErr := s.deleteHotRollups(name, "", nil, nil)
-	return errors.Join(rawErr, hotErr)
+	_, coarseErr := s.deleteCoarseRollupsMatching(name, "", nil)
+	return errors.Join(rawErr, hotErr, coarseErr)
 }
 
 // UpdateMetricRetention updates one metric's retention policy without deleting
@@ -678,7 +690,8 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 	if retentionDays == 0 {
 		_, rawErr := s.deleteRawPoints(name, "", nil)
 		_, hotErr := s.deleteHotRollups(name, "", nil, nil)
-		if err := errors.Join(rawErr, hotErr); err != nil {
+		_, coarseErr := s.deleteCoarseRollupsMatching(name, "", nil)
+		if err := errors.Join(rawErr, hotErr, coarseErr); err != nil {
 			return Definition{}, err
 		}
 	}
@@ -727,7 +740,8 @@ func (s *Store) DeleteMetricDataIfDisabled(ctx context.Context, name string) (bo
 	}
 	_, rawErr := s.deleteRawPoints(name, "", nil)
 	_, hotErr := s.deleteHotRollups(name, "", nil, nil)
-	if err := errors.Join(rawErr, hotErr); err != nil {
+	_, coarseErr := s.deleteCoarseRollupsMatching(name, "", nil)
+	if err := errors.Join(rawErr, hotErr, coarseErr); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -764,7 +778,8 @@ func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error
 	}
 	raw, rawErr := s.deleteRawPoints("", entityID, nil)
 	hot, hotErr := s.deleteHotRollups("", entityID, nil, nil)
-	return rollups + raw + hot, errors.Join(rawErr, hotErr)
+	_, coarseErr := s.deleteCoarseRollupsMatching("", entityID, nil)
+	return rollups + raw + hot, errors.Join(rawErr, hotErr, coarseErr)
 }
 
 // DeleteSeries deletes raw and rollup data matching a query-shaped series filter.
@@ -816,7 +831,8 @@ func (s *Store) deleteSeries(ctx context.Context, filter Query) (int64, error) {
 	}
 	raw, rawErr := s.deleteRawPoints(filter.MetricName, filter.EntityID, filter.Tags)
 	hot, hotErr := s.deleteHotRollups(filter.MetricName, filter.EntityID, filter.Tags, nil)
-	return rollups + raw + hot, errors.Join(rawErr, hotErr)
+	_, coarseErr := s.deleteCoarseRollupsMatching(filter.MetricName, filter.EntityID, filter.Tags)
+	return rollups + raw + hot, errors.Join(rawErr, hotErr, coarseErr)
 }
 
 // Write stores one metric point.
@@ -1190,29 +1206,144 @@ func (s *Store) DeleteBefore(ctx context.Context, metricName string, before time
 	return deleted + raw + hot, hotErr
 }
 
-// CleanupExpired deletes summaries past each metric's final retention.
+// CleanupExpired deletes data past each metric's effective retention in one
+// transaction. Definitions that share a tier/cutoff share one DELETE, keeping
+// the scheduled cleanup out of the report write path and avoiding per-metric
+// index churn.
 func (s *Store) CleanupExpired(ctx context.Context, now time.Time) (int64, error) {
+	if err := s.ensureOpen(); err != nil {
+		return 0, err
+	}
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
+
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
 		return 0, err
 	}
-	var total int64
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	type cleanupGroupKey struct {
+		interval   time.Duration
+		beforeMilli int64
+		all         bool
+	}
+	groups := make(map[cleanupGroupKey][]string)
+	disabled := make([]string, 0)
+	now = now.UTC()
 	for _, def := range defs {
 		if def.RetentionDays == 0 {
-			deleted, err := s.DeleteSeries(ctx, Query{MetricName: def.Name})
-			if err != nil {
-				return total, err
-			}
-			total += deleted
+			disabled = append(disabled, def.Name)
 			continue
 		}
-		deleted, err := s.DeleteBefore(ctx, def.Name, now.AddDate(0, 0, -def.RetentionDays))
+		policy := s.cfg.RollupPolicy.withMetricRetention(time.Duration(def.RetentionDays) * 24 * time.Hour)
+		retained := make(map[time.Duration]time.Duration, len(policy.Tiers))
+		for _, tier := range policy.Tiers {
+			retained[tier.Interval] = tier.Retention
+		}
+		for _, tier := range s.cfg.RollupPolicy.Tiers {
+			retention, keep := retained[tier.Interval]
+			if !keep {
+				key := cleanupGroupKey{interval: tier.Interval, all: true}
+				groups[key] = append(groups[key], def.Name)
+				continue
+			}
+			before := bucketStartMillis(now.Add(-retention).UnixMilli(), tier.Interval.Milliseconds())
+			key := cleanupGroupKey{interval: tier.Interval, beforeMilli: before}
+			groups[key] = append(groups[key], def.Name)
+		}
+	}
+
+	var total int64
+	if len(disabled) > 0 {
+		deleted, err := s.deleteRollupsForMetricsTx(ctx, disabled, tx)
 		if err != nil {
 			return total, err
 		}
 		total += deleted
 	}
+	keys := make([]cleanupGroupKey, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].interval != keys[j].interval {
+			return keys[i].interval < keys[j].interval
+		}
+		if keys[i].all != keys[j].all {
+			return keys[i].all
+		}
+		return keys[i].beforeMilli < keys[j].beforeMilli
+	})
+	for _, key := range keys {
+		deleted, err := s.deleteRollupGroupTx(ctx, groups[key], key.interval, key.beforeMilli, key.all, tx)
+		if err != nil {
+			return total, err
+		}
+		total += deleted
+	}
+	if err := tx.Commit(); err != nil {
+		return total, err
+	}
+
+	for _, name := range disabled {
+		raw, rawErr := s.deleteRawPoints(name, "", nil)
+		hot, hotErr := s.deleteHotRollups(name, "", nil, nil)
+		total += raw + hot
+		if rawErr != nil {
+			return total, rawErr
+		}
+		if hotErr != nil {
+			return total, hotErr
+		}
+		s.deleteCoarseRollups(name)
+	}
 	return total, nil
+}
+
+func (s *Store) deleteRollupsForMetricsTx(ctx context.Context, names []string, tx *sql.Tx) (int64, error) {
+	if len(names) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(names))
+	args := make([]any, len(names))
+	for i, name := range names {
+		placeholders[i] = s.dialect.placeholder(i + 1)
+		args[i] = name
+	}
+	sqlText := fmt.Sprintf("DELETE FROM %s WHERE series_id IN (SELECT id FROM %s WHERE metric_name IN (%s))", s.tables.rollups, s.tables.series, strings.Join(placeholders, ", "))
+	res, err := tx.ExecContext(ctx, sqlText, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) deleteRollupGroupTx(ctx context.Context, names []string, interval time.Duration, beforeMilli int64, all bool, tx *sql.Tx) (int64, error) {
+	if len(names) == 0 {
+		return 0, nil
+	}
+	args := []any{interval.Milliseconds()}
+	placeholders := make([]string, len(names))
+	for i, name := range names {
+		args = append(args, name)
+		placeholders[i] = s.dialect.placeholder(len(args))
+	}
+	where := "resolution_id IN (SELECT id FROM " + s.tables.resolutions + " WHERE resolution_milli = " + s.dialect.placeholder(1) + ")" +
+		" AND series_id IN (SELECT id FROM " + s.tables.series + " WHERE metric_name IN (" + strings.Join(placeholders, ", ") + "))"
+	if !all {
+		args = append(args, beforeMilli)
+		where += " AND bucket_milli < " + s.dialect.placeholder(len(args))
+	}
+	res, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s", s.tables.rollups, where), args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // sortedKeys returns sorted map keys.
