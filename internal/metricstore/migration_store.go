@@ -25,11 +25,14 @@ func configFromFingerprint(fingerprint string, base *MetricStoreConfig) (*Metric
 		return nil, fmt.Errorf("empty driver in target fingerprint: %q", fingerprint)
 	}
 	return &MetricStoreConfig{
-		Driver:       driver,
-		DSN:          dsn,
-		TablePrefix:  base.TablePrefix,
-		MaxOpenConns: base.MaxOpenConns,
-		MaxIdleConns: base.MaxIdleConns,
+		Driver:                           driver,
+		DSN:                              dsn,
+		TablePrefix:                      base.TablePrefix,
+		MaxOpenConns:                     base.MaxOpenConns,
+		MaxIdleConns:                     base.MaxIdleConns,
+		RollupMinuteRetentionMinutes:     base.RollupMinuteRetentionMinutes,
+		RollupFiveMinuteRetentionMinutes: base.RollupFiveMinuteRetentionMinutes,
+		RollupHourRetentionHours:         base.RollupHourRetentionHours,
 	}, nil
 }
 

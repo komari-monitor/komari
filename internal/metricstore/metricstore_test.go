@@ -72,6 +72,92 @@ func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
 	}
 }
 
+func TestBuildMetricConfigUsesCustomRollupRetention(t *testing.T) {
+	cfg, err := buildMetricConfig(&MetricStoreConfig{
+		Driver:                           "sqlite",
+		DSN:                              ":memory:",
+		RollupMinuteRetentionMinutes:     30,
+		RollupFiveMinuteRetentionMinutes: 150,
+		RollupHourRetentionHours:         300,
+	}, false)
+	if err != nil {
+		t.Fatalf("build metric config: %v", err)
+	}
+
+	want := []time.Duration{30 * time.Minute, 150 * time.Minute, 300 * time.Hour}
+	if len(cfg.RollupPolicy.Tiers) != 4 {
+		t.Fatalf("tier count = %d, want 4", len(cfg.RollupPolicy.Tiers))
+	}
+	for i, retention := range want {
+		if cfg.RollupPolicy.Tiers[i].Retention != retention {
+			t.Fatalf("tier %d retention = %s, want %s", i, cfg.RollupPolicy.Tiers[i].Retention, retention)
+		}
+	}
+}
+
+func TestBuildMetricConfigRejectsInvalidRollupRetention(t *testing.T) {
+	tests := []MetricStoreConfig{
+		{
+			Driver:                       "sqlite",
+			DSN:                          ":memory:",
+			RollupMinuteRetentionMinutes: -1,
+		},
+		{
+			Driver:                           "sqlite",
+			DSN:                              ":memory:",
+			RollupMinuteRetentionMinutes:     120,
+			RollupFiveMinuteRetentionMinutes: 60,
+			RollupHourRetentionHours:         600,
+		},
+		{
+			Driver:                           "sqlite",
+			DSN:                              ":memory:",
+			RollupMinuteRetentionMinutes:     30,
+			RollupFiveMinuteRetentionMinutes: 150,
+			RollupHourRetentionHours:         1,
+		},
+	}
+	for i, cfg := range tests {
+		if _, err := buildMetricConfig(&cfg, false); err == nil {
+			t.Fatalf("case %d: expected invalid rollup retention error", i)
+		}
+	}
+}
+
+func TestBuildMetricConfigDefaultsOmittedRollupRetention(t *testing.T) {
+	cfg, err := buildMetricConfig(&MetricStoreConfig{Driver: "sqlite", DSN: ":memory:"}, false)
+	if err != nil {
+		t.Fatalf("build metric config: %v", err)
+	}
+	if got, want := cfg.RollupPolicy.Tiers[0].Retention, 600*time.Minute; got != want {
+		t.Fatalf("minute retention = %s, want %s", got, want)
+	}
+	if got, want := cfg.RollupPolicy.Tiers[1].Retention, 3000*time.Minute; got != want {
+		t.Fatalf("five-minute retention = %s, want %s", got, want)
+	}
+}
+
+func TestConfigFromFingerprintPreservesRollupRetention(t *testing.T) {
+	base := &MetricStoreConfig{
+		TablePrefix:                      "metrics_",
+		MaxOpenConns:                     11,
+		MaxIdleConns:                     4,
+		RollupMinuteRetentionMinutes:     30,
+		RollupFiveMinuteRetentionMinutes: 150,
+		RollupHourRetentionHours:         300,
+	}
+
+	got, err := configFromFingerprint("mysql|user:password@tcp(host:3306)/metrics", base)
+	if err != nil {
+		t.Fatalf("config from fingerprint: %v", err)
+	}
+	if got.RollupMinuteRetentionMinutes != base.RollupMinuteRetentionMinutes ||
+		got.RollupFiveMinuteRetentionMinutes != base.RollupFiveMinuteRetentionMinutes ||
+		got.RollupHourRetentionHours != base.RollupHourRetentionHours {
+		t.Fatalf("rollup retention was not preserved: %#v", got)
+	}
+}
+
 func TestBuildMetricConfigAlwaysEnablesDownsampling(t *testing.T) {
 	cfg, err := buildMetricConfig(&MetricStoreConfig{
 		Driver: "sqlite",

@@ -15,6 +15,11 @@ const (
 	DefaultRollupRawRetention = 10 * time.Minute
 	DefaultRollupFinestTier   = time.Minute
 	defaultRollupPointLimit   = 600
+
+	defaultRollupMinuteRetentionMinutes     = defaultRollupPointLimit
+	defaultRollupFiveMinuteRetentionMinutes = 5 * defaultRollupPointLimit
+	defaultRollupHourRetentionHours         = defaultRollupPointLimit
+	defaultRollupDayRetentionDays           = 100 * 365
 )
 
 // MetricStoreConfig 保存 metric store 配置。
@@ -27,15 +32,24 @@ type MetricStoreConfig struct {
 	TablePrefix  string `json:"metric_table_prefix" default:"metric_"`     // 表名前缀
 	MaxOpenConns int    `json:"metric_max_open_conns" default:"25"`        // 最大连接数
 	MaxIdleConns int    `json:"metric_max_idle_conns" default:"5"`         // 最大空闲连接数
+	// RollupMinuteRetentionMinutes controls the persisted 1-minute bucket window.
+	RollupMinuteRetentionMinutes int `json:"metric_rollup_minute_retention_minutes" default:"600"`
+	// RollupFiveMinuteRetentionMinutes controls the persisted 5-minute bucket window.
+	RollupFiveMinuteRetentionMinutes int `json:"metric_rollup_five_minute_retention_minutes" default:"3000"`
+	// RollupHourRetentionHours controls the persisted 1-hour bucket window.
+	RollupHourRetentionHours int `json:"metric_rollup_hour_retention_hours" default:"600"`
 }
 
 // MetricStoreConfigKeys 配置键
 const (
-	MetricDBDriverKey     = "metric_db_driver"
-	MetricDBDSNKey        = "metric_db_dsn"
-	MetricTablePrefixKey  = "metric_table_prefix"
-	MetricMaxOpenConnsKey = "metric_max_open_conns"
-	MetricMaxIdleConnsKey = "metric_max_idle_conns"
+	MetricDBDriverKey                         = "metric_db_driver"
+	MetricDBDSNKey                            = "metric_db_dsn"
+	MetricTablePrefixKey                      = "metric_table_prefix"
+	MetricMaxOpenConnsKey                     = "metric_max_open_conns"
+	MetricMaxIdleConnsKey                     = "metric_max_idle_conns"
+	MetricRollupMinuteRetentionMinutesKey     = "metric_rollup_minute_retention_minutes"
+	MetricRollupFiveMinuteRetentionMinutesKey = "metric_rollup_five_minute_retention_minutes"
+	MetricRollupHourRetentionHoursKey         = "metric_rollup_hour_retention_hours"
 	// MigrationTargetKey 记录上一次成功完成手动迁移的目标指纹（driver+dsn），
 	// 用于在下一次管理员手动迁移时推断默认源库。
 	MigrationTargetKey = "metric_migration_target"
@@ -51,6 +65,9 @@ func targetFingerprint(cfg *MetricStoreConfig) string {
 // autoMigrate 控制是否在 Open 时自动建表：正式初始化/热加载时为 true，
 // 仅做连接测试时为 false（不写入 schema，避免对目标库产生副作用）。
 func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config, error) {
+	if cfg == nil {
+		return metric.Config{}, fmt.Errorf("metric store config is nil")
+	}
 	driver := ResolveDriverFromConfig(cfg.Driver, cfg.DSN)
 
 	tablePrefix := cfg.TablePrefix
@@ -61,7 +78,11 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 		metric.WithTablePrefix(tablePrefix),
 		metric.WithAutoMigrate(autoMigrate),
 	}
-	opts = append(opts, metric.WithRollupPolicy(defaultRollupPolicy()))
+	policy, err := rollupPolicyFromConfig(cfg)
+	if err != nil {
+		return metric.Config{}, err
+	}
+	opts = append(opts, metric.WithRollupPolicy(policy))
 
 	switch driver {
 	case metric.DriverSQLite:
@@ -102,18 +123,85 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 }
 
 func defaultRollupPolicy() metric.RollupPolicy {
+	return rollupPolicyFromValues(
+		defaultRollupMinuteRetentionMinutes,
+		defaultRollupFiveMinuteRetentionMinutes,
+		defaultRollupHourRetentionHours,
+	)
+}
+
+func rollupPolicyFromConfig(cfg *MetricStoreConfig) (metric.RollupPolicy, error) {
+	if cfg == nil {
+		return metric.RollupPolicy{}, fmt.Errorf("metric store config is nil")
+	}
+
+	minuteRetention := cfg.RollupMinuteRetentionMinutes
+	fiveMinuteRetention := cfg.RollupFiveMinuteRetentionMinutes
+	hourRetention := cfg.RollupHourRetentionHours
+	// Configs constructed by older callers do not have the new fields. Treat
+	// their zero values as omitted so recovery and migration remain compatible.
+	if minuteRetention == 0 {
+		minuteRetention = defaultRollupMinuteRetentionMinutes
+	}
+	if fiveMinuteRetention == 0 {
+		fiveMinuteRetention = defaultRollupFiveMinuteRetentionMinutes
+	}
+	if hourRetention == 0 {
+		hourRetention = defaultRollupHourRetentionHours
+	}
+	if minuteRetention < 0 || fiveMinuteRetention < 0 || hourRetention < 0 {
+		return metric.RollupPolicy{}, fmt.Errorf("metric rollup retention values must be positive integers")
+	}
+
+	minuteDuration, err := rollupDuration(minuteRetention, time.Minute)
+	if err != nil {
+		return metric.RollupPolicy{}, err
+	}
+	fiveMinuteDuration, err := rollupDuration(fiveMinuteRetention, time.Minute)
+	if err != nil {
+		return metric.RollupPolicy{}, err
+	}
+	hourDuration, err := rollupDuration(hourRetention, time.Hour)
+	if err != nil {
+		return metric.RollupPolicy{}, err
+	}
+
+	policy := rollupPolicyFromDurations(minuteDuration, fiveMinuteDuration, hourDuration)
+	if err := policy.Validate(); err != nil {
+		return metric.RollupPolicy{}, fmt.Errorf("invalid metric rollup retention policy: %w", err)
+	}
+	return policy, nil
+}
+
+func rollupPolicyFromValues(minuteRetentionMinutes, fiveMinuteRetentionMinutes, hourRetentionHours int) metric.RollupPolicy {
+	return rollupPolicyFromDurations(
+		time.Duration(minuteRetentionMinutes)*time.Minute,
+		time.Duration(fiveMinuteRetentionMinutes)*time.Minute,
+		time.Duration(hourRetentionHours)*time.Hour,
+	)
+}
+
+func rollupPolicyFromDurations(minuteRetention, fiveMinuteRetention, hourRetention time.Duration) metric.RollupPolicy {
 	return metric.RollupPolicy{
 		RawRetention: DefaultRollupRawRetention,
 		Tiers: []metric.RollupTier{
-			{Interval: time.Minute, Retention: time.Minute * defaultRollupPointLimit},
-			{Interval: 5 * time.Minute, Retention: 5 * time.Minute * defaultRollupPointLimit},
-			{Interval: time.Hour, Retention: time.Hour * defaultRollupPointLimit},
+			{Interval: time.Minute, Retention: minuteRetention},
+			{Interval: 5 * time.Minute, Retention: fiveMinuteRetention},
+			{Interval: time.Hour, Retention: hourRetention},
 			// Daily buckets form the terminal tier. They remain available until
 			// the metric's own retention policy removes them.
-			{Interval: 24 * time.Hour, Retention: 100 * 365 * 24 * time.Hour},
+			{Interval: 24 * time.Hour, Retention: time.Duration(defaultRollupDayRetentionDays) * 24 * time.Hour},
 		},
 		Compression: 30,
 	}
+}
+
+func rollupDuration(value int, unit time.Duration) (time.Duration, error) {
+	maxDurationValue := int64((time.Duration(1<<63 - 1)) / unit)
+	if value <= 0 || int64(value) > maxDurationValue {
+		return 0, fmt.Errorf("metric rollup retention value must be a positive duration")
+	}
+	return time.Duration(value) * unit, nil
 }
 
 // ResolveDriverFromConfig 根据 DSN 自动推断 metrics 数据库类型；当 DSN 不能可靠

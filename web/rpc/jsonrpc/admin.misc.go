@@ -3,6 +3,8 @@ package jsonrpc
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -10,12 +12,12 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/internal/lifecycle"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -110,15 +112,19 @@ func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonR
 	return cst, nil
 }
 
-// metricStoreConfigKeys 是与 metrics 独立数据库相关、需要触发连接测试 + 热重载的配置键。
+// metricStoreConfigKeys 是与 metrics 独立数据库及 rollup 策略相关、需要
+// 触发连接测试 + 热重载的配置键。
 //
 // 注意：metric_store_enabled 已废弃（metric store 始终启用），不再纳入此集合。
 var metricStoreConfigKeys = map[string]struct{}{
-	metricstore.MetricDBDriverKey:     {},
-	metricstore.MetricDBDSNKey:        {},
-	metricstore.MetricTablePrefixKey:  {},
-	metricstore.MetricMaxOpenConnsKey: {},
-	metricstore.MetricMaxIdleConnsKey: {},
+	metricstore.MetricDBDriverKey:                         {},
+	metricstore.MetricDBDSNKey:                            {},
+	metricstore.MetricTablePrefixKey:                      {},
+	metricstore.MetricMaxOpenConnsKey:                     {},
+	metricstore.MetricMaxIdleConnsKey:                     {},
+	metricstore.MetricRollupMinuteRetentionMinutesKey:     {},
+	metricstore.MetricRollupFiveMinuteRetentionMinutesKey: {},
+	metricstore.MetricRollupHourRetentionHoursKey:         {},
 }
 
 // metricKeysTouched 判断本次设置变更是否涉及 metrics 数据库相关键。
@@ -137,6 +143,9 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing request body: "+err.Error(), nil)
 	}
 	removeRetiredLowResourceMode(cfg)
+	if err := validateMetricRollupSettingChanges(cfg); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+	}
 
 	// 若本次修改涉及 metrics 数据库配置，则在落库前先用「当前配置 + 本次改动」
 	// 合并出的目标配置做一次连接测试。metric store 始终启用，只要触及 metrics
@@ -244,8 +253,85 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 	if v, ok := cfg[metricstore.MetricMaxIdleConnsKey]; ok {
 		merged.MaxIdleConns = toInt(v, merged.MaxIdleConns)
 	}
+	if v, ok := cfg[metricstore.MetricRollupMinuteRetentionMinutesKey]; ok {
+		merged.RollupMinuteRetentionMinutes = toInt(v, merged.RollupMinuteRetentionMinutes)
+	}
+	if v, ok := cfg[metricstore.MetricRollupFiveMinuteRetentionMinutesKey]; ok {
+		merged.RollupFiveMinuteRetentionMinutes = toInt(v, merged.RollupFiveMinuteRetentionMinutes)
+	}
+	if v, ok := cfg[metricstore.MetricRollupHourRetentionHoursKey]; ok {
+		merged.RollupHourRetentionHours = toInt(v, merged.RollupHourRetentionHours)
+	}
 
 	return merged, nil
+}
+
+func validateMetricRollupSettingChanges(cfg map[string]interface{}) error {
+	keys := []string{
+		metricstore.MetricRollupMinuteRetentionMinutesKey,
+		metricstore.MetricRollupFiveMinuteRetentionMinutesKey,
+		metricstore.MetricRollupHourRetentionHoursKey,
+	}
+	for _, key := range keys {
+		value, ok := cfg[key]
+		if !ok {
+			continue
+		}
+		n, err := metricRollupSettingInt(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("%s must be a positive integer", key)
+		}
+	}
+	return nil
+}
+
+func metricRollupSettingInt(value any) (int, error) {
+	maxInt := float64(^uint(0) >> 1)
+	switch value := value.(type) {
+	case int:
+		return value, nil
+	case int8:
+		return int(value), nil
+	case int16:
+		return int(value), nil
+	case int32:
+		return int(value), nil
+	case int64:
+		if float64(value) > maxInt || float64(value) < -maxInt-1 {
+			return 0, fmt.Errorf("integer overflow")
+		}
+		return int(value), nil
+	case uint:
+		if float64(value) > maxInt {
+			return 0, fmt.Errorf("integer overflow")
+		}
+		return int(value), nil
+	case uint8:
+		return int(value), nil
+	case uint16:
+		return int(value), nil
+	case uint32:
+		if float64(value) > maxInt {
+			return 0, fmt.Errorf("integer overflow")
+		}
+		return int(value), nil
+	case uint64:
+		if float64(value) > maxInt {
+			return 0, fmt.Errorf("integer overflow")
+		}
+		return int(value), nil
+	case float32:
+		return metricRollupSettingInt(float64(value))
+	case float64:
+		if math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value || value > maxInt || value < -maxInt-1 {
+			return 0, fmt.Errorf("not an integer")
+		}
+		return int(value), nil
+	case string:
+		return strconv.Atoi(strings.TrimSpace(value))
+	default:
+		return 0, fmt.Errorf("unsupported numeric type")
+	}
 }
 
 // toInt 将 JSON 解码得到的任意值（通常是 float64 或 string）转换为 int，失败时返回 fallback。
