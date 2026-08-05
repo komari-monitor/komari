@@ -19,7 +19,7 @@ func GetClients(c *gin.Context) {
 		return
 	}
 	// Upgrade the HTTP connection to a WebSocket connection
-	conn, err := UpgradeWebSocket(c)
+	conn, err := UpgradeSafeConn(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return

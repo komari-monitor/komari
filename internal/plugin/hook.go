@@ -83,6 +83,22 @@ func parseHookMatcher(pattern string) (*hookMatcher, error) {
 	return m, nil
 }
 
+// matchesPath reports whether a request path matches the filter. A nil
+// matcher matches everything.
+func (m *hookMatcher) matchesPath(path string) bool {
+	if m == nil {
+		return true
+	}
+	if path == "" {
+		path = "/"
+	}
+	path = strings.ToLower(path)
+	if m.prefix {
+		return path == m.path || strings.HasPrefix(path, m.path+"/")
+	}
+	return path == m.path
+}
+
 // matches reports whether the request matches the filter. A nil matcher
 // matches everything.
 func (m *hookMatcher) matches(r *http.Request) bool {
@@ -92,15 +108,7 @@ func (m *hookMatcher) matches(r *http.Request) bool {
 	if m.method != "" && r.Method != m.method {
 		return false
 	}
-	path := r.URL.Path
-	if path == "" {
-		path = "/"
-	}
-	path = strings.ToLower(path)
-	if m.prefix {
-		return path == m.path || strings.HasPrefix(path, m.path+"/")
-	}
-	return path == m.path
+	return m.matchesPath(r.URL.Path)
 }
 
 // isHTTPMethod reports whether s is a known HTTP request method.
@@ -291,6 +299,13 @@ func (m *Manager) runResponseHook(r *http.Request, bw *bufferedResponseWriter, h
 // for it with the runtime timeout. It reports whether the job was queued and
 // whether it timed out.
 func runHookTurn(host *jsruntime.Host, name string, job func(vm *goja.Runtime)) (queued, timedOut bool) {
+	return runHookTurnTimeout(host, name, host.Timeout(), job)
+}
+
+// runHookTurnTimeout is runHookTurn with an explicit wait budget. The
+// callback keeps running on the plugin loop after a timeout; the waiter gives
+// up and the caller falls back to passing the message through.
+func runHookTurnTimeout(host *jsruntime.Host, name string, timeout time.Duration, job func(vm *goja.Runtime)) (queued, timedOut bool) {
 	done := make(chan struct{})
 	if !host.RunOnLoop(func(vm *goja.Runtime) {
 		defer close(done)
@@ -301,7 +316,7 @@ func runHookTurn(host *jsruntime.Host, name string, job func(vm *goja.Runtime)) 
 	select {
 	case <-done:
 		return true, false
-	case <-time.After(host.Timeout()):
+	case <-time.After(timeout):
 		return true, true
 	}
 }

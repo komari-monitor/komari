@@ -33,7 +33,7 @@ type PluginPermissions struct {
 	Node                bool  `json:"node"`                // Node.js compatibility modules (runtime setting, not approval-relevant)
 	AllowSystemRPC      bool  `json:"allowSystemRPC"`      // server.call: call system RPC methods with admin authority
 	AllowRoutes         bool  `json:"allowRoutes"`         // server.route: register HTTP routes on the host engine
-	AllowHooks          bool  `json:"allowHooks"`          // server.hook: modify HTTP requests/responses
+	AllowHooks          bool  `json:"allowHooks"`          // server.hook: modify HTTP requests/responses and intercept WebSocket connections/frames
 	AllowHTMLInject     bool  `json:"allowHTMLInject"`     // server.injectHTML: embed CSS/JS into every HTML response
 	AllowExec           bool  `json:"allowExec"`           // child_process: execute child processes
 	AllowListen         bool  `json:"allowListen"`         // net/http servers: listen on local ports

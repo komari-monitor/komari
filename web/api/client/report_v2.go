@@ -124,12 +124,11 @@ func WebSocketV2RPC(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
 		return
 	}
-	unsafeConn, err := api.UpgradeWebSocket(c, api.EnableWebSocketCompression)
+	conn, err := api.UpgradeSafeConn(c, api.EnableWebSocketCompression)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
-	conn := connection.NewSafeConn(unsafeConn)
 	defer conn.Close()
 
 	uuid, ok := clientUUIDFromContext(c)

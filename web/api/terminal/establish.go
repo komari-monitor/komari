@@ -19,7 +19,7 @@ func EstablishConnection(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
 		return
 	}
-	conn, err := api.UpgradeWebSocket(c)
+	conn, err := api.UpgradeSafeConn(c)
 	if err != nil {
 		TerminalSessionsMutex.Lock()
 		if session.Browser != nil {

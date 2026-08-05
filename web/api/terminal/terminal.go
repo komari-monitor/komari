@@ -3,14 +3,14 @@ package terminal
 import (
 	"sync"
 
-	"github.com/gorilla/websocket"
+	"github.com/komari-monitor/komari/web/connection"
 )
 
 type TerminalSession struct {
 	UUID        string
 	UserUUID    string
-	Browser     *websocket.Conn
-	Agent       *websocket.Conn
+	Browser     *connection.SafeConn
+	Agent       *connection.SafeConn
 	RequesterIp string
 }
 

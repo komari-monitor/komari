@@ -4,8 +4,9 @@
 // directory, plus its long-term data directory data/plugin-data/<short>
 // exposed as __storageDir__ (which survives plugin updates), declares runtime
 // permissions in its manifest, and receives the host-injected "server" module
-// (server.route / server.call). Plugins run with admin authority inside the
-// system.
+// (server.route / server.call / server.hook, whose ws kinds can intercept
+// WebSocket connections and frames). Plugins run with admin authority inside
+// the system.
 //
 // Lifecycle: plugins are installed as directories under DataDir. The
 // persisted state file (state.json) records which plugins are enabled, which
@@ -35,6 +36,7 @@ import (
 	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/connection"
 )
 
 // DataDir is the on-disk root for installed plugins, mirroring the theme
@@ -129,12 +131,13 @@ var global = &Manager{
 	logs:      make(map[string]*LogBuffer),
 }
 
-// Init wires the manager to the HTTP engine. It must be called before any
-// plugin is loaded.
+// Init wires the manager to the HTTP engine and into every WebSocket
+// connection. It must be called before any plugin is loaded.
 func Init(engine *gin.Engine) {
 	global.mu.Lock()
 	global.engine = engine
 	global.mu.Unlock()
+	connection.SetFrameInterceptor(global)
 }
 
 // LoadAll loads every installed plugin whose persisted state is enabled and

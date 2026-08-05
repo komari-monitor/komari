@@ -13,7 +13,6 @@ import (
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
-	"github.com/komari-monitor/komari/web/connection"
 )
 
 // OnRpcRequest 是 /api/rpc2 的统一入口：GET 升级为 WebSocket，POST 处理单条/批量 JSON-RPC。
@@ -90,12 +89,11 @@ func headerOrQueryTwoFACode(c *gin.Context) string {
 }
 
 func serveWebSocket(c *gin.Context) {
-	_conn, err := api.UpgradeWebSocket(c)
+	conn, err := api.UpgradeSafeConn(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
-	conn := connection.NewSafeConn(_conn)
 	defer conn.Close()
 
 	meta := buildContextMeta(c)
