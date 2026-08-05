@@ -158,11 +158,11 @@ func DefaultConfig(driver Driver, dsn string) Config {
 		SQLite: SQLiteOptions{
 			PerformanceProfile:    SQLiteProfileBalanced,
 			BusyTimeout:           5 * time.Second,
-			CacheSizeKB:           16 * 1024,
+			CacheSizeKB:           4 * 1024,
 			TempStoreMemory:       false,
-			MMapSizeBytes:         32 * 1024 * 1024,
+			MMapSizeBytes:         0,
 			WALAutoCheckpoint:     4000,
-			JournalSizeLimitBytes: 16 * 1024 * 1024,
+			JournalSizeLimitBytes: 4 * 1024 * 1024,
 		},
 		RollupPolicy: RollupPolicy{
 			RawRetention: 10 * time.Minute,

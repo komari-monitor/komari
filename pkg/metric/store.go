@@ -247,16 +247,19 @@ func prepareSQLiteConfig(cfg Config) (Config, error) {
 		cfg.SQLite.BusyTimeout = 5 * time.Second
 	}
 	if cfg.SQLite.CacheSizeKB == 0 {
-		cfg.SQLite.CacheSizeKB = 16 * 1024
+		cfg.SQLite.CacheSizeKB = 4 * 1024
 	}
-	if cfg.SQLite.MMapSizeBytes == 0 {
-		cfg.SQLite.MMapSizeBytes = 32 * 1024 * 1024
+	// MMapSizeBytes == 0 表示显式禁用 mmap，而不是"未设置"：DefaultConfig 始终
+	// 填充 SQLiteOptions，因此这里的 0 是"跳过 mmap"的明确选择，不能被覆盖为
+	// 32MB。负数视为非法输入，归一为 0（禁用）。
+	if cfg.SQLite.MMapSizeBytes < 0 {
+		cfg.SQLite.MMapSizeBytes = 0
 	}
 	if cfg.SQLite.WALAutoCheckpoint == 0 {
 		cfg.SQLite.WALAutoCheckpoint = 4000
 	}
 	if cfg.SQLite.JournalSizeLimitBytes == 0 {
-		cfg.SQLite.JournalSizeLimitBytes = 16 * 1024 * 1024
+		cfg.SQLite.JournalSizeLimitBytes = 4 * 1024 * 1024
 	}
 
 	if cfg.DB == nil {

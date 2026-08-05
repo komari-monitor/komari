@@ -213,8 +213,8 @@ func TestSQLiteInDirCreatesDirectoryAndAppliesPragmas(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, "PRAGMA journal_size_limit").Scan(&journalSizeLimit); err != nil {
 		t.Fatalf("query journal size limit: %v", err)
 	}
-	if journalSizeLimit != 16*1024*1024 {
-		t.Fatalf("journal size limit = %d, want %d", journalSizeLimit, 16*1024*1024)
+	if journalSizeLimit != 4*1024*1024 {
+		t.Fatalf("journal size limit = %d, want %d", journalSizeLimit, 4*1024*1024)
 	}
 }
 
