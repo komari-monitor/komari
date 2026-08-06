@@ -32,13 +32,6 @@ var loadRecordMetricNames = []string{
 	MetricProcess, MetricConnections, MetricConnectionsUDP,
 }
 
-var obsoleteBuiltinMetricNames = []string{
-	"memory.total",
-	"swap.total",
-	"temperature",
-	"disk.total",
-}
-
 // gpuDeviceRecordMetricNames are stored separately from the entity-level GPU
 // average and are included when deleting all system records.
 var gpuDeviceRecordMetricNames = []string{

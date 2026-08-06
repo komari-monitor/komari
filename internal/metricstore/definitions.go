@@ -92,9 +92,6 @@ func createMetricDefinitionsWithDefaultRetention(ctx context.Context, s *metric.
 		}
 		if err == nil {
 			if existing.RetentionDays == 0 {
-				if _, err := s.SetMetricRetention(ctx, def.Name, 0); err != nil {
-					return fmt.Errorf("failed to preserve disabled metric %s: %w", def.Name, err)
-				}
 				continue
 			}
 			def.RetentionDays = existing.RetentionDays
@@ -103,11 +100,5 @@ func createMetricDefinitionsWithDefaultRetention(ctx context.Context, s *metric.
 			return fmt.Errorf("failed to create metric %s: %w", def.Name, err)
 		}
 	}
-	for _, name := range obsoleteBuiltinMetricNames {
-		if err := s.DeleteMetric(ctx, name); err != nil {
-			return fmt.Errorf("failed to remove obsolete metric %s: %w", name, err)
-		}
-	}
-
 	return nil
 }
