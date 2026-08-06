@@ -84,7 +84,31 @@ func ReclaimSpace(ctx context.Context) (MaintenanceResult, error) {
 	}
 	maintenanceCtx := context.Background()
 	result.Before, result.BeforeSizeError = activeStore.StorageSize(maintenanceCtx)
-	maintenanceErr := activeStore.ReclaimSpace(maintenanceCtx)
+	maintenanceErr := deleteUndefinedMetrics(maintenanceCtx, activeStore)
+	if maintenanceErr == nil {
+		maintenanceErr = activeStore.ReclaimSpace(maintenanceCtx)
+	}
 	result.After, result.AfterSizeError = activeStore.StorageSize(maintenanceCtx)
 	return result, maintenanceErr
+}
+
+func deleteUndefinedMetrics(ctx context.Context, s *metric.Store) error {
+	definitions, err := s.ListMetrics(ctx)
+	if err != nil {
+		return fmt.Errorf("list metric definitions before reclaim: %w", err)
+	}
+
+	builtin := make(map[string]struct{}, len(builtinMetricNames))
+	for _, name := range builtinMetricNames {
+		builtin[name] = struct{}{}
+	}
+	for _, definition := range definitions {
+		if _, ok := builtin[definition.Name]; ok {
+			continue
+		}
+		if err := s.DeleteMetric(ctx, definition.Name); err != nil {
+			return fmt.Errorf("delete undefined metric %q before reclaim: %w", definition.Name, err)
+		}
+	}
+	return nil
 }

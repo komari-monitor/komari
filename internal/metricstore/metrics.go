@@ -43,6 +43,8 @@ var recordMetricNames = joinMetricNames(loadRecordMetricNames, gpuDeviceRecordMe
 // Ping has an independent retention and cleanup boundary.
 var pingMetricNames = []string{MetricPingLatency, MetricPingLoss}
 
+var builtinMetricNames = joinMetricNames(recordMetricNames, pingMetricNames)
+
 func metricNameForRecordField(name string) (string, bool) {
 	switch name {
 	case "cpu":
