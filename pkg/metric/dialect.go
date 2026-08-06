@@ -35,6 +35,8 @@ type dialect interface {
 	//
 	// blobType 是 rollup t-digest sketch 的列类型。
 	blobType() string
+	renderSeriesDictionary(tables tables, indexName string, plan seriesDictionaryPlan) renderedSQL
+	renderRollupRead(tables tables, indexName string, plan rollupReadPlan) renderedSQL
 }
 
 // tables stores the physical table names used by a Store.

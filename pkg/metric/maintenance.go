@@ -125,6 +125,9 @@ func (s *Store) ReclaimSpace(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, sqliteVacuumSQL); err != nil {
 			return fmt.Errorf("metric: vacuum sqlite database: %w", err)
 		}
+		if _, err := s.db.ExecContext(ctx, "PRAGMA optimize"); err != nil {
+			return fmt.Errorf("metric: optimize sqlite database: %w", err)
+		}
 		// VACUUM itself can populate the WAL; truncate it again so the reported
 		// physical size reflects the completed reclamation.
 		return sqliteCheckpoint(ctx, s.db)

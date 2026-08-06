@@ -170,30 +170,84 @@ func markRawRebuild(rebuild map[hotRollupKey]struct{}, point preparedMetricPoint
 	rebuild[hotRollupKey{metricName: point.metricName, entityID: point.entityID, tagsHash: point.tagsHash, labelsHash: labelsHash, bucket: bucketStartMillis(point.timestamp, time.Minute.Milliseconds())}] = struct{}{}
 }
 
+type rawBatchPoints struct {
+	points     []Point
+	tagsHashes []string
+	order      Order
+}
+
+func (p *rawBatchPoints) Len() int { return len(p.points) }
+
+func (p *rawBatchPoints) Less(i, j int) bool {
+	if p.order == OrderDesc {
+		return rawPointLess(p.points[j], p.tagsHashes[j], p.points[i], p.tagsHashes[i])
+	}
+	return rawPointLess(p.points[i], p.tagsHashes[i], p.points[j], p.tagsHashes[j])
+}
+
+func (p *rawBatchPoints) Swap(i, j int) {
+	p.points[i], p.points[j] = p.points[j], p.points[i]
+	p.tagsHashes[i], p.tagsHashes[j] = p.tagsHashes[j], p.tagsHashes[i]
+}
+
 func (s *Store) queryRawPoints(ctx context.Context, query Query) ([]Point, error) {
+	entityIDs := []string(nil)
+	if query.EntityID != "" {
+		entityIDs = []string{query.EntityID}
+	}
+	batch, err := s.queryRawPointsBatch(ctx, BatchQuery{
+		MetricNames: []string{query.MetricName},
+		EntityIDs:   entityIDs,
+		Start:       query.Start,
+		End:         query.End,
+		Tags:        query.Tags,
+		Order:       query.Order,
+	})
+	if err != nil {
+		return nil, err
+	}
+	points := batch[query.MetricName]
+	startIndex := query.Offset
+	if startIndex > len(points) {
+		startIndex = len(points)
+	}
+	endIndex := len(points)
+	if query.Limit > 0 && startIndex+query.Limit < endIndex {
+		endIndex = startIndex + query.Limit
+	}
+	return points[startIndex:endIndex], nil
+}
+
+func (s *Store) queryRawPointsBatch(ctx context.Context, query BatchQuery) (map[string][]Point, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	start, end := query.Start.UnixMilli(), query.End.UnixMilli()
-	s.rawMu.Lock()
-	defer s.rawMu.Unlock()
-	now := time.Now().UTC()
-	visibleCutoff := now.Add(-rawMemoryRetention).UnixMilli()
+	visibleCutoff := time.Now().UTC().Add(-rawMemoryRetention).UnixMilli()
 	if start < visibleCutoff {
 		start = visibleCutoff
 	}
-	s.compressRawBeforeLocked("", now.Add(-directRawRetention).UnixMilli())
-	s.pruneRawBeforeLocked("", rawMemoryCutoff(now))
-
-	type resultPoint struct {
-		point    Point
-		entityID string
-		tagsHash string
+	metricNames := make(map[string]struct{}, len(query.MetricNames))
+	matched := make(map[string]*rawBatchPoints, len(query.MetricNames))
+	for _, metricName := range query.MetricNames {
+		metricNames[metricName] = struct{}{}
+		matched[metricName] = &rawBatchPoints{order: query.Order}
 	}
-	matched := make([]resultPoint, 0)
+	entityIDs := make(map[string]struct{}, len(query.EntityIDs))
+	for _, entityID := range query.EntityIDs {
+		entityIDs[entityID] = struct{}{}
+	}
+
+	s.rawMu.RLock()
+	defer s.rawMu.RUnlock()
 	for key, series := range s.raw {
-		if key.metricName != query.MetricName || (query.EntityID != "" && key.entityID != query.EntityID) {
+		if _, ok := metricNames[key.metricName]; !ok {
 			continue
+		}
+		if len(entityIDs) > 0 {
+			if _, ok := entityIDs[key.entityID]; !ok {
+				continue
+			}
 		}
 		tags, ok, err := matchRawTags(series.tagsJSON, query.Tags)
 		if err != nil {
@@ -217,37 +271,30 @@ func (s *Store) queryRawPoints(ctx context.Context, query Query) ([]Point, error
 				}
 				labels[sample.labelID] = labelMap
 			}
-			matched = append(matched, resultPoint{
-				point:    Point{MetricName: key.metricName, EntityID: key.entityID, Timestamp: fromMillis(sample.timestamp), Value: sample.value, Tags: cloneStringMap(tags), Labels: cloneStringMap(labelMap)},
-				entityID: key.entityID,
-				tagsHash: key.tagsHash,
+			metricPoints := matched[key.metricName]
+			metricPoints.points = append(metricPoints.points, Point{
+				MetricName: key.metricName, EntityID: key.entityID,
+				Timestamp: fromMillis(sample.timestamp), Value: sample.value, Tags: tags, Labels: labelMap,
 			})
+			metricPoints.tagsHashes = append(metricPoints.tagsHashes, key.tagsHash)
 		}
 	}
-	sort.Slice(matched, func(i, j int) bool {
-		left, right := matched[i], matched[j]
-		less := left.point.Timestamp.Before(right.point.Timestamp)
-		if left.point.Timestamp.Equal(right.point.Timestamp) {
-			less = left.entityID < right.entityID || (left.entityID == right.entityID && left.tagsHash < right.tagsHash)
-		}
-		if query.Order == OrderDesc {
-			return !less && !(left.point.Timestamp.Equal(right.point.Timestamp) && left.entityID == right.entityID && left.tagsHash == right.tagsHash)
-		}
-		return less
-	})
-	startIndex := query.Offset
-	if startIndex > len(matched) {
-		startIndex = len(matched)
-	}
-	endIndex := len(matched)
-	if query.Limit > 0 && startIndex+query.Limit < endIndex {
-		endIndex = startIndex + query.Limit
-	}
-	result := make([]Point, 0, endIndex-startIndex)
-	for _, item := range matched[startIndex:endIndex] {
-		result = append(result, item.point)
+	result := make(map[string][]Point, len(matched))
+	for metricName, metricPoints := range matched {
+		sort.Sort(metricPoints)
+		result[metricName] = metricPoints.points
 	}
 	return result, nil
+}
+
+func rawPointLess(left Point, leftTagsHash string, right Point, rightTagsHash string) bool {
+	if !left.Timestamp.Equal(right.Timestamp) {
+		return left.Timestamp.Before(right.Timestamp)
+	}
+	if left.EntityID != right.EntityID {
+		return left.EntityID < right.EntityID
+	}
+	return leftTagsHash < rightTagsHash
 }
 
 func (s *Store) rawEntityIDs(ctx context.Context, query Query) ([]string, error) {
@@ -255,15 +302,12 @@ func (s *Store) rawEntityIDs(ctx context.Context, query Query) ([]string, error)
 		return nil, err
 	}
 	start, end := query.Start.UnixMilli(), query.End.UnixMilli()
-	s.rawMu.Lock()
-	defer s.rawMu.Unlock()
-	now := time.Now().UTC()
-	visibleCutoff := now.Add(-rawMemoryRetention).UnixMilli()
+	s.rawMu.RLock()
+	defer s.rawMu.RUnlock()
+	visibleCutoff := time.Now().UTC().Add(-rawMemoryRetention).UnixMilli()
 	if start < visibleCutoff {
 		start = visibleCutoff
 	}
-	s.compressRawBeforeLocked("", now.Add(-directRawRetention).UnixMilli())
-	s.pruneRawBeforeLocked("", rawMemoryCutoff(now))
 	seen := make(map[string]struct{})
 	for key, series := range s.raw {
 		if key.metricName != query.MetricName || (query.EntityID != "" && key.entityID != query.EntityID) {

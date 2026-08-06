@@ -21,7 +21,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
-	return s.createNormalizedIndexes(ctx)
+	if err := s.createNormalizedIndexes(ctx); err != nil {
+		return err
+	}
+	if s.cfg.Driver == DriverSQLite {
+		_, err := s.db.ExecContext(ctx, "PRAGMA optimize")
+		return err
+	}
+	return nil
 }
 
 func (s *Store) normalizedSchemaStatements() []string {

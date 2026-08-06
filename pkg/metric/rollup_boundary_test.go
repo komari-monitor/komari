@@ -348,12 +348,10 @@ func TestSeriesHybridIncludesPartialCoarseBucketAtRawCutoff(t *testing.T) {
 	now := time.Date(2026, 6, 18, 12, 50, 0, 0, time.UTC)
 	old := now.Add(-40 * time.Minute)
 	recent := now.Add(-5 * time.Minute)
-	if err := s.WriteBatch(ctx, []Point{
-		{MetricName: "coarse-cutoff", EntityID: "n1", Timestamp: old, Value: 10},
-		{MetricName: "coarse-cutoff", EntityID: "n1", Timestamp: recent, Value: 100},
-	}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeRollupPointsAt(t, ctx, s, now,
+		Point{MetricName: "coarse-cutoff", EntityID: "n1", Timestamp: old, Value: 10},
+		Point{MetricName: "coarse-cutoff", EntityID: "n1", Timestamp: recent, Value: 100},
+	)
 	if _, err := s.Compact(ctx, now); err != nil {
 		t.Fatalf("compact: %v", err)
 	}
@@ -367,7 +365,7 @@ func TestSeriesHybridIncludesPartialCoarseBucketAtRawCutoff(t *testing.T) {
 		t.Fatalf("series: %v", err)
 	}
 	if len(got) != 1 || got[0].Count != 2 || math.Abs(got[0].Value-55) > 1e-9 {
-		t.Fatalf("expected coarse rollup and recent raw point, got %#v", got)
+		t.Fatalf("expected persisted and in-memory hourly data, got %#v", got)
 	}
 }
 
@@ -411,7 +409,9 @@ func TestSeriesAndAggregateRollupBridgeSealedCoarseTail(t *testing.T) {
 		read func() ([]AggregatePoint, error)
 	}{
 		{name: "series", read: func() ([]AggregatePoint, error) { return s.Series(ctx, query, base.Add(16*time.Minute)) }},
-		{name: "aggregate", read: func() ([]AggregatePoint, error) { return s.aggregateRollupAt(ctx, query, 5*time.Minute, base.Add(16*time.Minute)) }},
+		{name: "aggregate", read: func() ([]AggregatePoint, error) {
+			return s.aggregateRollupAt(ctx, query, 5*time.Minute, base.Add(16*time.Minute))
+		}},
 	} {
 		points, err := result.read()
 		if err != nil {

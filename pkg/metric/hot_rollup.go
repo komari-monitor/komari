@@ -60,7 +60,11 @@ func (s *Store) writePreparedHotRollups(ctx context.Context, prepared []prepared
 	if err != nil {
 		return err
 	}
-	_, err = s.flushClosedCoarseRollups(ctx, now)
+	if len(rebuild) > 0 {
+		_, err = s.flushClosedCoarseRollupsUnderView(ctx, now)
+	} else {
+		_, err = s.flushClosedCoarseRollups(ctx, now)
+	}
 	return err
 }
 

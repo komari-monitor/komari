@@ -74,7 +74,7 @@ type Store struct {
 	// coarseMu protects in-memory parent buckets. Coarser tiers are only
 	// materialized once their source window has remained closed long enough for
 	// the raw late-arrival window to pass.
-	coarseMu sync.Mutex
+	coarseMu sync.RWMutex
 	coarse   map[coarseRollupKey]*coarseRollup
 	// mu protects closed state.
 	//
@@ -932,6 +932,18 @@ func (s *Store) Query(ctx context.Context, query Query) ([]Point, error) {
 	}
 	query = query.normalized()
 	return s.queryRawPoints(ctx, query)
+}
+
+// QueryBatch loads exact raw samples for multiple metrics with one scan of the
+// in-memory raw store.
+func (s *Store) QueryBatch(ctx context.Context, query BatchQuery) (map[string][]Point, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if err := query.Validate(); err != nil {
+		return nil, err
+	}
+	return s.queryRawPointsBatch(ctx, query.normalized())
 }
 
 // EntityIDs returns distinct entity ids that have exact in-memory samples or

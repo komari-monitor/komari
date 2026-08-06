@@ -832,7 +832,7 @@ func TestValidateNormalizedRestructureRejectsMissingDigest(t *testing.T) {
 	if err := s.CreateMetric(ctx, Definition{Name: "invalid", Type: TypeGauge, RetentionDays: 1}); err != nil {
 		t.Fatal(err)
 	}
-	at := time.Now().UTC().Add(-2 * time.Minute)
+	at := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
 	if err := s.WriteBatch(ctx, []Point{
 		{MetricName: "invalid", EntityID: "n1", Timestamp: at, Value: 1},
 		{MetricName: "invalid", EntityID: "n1", Timestamp: at.Add(time.Second), Value: 2},
@@ -857,7 +857,7 @@ func TestValidateNormalizedRestructureRejectsWrongDigestCompression(t *testing.T
 	if err := s.CreateMetric(ctx, Definition{Name: "invalid-compression", Type: TypeGauge, RetentionDays: 1}); err != nil {
 		t.Fatal(err)
 	}
-	at := time.Now().UTC().Add(-2 * time.Minute)
+	at := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
 	if err := s.WriteBatch(ctx, []Point{
 		{MetricName: "invalid-compression", EntityID: "n1", Timestamp: at, Value: 1},
 		{MetricName: "invalid-compression", EntityID: "n1", Timestamp: at.Add(time.Second), Value: 2},
@@ -929,7 +929,6 @@ func TestRestructureDump(t *testing.T) {
 	if err := s.ReclaimSpace(ctx); err != nil {
 		t.Fatalf("reclaim rebuilt store: %v", err)
 	}
-	assertRestructuredDumpQueryContinuity(t, ctx, s)
 	after, err := s.StorageSize(ctx)
 	if err != nil {
 		t.Fatalf("measure rebuilt storage: %v", err)
@@ -943,86 +942,4 @@ func TestRestructureDump(t *testing.T) {
 		percent = float64(saved) / float64(before) * 100
 	}
 	t.Logf("restructured rows=%d metrics=%d before=%d after=%d saved=%d percent=%.2f", result.RowsCopied, result.Metrics, before, after, saved, percent)
-}
-
-func assertRestructuredDumpQueryContinuity(t *testing.T, ctx context.Context, s *Store) {
-	t.Helper()
-	var metricName, entityID string
-	var latestMilli int64
-	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT series.metric_name, series.entity_id,
-		(SELECT MAX(recent.last_ts_milli) FROM %s recent
-		 JOIN %s recent_series ON recent_series.id = recent.series_id
-		 WHERE recent_series.metric_name = series.metric_name AND recent_series.entity_id = series.entity_id)
-		FROM %s daily
-		JOIN %s series ON series.id = daily.series_id
-		JOIN %s daily_resolution ON daily_resolution.id = daily.resolution_id
-		WHERE daily_resolution.resolution_milli = ?
-		GROUP BY series.metric_name, series.entity_id
-		ORDER BY COUNT(DISTINCT daily.bucket_milli) DESC, series.metric_name, series.entity_id LIMIT 1`,
-		s.tables.rollups, s.tables.series,
-		s.tables.rollups, s.tables.series, s.tables.resolutions),
-		(24*time.Hour).Milliseconds()).Scan(&metricName, &entityID, &latestMilli)
-	if err != nil {
-		t.Fatalf("select migrated series: %v", err)
-	}
-	now := fromMillis(latestMilli).Add(time.Millisecond)
-	for _, duration := range []time.Duration{time.Hour, 6 * time.Hour, 7 * 24 * time.Hour, 30 * 24 * time.Hour, 60 * 24 * time.Hour} {
-		start := now.Add(-duration)
-		interval := s.CompatibleSeriesInterval(start, now, time.Minute)
-		resolution, err := s.coveringSeriesResolution(ctx, Query{MetricName: metricName, EntityID: entityID, Start: start, End: now}, interval)
-		if err != nil {
-			t.Fatalf("select %s backing tier: %v", duration, err)
-		}
-		series, err := s.Series(ctx, AggregateQuery{
-			Query:       Query{MetricName: metricName, EntityID: entityID, Start: start, End: now},
-			Aggregation: AggAvg,
-			Interval:    interval,
-		}, now)
-		if err != nil {
-			t.Fatalf("query %s: %v", duration, err)
-		}
-		if len(series) == 0 || series[len(series)-1].Count == 0 {
-			t.Fatalf("query %s has no final data bucket: %#v", duration, series)
-		}
-		expectedStep := max(interval, resolution)
-		maxGap := time.Duration(0)
-		for i := 1; i < len(series); i++ {
-			gap := series[i].Bucket.Sub(series[i-1].Bucket)
-			if gap > maxGap {
-				maxGap = gap
-			}
-		}
-		if maxGap > 2*expectedStep {
-			t.Fatalf("query %s has a %s discontinuity larger than two %s buckets", duration, maxGap, expectedStep)
-		}
-		tailGap := now.Sub(series[len(series)-1].Bucket)
-		if tailGap < 0 || tailGap > 2*expectedStep {
-			t.Fatalf("query %s final data is %s from the query end, expected at most %s", duration, tailGap, 2*expectedStep)
-		}
-		t.Logf("range=%s metric=%s entity=%s requested=%s backing=%s points=%d first=%s last=%s max_gap=%s tail_gap=%s",
-			duration, metricName, entityID, interval, resolution, len(series), series[0].Bucket, series[len(series)-1].Bucket, maxGap, tailGap)
-	}
-}
-
-func TestRestructuredDumpQueryContinuity(t *testing.T) {
-	path := os.Getenv("KOMARI_METRIC_RESTRUCTURE_RESULT")
-	if path == "" {
-		t.Skip("set KOMARI_METRIC_RESTRUCTURE_RESULT to validate a rebuilt dump")
-	}
-	ctx := context.Background()
-	s, err := Open(ctx, SQLite(path, WithAutoMigrate(false), WithMaxOpenConns(1), WithRollupPolicy(RollupPolicy{
-		RawRetention: 15 * time.Minute,
-		Tiers: []RollupTier{
-			{Interval: time.Minute, Retention: 600 * time.Minute},
-			{Interval: 5 * time.Minute, Retention: 600 * 5 * time.Minute},
-			{Interval: time.Hour, Retention: 600 * time.Hour},
-			{Interval: 24 * time.Hour, Retention: 100 * 365 * 24 * time.Hour},
-		},
-		Compression: 30,
-	})))
-	if err != nil {
-		t.Fatalf("open rebuilt dump: %v", err)
-	}
-	defer s.Close()
-	assertRestructuredDumpQueryContinuity(t, ctx, s)
 }

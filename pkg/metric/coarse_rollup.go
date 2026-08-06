@@ -104,6 +104,12 @@ func (s *Store) addCoarseChildren(metricName string, interval time.Duration, hig
 // late-arrival window. It flushes one tier at a time so a sealed child can feed
 // the next parent without any periodic rewrite of that parent.
 func (s *Store) flushClosedCoarseRollups(ctx context.Context, now time.Time) (int, error) {
+	s.rollupViewMu.Lock()
+	defer s.rollupViewMu.Unlock()
+	return s.flushClosedCoarseRollupsUnderView(ctx, now)
+}
+
+func (s *Store) flushClosedCoarseRollupsUnderView(ctx context.Context, now time.Time) (int, error) {
 	now = now.UTC()
 	written := 0
 	for {

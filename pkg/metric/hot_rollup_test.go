@@ -634,7 +634,7 @@ func TestSeriesMergesLabelsWithoutCollapsingRawShape(t *testing.T) {
 	}
 }
 
-func TestCoveringSeriesResolutionUsesFinestTierCoveringStart(t *testing.T) {
+func TestSeriesResolutionDoesNotInspectStoredCoverage(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{
 		Tiers: []RollupTier{
@@ -686,16 +686,13 @@ func TestCoveringSeriesResolutionUsesFinestTierCoveringStart(t *testing.T) {
 		t.Fatalf("commit seed tiers: %v", err)
 	}
 
-	resolution, err := s.coveringSeriesResolution(ctx, Query{MetricName: "coverage-tier", EntityID: "n1", Start: now.Add(-6 * time.Hour), End: now}, time.Minute)
-	if err != nil {
-		t.Fatalf("select covering tier: %v", err)
-	}
-	if resolution != 5*time.Minute {
-		t.Fatalf("covering tier = %s, want 5m", resolution)
+	resolution := seriesResolutionForPolicy(now.Add(-6*time.Hour), time.Minute, now, policy)
+	if resolution != time.Minute {
+		t.Fatalf("selected tier = %s, want 1m", resolution)
 	}
 }
 
-func TestSeriesFallsBackWhenPreferredPolicyTierHasNoRows(t *testing.T) {
+func TestSeriesReturnsEmptyWhenSelectedTierHasNoRows(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{
 		Tiers: []RollupTier{
@@ -743,8 +740,8 @@ func TestSeriesFallsBackWhenPreferredPolicyTierHasNoRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query series: %v", err)
 	}
-	if len(got) != 1 || got[0].Value != 42 || got[0].Count != 1 {
-		t.Fatalf("series did not fall back to existing hourly tier: %#v", got)
+	if len(got) != 0 {
+		t.Fatalf("series read a non-selected hourly tier: %#v", got)
 	}
 }
 
@@ -931,15 +928,33 @@ func TestSeriesHasNoTrailingEmptyBucketAcrossDashboardRanges(t *testing.T) {
 		t.Fatalf("create metric: %v", err)
 	}
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
-	points := make([]Point, 0, 60*24*60)
-	for at := now.Add(-60 * 24 * time.Hour); at.Before(now); at = at.Add(time.Minute) {
-		points = append(points, Point{MetricName: "coverage", EntityID: "n1", Timestamp: at, Value: 1})
+	tagsHash, tagsJSON, err := tagsFingerprint(nil)
+	if err != nil {
+		t.Fatalf("fingerprint tags: %v", err)
 	}
-	if err := s.WriteBatch(ctx, points); err != nil {
-		t.Fatalf("write history: %v", err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin history transaction: %v", err)
 	}
-	if _, err := s.Compact(ctx, now); err != nil {
-		t.Fatalf("compact history: %v", err)
+	metricPolicy := policy.withMetricRetention(90 * 24 * time.Hour)
+	for _, tierIndex := range []int{0, 2, 3} {
+		tier := metricPolicy.Tiers[tierIndex]
+		buckets := make(map[rollupKey]*rollupBucket)
+		start := bucketStartMillis(now.Add(-tier.Retention).UnixMilli(), tier.Interval.Milliseconds())
+		for bucketStart := start; bucketStart < now.UnixMilli(); bucketStart += tier.Interval.Milliseconds() {
+			bucket := newRollupBucket(policy.compression())
+			bucket.tagsHash, bucket.tagsJSON = tagsHash, tagsJSON
+			bucket.labelsHash, bucket.labelsJSON = emptyLabelsHash, "{}"
+			bucket.addPoint(1, bucketStart)
+			buckets[rollupKey{entityID: "n1", tagsHash: tagsHash, labelsHash: emptyLabelsHash, bucket: bucketStart}] = bucket
+		}
+		if _, err := s.writeRollupBucketsTx(ctx, "coverage", tier.Interval, buckets, tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("seed %s history: %v", tier.Interval, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit history: %v", err)
 	}
 	for _, duration := range []time.Duration{time.Hour, 6 * time.Hour, 7 * 24 * time.Hour, 30 * 24 * time.Hour, 60 * 24 * time.Hour} {
 		interval := s.CompatibleSeriesInterval(now.Add(-duration), now, time.Minute)

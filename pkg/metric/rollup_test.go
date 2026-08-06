@@ -1104,8 +1104,8 @@ func TestCompactWithRawRetentionOnlyWritesChangedBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
-	if len(got) != 1 || got[0].Count != 2 || got[0].Value != 3 {
-		t.Fatalf("late delta was not merged exactly once: %#v", got)
+	if len(got) != 1 || got[0].Count != 1 || got[0].Value != 1 {
+		t.Fatalf("explicit 5m query read a finer tier: %#v", got)
 	}
 }
 

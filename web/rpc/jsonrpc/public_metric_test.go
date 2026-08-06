@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
@@ -411,7 +411,7 @@ func TestPublicMetricUsesRawWindowOnlyForCurrentlyRetainedRange(t *testing.T) {
 	}
 }
 
-func TestLoadPublicMetricPointsUsesRollupsForRestartGapWithoutDuplicatingRaw(t *testing.T) {
+func TestLoadPublicMetricPointsReturnsOnlyRawAfterRestart(t *testing.T) {
 	ctx := context.Background()
 	dsn := filepath.Join(t.TempDir(), "metrics.db")
 	policy := metric.RollupPolicy{
@@ -473,28 +473,16 @@ func TestLoadPublicMetricPointsUsesRollupsForRestartGapWithoutDuplicatingRaw(t *
 	if err != nil {
 		t.Fatalf("load mixed restart window: %v", err)
 	}
-	if !got.downsampled || got.interval != time.Minute {
-		t.Fatalf("restart fallback metadata = %#v", got)
+	if got.downsampled || got.interval != 0 {
+		t.Fatalf("raw query metadata = %#v", got)
 	}
-	if len(got.points) != 3 {
-		t.Fatalf("restart window returned %d points, want two rollups and one raw: %#v", len(got.points), got.points)
+	if len(got.points) != 1 {
+		t.Fatalf("restart window returned %d points, want one raw point: %#v", len(got.points), got.points)
 	}
-	values := []float64{1, 2, 3}
-	for i, point := range got.points {
-		if point.Value == nil || *point.Value != values[i] {
-			t.Fatalf("point %d = %#v, want value %v", i, point, values[i])
-		}
+	if got.points[0].Value == nil || *got.points[0].Value != 3 {
+		t.Fatalf("raw point = %#v, want value 3", got.points[0])
 	}
-	if got.points[2].Count != 1 || got.points[2].Labels["source"] != "raw" {
-		t.Fatalf("post-restart exact point changed: %#v", got.points[2])
-	}
-
-	// The current hot rollup covers the same minute as the exact point. It must
-	// be omitted rather than returned as a fourth, duplicate observation.
-	currentBucket := afterRestart.Timestamp.Truncate(time.Minute)
-	for _, point := range got.points {
-		if point.Time.Equal(currentBucket) {
-			t.Fatalf("current raw minute also returned its rollup: %#v", got.points)
-		}
+	if got.points[0].Count != 1 || got.points[0].Labels["source"] != "raw" {
+		t.Fatalf("post-restart exact point changed: %#v", got.points[0])
 	}
 }

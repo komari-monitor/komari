@@ -173,93 +173,159 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
-	batchAllEntities := len(requestedEntityIDs) == 0 && len(entityIDs) > 1
-	queryEntityIDs := entityIDs
-	if batchAllEntities {
-		queryEntityIDs = []string{""}
-	}
 
 	store := metricstore.GetStore()
 	if store == nil {
 		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
 	}
-	defs, err := store.ListMetrics(ctx)
-	if err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to list metric definitions: "+err.Error(), nil)
-	}
-	defMap := make(map[string]metric.Definition, len(defs))
-	for _, def := range defs {
-		defMap[def.Name] = def
-	}
 
-	series := make([]publicMetricSeries, 0, len(metricKeys)*maxInt(1, len(entityIDs)))
+	type metricLoadSpec struct {
+		metricKey string
+		algorithm metric.Aggregation
+		maxPoints int
+		interval  time.Duration
+	}
+	loadSpecs := make([]metricLoadSpec, 0, len(metricKeys))
 	for _, metricKey := range metricKeys {
-		def, ok := defMap[metricKey]
-		if !ok {
-			return nil, rpc.MakeError(rpc.InvalidParams, "unknown metric key: "+metricKey, nil)
-		}
 		maxPoints, err := resolveMetricMaxPoints(metricKey, params)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 		}
-		algorithm := resolveMetricAggregation(metricKey, params)
-		metricFillEmpty := resolveMetricFillEmpty(params)
+		loadSpecs = append(loadSpecs, metricLoadSpec{
+			metricKey: metricKey,
+			algorithm: resolveMetricAggregation(metricKey, params),
+			maxPoints: maxPoints,
+		})
+	}
 
-		for _, entityID := range queryEntityIDs {
-			query := metric.Query{
-				MetricName: metricKey,
-				EntityID:   entityID,
-				Start:      start,
-				End:        end,
-				Tags:       params.Tags,
-				Order:      metric.OrderAsc,
+	metricFillEmpty := resolveMetricFillEmpty(params)
+	useRaw := publicMetricUsesRawWindow(start, end, queryNow)
+	definitions := make(map[string]metric.Definition, len(metricKeys))
+	rawValues := make(map[string][]metric.Point)
+	rollupValues := make(map[string]map[metric.Aggregation][]metric.AggregatePoint)
+	if len(entityIDs) > 0 && useRaw {
+		var err error
+		definitions, err = store.GetMetrics(ctx, metricKeys)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InternalError, "Failed to query metric definitions: "+err.Error(), nil)
+		}
+		for _, spec := range loadSpecs {
+			if _, ok := definitions[spec.metricKey]; !ok {
+				return nil, rpc.MakeError(rpc.InvalidParams, "unknown metric key: "+spec.metricKey, nil)
 			}
-			item := publicMetricSeries{
-				MetricKey:     metricKey,
-				EntityID:      entityID,
-				Type:          string(def.Type),
-				Unit:          def.Unit,
-				RetentionDays: def.RetentionDays,
-				Tags:          params.Tags,
-				FillEmpty:     metricFillEmpty,
-				MaxPoints:     maxPoints,
+		}
+		rawValues, err = store.QueryBatch(ctx, metric.BatchQuery{
+			MetricNames: metricKeys,
+			EntityIDs:   entityIDs,
+			Start:       start,
+			End:         end,
+			Tags:        params.Tags,
+			Order:       metric.OrderAsc,
+		})
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metrics: "+err.Error(), nil)
+		}
+	} else if len(entityIDs) > 0 {
+		batchSpecs := make([]metric.BatchSeriesSpec, 0, len(loadSpecs))
+		for i := range loadSpecs {
+			loadSpecs[i].interval = metricDownsampleInterval(end.Sub(start), loadSpecs[i].maxPoints)
+			loadSpecs[i].interval = store.CompatibleSeriesInterval(start, queryNow, loadSpecs[i].interval)
+			batchSpecs = append(batchSpecs, metric.BatchSeriesSpec{
+				MetricName:     loadSpecs[i].metricKey,
+				Aggregations:   []metric.Aggregation{loadSpecs[i].algorithm},
+				Interval:       loadSpecs[i].interval,
+				PreserveSeries: true,
+			})
+		}
+		loaded, err := store.SeriesBatch(ctx, metric.BatchSeriesQuery{
+			Specs:     batchSpecs,
+			EntityIDs: entityIDs,
+			Start:     start,
+			End:       end,
+			Tags:      params.Tags,
+			Order:     metric.OrderAsc,
+		}, queryNow)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metrics: "+err.Error(), nil)
+		}
+		definitions = loaded.Definitions
+		rollupValues = loaded.Values
+		for _, spec := range loadSpecs {
+			if _, ok := definitions[spec.metricKey]; !ok {
+				return nil, rpc.MakeError(rpc.InvalidParams, "unknown metric key: "+spec.metricKey, nil)
 			}
+		}
+	} else {
+		var err error
+		definitions, err = store.GetMetrics(ctx, metricKeys)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InternalError, "Failed to query metric definitions: "+err.Error(), nil)
+		}
+		for _, spec := range loadSpecs {
+			if _, ok := definitions[spec.metricKey]; !ok {
+				return nil, rpc.MakeError(rpc.InvalidParams, "unknown metric key: "+spec.metricKey, nil)
+			}
+		}
+	}
 
-			loaded, err := loadPublicMetricPoints(ctx, store, query, algorithm, maxPoints, metricFillEmpty, queryNow)
-			if err != nil {
-				return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metric "+metricKey+": "+err.Error(), nil)
+	series := make([]publicMetricSeries, 0, len(metricKeys)*maxInt(1, len(entityIDs)))
+	for _, spec := range loadSpecs {
+		def := definitions[spec.metricKey]
+		item := publicMetricSeries{
+			MetricKey:     spec.metricKey,
+			Type:          string(def.Type),
+			Unit:          def.Unit,
+			RetentionDays: def.RetentionDays,
+			Tags:          params.Tags,
+			FillEmpty:     metricFillEmpty,
+			MaxPoints:     spec.maxPoints,
+			Downsampled:   !useRaw,
+		}
+		if useRaw {
+			points := rawValues[spec.metricKey]
+			item.Points = make([]publicMetricPoint, 0, len(points))
+			for _, point := range points {
+				item.Points = append(item.Points, publicMetricPoint{
+					entityID: point.EntityID,
+					Time:     point.Timestamp.UTC(),
+					Value:    publicRawMetricValue(point.MetricName, point.Value, metricFillEmpty),
+					Count:    1,
+					Tags:     point.Tags,
+					Labels:   point.Labels,
+				})
 			}
-			item.Downsampled = loaded.downsampled
-			item.Points = loaded.points
-			if loaded.downsampled {
-				item.DownsampleAlgorithm = string(algorithm)
-				item.IntervalSeconds = loaded.interval.Seconds()
+		} else {
+			item.DownsampleAlgorithm = string(spec.algorithm)
+			item.IntervalSeconds = spec.interval.Seconds()
+			points := rollupValues[spec.metricKey][spec.algorithm]
+			item.Points = make([]publicMetricPoint, 0, len(points))
+			for _, point := range points {
+				item.Points = append(item.Points, publicMetricPoint{
+					entityID: point.EntityID,
+					Time:     point.Bucket.UTC(),
+					Value:    publicRawMetricValue(point.MetricName, point.Value, metricFillEmpty),
+					Count:    point.Count,
+					Tags:     point.Tags,
+				})
 			}
-			splits := splitPublicMetricSeries(item)
-			if batchAllEntities {
-				byEntity := make(map[string][]publicMetricSeries, len(entityIDs))
-				for _, split := range splits {
-					byEntity[split.EntityID] = append(byEntity[split.EntityID], split)
-				}
-				for _, visibleEntityID := range entityIDs {
-					entitySeries := byEntity[visibleEntityID]
-					if len(entitySeries) == 0 {
-						empty := item
-						empty.EntityID = visibleEntityID
-						empty.Count = 0
-						empty.Points = nil
-						entitySeries = []publicMetricSeries{empty}
-					}
-					for _, split := range entitySeries {
-						if metricFillEmpty {
-							split = adaptiveFillPublicMetricSeries(split, start, end)
-						}
-						series = append(series, split)
-					}
-				}
-				continue
+		}
+
+		byEntity := make(map[string][]publicMetricSeries, len(entityIDs))
+		for _, split := range splitPublicMetricSeries(item) {
+			if split.EntityID != "" {
+				byEntity[split.EntityID] = append(byEntity[split.EntityID], split)
 			}
-			for _, split := range splits {
+		}
+		for _, entityID := range entityIDs {
+			entitySeries := byEntity[entityID]
+			if len(entitySeries) == 0 {
+				empty := item
+				empty.EntityID = entityID
+				empty.Count = 0
+				empty.Points = nil
+				entitySeries = []publicMetricSeries{empty}
+			}
+			for _, split := range entitySeries {
 				if metricFillEmpty {
 					split = adaptiveFillPublicMetricSeries(split, start, end)
 				}
@@ -294,64 +360,21 @@ func loadPublicMetricPoints(
 	now time.Time,
 ) (publicMetricPointResult, error) {
 	if publicMetricUsesRawWindow(query.Start, query.End, now) {
-		fallbackInterval := store.CompatibleSeriesInterval(query.Start, now, time.Minute)
-		// Read rollups first so a concurrent write is observed by the later raw
-		// read and suppresses the older summary for that bucket.
-		fallback, err := store.Series(ctx, metric.AggregateQuery{
-			Query:          query,
-			Aggregation:    algorithm,
-			Interval:       fallbackInterval,
-			PreserveSeries: true,
-		}, now)
-		if err != nil {
-			return publicMetricPointResult{}, err
-		}
 		points, err := store.Query(ctx, query)
 		if err != nil {
 			return publicMetricPointResult{}, err
 		}
 		result := publicMetricPointResult{points: make([]publicMetricPoint, 0, len(points))}
-		rawBuckets := make(map[string]struct{}, len(points))
 		for _, point := range points {
-			publicPoint := publicMetricPoint{
+			result.points = append(result.points, publicMetricPoint{
 				entityID: point.EntityID,
 				Time:     point.Timestamp.UTC(),
 				Value:    publicRawMetricValue(point.MetricName, point.Value, fillEmpty),
 				Count:    1,
 				Tags:     point.Tags,
 				Labels:   point.Labels,
-			}
-			result.points = append(result.points, publicPoint)
-			rawBuckets[publicMetricBucketKey(publicPoint, fallbackInterval)] = struct{}{}
+			})
 		}
-
-		// Exact samples disappear on restart, while the minute summaries remain
-		// persisted. Fill only buckets that have no exact sample so a restart does
-		// not create a false gap or duplicate a bucket that is still in memory.
-		for _, point := range fallback {
-			publicPoint := publicMetricPoint{
-				entityID: point.EntityID,
-				Time:     point.Bucket.UTC(),
-				Value:    publicRawMetricValue(point.MetricName, point.Value, fillEmpty),
-				Count:    point.Count,
-				Tags:     point.Tags,
-			}
-			if publicPoint.Time.Before(query.Start) || publicPoint.Time.Add(fallbackInterval).After(query.End) {
-				continue
-			}
-			if _, exact := rawBuckets[publicMetricBucketKey(publicPoint, fallbackInterval)]; exact {
-				continue
-			}
-			result.points = append(result.points, publicPoint)
-			result.downsampled = true
-			result.interval = fallbackInterval
-		}
-		sort.SliceStable(result.points, func(i, j int) bool {
-			if result.points[i].Time.Equal(result.points[j].Time) {
-				return publicMetricTagsKey(result.points[i].Tags) < publicMetricTagsKey(result.points[j].Tags)
-			}
-			return result.points[i].Time.Before(result.points[j].Time)
-		})
 		return result, nil
 	}
 
@@ -386,11 +409,6 @@ func loadPublicMetricPoints(
 func publicMetricUsesRawWindow(start, end, now time.Time) bool {
 	retention := metricstore.DefaultRollupRawRetention
 	return end.Sub(start) <= retention && end.After(now.UTC().Add(-retention))
-}
-
-func publicMetricBucketKey(point publicMetricPoint, interval time.Duration) string {
-	bucket := point.Time.UTC().Truncate(interval).UnixMilli()
-	return point.entityID + "\x00" + strconv.FormatInt(bucket, 10) + "\x00" + publicMetricTagsKey(point.Tags)
 }
 
 func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -443,24 +461,13 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	interval := metricDownsampleInterval(end.Sub(start), maxPoints)
 	interval = store.CompatibleSeriesInterval(start, now, interval)
 
+	groupsByEntity, err := loadPublicPingMetricAggregateGroups(ctx, store, entityIDs, start, end, interval, now)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to query ping stats: "+err.Error(), nil)
+	}
 	stats := make([]publicPingMetricTaskStats, 0)
-	if len(requestedEntities) == 0 && len(entityIDs) > 1 {
-		groupsByEntity, err := loadPublicPingMetricAggregateGroups(ctx, store, "", start, end, interval, now)
-		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to query ping stats: "+err.Error(), nil)
-		}
-		for _, entityID := range entityIDs {
-			stats = append(stats, publicPingStatsFromAggregateGroups(entityID, groupsByEntity[entityID], taskMap, taskFilter)...)
-		}
-	} else {
-		for _, entityID := range entityIDs {
-			groupsByEntity, err := loadPublicPingMetricAggregateGroups(ctx, store, entityID, start, end, interval, now)
-			if err != nil {
-				return nil, rpc.MakeError(rpc.InternalError, "Failed to query ping stats: "+err.Error(), nil)
-			}
-			entityStats := publicPingStatsFromAggregateGroups(entityID, groupsByEntity[entityID], taskMap, taskFilter)
-			stats = append(stats, entityStats...)
-		}
+	for _, entityID := range entityIDs {
+		stats = append(stats, publicPingStatsFromAggregateGroups(entityID, groupsByEntity[entityID], taskMap, taskFilter)...)
 	}
 
 	sort.Slice(stats, func(i, j int) bool {
@@ -771,7 +778,7 @@ type publicPingMetricAggregateGroups struct {
 	LossAvailable bool
 }
 
-func loadPublicPingMetricAggregateGroups(ctx context.Context, store *metric.Store, entityID string, start, end time.Time, interval time.Duration, now time.Time) (map[string]publicPingMetricAggregateGroups, error) {
+func loadPublicPingMetricAggregateGroups(ctx context.Context, store *metric.Store, entityIDs []string, start, end time.Time, interval time.Duration, now time.Time) (map[string]publicPingMetricAggregateGroups, error) {
 	latencyAggregations := []metric.Aggregation{
 		metric.AggAvg,
 		metric.AggMin,
@@ -781,29 +788,21 @@ func loadPublicPingMetricAggregateGroups(ctx context.Context, store *metric.Stor
 		metric.AggP99,
 		metric.AggStdDev,
 	}
-	latency, err := store.SeriesAggregates(ctx, metric.Query{
-		MetricName: metricstore.MetricPingLatency,
-		EntityID:   entityID,
-		Start:      start,
-		End:        end,
-		Order:      metric.OrderAsc,
-	}, latencyAggregations, interval, true, now)
+	loaded, err := store.SeriesBatch(ctx, metric.BatchSeriesQuery{
+		Specs: []metric.BatchSeriesSpec{
+			{MetricName: metricstore.MetricPingLatency, Aggregations: latencyAggregations, Interval: interval, PreserveSeries: true},
+			{MetricName: metricstore.MetricPingLoss, Aggregations: []metric.Aggregation{metric.AggAvg}, Interval: interval, PreserveSeries: true},
+		},
+		EntityIDs: entityIDs,
+		Start:     start,
+		End:       end,
+		Order:     metric.OrderAsc,
+	}, now)
 	if err != nil {
 		return nil, err
 	}
-
-	lossPoints, lossErr := store.Series(ctx, metric.AggregateQuery{
-		Query: metric.Query{
-			MetricName: metricstore.MetricPingLoss,
-			EntityID:   entityID,
-			Start:      start,
-			End:        end,
-			Order:      metric.OrderAsc,
-		},
-		Aggregation:    metric.AggAvg,
-		Interval:       interval,
-		PreserveSeries: true,
-	}, now)
+	latency := loaded.Values[metricstore.MetricPingLatency]
+	lossPoints := loaded.Values[metricstore.MetricPingLoss][metric.AggAvg]
 
 	avg := groupPingMetricAggregatePointsByEntity(latency[metric.AggAvg])
 	minimum := groupPingMetricAggregatePointsByEntity(latency[metric.AggMin])
@@ -832,7 +831,7 @@ func loadPublicPingMetricAggregateGroups(ctx context.Context, store *metric.Stor
 			P99:           p99[currentEntityID],
 			StdDev:        stddev[currentEntityID],
 			Loss:          entityLoss,
-			LossAvailable: lossErr == nil && pingMetricGroupsHaveData(entityLoss),
+			LossAvailable: pingMetricGroupsHaveData(entityLoss),
 		}
 	}
 	return result, nil

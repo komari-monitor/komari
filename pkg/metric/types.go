@@ -291,6 +291,43 @@ type Query struct {
 	Order Order `json:"order,omitempty"`
 }
 
+// BatchQuery loads exact raw samples for multiple metrics and entities from one
+// shared time window.
+type BatchQuery struct {
+	MetricNames []string          `json:"metric_names"`
+	EntityIDs   []string          `json:"entity_ids,omitempty"`
+	Start       time.Time         `json:"start"`
+	End         time.Time         `json:"end"`
+	Tags        map[string]string `json:"tags,omitempty"`
+	Order       Order             `json:"order,omitempty"`
+}
+
+// BatchSeriesSpec describes the rollup output requested for one metric.
+type BatchSeriesSpec struct {
+	MetricName     string
+	Aggregations   []Aggregation
+	Interval       time.Duration
+	PreserveSeries bool
+}
+
+// BatchSeriesQuery combines per-metric rollup specifications that share the
+// same time, entity, tag, and ordering filters.
+type BatchSeriesQuery struct {
+	Specs     []BatchSeriesSpec
+	EntityIDs []string
+	Start     time.Time
+	End       time.Time
+	Tags      map[string]string
+	Order     Order
+}
+
+// BatchSeriesResult contains definitions and aggregate values keyed by metric
+// and aggregation.
+type BatchSeriesResult struct {
+	Definitions map[string]Definition
+	Values      map[string]map[Aggregation][]AggregatePoint
+}
+
 // Validate checks whether the value is well formed.
 //
 // Validate 检查原始查询条件是否合法。
@@ -319,6 +356,76 @@ func (q Query) Validate() error {
 //
 // normalized 将查询时间规范化为 UTC，并设置默认排序。
 func (q Query) normalized() Query {
+	q.Start = q.Start.UTC()
+	q.End = q.End.UTC()
+	if q.Order == "" {
+		q.Order = OrderAsc
+	}
+	return q
+}
+
+// Validate checks whether a batch raw query is well formed.
+func (q BatchQuery) Validate() error {
+	if len(q.MetricNames) == 0 {
+		return fmt.Errorf("%w: at least one metric name is required", ErrInvalidArgument)
+	}
+	for _, name := range q.MetricNames {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("%w: metric name is required", ErrInvalidArgument)
+		}
+	}
+	if q.Start.IsZero() || q.End.IsZero() {
+		return fmt.Errorf("%w: start and end time are required", ErrInvalidArgument)
+	}
+	if q.End.Before(q.Start) {
+		return fmt.Errorf("%w: end time cannot be before start time", ErrInvalidArgument)
+	}
+	switch q.Order {
+	case "", OrderAsc, OrderDesc:
+	default:
+		return fmt.Errorf("%w: unsupported order %q", ErrInvalidArgument, q.Order)
+	}
+	return nil
+}
+
+func (q BatchQuery) normalized() BatchQuery {
+	q.Start = q.Start.UTC()
+	q.End = q.End.UTC()
+	if q.Order == "" {
+		q.Order = OrderAsc
+	}
+	return q
+}
+
+// Validate checks whether a batch rollup query is well formed.
+func (q BatchSeriesQuery) Validate() error {
+	if len(q.Specs) == 0 {
+		return fmt.Errorf("%w: at least one series specification is required", ErrInvalidArgument)
+	}
+	seen := make(map[string]struct{}, len(q.Specs))
+	for _, spec := range q.Specs {
+		if _, ok := seen[spec.MetricName]; ok {
+			return fmt.Errorf("%w: duplicate series specification for metric %q", ErrInvalidArgument, spec.MetricName)
+		}
+		seen[spec.MetricName] = struct{}{}
+		if len(spec.Aggregations) == 0 {
+			return fmt.Errorf("%w: at least one aggregation is required for metric %q", ErrInvalidArgument, spec.MetricName)
+		}
+		for _, aggregation := range spec.Aggregations {
+			if err := (AggregateQuery{
+				Query:          Query{MetricName: spec.MetricName, Start: q.Start, End: q.End, Tags: q.Tags, Order: q.Order},
+				Aggregation:    aggregation,
+				Interval:       spec.Interval,
+				PreserveSeries: spec.PreserveSeries,
+			}).Validate(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (q BatchSeriesQuery) normalized() BatchSeriesQuery {
 	q.Start = q.Start.UTC()
 	q.End = q.End.UTC()
 	if q.Order == "" {

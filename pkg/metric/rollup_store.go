@@ -146,7 +146,7 @@ func (s *Store) rebuildRollupBucketTx(ctx context.Context, metricName string, fi
 	if err != nil {
 		return nil, err
 	}
-	stored, err := scanStoredRollups(rows, true, s.cfg.RollupPolicy.compression())
+	stored, err := scanStoredRollupsForMaintenance(rows, true, s.cfg.RollupPolicy.compression())
 	_ = rows.Close()
 	if err != nil {
 		return nil, err

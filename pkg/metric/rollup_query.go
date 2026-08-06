@@ -7,322 +7,118 @@ import (
 	"time"
 )
 
-// AggregateRollup reduces one materialized tier into the requested output
-// interval. The hot minute is folded in separately so recent charts never wait
-// for another report before their final real bucket becomes visible.
+// AggregateRollup reduces one explicitly selected materialized tier into the
+// requested output interval.
 func (s *Store) AggregateRollup(ctx context.Context, query AggregateQuery, resolution time.Duration) ([]AggregatePoint, error) {
 	return s.aggregateRollupAt(ctx, query, resolution, time.Now().UTC())
 }
 
-// aggregateRollupAt reads a sealed rollup prefix at the requested backing
-// resolution, then recursively falls back through finer tiers for the
-// ten-minute late-arrival tail. Series passes its supplied now value here so
-// callers receive a stable view while AggregateRollup keeps its public API.
 func (s *Store) aggregateRollupAt(ctx context.Context, query AggregateQuery, resolution time.Duration, now time.Time) ([]AggregatePoint, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
 	if resolution <= 0 {
 		return nil, fmt.Errorf("%w: rollup resolution must be positive", ErrInvalidArgument)
 	}
-	policy, err := s.metricRollupPolicy(ctx, query.MetricName)
+	entityIDs := []string(nil)
+	if query.EntityID != "" {
+		entityIDs = []string{query.EntityID}
+	}
+	batch := BatchSeriesQuery{
+		Specs: []BatchSeriesSpec{{
+			MetricName:     query.MetricName,
+			Aggregations:   []Aggregation{query.Aggregation},
+			Interval:       query.Interval,
+			PreserveSeries: query.PreserveSeries,
+		}},
+		EntityIDs: entityIDs,
+		Start:     query.Start,
+		End:       query.End,
+		Tags:      query.Tags,
+		Order:     query.Order,
+	}
+	if err := batch.Validate(); err != nil {
+		return nil, err
+	}
+	result, err := s.seriesBatchAt(ctx, batch.normalized(), now.UTC(), map[string]time.Duration{query.MetricName: resolution})
 	if err != nil {
 		return nil, err
 	}
-	results, err := s.aggregateRollupsAt(ctx, query.Query, []Aggregation{query.Aggregation}, query.Interval, query.PreserveSeries, resolution, now, policy)
+	return pageBuckets(result.Values[query.MetricName][query.Aggregation], query.BucketLimit, query.BucketOffset), nil
+}
+
+// Series selects one deterministic backing tier and delegates to SeriesBatch.
+func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time) ([]AggregatePoint, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if err := query.Validate(); err != nil {
+		return nil, err
+	}
+	entityIDs := []string(nil)
+	if query.EntityID != "" {
+		entityIDs = []string{query.EntityID}
+	}
+	result, err := s.SeriesBatch(ctx, BatchSeriesQuery{
+		Specs: []BatchSeriesSpec{{
+			MetricName:     query.MetricName,
+			Aggregations:   []Aggregation{query.Aggregation},
+			Interval:       query.Interval,
+			PreserveSeries: query.PreserveSeries,
+		}},
+		EntityIDs: entityIDs,
+		Start:     query.Start,
+		End:       query.End,
+		Tags:      query.Tags,
+		Order:     query.Order,
+	}, now)
 	if err != nil {
 		return nil, err
 	}
-	return pageBuckets(results[query.Aggregation], query.BucketLimit, query.BucketOffset), nil
+	return pageBuckets(result.Values[query.MetricName][query.Aggregation], query.BucketLimit, query.BucketOffset), nil
 }
 
-// hybridRollupRows reads each part of a range once. A parent bucket becomes
-// eligible only after its end is outside coarseRollupGrace; the remainder is
-// represented by the immediate finer tier until minute buckets, where hot
-// in-memory observations complete the view.
-func (s *Store) hybridRollupRows(ctx context.Context, query Query, policy RollupPolicy, resolution time.Duration, now time.Time, needDigest bool) ([]storedRollup, error) {
-	if len(policy.Tiers) == 0 {
-		return nil, nil
+// SeriesAggregates derives multiple aggregations from the same streamed scan.
+func (s *Store) SeriesAggregates(ctx context.Context, query Query, aggregations []Aggregation, interval time.Duration, preserveSeries bool, now time.Time) (map[Aggregation][]AggregatePoint, error) {
+	entityIDs := []string(nil)
+	if query.EntityID != "" {
+		entityIDs = []string{query.EntityID}
 	}
-	index := -1
-	for i, tier := range policy.Tiers {
-		if tier.Interval <= resolution && resolution%tier.Interval == 0 {
-			index = i
-		}
-	}
-	if index < 0 {
-		return s.scanRollupRowsBetween(ctx, query.MetricName, query.EntityID, query.Tags, resolution.Milliseconds(), bucketStartMillis(query.Start.UnixMilli(), resolution.Milliseconds()), query.End.UnixMilli(), needDigest)
-	}
-	return s.hybridRollupRowsAtTier(ctx, query, policy, index, query.Start.UTC().UnixMilli(), query.End.UTC().UnixMilli(), now, needDigest)
-}
-
-func (s *Store) hybridRollupRowsAtTier(ctx context.Context, query Query, policy RollupPolicy, index int, startMilli, endMilli int64, now time.Time, needDigest bool) ([]storedRollup, error) {
-	if startMilli > endMilli {
-		return nil, nil
-	}
-	tier := policy.Tiers[index]
-	intervalMilli := tier.Interval.Milliseconds()
-	// The greatest bucket start whose end is at least coarseRollupGrace behind
-	// now. Buckets after it are still mutable in the in-memory parent map.
-	sealedThrough := bucketStartMillis(now.Add(-coarseRollupGrace-tier.Interval).UnixMilli(), intervalMilli)
-	rows := make([]storedRollup, 0)
-	if startMilli <= sealedThrough {
-		upper := sealedThrough
-		if upper > endMilli {
-			upper = endMilli
-		}
-		sealed, err := s.scanRollupRowsBetween(ctx, query.MetricName, query.EntityID, query.Tags, intervalMilli, bucketStartMillis(startMilli, intervalMilli), upper, needDigest)
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, sealed...)
-	}
-
-	tailStart := startMilli
-	if tailStart <= sealedThrough {
-		tailStart = sealedThrough + intervalMilli
-	}
-	if tailStart > endMilli {
-		return rows, nil
-	}
-	if index == 0 {
-		minute, err := s.scanRollupRowsBetween(ctx, query.MetricName, query.EntityID, query.Tags, intervalMilli, bucketStartMillis(tailStart, intervalMilli), endMilli, needDigest)
-		if err != nil {
-			return nil, err
-		}
-		hot, err := s.hotRollupRows(query.MetricName, query.EntityID, query.Tags, fromMillis(tailStart), fromMillis(endMilli), needDigest)
-		if err != nil {
-			return nil, err
-		}
-		return append(rows, append(minute, hot...)...), nil
-	}
-	tail, err := s.hybridRollupRowsAtTier(ctx, query, policy, index-1, tailStart, endMilli, now, needDigest)
+	result, err := s.SeriesBatch(ctx, BatchSeriesQuery{
+		Specs: []BatchSeriesSpec{{
+			MetricName:     query.MetricName,
+			Aggregations:   aggregations,
+			Interval:       interval,
+			PreserveSeries: preserveSeries,
+		}},
+		EntityIDs: entityIDs,
+		Start:     query.Start,
+		End:       query.End,
+		Tags:      query.Tags,
+		Order:     query.Order,
+	}, now)
 	if err != nil {
 		return nil, err
 	}
-	return append(rows, tail...), nil
+	return result.Values[query.MetricName], nil
 }
 
-func (s *Store) aggregateRollupsAt(ctx context.Context, query Query, aggregations []Aggregation, interval time.Duration, preserveSeries bool, resolution time.Duration, now time.Time, policy RollupPolicy) (map[Aggregation][]AggregatePoint, error) {
-	s.rollupViewMu.RLock()
-	defer s.rollupViewMu.RUnlock()
-
-	query = query.normalized()
-	needDigest := false
-	for _, aggregation := range aggregations {
-		if isPercentile(aggregation) {
-			needDigest = true
+func seriesResolutionForPolicy(start time.Time, interval time.Duration, now time.Time, policy RollupPolicy) time.Duration {
+	preferred := policy.Tiers[0].Interval
+	if tier := bestRollupTier(policy, interval, start.UTC(), now.UTC()); tier != nil {
+		return tier.Interval
+	}
+	for i := len(policy.Tiers) - 1; i >= 0; i-- {
+		tier := policy.Tiers[i]
+		if interval >= tier.Interval && interval%tier.Interval == 0 {
+			preferred = tier.Interval
 			break
 		}
 	}
-	rows, err := s.hybridRollupRows(ctx, query, policy, resolution, now.UTC(), needDigest)
-	if err != nil {
-		return nil, err
-	}
-
-	results := make(map[Aggregation][]AggregatePoint, len(aggregations))
-	nonRate := make([]Aggregation, 0, len(aggregations))
-	for _, aggregation := range aggregations {
-		results[aggregation] = []AggregatePoint{}
-		if aggregation == AggRate {
-			points := representativePoints(query.MetricName, rows)
-			aggregated, aggregateErr := AggregatePoints(points, AggregateQuery{
-				Query:          query,
-				Aggregation:    aggregation,
-				Interval:       interval,
-				PreserveSeries: preserveSeries,
-			})
-			if aggregateErr != nil {
-				return nil, aggregateErr
-			}
-			results[aggregation] = aggregated
-			continue
-		}
-		nonRate = append(nonRate, aggregation)
-	}
-	if len(nonRate) == 0 {
-		return results, nil
-	}
-
-	groups := foldRollupRows(nil, rows, interval, s.cfg.RollupPolicy.compression(), preserveSeries, false, needDigest)
-	nonRateResults, err := rollupGroupsToPoints(groups, query.MetricName, nonRate, preserveSeries)
-	if err != nil {
-		return nil, err
-	}
-	for aggregation, points := range nonRateResults {
-		results[aggregation] = points
-	}
-	return results, nil
-}
-
-func representativePoints(metricName string, rows []storedRollup) []Point {
-	points := make([]Point, 0, len(rows))
-	for _, row := range rows {
-		tags, err := rollupTagsFromJSON(row.bucketData.tagsJSON)
-		if err != nil {
-			continue
-		}
-		labels, err := rollupTagsFromJSON(row.bucketData.labelsJSON)
-		if err != nil {
-			continue
-		}
-		points = append(points, Point{MetricName: metricName, EntityID: row.entityID, Timestamp: fromMillis(row.bucketData.lastTS), Value: row.bucketData.lastVal, Tags: tags, Labels: labels})
-	}
-	return points
-}
-
-func foldRollupRows(groups map[rollupKey]*rollupBucket, rows []storedRollup, interval time.Duration, compression float64, preserveSeries, preserveLabels, needDigest bool) map[rollupKey]*rollupBucket {
-	if groups == nil {
-		groups = make(map[rollupKey]*rollupBucket)
-	}
-	for _, row := range rows {
-		key := rollupKey{bucket: bucketStartMillis(row.bucket, interval.Milliseconds())}
-		if preserveSeries {
-			key.entityID, key.tagsHash = row.entityID, row.bucketData.tagsHash
-			if preserveLabels {
-				key.labelsHash = row.bucketData.labelsHash
-			}
-		}
-		bucket := groups[key]
-		if bucket == nil {
-			bucket = newRollupBucketWithDigest(compression, needDigest)
-			bucket.tagsHash, bucket.tagsJSON = row.bucketData.tagsHash, row.bucketData.tagsJSON
-			bucket.labelsHash, bucket.labelsJSON = row.bucketData.labelsHash, row.bucketData.labelsJSON
-			groups[key] = bucket
-		}
-		bucket.mergeStored(row.bucketData)
-	}
-	return groups
-}
-
-func rollupGroupsToPoints(groups map[rollupKey]*rollupBucket, metricName string, aggregations []Aggregation, preserveSeries bool) (map[Aggregation][]AggregatePoint, error) {
-	keys := make([]rollupKey, 0, len(groups))
-	for key := range groups {
-		keys = append(keys, key)
-	}
-	sortRollupKeys(keys)
-	results := make(map[Aggregation][]AggregatePoint, len(aggregations))
-	for _, aggregation := range aggregations {
-		results[aggregation] = make([]AggregatePoint, 0, len(keys))
-	}
-	for _, key := range keys {
-		bucket := groups[key]
-		tags := map[string]string{}
-		if preserveSeries {
-			var err error
-			tags, err = rollupTagsFromJSON(bucket.tagsJSON)
-			if err != nil {
-				return nil, err
-			}
-		}
-		for _, aggregation := range aggregations {
-			value, ok := bucket.value(aggregation)
-			if !ok {
-				return nil, fmt.Errorf("%w: aggregation %q requires raw samples", ErrInvalidArgument, aggregation)
-			}
-			results[aggregation] = append(results[aggregation], AggregatePoint{MetricName: metricName, EntityID: key.entityID, Bucket: fromMillis(key.bucket), Value: value, Count: int(bucket.count), Tags: tags})
-		}
-	}
-	return results, nil
-}
-
-func (s *Store) scanRollupRowsBetween(ctx context.Context, metricName, entityID string, tags map[string]string, resolutionMilli, lowerBucket, upperBucket int64, needDigest bool) ([]storedRollup, error) {
-	return s.scanRollupRowsBetweenWith(ctx, s.reader(), metricName, entityID, tags, time.Duration(resolutionMilli)*time.Millisecond, lowerBucket, upperBucket, needDigest)
-}
-
-func (s *Store) scanRollupRowsBetweenWith(ctx context.Context, q querier, metricName, entityID string, tags map[string]string, resolution time.Duration, lowerBucket, upperBucket int64, needDigest bool) ([]storedRollup, error) {
-	args := []any{metricName, resolution.Milliseconds(), lowerBucket, upperBucket}
-	parts := []string{
-		"s.metric_name = " + s.dialect.placeholder(1),
-		"d.resolution_milli = " + s.dialect.placeholder(2),
-		"r.bucket_milli >= " + s.dialect.placeholder(3),
-		"r.bucket_milli <= " + s.dialect.placeholder(4),
-	}
-	if entityID != "" {
-		args = append(args, entityID)
-		parts = append(parts, "s.entity_id = "+s.dialect.placeholder(len(args)))
-	}
-	for _, key := range sortedKeys(tags) {
-		args = append(args, tags[key])
-		parts = append(parts, s.dialect.jsonExtractEquals("s.tags", key, s.dialect.placeholder(len(args))))
-	}
-	columns := "s.entity_id, s.tags_hash, s.tags, l.labels_hash, l.labels, r.bucket_milli, r.count, r.sum, r.sum_sq, r.min_val, r.max_val, r.first_val, r.first_ts_milli, r.last_val, r.last_ts_milli"
-	if needDigest {
-		columns += ", r.digest"
-	}
-	sqlText := fmt.Sprintf("SELECT %s FROM %s r JOIN %s s ON s.id = r.series_id JOIN %s d ON d.id = r.resolution_id JOIN %s l ON l.id = r.label_id WHERE %s ORDER BY r.bucket_milli ASC", columns, s.tables.rollups, s.tables.series, s.tables.resolutions, s.tables.labels, joinSQLWith(parts, " AND "))
-	rows, err := q.QueryContext(ctx, sqlText, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanStoredRollups(rows, needDigest, s.cfg.RollupPolicy.compression())
-}
-
-func joinSQLWith(parts []string, separator string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	out := parts[0]
-	for _, part := range parts[1:] {
-		out += separator + part
-	}
-	return out
-}
-
-func scanStoredRollups(rows *sql.Rows, needDigest bool, compression float64) ([]storedRollup, error) {
-	result := make([]storedRollup, 0)
-	for rows.Next() {
-		var entityID, tagsHash, tagsJSON, labelsHash, labelsJSON string
-		var bucket, count, firstTS, lastTS int64
-		var sum, sumSq, min, max, firstVal, lastVal float64
-		var digest []byte
-		var err error
-		if needDigest {
-			err = rows.Scan(&entityID, &tagsHash, &tagsJSON, &labelsHash, &labelsJSON, &bucket, &count, &sum, &sumSq, &min, &max, &firstVal, &firstTS, &lastVal, &lastTS, &digest)
-		} else {
-			err = rows.Scan(&entityID, &tagsHash, &tagsJSON, &labelsHash, &labelsJSON, &bucket, &count, &sum, &sumSq, &min, &max, &firstVal, &firstTS, &lastVal, &lastTS)
-		}
-		if err != nil {
-			return nil, err
-		}
-		var d *TDigest
-		if needDigest {
-			d, err = digestFromRollup(count, min, max, digest, compression)
-			if err != nil {
-				return nil, err
-			}
-		}
-		result = append(result, storedRollup{entityID: entityID, bucket: bucket, bucketData: &rollupBucket{count: count, sum: sum, sumSq: sumSq, min: min, max: max, firstVal: firstVal, firstTS: firstTS, lastVal: lastVal, lastTS: lastTS, digest: d, tagsHash: tagsHash, tagsJSON: tagsJSON, labelsHash: labelsHash, labelsJSON: labelsJSON}})
-	}
-	return result, rows.Err()
-}
-
-func rawJSONToString(value any) (string, error) {
-	switch v := value.(type) {
-	case nil:
-		return "{}", nil
-	case string:
-		if v == "" {
-			return "{}", nil
-		}
-		return v, nil
-	case []byte:
-		if len(v) == 0 {
-			return "{}", nil
-		}
-		return string(v), nil
-	default:
-		return "", fmt.Errorf("unsupported JSON column type %T", value)
-	}
-}
-
-func rollupTagsFromJSON(raw string) (map[string]string, error) {
-	values, err := decodeMapString(raw)
-	if err != nil {
-		return nil, err
-	}
-	return cloneStringMap(values), nil
+	return preferred
 }
 
 func (s *Store) CompatibleSeriesInterval(start, now time.Time, interval time.Duration) time.Duration {
@@ -354,156 +150,129 @@ func bestRollupTier(policy RollupPolicy, interval time.Duration, start, now time
 	for i := range policy.Tiers {
 		tier := &policy.Tiers[i]
 		if interval >= tier.Interval && interval%tier.Interval == 0 && !now.Add(-tier.Retention).After(start) {
-			// Prefer the coarsest backing tier compatible with the requested
-			// output width. hybridRollupRows fills its unsealed tail from finer
-			// tiers, so this reduces reads without sacrificing recent data.
 			best = tier
 		}
 	}
 	return best
 }
 
-func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time) ([]AggregatePoint, error) {
-	if err := s.ensureOpen(); err != nil {
-		return nil, err
-	}
-	if err := query.Validate(); err != nil {
-		return nil, err
-	}
-	policy, err := s.metricRollupPolicy(ctx, query.MetricName)
-	if err != nil {
-		return nil, err
-	}
-	if len(policy.Tiers) == 0 {
-		return []AggregatePoint{}, nil
-	}
-	resolution, err := s.seriesResolutionForPolicy(ctx, query.Query.normalized(), query.Interval, now, policy)
-	if err != nil {
-		return nil, err
-	}
-	results, err := s.aggregateRollupsAt(ctx, query.Query, []Aggregation{query.Aggregation}, query.Interval, query.PreserveSeries, resolution, now, policy)
-	if err != nil {
-		return nil, err
-	}
-	return pageBuckets(results[query.Aggregation], query.BucketLimit, query.BucketOffset), nil
+// scanRollupRowsBetween is retained for compaction maintenance and internal
+// verification. User-facing aggregation goes through SeriesBatch.
+func (s *Store) scanRollupRowsBetween(ctx context.Context, metricName, entityID string, tags map[string]string, resolutionMilli, lowerBucket, upperBucket int64, needDigest bool) ([]storedRollup, error) {
+	return s.scanRollupRowsBetweenWith(ctx, s.reader(), metricName, entityID, tags, time.Duration(resolutionMilli)*time.Millisecond, lowerBucket, upperBucket, needDigest)
 }
 
-// SeriesAggregates reads one rollup range and derives every requested
-// aggregation from the same bucket set. This avoids repeating database scans
-// and t-digest merges for dashboards that need several statistics together.
-func (s *Store) SeriesAggregates(ctx context.Context, query Query, aggregations []Aggregation, interval time.Duration, preserveSeries bool, now time.Time) (map[Aggregation][]AggregatePoint, error) {
-	if err := s.ensureOpen(); err != nil {
+func (s *Store) scanRollupRowsBetweenWith(ctx context.Context, q querier, metricName, entityID string, tags map[string]string, resolution time.Duration, lowerBucket, upperBucket int64, needDigest bool) ([]storedRollup, error) {
+	args := []any{metricName, resolution.Milliseconds(), lowerBucket, upperBucket}
+	parts := []string{
+		"s.metric_name = " + s.dialect.placeholder(1),
+		"d.resolution_milli = " + s.dialect.placeholder(2),
+		"r.bucket_milli >= " + s.dialect.placeholder(3),
+		"r.bucket_milli <= " + s.dialect.placeholder(4),
+	}
+	if entityID != "" {
+		args = append(args, entityID)
+		parts = append(parts, "s.entity_id = "+s.dialect.placeholder(len(args)))
+	}
+	for _, key := range sortedKeys(tags) {
+		args = append(args, tags[key])
+		parts = append(parts, s.dialect.jsonExtractEquals("s.tags", key, s.dialect.placeholder(len(args))))
+	}
+	columns := "s.entity_id, s.tags_hash, s.tags, l.labels_hash, l.labels, r.bucket_milli, r.count, r.sum, r.sum_sq, r.min_val, r.max_val, r.first_val, r.first_ts_milli, r.last_val, r.last_ts_milli"
+	if needDigest {
+		columns += ", r.digest"
+	}
+	sqlText := fmt.Sprintf("SELECT %s FROM %s r JOIN %s s ON s.id = r.series_id JOIN %s d ON d.id = r.resolution_id JOIN %s l ON l.id = r.label_id WHERE %s ORDER BY r.bucket_milli ASC", columns, s.tables.rollups, s.tables.series, s.tables.resolutions, s.tables.labels, joinSQLWith(parts, " AND "))
+	rows, err := q.QueryContext(ctx, sqlText, args...)
+	if err != nil {
 		return nil, err
 	}
-	if len(aggregations) == 0 {
-		return nil, fmt.Errorf("%w: at least one aggregation is required", ErrInvalidArgument)
+	defer rows.Close()
+	return scanStoredRollupsForMaintenance(rows, needDigest, s.cfg.RollupPolicy.compression())
+}
+
+func joinSQLWith(parts []string, separator string) string {
+	if len(parts) == 0 {
+		return ""
 	}
-	for _, aggregation := range aggregations {
-		if err := (AggregateQuery{Query: query, Aggregation: aggregation, Interval: interval, PreserveSeries: preserveSeries}).Validate(); err != nil {
+	out := parts[0]
+	for _, part := range parts[1:] {
+		out += separator + part
+	}
+	return out
+}
+
+func scanStoredRollupsForMaintenance(rows *sql.Rows, needDigest bool, compression float64) ([]storedRollup, error) {
+	result := make([]storedRollup, 0)
+	for rows.Next() {
+		var entityID, tagsHash, tagsJSON, labelsHash, labelsJSON string
+		var bucket, count, firstTS, lastTS int64
+		var sum, sumSq, min, max, firstVal, lastVal float64
+		var digest []byte
+		var err error
+		if needDigest {
+			err = rows.Scan(&entityID, &tagsHash, &tagsJSON, &labelsHash, &labelsJSON, &bucket, &count, &sum, &sumSq, &min, &max, &firstVal, &firstTS, &lastVal, &lastTS, &digest)
+		} else {
+			err = rows.Scan(&entityID, &tagsHash, &tagsJSON, &labelsHash, &labelsJSON, &bucket, &count, &sum, &sumSq, &min, &max, &firstVal, &firstTS, &lastVal, &lastTS)
+		}
+		if err != nil {
 			return nil, err
 		}
-	}
-	policy, err := s.metricRollupPolicy(ctx, query.MetricName)
-	if err != nil {
-		return nil, err
-	}
-	if len(policy.Tiers) == 0 {
-		results := make(map[Aggregation][]AggregatePoint, len(aggregations))
-		for _, aggregation := range aggregations {
-			results[aggregation] = []AggregatePoint{}
-		}
-		return results, nil
-	}
-	resolution, err := s.seriesResolutionForPolicy(ctx, query.normalized(), interval, now, policy)
-	if err != nil {
-		return nil, err
-	}
-	return s.aggregateRollupsAt(ctx, query, aggregations, interval, preserveSeries, resolution, now, policy)
-}
-
-func (s *Store) seriesResolutionForPolicy(ctx context.Context, query Query, interval time.Duration, now time.Time, policy RollupPolicy) (time.Duration, error) {
-	preferred := policy.Tiers[0].Interval
-	if tier := bestRollupTier(policy, interval, query.Start.UTC(), now.UTC()); tier != nil {
-		preferred = tier.Interval
-	} else {
-		for i := len(policy.Tiers) - 1; i >= 0; i-- {
-			tier := policy.Tiers[i]
-			if interval >= tier.Interval && interval%tier.Interval == 0 {
-				preferred = tier.Interval
-				break
+		var decoded *TDigest
+		if needDigest {
+			decoded, err = digestFromRollup(count, min, max, digest, compression)
+			if err != nil {
+				return nil, err
 			}
 		}
+		result = append(result, storedRollup{entityID: entityID, bucket: bucket, bucketData: &rollupBucket{
+			count: count, sum: sum, sumSq: sumSq, min: min, max: max,
+			firstVal: firstVal, firstTS: firstTS, lastVal: lastVal, lastTS: lastTS,
+			digest: decoded, tagsHash: tagsHash, tagsJSON: tagsJSON, labelsHash: labelsHash, labelsJSON: labelsJSON,
+		}})
 	}
-	return s.coveringSeriesResolutionForPolicy(ctx, query, preferred, policy)
+	return result, rows.Err()
 }
 
-// coveringSeriesResolution falls back to a coarser retained tier only when
-// the preferred tier starts after the requested range. This happens directly
-// after a legacy migration: historical 5m/hour rollups predate the newly
-// written 1m tier. Returning the coarser summary preserves the entire query
-// rather than presenting a false gap at that boundary.
-func (s *Store) coveringSeriesResolution(ctx context.Context, query Query, preferred time.Duration) (time.Duration, error) {
-	return s.coveringSeriesResolutionForPolicy(ctx, query, preferred, s.cfg.RollupPolicy)
-}
-
-func (s *Store) coveringSeriesResolutionForPolicy(ctx context.Context, query Query, preferred time.Duration, policy RollupPolicy) (time.Duration, error) {
-	selected := preferred
-	earliest, latest, found, err := s.rollupTimeBounds(ctx, query, preferred)
-	if err != nil {
-		return 0, err
-	}
-	startMilli := query.Start.UTC().UnixMilli()
-	endMilli := query.End.UTC().UnixMilli()
-	if found && earliest <= startMilli && latest >= startMilli {
-		return selected, nil
-	}
-	selectedFound := found && earliest <= endMilli && latest >= startMilli
-	for _, tier := range policy.Tiers {
-		if tier.Interval <= preferred {
-			continue
-		}
-		candidateEarliest, candidateLatest, candidateFound, err := s.rollupTimeBounds(ctx, query, tier.Interval)
+func representativePoints(metricName string, rows []storedRollup) []Point {
+	points := make([]Point, 0, len(rows))
+	for _, row := range rows {
+		tags, err := rollupTagsFromJSON(row.bucketData.tagsJSON)
 		if err != nil {
-			return 0, err
-		}
-		if !candidateFound || candidateEarliest > endMilli || candidateLatest < startMilli {
 			continue
 		}
-		if candidateEarliest <= startMilli && candidateLatest >= startMilli {
-			return tier.Interval, nil
+		labels, err := rollupTagsFromJSON(row.bucketData.labelsJSON)
+		if err != nil {
+			continue
 		}
-		if !selectedFound || candidateEarliest < earliest {
-			selected, earliest, selectedFound = tier.Interval, candidateEarliest, true
-		}
+		points = append(points, Point{MetricName: metricName, EntityID: row.entityID, Timestamp: fromMillis(row.bucketData.lastTS), Value: row.bucketData.lastVal, Tags: tags, Labels: labels})
 	}
-	return selected, nil
+	return points
 }
 
-func (s *Store) rollupTimeBounds(ctx context.Context, query Query, interval time.Duration) (int64, int64, bool, error) {
-	args := []any{query.MetricName}
-	seriesParts := []string{"s.metric_name = " + s.dialect.placeholder(1)}
-	if query.EntityID != "" {
-		args = append(args, query.EntityID)
-		seriesParts = append(seriesParts, "s.entity_id = "+s.dialect.placeholder(len(args)))
+func rawJSONToString(value any) (string, error) {
+	switch v := value.(type) {
+	case nil:
+		return "{}", nil
+	case string:
+		if v == "" {
+			return "{}", nil
+		}
+		return v, nil
+	case []byte:
+		if len(v) == 0 {
+			return "{}", nil
+		}
+		return string(v), nil
+	default:
+		return "", fmt.Errorf("unsupported JSON column type %T", value)
 	}
-	for _, key := range sortedKeys(query.Tags) {
-		args = append(args, query.Tags[key])
-		seriesParts = append(seriesParts, s.dialect.jsonExtractEquals("s.tags", key, s.dialect.placeholder(len(args))))
-	}
-	args = append(args, interval.Milliseconds())
-	resolutionPlaceholder := s.dialect.placeholder(len(args))
-	args = append(args, query.End.UTC().UnixMilli())
-	endPlaceholder := s.dialect.placeholder(len(args))
+}
 
-	var earliest, latest sql.NullInt64
-	err := s.reader().QueryRowContext(ctx, fmt.Sprintf(`SELECT MIN(r.first_ts_milli), MAX(r.last_ts_milli) FROM %s r
-		WHERE r.series_id IN (SELECT s.id FROM %s s WHERE %s)
-		AND r.resolution_id IN (SELECT d.id FROM %s d WHERE d.resolution_milli = %s)
-		AND r.first_ts_milli <= %s`, s.tables.rollups, s.tables.series, joinSQLWith(seriesParts, " AND "),
-		s.tables.resolutions, resolutionPlaceholder, endPlaceholder),
-		args...).Scan(&earliest, &latest)
+func rollupTagsFromJSON(raw string) (map[string]string, error) {
+	values, err := decodeMapString(raw)
 	if err != nil {
-		return 0, 0, false, err
+		return nil, err
 	}
-	return earliest.Int64, latest.Int64, earliest.Valid && latest.Valid, nil
+	return cloneStringMap(values), nil
 }
