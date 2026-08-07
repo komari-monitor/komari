@@ -8,10 +8,7 @@ ARG TARGETARCH
 
 RUN apk add --no-cache ca-certificates curl tzdata
 
-COPY komari-${TARGETOS}-${TARGETARCH} /app/komari
-
-
-RUN chmod +x /app/komari
+COPY --chmod=755 komari-${TARGETOS}-${TARGETARCH} /app/komari
 
 ENV GIN_MODE=release
 ENV KOMARI_LISTEN=0.0.0.0:25774
