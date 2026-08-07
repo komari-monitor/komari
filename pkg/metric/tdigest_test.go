@@ -73,6 +73,95 @@ func TestTDigestMergeMatchesCombined(t *testing.T) {
 	}
 }
 
+func TestTDigestMergeGroupingAccuracy(t *testing.T) {
+	rng := rand.New(rand.NewSource(17))
+	all := make([]float64, 0, 24*2000)
+	fine := make([]*TDigest, 24)
+	for bucket := range fine {
+		fine[bucket] = NewTDigest(100)
+		for i := 0; i < 2000; i++ {
+			value := math.Abs(rng.NormFloat64())*70 + rng.ExpFloat64()*30
+			fine[bucket].Add(value, 1)
+			all = append(all, value)
+		}
+	}
+
+	flat := NewTDigest(100)
+	grouped := NewTDigest(100)
+	for _, digest := range fine {
+		flat.Merge(digest)
+	}
+	for groupStart := 0; groupStart < len(fine); groupStart += 4 {
+		group := NewTDigest(100)
+		for _, digest := range fine[groupStart : groupStart+4] {
+			group.Merge(digest)
+		}
+		grouped.Merge(group)
+	}
+
+	for name, digest := range map[string]*TDigest{"flat": flat, "grouped": grouped} {
+		if digest.Count() != float64(len(all)) || digest.min != exactQuantile(all, 0) || digest.max != exactQuantile(all, 1) {
+			t.Fatalf("%s exact aggregates changed: count=%v min=%v max=%v", name, digest.Count(), digest.min, digest.max)
+		}
+		for _, q := range []float64{0.5, 0.95, 0.99, 0.999} {
+			exact := exactQuantile(all, q)
+			relErr := math.Abs(digest.Quantile(q)-exact) / math.Abs(exact)
+			if relErr > 0.02 {
+				t.Fatalf("%s q=%v relative error %v exceeds 2%%", name, q, relErr)
+			}
+		}
+	}
+}
+
+func TestTDigestMergeDefersProcessingUntilThreshold(t *testing.T) {
+	source := NewTDigest(30)
+	source.Add(42, 1)
+	if source.processed {
+		t.Fatal("source should have buffered centroid before merge")
+	}
+
+	merged := NewTDigest(30)
+	for i := 0; i <= merged.processThreshold(); i++ {
+		merged.Merge(source)
+	}
+	if !merged.processed {
+		t.Fatal("merge did not process after exceeding threshold")
+	}
+	if source.processed {
+		t.Fatal("merge processed the source digest")
+	}
+
+	merged.Merge(source)
+	if merged.processed {
+		t.Fatal("merge below threshold should remain buffered")
+	}
+	if merged.Count() != float64(merged.processThreshold()+2) {
+		t.Fatalf("count = %v", merged.Count())
+	}
+	if merged.processed {
+		t.Fatal("Count processed buffered centroids")
+	}
+	if value := merged.Quantile(0.5); value != 42 || !merged.processed {
+		t.Fatalf("Quantile did not finalize digest: value=%v processed=%v", value, merged.processed)
+	}
+
+	merged.Merge(source)
+	if merged.processed {
+		t.Fatal("merge below threshold should remain buffered before Encode")
+	}
+	encoded := merged.Encode()
+	if len(encoded) == 0 || !merged.processed {
+		t.Fatal("Encode did not finalize digest")
+	}
+	decoded, err := DecodeTDigest(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Count() != merged.Count() || decoded.min != merged.min || decoded.max != merged.max {
+		t.Fatalf("round trip changed exact aggregates: %#v vs %#v", decoded, merged)
+	}
+}
+
 // TestTDigestEncodeRoundTrip verifies t-digest serialization.
 //
 // TestTDigestEncodeRoundTrip 验证 t-digest 编码和解码往返。

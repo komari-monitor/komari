@@ -3,7 +3,6 @@ package metricstore
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -283,7 +282,7 @@ func TestCreateMetricDefinitionsUsesExplicitRetentionAndPreservesOverrides(t *te
 	}
 }
 
-func TestCreateMetricDefinitionsRemovesObsoleteMetrics(t *testing.T) {
+func TestCreateMetricDefinitionsKeepsExistingMetrics(t *testing.T) {
 	ctx := context.Background()
 	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1)))
 	if err != nil {
@@ -299,15 +298,19 @@ func TestCreateMetricDefinitionsRemovesObsoleteMetrics(t *testing.T) {
 	if err := createMetricDefinitions(ctx, s); err != nil {
 		t.Fatalf("refresh built-in definitions: %v", err)
 	}
-	if _, err := s.GetMetric(ctx, "memory.total"); !errors.Is(err, metric.ErrNotFound) {
-		t.Fatalf("obsolete definition error = %v, want ErrNotFound", err)
+	definition, err := s.GetMetric(ctx, "memory.total")
+	if err != nil {
+		t.Fatalf("existing definition was removed: %v", err)
+	}
+	if definition.RetentionDays != 1 {
+		t.Fatalf("existing retention = %d, want 1", definition.RetentionDays)
 	}
 	points, err := s.Query(ctx, metric.Query{MetricName: "memory.total", EntityID: "node-a", Start: time.Now().UTC().Add(-time.Hour), End: time.Now().UTC().Add(time.Hour)})
 	if err != nil {
-		t.Fatalf("query obsolete points: %v", err)
+		t.Fatalf("query existing points: %v", err)
 	}
-	if len(points) != 0 {
-		t.Fatalf("obsolete points remain: %#v", points)
+	if len(points) != 1 || points[0].Value != 1024 {
+		t.Fatalf("existing points were removed: %#v", points)
 	}
 }
 

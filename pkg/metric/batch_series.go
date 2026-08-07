@@ -263,32 +263,32 @@ func (s *Store) scanPersistedRollupGroup(ctx context.Context, query BatchSeriesQ
 		return err
 	}
 	defer rows.Close()
+	var seriesID, bucket, count, firstTS, lastTS int64
+	var sum, sumSq, min, max, firstVal, lastVal float64
+	var digestBlob []byte
+	destinations := []any{&seriesID, &bucket, &count}
+	if group.fields&rollupReadSum != 0 {
+		destinations = append(destinations, &sum)
+	}
+	if group.fields&rollupReadSumSq != 0 {
+		destinations = append(destinations, &sumSq)
+	}
+	if group.fields&rollupReadMin != 0 {
+		destinations = append(destinations, &min)
+	}
+	if group.fields&rollupReadMax != 0 {
+		destinations = append(destinations, &max)
+	}
+	if group.fields&rollupReadFirst != 0 {
+		destinations = append(destinations, &firstVal, &firstTS)
+	}
+	if group.fields&rollupReadLast != 0 {
+		destinations = append(destinations, &lastVal, &lastTS)
+	}
+	if group.fields&rollupReadDigest != 0 {
+		destinations = append(destinations, &digestBlob)
+	}
 	for rows.Next() {
-		var seriesID, bucket, count, firstTS, lastTS int64
-		var sum, sumSq, min, max, firstVal, lastVal float64
-		var digestBlob []byte
-		destinations := []any{&seriesID, &bucket, &count}
-		if group.fields&rollupReadSum != 0 {
-			destinations = append(destinations, &sum)
-		}
-		if group.fields&rollupReadSumSq != 0 {
-			destinations = append(destinations, &sumSq)
-		}
-		if group.fields&rollupReadMin != 0 {
-			destinations = append(destinations, &min)
-		}
-		if group.fields&rollupReadMax != 0 {
-			destinations = append(destinations, &max)
-		}
-		if group.fields&rollupReadFirst != 0 {
-			destinations = append(destinations, &firstVal, &firstTS)
-		}
-		if group.fields&rollupReadLast != 0 {
-			destinations = append(destinations, &lastVal, &lastTS)
-		}
-		if group.fields&rollupReadDigest != 0 {
-			destinations = append(destinations, &digestBlob)
-		}
 		err = rows.Scan(destinations...)
 		if err != nil {
 			return err
@@ -534,22 +534,39 @@ func mergeRollupValues(target *rollupBucket, count int64, sum, sumSq, min, max, 
 
 func (a *metricSeriesAccumulator) points(order Order) (map[Aggregation][]AggregatePoint, error) {
 	values := make(map[Aggregation][]AggregatePoint, len(a.spec.Aggregations))
+	var summaryKeys []rollupKey
+	if a.needSummary {
+		summaryKeys = make([]rollupKey, 0, len(a.groups))
+		for key := range a.groups {
+			summaryKeys = append(summaryKeys, key)
+		}
+		sortRollupKeys(summaryKeys)
+	}
+	var rateKeys []rollupKey
+	if a.needRate {
+		rateKeys = make([]rollupKey, 0, len(a.rateGroups))
+		for key, state := range a.rateGroups {
+			rateKeys = append(rateKeys, key)
+			sort.SliceStable(state.rateSamples, func(i, j int) bool { return state.rateSamples[i].timestamp < state.rateSamples[j].timestamp })
+		}
+		sortRollupKeys(rateKeys)
+	}
 	for _, aggregation := range a.spec.Aggregations {
-		groups := a.groups
+		keys := summaryKeys
 		if aggregation == AggRate {
-			groups = a.rateGroups
+			keys = rateKeys
 		}
-		keys := make([]rollupKey, 0, len(groups))
-		for key := range groups {
-			keys = append(keys, key)
+		start, end, step := 0, len(keys), 1
+		if order == OrderDesc {
+			start, end, step = len(keys)-1, -1, -1
 		}
-		sortRollupKeys(keys)
 		points := make([]AggregatePoint, 0, len(keys))
-		for _, key := range keys {
-			state := groups[key]
+		for keyIndex := start; keyIndex != end; keyIndex += step {
+			key := keys[keyIndex]
+			state := a.groups[key]
 			count, value := 0, 0.0
 			if aggregation == AggRate {
-				sort.SliceStable(state.rateSamples, func(i, j int) bool { return state.rateSamples[i].timestamp < state.rateSamples[j].timestamp })
+				state = a.rateGroups[key]
 				value = rollupCounterRate(state.rateSamples)
 				count = len(state.rateSamples)
 			} else {
@@ -568,11 +585,6 @@ func (a *metricSeriesAccumulator) points(order Order) (map[Aggregation][]Aggrega
 				Count:      count,
 				Tags:       state.tags,
 			})
-		}
-		if order == OrderDesc {
-			for left, right := 0, len(points)-1; left < right; left, right = left+1, right-1 {
-				points[left], points[right] = points[right], points[left]
-			}
 		}
 		values[aggregation] = points
 	}

@@ -38,6 +38,61 @@ type compressedRawSamples struct {
 	lastStamp int64
 }
 
+type rawSampleDecoder struct {
+	data     []byte
+	offset   int
+	index    int
+	count    int
+	previous int64
+}
+
+func newRawSampleDecoder(samples compressedRawSamples) rawSampleDecoder {
+	return rawSampleDecoder{data: samples.data, count: samples.count}
+}
+
+func (d *rawSampleDecoder) next() (rawSample, bool) {
+	if d.index == d.count {
+		return rawSample{}, false
+	}
+	var timestamp int64
+	if d.index == 0 {
+		value, size := binary.Varint(d.data[d.offset:])
+		d.offset += size
+		timestamp = value
+	} else {
+		delta, size := binary.Uvarint(d.data[d.offset:])
+		d.offset += size
+		timestamp = d.previous + int64(delta)
+	}
+	value := math.Float64frombits(binary.LittleEndian.Uint64(d.data[d.offset:]))
+	d.offset += 8
+	labelID, size := binary.Uvarint(d.data[d.offset:])
+	d.offset += size
+	d.index++
+	d.previous = timestamp
+	return rawSample{timestamp: timestamp, value: value, labelID: uint32(labelID)}, true
+}
+
+func newCompressedRawSamples(capacity int) compressedRawSamples {
+	return compressedRawSamples{data: make([]byte, 0, capacity)}
+}
+
+func (c *compressedRawSamples) appendSample(sample rawSample) {
+	if c.count == 0 {
+		c.data = appendVarint(c.data, sample.timestamp)
+	} else {
+		c.data = appendUvarint(c.data, uint64(sample.timestamp-c.lastStamp))
+	}
+	c.data = appendRawSample(c.data, sample)
+	c.count++
+	c.lastStamp = sample.timestamp
+}
+
+func (c compressedRawSamples) firstStamp() int64 {
+	value, _ := binary.Varint(c.data)
+	return value
+}
+
 // rawSeries stores exact samples compactly for one logical series. Tags are
 // shared by the series and labels are interned into small integer ids.
 type rawSeries struct {
@@ -190,6 +245,19 @@ func (p *rawBatchPoints) Swap(i, j int) {
 	p.tagsHashes[i], p.tagsHashes[j] = p.tagsHashes[j], p.tagsHashes[i]
 }
 
+func (p *rawBatchPoints) grow(additional int) {
+	if additional <= cap(p.points)-len(p.points) {
+		return
+	}
+	pointCount := len(p.points) + additional
+	points := make([]Point, len(p.points), pointCount)
+	copy(points, p.points)
+	p.points = points
+	tagsHashes := make([]string, len(p.tagsHashes), pointCount)
+	copy(tagsHashes, p.tagsHashes)
+	p.tagsHashes = tagsHashes
+}
+
 func (s *Store) queryRawPoints(ctx context.Context, query Query) ([]Point, error) {
 	entityIDs := []string(nil)
 	if query.EntityID != "" {
@@ -256,27 +324,37 @@ func (s *Store) queryRawPointsBatch(ctx context.Context, query BatchQuery) (map[
 		if !ok {
 			continue
 		}
-		all := series.allSamples()
 		labels := make(map[uint32]map[string]string)
-		first := sort.Search(len(all), func(i int) bool { return all[i].timestamp >= start })
-		for _, sample := range all[first:] {
-			if sample.timestamp > end {
-				break
-			}
-			labelMap := labels[sample.labelID]
-			if labelMap == nil {
-				labelMap, err = decodeMapString(series.labelsJSON[sample.labelID])
+		directStart := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= start })
+		directEnd := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp > end })
+		additional := directEnd - directStart
+		if series.compressed.count > 0 && start <= series.compressed.firstStamp() && end >= series.compressed.lastStamp {
+			additional += series.compressed.count
+		}
+		metricPoints := matched[key.metricName]
+		metricPoints.grow(additional)
+		if series.compressed.count > 0 && start <= series.compressed.lastStamp && end >= series.compressed.firstStamp() {
+			decoder := newRawSampleDecoder(series.compressed)
+			for sample, more := decoder.next(); more; sample, more = decoder.next() {
+				if sample.timestamp < start {
+					continue
+				}
+				if sample.timestamp > end {
+					break
+				}
+				labelMap, err := rawSampleLabels(series, labels, sample.labelID)
 				if err != nil {
 					return nil, err
 				}
-				labels[sample.labelID] = labelMap
+				appendRawQueryPoint(metricPoints, key, tags, labelMap, sample)
 			}
-			metricPoints := matched[key.metricName]
-			metricPoints.points = append(metricPoints.points, Point{
-				MetricName: key.metricName, EntityID: key.entityID,
-				Timestamp: fromMillis(sample.timestamp), Value: sample.value, Tags: tags, Labels: labelMap,
-			})
-			metricPoints.tagsHashes = append(metricPoints.tagsHashes, key.tagsHash)
+		}
+		for _, sample := range series.samples[directStart:directEnd] {
+			labelMap, err := rawSampleLabels(series, labels, sample.labelID)
+			if err != nil {
+				return nil, err
+			}
+			appendRawQueryPoint(metricPoints, key, tags, labelMap, sample)
 		}
 	}
 	result := make(map[string][]Point, len(matched))
@@ -285,6 +363,26 @@ func (s *Store) queryRawPointsBatch(ctx context.Context, query BatchQuery) (map[
 		result[metricName] = metricPoints.points
 	}
 	return result, nil
+}
+
+func rawSampleLabels(series *rawSeries, labels map[uint32]map[string]string, labelID uint32) (map[string]string, error) {
+	if labelMap := labels[labelID]; labelMap != nil {
+		return labelMap, nil
+	}
+	labelMap, err := decodeMapString(series.labelsJSON[labelID])
+	if err != nil {
+		return nil, err
+	}
+	labels[labelID] = labelMap
+	return labelMap, nil
+}
+
+func appendRawQueryPoint(points *rawBatchPoints, key rawSeriesKey, tags, labels map[string]string, sample rawSample) {
+	points.points = append(points.points, Point{
+		MetricName: key.metricName, EntityID: key.entityID,
+		Timestamp: fromMillis(sample.timestamp), Value: sample.value, Tags: tags, Labels: labels,
+	})
+	points.tagsHashes = append(points.tagsHashes, key.tagsHash)
 }
 
 func rawPointLess(left Point, leftTagsHash string, right Point, rightTagsHash string) bool {
@@ -320,9 +418,25 @@ func (s *Store) rawEntityIDs(ctx context.Context, query Query) ([]string, error)
 		if !ok {
 			continue
 		}
-		all := series.allSamples()
-		index := sort.Search(len(all), func(i int) bool { return all[i].timestamp >= start })
-		if index < len(all) && all[index].timestamp <= end {
+		found := false
+		if series.compressed.count > 0 && start <= series.compressed.lastStamp && end >= series.compressed.firstStamp() {
+			decoder := newRawSampleDecoder(series.compressed)
+			for sample, more := decoder.next(); more; sample, more = decoder.next() {
+				if sample.timestamp < start {
+					continue
+				}
+				if sample.timestamp > end {
+					break
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			index := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= start })
+			found = index < len(series.samples) && series.samples[index].timestamp <= end
+		}
+		if found {
 			seen[key.entityID] = struct{}{}
 		}
 	}
@@ -399,29 +513,45 @@ func (s *Store) pruneRawBeforeLocked(metricName string, beforeMilli int64) int64
 		if metricName != "" && key.metricName != metricName {
 			continue
 		}
-		compressed := series.decodeCompressed()
-		compressedIndex := sort.Search(len(compressed), func(i int) bool { return compressed[i].timestamp >= beforeMilli })
-		if compressedIndex > 0 {
-			compressed = compressed[compressedIndex:]
-			series.compressed.set(compressed)
-			deleted += int64(compressedIndex)
-		}
-		if len(compressed) == 0 {
-			series.compressed = compressedRawSamples{}
-		}
+		compressedDeleted := pruneCompressedRawSamples(&series.compressed, beforeMilli)
+		deleted += int64(compressedDeleted)
 		directIndex := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= beforeMilli })
 		if directIndex > 0 {
 			deleted += int64(directIndex)
-			series.samples = append([]rawSample(nil), series.samples[directIndex:]...)
+			copy(series.samples, series.samples[directIndex:])
+			series.samples = series.samples[:len(series.samples)-directIndex]
 		}
 		if series.compressed.count == 0 && len(series.samples) == 0 {
 			delete(s.raw, key)
 			continue
 		}
-		if compressedIndex > 0 || directIndex > 0 {
+		if compressedDeleted > 0 || directIndex > 0 {
 			compactRawLabels(series)
 		}
 	}
+	return deleted
+}
+
+func pruneCompressedRawSamples(samples *compressedRawSamples, beforeMilli int64) int {
+	if samples.count == 0 || samples.firstStamp() >= beforeMilli {
+		return 0
+	}
+	if samples.lastStamp < beforeMilli {
+		deleted := samples.count
+		*samples = compressedRawSamples{}
+		return deleted
+	}
+	decoder := newRawSampleDecoder(*samples)
+	kept := newCompressedRawSamples(len(samples.data))
+	deleted := 0
+	for sample, more := decoder.next(); more; sample, more = decoder.next() {
+		if sample.timestamp < beforeMilli {
+			deleted++
+			continue
+		}
+		kept.appendSample(sample)
+	}
+	*samples = kept
 	return deleted
 }
 
@@ -435,70 +565,38 @@ func (s *Store) compressRawBeforeLocked(metricName string, beforeMilli int64) {
 			continue
 		}
 		series.compressed.append(series.samples[:index])
-		series.samples = append([]rawSample(nil), series.samples[index:]...)
-	}
-}
-
-func (s *rawSeries) decodeCompressed() []rawSample {
-	if s.compressed.count == 0 {
-		return nil
-	}
-	result := make([]rawSample, 0, s.compressed.count)
-	for offset, previous := 0, int64(0); offset < len(s.compressed.data); {
-		var timestamp int64
-		if len(result) == 0 {
-			first, n := binary.Varint(s.compressed.data[offset:])
-			if n <= 0 {
-				return result
-			}
-			offset += n
-			timestamp = first
-		} else {
-			delta, dn := binary.Uvarint(s.compressed.data[offset:])
-			if dn <= 0 {
-				return result
-			}
-			offset += dn
-			timestamp = previous + int64(delta)
+		copy(series.samples, series.samples[index:])
+		series.samples = series.samples[:len(series.samples)-index]
+		if len(series.samples) == 0 {
+			series.samples = nil
 		}
-		if offset+8 > len(s.compressed.data) {
-			return result
-		}
-		value := math.Float64frombits(binary.LittleEndian.Uint64(s.compressed.data[offset:]))
-		offset += 8
-		labelID, ln := binary.Uvarint(s.compressed.data[offset:])
-		if ln <= 0 {
-			return result
-		}
-		offset += ln
-		result = append(result, rawSample{timestamp: timestamp, value: value, labelID: uint32(labelID)})
-		previous = timestamp
 	}
-	return result
-}
-
-func (s *rawSeries) allSamples() []rawSample {
-	compressed := s.decodeCompressed()
-	result := make([]rawSample, 0, len(compressed)+len(s.samples))
-	result = append(result, compressed...)
-	result = append(result, s.samples...)
-	return result
 }
 
 func (s *rawSeries) replaceCompressed(sample rawSample) (rawSample, bool) {
-	samples := s.decodeCompressed()
-	index := sort.Search(len(samples), func(i int) bool { return samples[i].timestamp >= sample.timestamp })
 	var old rawSample
-	replaced := index < len(samples) && samples[index].timestamp == sample.timestamp
-	if replaced {
-		old = samples[index]
-		samples[index] = sample
-	} else {
-		samples = append(samples, rawSample{})
-		copy(samples[index+1:], samples[index:])
-		samples[index] = sample
+	replaced := false
+	inserted := false
+	decoder := newRawSampleDecoder(s.compressed)
+	encoded := newCompressedRawSamples(len(s.compressed.data) + binary.MaxVarintLen64 + 9)
+	for current, more := decoder.next(); more; current, more = decoder.next() {
+		if !inserted && sample.timestamp < current.timestamp {
+			encoded.appendSample(sample)
+			inserted = true
+		}
+		if !inserted && sample.timestamp == current.timestamp {
+			old = current
+			replaced = true
+			encoded.appendSample(sample)
+			inserted = true
+			continue
+		}
+		encoded.appendSample(current)
 	}
-	s.compressed.set(samples)
+	if !inserted {
+		encoded.appendSample(sample)
+	}
+	s.compressed = encoded
 	return old, replaced
 }
 
@@ -507,51 +605,39 @@ func (c *compressedRawSamples) append(samples []rawSample) {
 		return
 	}
 	if c.count > 0 && samples[0].timestamp <= c.lastStamp {
-		merged := make([]rawSample, 0, c.count+len(samples))
-		merged = append(merged, c.decode()...)
-		for _, sample := range samples {
-			index := sort.Search(len(merged), func(i int) bool { return merged[i].timestamp >= sample.timestamp })
-			if index < len(merged) && merged[index].timestamp == sample.timestamp {
-				merged[index] = sample
+		decoder := newRawSampleDecoder(*c)
+		merged := newCompressedRawSamples(len(c.data) + len(samples)*10)
+		current, more := decoder.next()
+		for sampleIndex := 0; more || sampleIndex < len(samples); {
+			if !more {
+				merged.appendSample(samples[sampleIndex])
+				sampleIndex++
 				continue
 			}
-			merged = append(merged, rawSample{})
-			copy(merged[index+1:], merged[index:])
-			merged[index] = sample
+			if sampleIndex == len(samples) {
+				merged.appendSample(current)
+				current, more = decoder.next()
+				continue
+			}
+			next := samples[sampleIndex]
+			switch {
+			case next.timestamp < current.timestamp:
+				merged.appendSample(next)
+				sampleIndex++
+			case next.timestamp == current.timestamp:
+				merged.appendSample(next)
+				sampleIndex++
+				current, more = decoder.next()
+			default:
+				merged.appendSample(current)
+				current, more = decoder.next()
+			}
 		}
-		c.set(merged)
+		*c = merged
 		return
 	}
 	for _, sample := range samples {
-		if c.count == 0 {
-			c.data = appendVarint(c.data, sample.timestamp)
-		} else {
-			c.data = appendUvarint(c.data, uint64(sample.timestamp-c.lastStamp))
-		}
-		c.data = appendRawSample(c.data, sample)
-		c.count++
-		c.lastStamp = sample.timestamp
-	}
-}
-
-func (c *compressedRawSamples) decode() []rawSample {
-	series := rawSeries{compressed: *c}
-	return series.decodeCompressed()
-}
-
-func (c *compressedRawSamples) set(samples []rawSample) {
-	c.data = nil
-	c.count = 0
-	c.lastStamp = 0
-	for _, sample := range samples {
-		if c.count == 0 {
-			c.data = appendVarint(c.data, sample.timestamp)
-		} else {
-			c.data = appendUvarint(c.data, uint64(sample.timestamp-c.lastStamp))
-		}
-		c.data = appendRawSample(c.data, sample)
-		c.count++
-		c.lastStamp = sample.timestamp
+		c.appendSample(sample)
 	}
 }
 
@@ -578,9 +664,12 @@ func compactRawLabels(series *rawSeries) {
 	if len(series.labelHashes) <= 1 {
 		return
 	}
-	all := series.allSamples()
 	used := make([]bool, len(series.labelHashes))
-	for _, sample := range all {
+	decoder := newRawSampleDecoder(series.compressed)
+	for sample, more := decoder.next(); more; sample, more = decoder.next() {
+		used[sample.labelID] = true
+	}
+	for _, sample := range series.samples {
 		used[sample.labelID] = true
 	}
 	usedCount := 0
@@ -607,11 +696,13 @@ func compactRawLabels(series *rawSeries) {
 		labelsJSON = append(labelsJSON, series.labelsJSON[oldID])
 		labelIDs[hash] = newID
 	}
-	compressed := series.decodeCompressed()
-	for i := range compressed {
-		compressed[i].labelID = remap[compressed[i].labelID]
+	decoder = newRawSampleDecoder(series.compressed)
+	compressed := newCompressedRawSamples(len(series.compressed.data))
+	for sample, more := decoder.next(); more; sample, more = decoder.next() {
+		sample.labelID = remap[sample.labelID]
+		compressed.appendSample(sample)
 	}
-	series.compressed.set(compressed)
+	series.compressed = compressed
 	for i := range series.samples {
 		series.samples[i].labelID = remap[series.samples[i].labelID]
 	}

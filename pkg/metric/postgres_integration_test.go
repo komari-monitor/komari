@@ -18,7 +18,7 @@ func TestPostgreSQLIntegration(t *testing.T) {
 		t.Skip("METRIC_POSTGRES_DSN is not set")
 	}
 
-	runSQLIntegration(t, "postgres", PostgreSQL(dsn), true)
+	runSQLIntegration(t, "postgres", PostgreSQL(dsn))
 	runSQLRestructureIntegration(t, "postgres", PostgreSQL(dsn))
 }
 
@@ -31,14 +31,24 @@ func TestMySQLIntegration(t *testing.T) {
 		t.Skip("METRIC_MYSQL_DSN is not set")
 	}
 
-	runSQLIntegration(t, "mysql", MySQL(dsn), false)
+	runSQLIntegration(t, "mysql", MySQL(dsn))
 	runSQLRestructureIntegration(t, "mysql", MySQL(dsn))
+}
+
+func TestMariaDBIntegration(t *testing.T) {
+	dsn := os.Getenv("METRIC_MARIADB_DSN")
+	if dsn == "" {
+		t.Skip("METRIC_MARIADB_DSN is not set")
+	}
+
+	runSQLIntegration(t, "mariadb", MySQL(dsn))
+	runSQLRestructureIntegration(t, "mariadb", MySQL(dsn))
 }
 
 // runSQLIntegration exercises the SQL store against an external database.
 //
 // runSQLIntegration 在外部数据库上执行通用 SQL 集成测试流程。
-func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentile bool) {
+func runSQLIntegration(t *testing.T, name string, cfg Config) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
@@ -160,10 +170,6 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 	if len(p95Buckets) != 1 || p95Buckets[0].Count != 3 || p95Buckets[0].Value <= 28 {
 		t.Fatalf("unexpected p95 aggregate: %#v", p95Buckets)
 	}
-	if _, ok := sqlAggValueExpr(cfg.Driver, AggP95); ok != expectSQLPercentile {
-		t.Fatalf("%s p95 pushdown expectation mismatch: got %v want %v", name, ok, expectSQLPercentile)
-	}
-
 	latest, err := store.Latest(ctx, "http.latency", "api-1", 1)
 	if err != nil {
 		t.Fatalf("latest: %v", err)

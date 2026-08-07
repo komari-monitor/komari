@@ -82,8 +82,25 @@ func (s *Store) rebuildHotRollupsLocked(keys map[hotRollupKey]struct{}, compress
 			if labelID, ok := series.labelIDs[key.labelsHash]; ok {
 				bucket.labelsJSON = series.labelsJSON[labelID]
 			}
-			for _, sample := range series.allSamples() {
-				if bucketStartMillis(sample.timestamp, minuteMillis) != key.bucket || series.labelHashes[sample.labelID] != key.labelsHash {
+			bucketEnd := key.bucket + minuteMillis
+			decoder := newRawSampleDecoder(series.compressed)
+			for sample, more := decoder.next(); more; sample, more = decoder.next() {
+				if sample.timestamp < key.bucket {
+					continue
+				}
+				if sample.timestamp >= bucketEnd {
+					break
+				}
+				if series.labelHashes[sample.labelID] != key.labelsHash {
+					continue
+				}
+				bucket.labelsJSON = series.labelsJSON[sample.labelID]
+				bucket.addPoint(sample.value, sample.timestamp)
+			}
+			directStart := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= key.bucket })
+			directEnd := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= bucketEnd })
+			for _, sample := range series.samples[directStart:directEnd] {
+				if series.labelHashes[sample.labelID] != key.labelsHash {
 					continue
 				}
 				bucket.labelsJSON = series.labelsJSON[sample.labelID]

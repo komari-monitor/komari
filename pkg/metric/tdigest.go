@@ -139,9 +139,13 @@ func (t *TDigest) Add(x, w float64) {
 	t.processed = false
 	// Bound the unprocessed buffer so a long stream cannot grow memory without
 	// limit; process() collapses it back to ~compression centroids.
-	if len(t.centroids) > int(8*t.compression)+16 {
+	if len(t.centroids) > t.processThreshold() {
 		t.process()
 	}
+}
+
+func (t *TDigest) processThreshold() int {
+	return int(8*t.compression) + 16
 }
 
 // Merge folds every centroid of other into t. This is the operation rollup
@@ -154,10 +158,7 @@ func (t *TDigest) Merge(other *TDigest) {
 	if other == nil || other.count == 0 {
 		return
 	}
-	other.process()
-	for _, c := range other.centroids {
-		t.centroids = append(t.centroids, c)
-	}
+	t.centroids = append(t.centroids, other.centroids...)
 	t.count += other.count
 	if other.min < t.min {
 		t.min = other.min
@@ -166,7 +167,9 @@ func (t *TDigest) Merge(other *TDigest) {
 		t.max = other.max
 	}
 	t.processed = false
-	t.process()
+	if len(t.centroids) > t.processThreshold() {
+		t.process()
+	}
 }
 
 // Count returns the total weight observed.
@@ -194,7 +197,7 @@ func (t *TDigest) process() {
 		return t.centroids[i].mean < t.centroids[j].mean
 	})
 	total := t.count
-	merged := t.centroids[:0:0] // fresh backing array; don't alias input mid-merge
+	merged := t.centroids[:0]
 	cur := t.centroids[0]
 	weightBefore := 0.0
 	for i := 1; i < len(t.centroids); i++ {

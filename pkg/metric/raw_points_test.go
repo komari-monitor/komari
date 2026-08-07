@@ -124,14 +124,121 @@ func TestCompressedRawSamplesRoundTripExactly(t *testing.T) {
 	}
 	var compressed compressedRawSamples
 	compressed.append(samples)
-	decoded := compressed.decode()
-	if len(decoded) != len(samples) {
-		t.Fatalf("decoded sample count = %d, want %d", len(decoded), len(samples))
-	}
+	decoder := newRawSampleDecoder(compressed)
 	for i := range samples {
-		if decoded[i].timestamp != samples[i].timestamp || decoded[i].labelID != samples[i].labelID || math.Float64bits(decoded[i].value) != math.Float64bits(samples[i].value) {
-			t.Fatalf("decoded sample %d = %#v, want %#v", i, decoded[i], samples[i])
+		decoded, more := decoder.next()
+		if !more {
+			t.Fatalf("decoded sample count = %d, want %d", i, len(samples))
 		}
+		if decoded.timestamp != samples[i].timestamp || decoded.labelID != samples[i].labelID || math.Float64bits(decoded.value) != math.Float64bits(samples[i].value) {
+			t.Fatalf("decoded sample %d = %#v, want %#v", i, decoded, samples[i])
+		}
+	}
+	if _, more := decoder.next(); more {
+		t.Fatal("decoder returned extra sample")
+	}
+}
+
+func TestCompressedRawSamplesMergeInsertionAndReplacement(t *testing.T) {
+	base := time.Now().UTC().Add(-5 * time.Minute).UnixMilli()
+	var compressed compressedRawSamples
+	compressed.append([]rawSample{
+		{timestamp: base, value: 1, labelID: 0},
+		{timestamp: base + 2000, value: 3, labelID: 2},
+	})
+	compressed.append([]rawSample{
+		{timestamp: base + 1000, value: math.Copysign(0, -1), labelID: 1},
+		{timestamp: base + 2000, value: 33, labelID: 3},
+	})
+	want := []rawSample{
+		{timestamp: base, value: 1, labelID: 0},
+		{timestamp: base + 1000, value: math.Copysign(0, -1), labelID: 1},
+		{timestamp: base + 2000, value: 33, labelID: 3},
+	}
+	decoder := newRawSampleDecoder(compressed)
+	for i := range want {
+		got, more := decoder.next()
+		if !more || got.timestamp != want[i].timestamp || got.labelID != want[i].labelID || math.Float64bits(got.value) != math.Float64bits(want[i].value) {
+			t.Fatalf("sample %d = %#v, want %#v", i, got, want[i])
+		}
+	}
+	if _, more := decoder.next(); more {
+		t.Fatal("decoder returned extra merged sample")
+	}
+}
+
+func TestRawQueryCompressedDirectBoundaryClosedRange(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	if err := s.CreateMetric(ctx, Definition{Name: "raw-boundary", RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	compressedAt := now.Add(-time.Minute)
+	directAt := compressedAt.Add(time.Millisecond)
+	series := &rawSeries{
+		tagsJSON: "{}", labelIDs: map[string]uint32{emptyLabelsHash: 0},
+		labelHashes: []string{emptyLabelsHash}, labelsJSON: []string{"{}"},
+		samples: []rawSample{{timestamp: directAt.UnixMilli(), value: 2}},
+	}
+	series.compressed.append([]rawSample{{timestamp: compressedAt.UnixMilli(), value: 1}})
+	s.raw[rawSeriesKey{metricName: "raw-boundary", entityID: "n1", tagsHash: emptyLabelsHash}] = series
+
+	ascending, err := s.Query(ctx, Query{MetricName: "raw-boundary", Start: compressedAt, End: directAt, Order: OrderAsc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ascending) != 2 || ascending[0].Value != 1 || ascending[1].Value != 2 {
+		t.Fatalf("closed ascending range = %#v", ascending)
+	}
+	descending, err := s.Query(ctx, Query{MetricName: "raw-boundary", Start: compressedAt, End: directAt, Order: OrderDesc, Offset: 1, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(descending) != 1 || descending[0].Value != 1 {
+		t.Fatalf("paged descending range = %#v", descending)
+	}
+}
+
+func TestRawPruneStreamsAndReclaimsLabels(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore(t)
+	if err := s.CreateMetric(ctx, Definition{Name: "raw-prune", RetentionDays: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	cutoff := now.Add(-3 * time.Minute)
+	series := &rawSeries{
+		tagsJSON:    "{}",
+		labelIDs:    map[string]uint32{"old": 0, "middle": 1, "keep": 2},
+		labelHashes: []string{"old", "middle", "keep"},
+		labelsJSON:  []string{`{"label":"old"}`, `{"label":"middle"}`, `{"label":"keep"}`},
+		samples:     []rawSample{{timestamp: now.Add(-30 * time.Second).UnixMilli(), value: 4, labelID: 2}},
+	}
+	series.compressed.append([]rawSample{
+		{timestamp: now.Add(-5 * time.Minute).UnixMilli(), value: 1, labelID: 0},
+		{timestamp: now.Add(-4 * time.Minute).UnixMilli(), value: 2, labelID: 1},
+		{timestamp: cutoff.UnixMilli(), value: 3, labelID: 2},
+	})
+	s.raw[rawSeriesKey{metricName: "raw-prune", entityID: "n1", tagsHash: emptyLabelsHash}] = series
+
+	if deleted := s.deleteRawBefore("raw-prune", cutoff.UnixMilli()); deleted != 2 {
+		t.Fatalf("deleted %d samples, want 2", deleted)
+	}
+	if len(series.labelsJSON) != 1 || series.labelsJSON[0] != `{"label":"keep"}` || series.compressed.count != 1 || series.samples[0].labelID != 0 {
+		t.Fatalf("compacted series = %#v", series)
+	}
+	decoder := newRawSampleDecoder(series.compressed)
+	kept, more := decoder.next()
+	if !more || kept.timestamp != cutoff.UnixMilli() || kept.labelID != 0 || kept.value != 3 {
+		t.Fatalf("kept compressed sample = %#v", kept)
+	}
+	points, err := s.Query(ctx, Query{MetricName: "raw-prune", Start: cutoff, End: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 2 || points[0].Labels["label"] != "keep" || points[1].Labels["label"] != "keep" {
+		t.Fatalf("pruned query = %#v", points)
 	}
 }
 
