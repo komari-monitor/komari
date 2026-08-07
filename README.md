@@ -7,29 +7,29 @@
 
 [English](./README.md) | [简体中文](./README_zh-cn.md)
 
-Komari is a lightweight, self-hosted server monitoring tool designed to provide a simple and efficient solution for monitoring server performance. It supports viewing server status through a web interface and collects data through a lightweight agent.
+Komari is a lightweight, self-hosted server monitoring solution. It provides a simple and efficient way to track server performance through a web interface, with metrics collected by a lightweight agent.
 
 > [!WARNING]
-> Komari is a self-hosted monitoring/control program that should only be deployed on systems you own or are authorized to manage. Deploying, accessing, persisting, executing commands, or engaging in other abusive behavior without authorization — you bear sole responsibility for deploying and using Komari. The developers assume no responsibility for unauthorized or abusive use, or any resulting consequences.
+> Komari is a self-hosted monitoring and control application. Deploy it only on systems you own or are authorized to manage. You are solely responsible for how you deploy and use Komari. The developers accept no liability for unauthorized access, persistence, command execution, other misuse, or any resulting consequences.
 
 [Documentation](https://www.komari.wiki/) | [Telegram Group](https://t.me/komari_monitor)
 
 ## Features
 
-- **Real-time Monitoring**: Real-time data display at second-level granularity.
-- **Lightweight and Efficient**: Low resource consumption, suitable for servers of all sizes.
-- **Self-hosted**: Full control over data privacy, easy to deploy.
-- **Web Interface**: Intuitive monitoring dashboard, easy to use.
-- **Highly Extensible**: Support for custom themes and plugins.
+- **Real-time monitoring**: Displays monitoring data at one-second intervals.
+- **Lightweight and efficient**: Uses minimal system resources and works well on servers of any size.
+- **Self-hosted**: Keeps you in control of your data and privacy.
+- **Web interface**: Provides an intuitive, easy-to-use monitoring dashboard.
+- **Extensible**: Supports custom themes and plugins.
 
 ## Quick Start
 
-| Platform                                                                                                                                                                                                 | Introduction                                                                                                                                                                                                     |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| <a href="https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_"><img src="https://rainyun-apps.cn-nb1.rains3.com/materials/deploy-on-rainyun-cn.svg" alt="Rainyun" width="180"></a>                      | Deploy websites, databases, and hundreds of popular apps in seconds, with flexible hourly billing.                                                                                                               |
-| <a href="https://apps.fit2cloud.com/1panel/komari"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/1panel-logo-blue.png" alt="1Panel Appstore" width="180"></a> | A modern, open-source Linux server operations management panel that provides website, database, container, file, backup, security, and AI management capabilities, with one-click deployment from the app store. |
+| Platform                                                                                                                                                                                                  | Description                                                                                                                                                              |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| <a href="https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_"><img src="https://rainyun-apps.cn-nb1.rains3.com/materials/deploy-on-rainyun-cn.svg" alt="Rainyun" width="180"></a>                       | Deploy websites, databases, and hundreds of popular apps in seconds with flexible hourly billing.                                                                        |
+| <a href="https://apps.fit2cloud.com/1panel/komari"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/1panel-logo-blue.png" alt="1Panel App Store" width="180"></a> | A modern, open-source Linux server management panel for websites, databases, containers, files, backups, security, and AI, with one-click deployment from its app store. |
 
-For Docker, binary, source-build, and update instructions, see the [installation guide](https://www.komari.wiki/en/install/quick-start).
+For instructions on Docker deployment, binary installation, building from source, and updates, see the [installation guide](https://www.komari.wiki/en/install/quick-start).
 
 ## Screenshots
 
@@ -42,20 +42,25 @@ For Docker, binary, source-build, and update instructions, see the [installation
 | Customizable Themes | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%8F%AF%E8%87%AA%E5%AE%9A%E4%B9%89-en.webp" width="800" alt="Customizable Themes"> |
 | Theme Market        | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%B8%82%E5%9C%BA-en.webp" width="800" alt="Theme Market">                          |
 
-## Acknowledgements
+## Sponsors
 
-Want to be featured here? Contact the developer via [email](mailto:komari@akz.moe) or [Telegram](https://t.me/mamomoe).
+Interested in sponsoring Komari? Contact the developer via [email](mailto:komari@akz.moe) or [Telegram](https://t.me/mamomoe).
 
-| Sponsor                                                                                                                                                                                          | Description                                                                                                                                                                                                                                                                                                                                                                                       |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| <a href="https://whmcs.as211392.com/aff.php?aff=110"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/dreamcloud.png" alt="Dream Cloud" width="180"></a> | Cost-effective direct-connect Asia-Pacific high-defense hosting, real high defense without inflated specs.                                                                                                                                                                                                                                                                                        |
-| <a href="https://sharon.io"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/sharon-networks.webp" alt="Sharon Networks" width="180"></a>                | Top-tier China-optimized network access from Asia-Pacific data centers · Low latency & high bandwidth & Tbps-level local DDoS scrubbing high-defense service, protecting your business and providing an ultimate experience for your customers. Join the community [Telegram Group](https://t.me/SharonNetwork) to participate in charity donations or win free usage through in-group giveaways. |
-| Open Source Community                                                                                                                                                                            | <a href="https://github.com/komari-monitor/komari/graphs/contributors"><img src="https://contributors-img.web.app/image?repo=komari-monitor/komari" alt="contributors" width="600"></a>                                                                                                                                                                                                           |
+| Sponsor                                                                                                                                                                                          | Description                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| <a href="https://whmcs.as211392.com/aff.php?aff=110"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/dreamcloud.png" alt="Dream Cloud" width="180"></a> | Cost-effective Asia-Pacific hosting with direct connectivity and robust DDoS protection, backed by transparent capacity claims.                                                                                                                                               |
+| <a href="https://sharon.io"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/sharon-networks.webp" alt="Sharon Networks" width="180"></a>                | Premium China-optimized connectivity from Asia-Pacific data centers, featuring low latency, high bandwidth, and Tbps-scale local DDoS mitigation. Join the [Telegram community](https://t.me/SharonNetwork) to participate in charitable initiatives and community giveaways. |
 
-## Sponsorship
+## Contributors
 
-Buy me a cup of coffee, thank you meow~!
+Thanks to everyone who has contributed code, themes, plugins, documentation, translations, bug reports, or feedback to Komari.
 
-| WeChat Reward Code                                                                               | TRON Network                                                                |
-| ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| ![wechat](https://b2.akz.moe/awesome-pictures/%E5%BE%AE%E4%BF%A1%E8%B5%9E%E8%B5%8F%E7%A0%81.png) | ![TRON](https://b2.akz.moe/awesome-pictures/PixPin_2026-08-07_15-16-52.png) |
+<a href="https://github.com/komari-monitor/komari/graphs/contributors"><img src="https://contributors-img.web.app/image?repo=komari-monitor/komari" alt="Komari contributors" width="600"></a>
+
+## Support the Project
+
+If Komari has been useful to you, consider buying me a coffee. Thank you for your support!
+
+| WeChat Pay                                                                                                   | TRON Network                                                                                |
+| ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| ![WeChat Pay QR code](https://b2.akz.moe/awesome-pictures/%E5%BE%AE%E4%BF%A1%E8%B5%9E%E8%B5%8F%E7%A0%81.png) | ![TRON Network QR code](https://b2.akz.moe/awesome-pictures/PixPin_2026-08-07_15-16-52.png) |

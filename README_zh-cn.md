@@ -42,19 +42,24 @@ Docker、二进制文件、源码构建和更新说明，请参阅 [安装指南
 | 主题可自定义 | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%8F%AF%E8%87%AA%E5%AE%9A%E4%B9%89.webp" width="800" alt="主题可自定义"> |
 | 主题市场     | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%B8%82%E5%9C%BA.webp" width="800" alt="主题市场">                       |
 
-## 鸣谢
+## 赞助商
 
-想出现在这里？通过 [电子邮箱](mailto:komari@akz.moe) 或 [Telegram](https://t.me/mamomoe) 联系开发者。
+有意赞助 Komari？请通过 [电子邮箱](mailto:komari@akz.moe) 或 [Telegram](https://t.me/mamomoe) 联系开发者。
 
 | 赞助商                                                                                                                                                                                           | 描述                                                                                                                                                                                                                |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | <a href="https://whmcs.as211392.com/aff.php?aff=110"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/dreamcloud.png" alt="Dream Cloud" width="180"></a> | 极高性价比解锁直连亚太高防，真高防，不虚标，打死退款                                                                                                                                                                |
 | <a href="https://sharon.io"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/sharon-networks.webp" alt="Sharon Networks" width="180"></a>                | 亚太数据中心提供顶级的中国优化网络接入 · 低延时&高带宽&提供Tbps级本地清洗高防服务, 为您的业务保驾护航, 为您的客户提供极致体验. 加入社区 [Telegram群组](https://t.me/SharonNetwork) 可参与公益募捐或群内抽奖免费使用 |
-| 开源社区                                                                                                                                                                                         | <a href="https://github.com/komari-monitor/komari/graphs/contributors"><img src="https://contributors-img.web.app/image?repo=komari-monitor/komari" alt="contributors" width="600"></a>                             |
 
-## 赞助支持
+## 贡献者
 
-请作者喝一杯奶茶，谢谢你喵~！
+感谢所有为 Komari 贡献代码、主题、插件、文档、翻译、问题报告或反馈的朋友。
+
+<a href="https://github.com/komari-monitor/komari/graphs/contributors"><img src="https://contributors-img.web.app/image?repo=komari-monitor/komari" alt="Komari 贡献者" width="600"></a>
+
+## 支持项目
+
+如果 Komari 对你有所帮助，欢迎请作者喝一杯奶茶。感谢你的支持！
 
 | 微信赞赏码                                                                                       | TRON Network                                                                |
 | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
