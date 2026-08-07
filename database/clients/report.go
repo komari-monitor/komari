@@ -1,13 +1,25 @@
 package clients
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
 )
+
+const (
+	maxReportDiskMounts          = 128
+	maxReportDiskStringLength    = 4096
+	maxReportDisksBytes          = 32 * 1024
+	maxReportExtensionNamespaces = 32
+	maxReportExtensionsBytes     = 32 * 1024
+)
+
+var reportExtensionNamespacePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$`)
 
 func GetClientUUIDByToken(token string) (clientUUID string, err error) {
 	db := dbcore.GetDBInstance()
@@ -76,6 +88,54 @@ func ReportVerify(report v1.Report) error {
 	}
 	if err := checkInt64("Disk.Total", report.Disk.Total); err != nil {
 		return err
+	}
+	if len(report.Disks) > maxReportDiskMounts {
+		return fmt.Errorf("Disks must contain at most %d entries", maxReportDiskMounts)
+	}
+	if len(report.Disks) > 0 {
+		encoded, err := json.Marshal(report.Disks)
+		if err != nil {
+			return fmt.Errorf("Disks must contain valid data: %w", err)
+		}
+		if len(encoded) > maxReportDisksBytes {
+			return fmt.Errorf("Disks must not exceed %d bytes", maxReportDisksBytes)
+		}
+	}
+	for i, disk := range report.Disks {
+		prefix := fmt.Sprintf("Disks[%d]", i)
+		if len(disk.Name) > maxReportDiskStringLength ||
+			len(disk.Device) > maxReportDiskStringLength ||
+			len(disk.Mountpoint) > maxReportDiskStringLength ||
+			len(disk.Filesystem) > maxReportDiskStringLength {
+			return fmt.Errorf("%s contains a string longer than %d bytes", prefix, maxReportDiskStringLength)
+		}
+		if err := checkInt64(prefix+".Used", disk.Used); err != nil {
+			return err
+		}
+		if err := checkInt64(prefix+".Total", disk.Total); err != nil {
+			return err
+		}
+	}
+	if len(report.Extensions) > maxReportExtensionNamespaces {
+		return fmt.Errorf("Extensions must contain at most %d namespaces", maxReportExtensionNamespaces)
+	}
+	if len(report.Extensions) > 0 {
+		encoded, err := json.Marshal(report.Extensions)
+		if err != nil {
+			return fmt.Errorf("Extensions must contain valid JSON: %w", err)
+		}
+		if len(encoded) > maxReportExtensionsBytes {
+			return fmt.Errorf("Extensions must not exceed %d bytes", maxReportExtensionsBytes)
+		}
+		for namespace, raw := range report.Extensions {
+			if !reportExtensionNamespacePattern.MatchString(namespace) {
+				return fmt.Errorf("Extensions namespace %q is invalid", namespace)
+			}
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+				return fmt.Errorf("Extensions namespace %q must contain a JSON object", namespace)
+			}
+		}
 	}
 	// Network 验证
 	if err := checkInt64("Network.Up", report.Network.Up); err != nil {

@@ -129,7 +129,7 @@ func GetLatestReport() map[string]*v1.Report {
 		if v == nil {
 			continue
 		}
-		item := *v
+		item := cloneReport(*v)
 		reportCopy[k] = &item
 	}
 	return reportCopy
@@ -149,7 +149,7 @@ func RecordReport(report v1.Report) {
 	mu.Lock()
 	defer mu.Unlock()
 	if latest := latestReport[report.UUID]; latest == nil || !report.UpdatedAt.Before(latest.UpdatedAt) {
-		item := report
+		item := cloneReport(report)
 		latestReport[report.UUID] = &item
 	}
 	cutoff := time.Now().UTC().Add(-recentReportRetention)
@@ -158,6 +158,10 @@ func RecordReport(report v1.Report) {
 		recentReports[report.UUID] = reports
 		return
 	}
+	// Optional status details are exposed through the latest-status APIs only.
+	// Avoid duplicating them across the short recent-report window.
+	report.Disks = nil
+	report.Extensions = nil
 	insertAt := sort.Search(len(reports), func(i int) bool {
 		return reports[i].UpdatedAt.After(report.UpdatedAt)
 	})
@@ -177,6 +181,20 @@ func GetRecentReports(uuid string) []v1.Report {
 	}
 	recentReports[uuid] = reports
 	return append([]v1.Report(nil), reports...)
+}
+
+func cloneReport(report v1.Report) v1.Report {
+	cloned := report
+	if report.Disks != nil {
+		cloned.Disks = append([]v1.DiskMount(nil), report.Disks...)
+	}
+	if report.Extensions != nil {
+		cloned.Extensions = make(v1.ReportExtensions, len(report.Extensions))
+		for namespace, raw := range report.Extensions {
+			cloned.Extensions[namespace] = append([]byte(nil), raw...)
+		}
+	}
+	return cloned
 }
 
 func reportsAfter(reports []v1.Report, cutoff time.Time) []v1.Report {
