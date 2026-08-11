@@ -413,6 +413,22 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// QueryContext executes a raw read query against the Store's read pool.
+func (s *Store) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
+	return s.reader().QueryContext(ctx, query, args...)
+}
+
+// ExecContext executes a raw statement against the Store's primary write pool.
+func (s *Store) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
+	return s.db.ExecContext(ctx, query, args...)
+}
+
 // ensureOpen verifies that the Store is not closed.
 //
 // ensureOpen 检查 Store 是否仍处于打开状态。
