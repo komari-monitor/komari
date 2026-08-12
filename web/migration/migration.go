@@ -30,6 +30,7 @@ const (
 )
 
 const largeDatasetThreshold int64 = 300_000
+const structureProgressCeiling = 80.0
 
 type Mode string
 
@@ -471,7 +472,7 @@ func (c *Controller) failTarget(err error, dsn, phase string) {
 
 func structureProgressPercent(progress metricstore.RestructureProgress) float64 {
 	if progress.Phase == "reclaiming" {
-		return 95
+		return structureProgressCeiling
 	}
 	if progress.Phase == "discarding" && progress.RowsTotal == 0 {
 		return 1
@@ -479,12 +480,12 @@ func structureProgressPercent(progress metricstore.RestructureProgress) float64 
 	if progress.RowsTotal <= 0 {
 		return 0
 	}
-	value := float64(progress.RowsDone) / float64(progress.RowsTotal) * 95
+	value := float64(progress.RowsDone) / float64(progress.RowsTotal) * structureProgressCeiling
 	if value < 0 {
 		return 0
 	}
-	if value > 95 {
-		return 95
+	if value > structureProgressCeiling {
+		return structureProgressCeiling
 	}
 	return value
 }
