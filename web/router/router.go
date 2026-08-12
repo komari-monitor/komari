@@ -86,11 +86,14 @@ func registerAdminRoutes(r *gin.Engine) {
 
 	// --- 二进制/流/重定向类，保留 REST handler ---
 	g.GET("/download/backup", admin.DownloadBackup)
-	g.POST("/upload/backup", admin.UploadBackup)
-	// chunk upload 用于大备份文件分块上传，提高稳定性
-	g.POST("/upload/backup/init", admin.InitChunkUpload)
-	g.POST("/upload/backup/chunk", admin.UploadChunk)
-	g.POST("/upload/backup/merge", admin.MergeChunkUpload)
+	uploadHandler := admin.NewArchiveUploadHandler()
+	uploadGroup := g.Group("/upload")
+	{
+		uploadGroup.POST("/init", uploadHandler.Init)
+		uploadGroup.POST("/chunk", uploadHandler.Chunk)
+		uploadGroup.POST("/merge", uploadHandler.Merge)
+		uploadGroup.POST("/cancel", uploadHandler.Cancel)
+	}
 	g.GET("/test/geoip", jsonRpc.Bind("admin:testGeoip", jsonRpc.WithQuery("ip")))
 	g.POST("/test/sendMessage", jsonRpc.Bind("admin:testSendMessage"))
 	g.POST("/update/mmdb", admin.UpdateMmdbGeoIP)
@@ -98,10 +101,9 @@ func registerAdminRoutes(r *gin.Engine) {
 	g.PUT("/update/favicon", admin.UploadFavicon)
 	g.POST("/update/favicon", admin.DeleteFavicon)
 
-	// theme 含文件上传，保留 REST handler。
+	// theme 的安装流程通过统一的分片上传接口；其余主题接口保留 REST handler。
 	theme := g.Group("/theme")
 	{
-		theme.PUT("/upload", admin.UploadTheme)
 		theme.GET("/list", admin.ListThemes)
 		theme.POST("/delete", admin.DeleteTheme)
 		theme.GET("/set", admin.SetTheme)
@@ -205,13 +207,12 @@ func registerAdminRoutes(r *gin.Engine) {
 		clipboardGroup.POST("/:id/remove", jsonRpc.Bind("admin:deleteClipboard", jsonRpc.WithPath("id")))
 	}
 
-	// plugins: 上传走 REST（zip 二进制），启停/列表/日志走 RPC2，市场对齐主题市场。
+	// plugins: 安装流程通过统一的分片上传接口，启停/列表/日志走 RPC2，市场对齐主题市场。
 	pluginGroup := g.Group("/plugin")
 	{
 		pluginGroup.GET("/list", jsonRpc.Bind("admin:listPlugins"))
 		pluginGroup.POST("/enabled", jsonRpc.Bind("admin:setPluginEnabled"))
 		pluginGroup.GET("/logs", jsonRpc.Bind("admin:getPluginLogs", jsonRpc.WithQuery("short")))
-		pluginGroup.POST("/install", admin.UploadPlugin)
 		pluginGroup.GET("/market/sources", admin.ListPluginMarketSources)
 		pluginGroup.POST("/market/sources", admin.CreatePluginMarketSource)
 		pluginGroup.PUT("/market/sources/:id", admin.UpdatePluginMarketSource)

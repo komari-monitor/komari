@@ -28,39 +28,6 @@ const (
 	maxThemeManifestSize  = 1 << 20
 )
 
-// UploadTheme 上传主题
-func UploadTheme(c *gin.Context) {
-	// 读取上传的文件内容
-	data, err := io.ReadAll(c.Request.Body)
-	if err != nil || len(data) == 0 {
-		api.RespondError(c, http.StatusBadRequest, "请选择要上传的主题文件")
-		return
-	}
-
-	// 临时文件名
-	tempFile := filepath.Join(os.TempDir(), "uploaded_theme.zip")
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
-		api.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
-		return
-	}
-	defer os.Remove(tempFile)
-
-	// 检查文件扩展名（这里假定上传的就是zip）
-	if !strings.HasSuffix(strings.ToLower(tempFile), ".zip") {
-		api.RespondError(c, http.StatusBadRequest, "只支持ZIP格式的主题文件")
-		return
-	}
-
-	// 解压ZIP文件并验证
-	themeInfo, err := extractAndValidateTheme(tempFile)
-	if err != nil {
-		api.RespondError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	api.RespondSuccessMessage(c, "主题上传成功", themeInfo)
-}
-
 // ListThemes 列出所有主题
 func ListThemes(c *gin.Context) {
 	dataDir := "./data/theme"

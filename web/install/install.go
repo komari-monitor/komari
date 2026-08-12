@@ -15,12 +15,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	appconfig "github.com/komari-monitor/komari/internal/config"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/backup"
+	"github.com/komari-monitor/komari/web/upload"
 	"gorm.io/gorm"
 )
 
@@ -64,7 +65,16 @@ func (c *Controller) Register(r *gin.Engine) {
 	g := r.Group(APIPath, c.requireActive)
 	g.GET("/status", c.status)
 	g.POST("/complete", c.complete)
-	g.POST("/restore", c.restore)
+	uploadHandler := upload.NewHandler(upload.DefaultStore, map[upload.Purpose]upload.Finalizer{
+		upload.PurposeBackup: c.finalizeBackupUpload,
+	})
+	uploadGroup := g.Group("/upload")
+	{
+		uploadGroup.POST("/init", uploadHandler.Init)
+		uploadGroup.POST("/chunk", uploadHandler.Chunk)
+		uploadGroup.POST("/merge", uploadHandler.Merge)
+		uploadGroup.POST("/cancel", uploadHandler.Cancel)
+	}
 }
 
 func (c *Controller) requireActive(ctx *gin.Context) {
@@ -82,25 +92,21 @@ func (c *Controller) status(ctx *gin.Context) {
 	api.RespondSuccess(ctx, Status{State: state, Required: state != "completed"})
 }
 
-// restore stages a verified backup before the guide creates any new data.
-func (c *Controller) restore(ctx *gin.Context) {
-	file, header, err := ctx.Request.FormFile("backup")
+func (c *Controller) finalizeBackupUpload(session upload.Session) (upload.Result, error) {
+	archive, err := os.Open(session.ArchivePath)
 	if err != nil {
-		api.RespondError(ctx, http.StatusBadRequest, fmt.Sprintf("get uploaded backup: %v", err))
-		return
+		return upload.Result{}, fmt.Errorf("open merged backup: %w", err)
 	}
-	defer file.Close()
-	if err := backup.SaveUploadedBackup(file, header.Filename); err != nil {
-		api.RespondError(ctx, http.StatusBadRequest, err.Error())
-		return
+	defer archive.Close()
+	if err := backup.SaveUploadedBackup(archive, session.Metadata.Filename); err != nil {
+		return upload.Result{}, err
 	}
-
-	api.RespondSuccessMessage(ctx, "backup uploaded; restarting to restore", gin.H{})
 	go func() {
 		logger.InfoArgs("install", "Backup uploaded, restarting service to restore it on startup...")
 		time.Sleep(2 * time.Second)
 		os.Exit(0)
 	}()
+	return upload.Result{Message: "backup uploaded; restarting to restore", Data: gin.H{}}, nil
 }
 
 func (c *Controller) complete(ctx *gin.Context) {

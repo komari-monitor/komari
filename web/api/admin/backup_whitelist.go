@@ -15,6 +15,8 @@ var backupWhitelist = []string{
 	"favicon.ico",
 	"font.ttf",
 	"theme/",
+	"plugin/",
+	"plguin-data/",
 	"metrics.db",
 }
 
