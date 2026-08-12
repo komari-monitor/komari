@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/web/api"
 )
@@ -445,17 +446,7 @@ func validateThemeMarketTheme(theme ThemeMarketTheme) error {
 // isMarketText reports whether a market entry field is usable: a non-empty
 // string or an i18n object with at least one non-empty value.
 func isMarketText(value any) bool {
-	switch text := value.(type) {
-	case string:
-		return strings.TrimSpace(text) != ""
-	case map[string]any:
-		for _, item := range text {
-			if itemText, ok := item.(string); ok && strings.TrimSpace(itemText) != "" {
-				return true
-			}
-		}
-	}
-	return false
+	return models.IsLocalizedText(value)
 }
 
 func validateMarketURLSyntax(rawURL string) error {

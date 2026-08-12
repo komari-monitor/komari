@@ -41,7 +41,7 @@ func validateManifest(info *models.Plugin) error {
 	if !validShort(info.Short) {
 		return fmt.Errorf("plugin short %q is invalid: only letters, digits, '_' and '-' are allowed", info.Short)
 	}
-	if !localizedText(info.Name) {
+	if !models.IsLocalizedText(info.Name) {
 		return fmt.Errorf("plugin name is required")
 	}
 	if info.Entry == "" {
@@ -90,7 +90,7 @@ func validatePage(page *models.PluginPage) error {
 	default:
 		return fmt.Errorf("plugin page type %q is invalid: use \"iframe\" or \"redirect\"", page.Type)
 	}
-	if !localizedText(page.Title) {
+	if !models.IsLocalizedText(page.Title) {
 		return fmt.Errorf("plugin page %q requires a title", page.Title)
 	}
 	return nil
@@ -112,24 +112,4 @@ func isSafeInternalPath(target string) bool {
 		}
 	}
 	return true
-}
-
-// localizedText reports whether v is a usable name/description/author value:
-// a non-empty string, or an i18n object with at least one non-empty value.
-func localizedText(v any) bool {
-	switch t := v.(type) {
-	case nil:
-		return false
-	case string:
-		return strings.TrimSpace(t) != ""
-	case map[string]any:
-		for _, value := range t {
-			if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
-				return true
-			}
-		}
-		return false
-	default:
-		return false
-	}
 }

@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/managedconfig"
 	"gorm.io/gorm"
 )
 
@@ -26,7 +26,11 @@ func GetConfiguration(short string) (map[string]any, error) {
 	if err != nil {
 		return values, nil // not installed (or unreadable): keep saved values
 	}
-	mergeConfigurationDefaults(values, info.Configuration)
+	items := managedconfig.Items(info.Configuration)
+	mergeConfigurationDefaults(values, items)
+	if err := managedconfig.ResolveForOutput(values, items); err != nil {
+		return nil, fmt.Errorf("resolve plugin configuration: %w", err)
+	}
 	return values, nil
 }
 
@@ -48,18 +52,7 @@ func savedConfiguration(short string) (map[string]any, error) {
 
 // mergeConfigurationDefaults fills manifest-declared defaults for keys that
 // are missing from the saved values, following the theme merge rules.
-func mergeConfigurationDefaults(values map[string]any, configuration models.Configuration) {
-	if configuration.Type != models.ThemeConfigurationManaged {
-		return
-	}
-	raw, err := json.Marshal(configuration.Data)
-	if err != nil {
-		return
-	}
-	var items []models.ManagedThemeConfigurationItem
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return
-	}
+func mergeConfigurationDefaults(values map[string]any, items []models.ManagedThemeConfigurationItem) {
 	for _, item := range items {
 		if item.Key == "" {
 			continue
@@ -67,36 +60,8 @@ func mergeConfigurationDefaults(values map[string]any, configuration models.Conf
 		if _, exists := values[item.Key]; exists {
 			continue
 		}
-		values[item.Key] = configurationDefault(item)
+		values[item.Key] = managedconfig.DefaultValue(item)
 	}
-}
-
-// configurationDefault resolves one item's effective default, mirroring the
-// theme rules: select falls back to its first option; nil defaults become
-// 0 for number, false for switch and "" otherwise.
-func configurationDefault(item models.ManagedThemeConfigurationItem) any {
-	def := item.Default
-	if item.Type == "select" {
-		if def == nil || def == "" {
-			if item.Options != "" {
-				opts := strings.Split(item.Options, ",")
-				if len(opts) > 0 {
-					return strings.TrimSpace(opts[0])
-				}
-			}
-		}
-	}
-	if def == nil {
-		switch item.Type {
-		case "number":
-			return float64(0) // JSON numbers decode as float64
-		case "switch":
-			return false
-		default:
-			return ""
-		}
-	}
-	return def
 }
 
 // SaveConfiguration upserts the configuration values of one plugin.

@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -398,6 +400,58 @@ func TestGetConfigurationMergesManifestDefaults(t *testing.T) {
 		t.Errorf("mode still default = %v", values["mode"])
 	}
 }
+
+func TestGetConfigurationResolvesSelectorValues(t *testing.T) {
+	withTempDataDir(t)
+	if err := dbcore.GetDBInstance().Create(&models.Client{UUID: "node-a"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := dbcore.GetDBInstance().Create(&models.PingTask{Id: 8}).Error; err != nil {
+		t.Fatal(err)
+	}
+	zipPath := writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"Cfg","short":"cfg","version":"1.0.0","configuration":{"type":"managed","data":[
+			{"key":"nodes","name":"Nodes","type":"nodes"},
+			{"key":"tasks","name":"Tasks","type":"pingtasks"}
+		]}}`,
+		"script.js": `function load() {}`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfiguration("cfg", map[string]any{
+		"nodes": `["node-a","deleted-node"]`,
+		"tasks": `[8,7]`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	values, err := GetConfiguration("cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, ok := values["nodes"].([]string)
+	if !ok || len(nodes) != 1 || nodes[0] != "node-a" {
+		t.Fatalf("nodes = %#v", values["nodes"])
+	}
+	tasks, ok := values["tasks"].([]uint)
+	if !ok || len(tasks) != 1 || tasks[0] != 8 {
+		t.Fatalf("tasks = %#v", values["tasks"])
+	}
+
+	var stored models.PluginConfiguration
+	if err := dbcore.GetDBInstance().Where("short = ?", "cfg").First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(stored.Data), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["nodes"] != `["node-a","deleted-node"]` || raw["tasks"] != `[8,7]` {
+		t.Fatalf("stored = %#v", raw)
+	}
+}
+
 func TestGetConfigFromScript(t *testing.T) {
 	withTempDataDir(t)
 	gin.SetMode(gin.TestMode)

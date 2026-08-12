@@ -217,17 +217,7 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 		return themeInfo, fmt.Errorf("主题配置格式错误: %v", err)
 	}
 
-	// 验证必填字段
-	if themeInfo.Name == "" || themeInfo.Short == "" {
-		return themeInfo, fmt.Errorf("主题配置缺少必填字段（name、short）")
-	}
-
-	// 验证Short字段格式（只允许字母、数字、下划线、连字符）
-	if !isValidMarketShort(themeInfo.Short) {
-		return themeInfo, fmt.Errorf("主题short字段格式无效，只允许字母、数字、下划线和连字符")
-	}
-
-	if err := themeInfo.ValidateConfiguration(); err != nil {
+	if err := validateThemeManifest(themeInfo); err != nil {
 		return themeInfo, err
 	}
 
@@ -322,6 +312,16 @@ func loadThemeConfig(configPath string) (models.Theme, error) {
 	}
 
 	return themeInfo, nil
+}
+
+func validateThemeManifest(themeInfo models.Theme) error {
+	if !models.IsLocalizedText(themeInfo.Name) || themeInfo.Short == "" {
+		return fmt.Errorf("主题配置缺少必填字段（name、short）")
+	}
+	if !isValidMarketShort(themeInfo.Short) {
+		return fmt.Errorf("主题short字段格式无效，只允许字母、数字、下划线和连字符")
+	}
+	return themeInfo.ValidateConfiguration()
 }
 
 // isValidMarketShort validates a market entry short name (shared by the
@@ -726,15 +726,7 @@ func peekThemeFromZip(zipPath string) (models.Theme, error) {
 		return themeInfo, fmt.Errorf("主题配置格式错误: %v", err)
 	}
 
-	if themeInfo.Name == "" || themeInfo.Short == "" {
-		return themeInfo, fmt.Errorf("主题配置缺少必填字段（name、short）")
-	}
-
-	if !isValidMarketShort(themeInfo.Short) {
-		return themeInfo, fmt.Errorf("主题short字段格式无效，只允许字母、数字、下划线和连字符")
-	}
-
-	if err := themeInfo.ValidateConfiguration(); err != nil {
+	if err := validateThemeManifest(themeInfo); err != nil {
 		return themeInfo, err
 	}
 
@@ -840,7 +832,6 @@ func UpdateThemeSettings(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "主题名称不能为空")
 		return
 	}
-
 	var req map[string]any
 
 	err := c.ShouldBindJSON(&req)
