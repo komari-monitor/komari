@@ -87,11 +87,11 @@ func TestWriteReportStoresMinuteMetricsAndResetAwareTraffic(t *testing.T) {
 		t.Fatalf("write reset report: %v", err)
 	}
 
-	assertMetricValues(t, s, MetricTrafficUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 50, 20})
-	assertMetricValues(t, s, MetricTrafficDown, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 60, 30})
+	assertMetricValues(t, s, MetricTrafficUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 50, 0})
+	assertMetricValues(t, s, MetricTrafficDown, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 60, 0})
 	assertMetricValues(t, s, MetricNetTotalUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{100, 150, 20})
-	assertMetricAggregate(t, s, MetricTrafficUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggSum, 70, 3)
-	assertMetricAggregate(t, s, MetricTrafficDown, report.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggSum, 90, 3)
+	assertMetricAggregate(t, s, MetricTrafficUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggSum, 50, 3)
+	assertMetricAggregate(t, s, MetricTrafficDown, report.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggSum, 60, 3)
 
 	gpuPoints, err := s.Query(ctx, metric.Query{
 		MetricName: MetricGPUDeviceUsage,
@@ -368,6 +368,48 @@ func TestTrafficCounterDelta(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWriteReportRebasesTrafficAfterAgentRestart(t *testing.T) {
+	ctx := context.Background()
+	s := useReportTestStore(t, nil)
+	base := time.Now().UTC().Truncate(time.Minute).Add(5 * time.Second)
+	report := v1.Report{
+		UUID:      "restarted-node",
+		UpdatedAt: base,
+		Uptime:    1000,
+		Network:   v1.NetworkReport{TotalUp: 100, TotalDown: 200},
+	}
+	if _, err := WriteReport(ctx, report); err != nil {
+		t.Fatalf("write first report: %v", err)
+	}
+
+	report.UpdatedAt = base.Add(3 * time.Second)
+	report.Uptime = 1003
+	report.Network.TotalUp = 150
+	report.Network.TotalDown = 260
+	if _, err := WriteReport(ctx, report); err != nil {
+		t.Fatalf("write continuous report: %v", err)
+	}
+
+	report.UpdatedAt = base.Add(6 * time.Second)
+	report.Uptime = 1
+	report.Network.TotalUp = 155
+	report.Network.TotalDown = 265
+	if _, err := WriteReport(ctx, report); err != nil {
+		t.Fatalf("write report after agent restart: %v", err)
+	}
+
+	report.UpdatedAt = base.Add(9 * time.Second)
+	report.Uptime = 4
+	report.Network.TotalUp = 180
+	report.Network.TotalDown = 300
+	if _, err := WriteReport(ctx, report); err != nil {
+		t.Fatalf("write report after new baseline: %v", err)
+	}
+
+	assertMetricValues(t, s, MetricTrafficUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 50, 0, 25})
+	assertMetricValues(t, s, MetricTrafficDown, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{0, 60, 0, 35})
 }
 
 func TestWriteReportNormalizesReceiveTimeToUTC(t *testing.T) {
