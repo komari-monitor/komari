@@ -3,6 +3,7 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -143,7 +144,12 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 						_ = reject(jsRPCError(vm, resp.Error))
 						return
 					}
-					_ = resolve(resp.Result)
+					result, err := normalizeRPCValue(resp.Result)
+					if err != nil {
+						_ = reject(vm.NewGoError(err))
+						return
+					}
+					_ = resolve(result)
 				})
 			}()
 			return vm.ToValue(promise)
@@ -264,6 +270,19 @@ func jsRPCError(vm *goja.Runtime, e *rpc.JsonRpcError) *goja.Object {
 		_ = obj.Set("data", e.Data)
 	}
 	return obj
+}
+
+func normalizeRPCValue(value any) (any, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("serialize RPC result: %w", err)
+	}
+
+	var normalized any
+	if err := json.Unmarshal(data, &normalized); err != nil {
+		return nil, fmt.Errorf("decode RPC result: %w", err)
+	}
+	return normalized, nil
 }
 
 // registerRoute registers (or reuses) a gin route slot for one plugin. It is
