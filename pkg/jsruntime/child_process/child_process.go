@@ -163,7 +163,7 @@ func (m *Module) childCommandArguments(vm *goja.Runtime, call goja.FunctionCall,
 }
 
 func (m *Module) childOptions(vm *goja.Runtime, value goja.Value) childCommandOptions {
-	options := childCommandOptions{cwd: m.filesystem.Cwd(), env: os.Environ(), timeout: m.runtime.Timeout(), maxBuffer: m.maxOutput}
+	options := childCommandOptions{cwd: m.filesystem.Cwd(), env: os.Environ(), maxBuffer: m.maxOutput}
 	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
 		return options
 	}
@@ -190,7 +190,7 @@ func (m *Module) childOptions(vm *goja.Runtime, value goja.Value) childCommandOp
 	}
 	if timeoutValue := object.Get("timeout"); timeoutValue != nil && timeoutValue.ToInteger() > 0 {
 		timeout := timeoutValue.ToInteger()
-		options.timeout = min(options.timeout, time.Duration(timeout)*time.Millisecond)
+		options.timeout = time.Duration(timeout) * time.Millisecond
 	}
 	if encoding := object.Get("encoding"); encoding != nil && !goja.IsUndefined(encoding) && !goja.IsNull(encoding) {
 		options.encoding = encoding.String()

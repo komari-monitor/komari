@@ -705,7 +705,8 @@ function runtimeInfo() {
 | ChildProcess `kill/ref/unref/disconnect/send` | `部分实现` 或调用抛错，见下文 |
 
 支持的 options：`cwd`、`env`、`shell`、`timeout`、`encoding`、`maxBuffer`。
-`cwd` 受 `BaseDir` 限制；请求的 timeout 和 maxBuffer 只能收紧 Go 侧全局上限，不能放大。
+`cwd` 受 `BaseDir` 限制；子进程默认不继承 runtime 的 `Timeout`，只有显式传入 `timeout` 时才会自动结束。
+请求的 `maxBuffer` 只能收紧 Go 侧全局上限，不能放大。
 `stdio/input/detached/uid/gid/windowsHide/windowsVerbatimArguments/serialization` 等未实现。
 
 - `spawn()` 的 `stdin` 是 `stream.Writable`（写入经后台写队列串行执行，`end()` 后关闭管道），
