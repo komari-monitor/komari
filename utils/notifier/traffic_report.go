@@ -130,7 +130,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 		return
 	}
 
-	message := strings.Join(lines, "\n")
+	message := strings.Join(lines, "\nKomari 内置的流量报告即将在 1.5.0 版本移除，请尽快迁移至插件“流量定期报告”。\nKomari's built-in traffic reports will be removed in version 1.5.0. Please migrate to the Scheduled Traffic Reports plugin as soon as possible.")
 	var emoji string
 	switch {
 	case daily:
