@@ -29,6 +29,8 @@ INSTALL_DIR="/opt/komari"
 DATA_DIR="/opt/komari"
 SERVICE_NAME="komari"
 BINARY_PATH="$INSTALL_DIR/komari"
+BACKUP_DIR="$INSTALL_DIR/backup"
+DATA_BACKUP_DIR="$DATA_DIR/data/backup"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
 REPO="komari-monitor/komari"
@@ -419,6 +421,26 @@ show_access_info() {
     ui_msgbox "安装完成" "$content"
 }
 
+# Remove historical upgrade backups
+cleanup_backups() {
+    if ! ui_yesno "确认清理备份" "将删除 Komari 的二进制升级备份和数据升级压缩包。\n\n您确定要继续吗？"; then
+        log_info "备份清理已取消"
+        return 0
+    fi
+
+    log_step "清理升级历史备份..."
+    rm -f -- "${BINARY_PATH}.backup."*
+
+    local backup_dir
+    for backup_dir in "$BACKUP_DIR" "$DATA_BACKUP_DIR"; do
+        if [ -d "$backup_dir" ]; then
+            find "$backup_dir" -maxdepth 1 -type f -name '*.zip' -delete
+        fi
+    done
+
+    ui_msgbox "清理完成" "升级历史备份已清理。\n\n清理范围：\n  二进制备份: ${BINARY_PATH}.backup.*\n  数据压缩包: $BACKUP_DIR\n  数据压缩包: $DATA_BACKUP_DIR"
+}
+
 # Upgrade function
 upgrade_komari() {
     log_step "升级 Komari..."
@@ -439,14 +461,23 @@ upgrade_komari() {
     log_step "停止 Komari 服务..."
     systemctl stop ${SERVICE_NAME}.service
 
+    log_step "清理旧的二进制备份..."
+    rm -f -- "${BINARY_PATH}.backup."*
+
+    local backup_path="${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
     log_step "备份当前二进制文件..."
-    cp "$BINARY_PATH" "${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
+    if ! cp "$BINARY_PATH" "$backup_path"; then
+        log_error "备份当前二进制文件失败，正在启动服务"
+        systemctl start ${SERVICE_NAME}.service
+        ui_msgbox "错误" "备份当前二进制文件失败，升级已取消。"
+        return 1
+    fi
 
     local arch=$(detect_arch)
     local download_url=$(get_download_url "$arch")
     if [ $? -ne 0 ]; then
         log_error "获取下载链接失败，正在从备份恢复"
-        mv "${BINARY_PATH}.backup."* "$BINARY_PATH"
+        mv "$backup_path" "$BINARY_PATH"
         systemctl start ${SERVICE_NAME}.service
         ui_msgbox "错误" "获取下载链接失败，已从备份恢复。"
         return 1
@@ -455,7 +486,7 @@ upgrade_komari() {
     log_step "下载最新版本..."
     if ! curl -L -o "$BINARY_PATH" "$download_url"; then
         log_error "下载失败，正在从备份恢复"
-        mv "${BINARY_PATH}.backup."* "$BINARY_PATH"
+        mv "$backup_path" "$BINARY_PATH"
         systemctl start ${SERVICE_NAME}.service
         ui_msgbox "错误" "下载失败，已从备份恢复。"
         return 1
@@ -593,7 +624,8 @@ main_menu() {
             "5" "查看日志" \
             "6" "重启服务" \
             "7" "停止服务" \
-            "8" "退出")
+            "8" "清理升级历史备份" \
+            "9" "退出")
 
         # 用户在 TUI 中取消（ESC/Cancel）则退出
         if [ $? -ne 0 ] && tui_enabled; then
@@ -609,7 +641,8 @@ main_menu() {
             5) show_logs ;;
             6) restart_service ;;
             7) stop_service ;;
-            8) 
+            8) cleanup_backups ;;
+            9)
                 tui_enabled && clear
                 exit 0 
                 ;;
