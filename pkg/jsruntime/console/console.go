@@ -5,6 +5,7 @@ package console
 // substitutions. assert(false, ...) and trace() include a stack trace.
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -121,9 +122,25 @@ func formatConsoleValues(values []goja.Value) string {
 	}
 	parts := make([]string, 0, len(args))
 	for _, arg := range args {
-		parts = append(parts, fmt.Sprint(arg))
+		parts = append(parts, formatConsoleValue(arg))
 	}
 	return strings.Join(parts, " ")
+}
+
+func formatConsoleValue(value any) string {
+	switch value := value.(type) {
+	case nil:
+		return "null"
+	case string:
+		return value
+	case error:
+		return value.Error()
+	}
+
+	if data, err := json.Marshal(value); err == nil {
+		return string(data)
+	}
+	return fmt.Sprint(value)
 }
 
 func formatConsoleString(format string, args []any) string {
@@ -154,7 +171,7 @@ func formatConsoleString(format string, args []any) string {
 		argIndex++
 		switch format[i] {
 		case 's', 'o', 'O':
-			builder.WriteString(fmt.Sprint(arg))
+			builder.WriteString(formatConsoleValue(arg))
 		case 'd', 'i':
 			builder.WriteString(fmt.Sprintf("%d", toConsoleInteger(arg)))
 		case 'f':
@@ -168,7 +185,7 @@ func formatConsoleString(format string, args []any) string {
 	if argIndex < len(args) {
 		remaining := make([]string, 0, len(args)-argIndex)
 		for _, arg := range args[argIndex:] {
-			remaining = append(remaining, fmt.Sprint(arg))
+			remaining = append(remaining, formatConsoleValue(arg))
 		}
 		if builder.Len() > 0 {
 			builder.WriteByte(' ')
