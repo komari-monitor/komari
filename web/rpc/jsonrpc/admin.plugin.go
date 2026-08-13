@@ -113,5 +113,8 @@ func adminSetPluginConfiguration(_ context.Context, req *rpc.JsonRpcRequest) (an
 	if err := plugin.SaveConfiguration(short, data); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	if err := plugin.Reload(short); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "plugin configuration saved but reload failed: "+err.Error(), nil)
+	}
 	return nil, nil
 }

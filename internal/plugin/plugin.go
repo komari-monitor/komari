@@ -153,6 +153,13 @@ func SetEnabled(short string, enabled, approved bool) error {
 	return global.setEnabled(short, enabled, approved)
 }
 
+// Reload unloads and loads an enabled plugin. The load hook completes before
+// this function returns; a failed load is persisted as the plugin's last
+// error and disables the plugin, matching the normal enable/startup path.
+func Reload(short string) error {
+	return global.reload(short)
+}
+
 // CloseAll unloads every loaded plugin. Used during server shutdown.
 func CloseAll() error {
 	return global.closeAll()
@@ -519,6 +526,16 @@ func (m *Manager) restartPlugin(short string) error {
 	st.LastError = ""
 	m.stateStore().set(short, st)
 	return nil
+}
+
+func (m *Manager) reload(short string) error {
+	if !m.stateStore().get(short).Enabled {
+		return nil
+	}
+	if err := m.unload(short); err != nil && !errors.Is(err, errNotLoaded) {
+		return err
+	}
+	return m.restartPlugin(short)
 }
 
 // disableWithError persists the auto-disable state for one plugin and wraps

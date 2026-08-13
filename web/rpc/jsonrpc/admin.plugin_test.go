@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/komari-monitor/komari/cmd/flags"
@@ -90,6 +91,35 @@ func TestAdminPluginConfigurationRoundTrip(t *testing.T) {
 	data, ok := result.(map[string]any)["data"].(map[string]any)
 	if !ok || data["greeting"] != "saved" {
 		t.Fatalf("data = %v", result)
+	}
+}
+
+func TestAdminPluginConfigurationKeepsSavedDataWhenReloadFails(t *testing.T) {
+	withTempPluginDir(t)
+	installTestPlugin(t, `{"name":"Cfg","short":"cfg","version":"1.0.0","configuration":{"type":"managed","data":[{"key":"greeting","name":"Greeting","type":"string","default":"hi"}]}}`, "function load() {}")
+
+	if err := plugin.SetEnabled("cfg", true, false); err != nil {
+		t.Fatalf("enable failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin.DataDir, "cfg", "script.js"), []byte(`function load() { throw new Error("reload-boom"); }`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, jerr := adminSetPluginConfiguration(nil, &rpc.JsonRpcRequest{
+		Version: rpc.RPC_VERSION,
+		Method:  "admin:setPluginConfiguration",
+		Params:  map[string]any{"short": "cfg", "data": map[string]any{"greeting": "saved-before-reload-error"}},
+	})
+	if jerr == nil || !strings.Contains(jerr.Message, "plugin configuration saved but reload failed") {
+		t.Fatalf("expected reload error after saving, got %v", jerr)
+	}
+
+	values, err := plugin.GetConfiguration("cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["greeting"] != "saved-before-reload-error" {
+		t.Fatalf("saved configuration was rolled back: %#v", values)
 	}
 }
 
