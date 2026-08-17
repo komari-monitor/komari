@@ -24,10 +24,10 @@ Komari 是一款轻量级的自托管服务器监控工具，旨在提供简单�
 
 ## 快速开始
 
-| 平台                                                                                                                                                                                                     | 介绍                                                                                                                  |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| <a href="https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_"><img src="https://rainyun-apps.cn-nb1.rains3.com/materials/deploy-on-rainyun-cn.svg" alt="Rainyun" width="180"></a>                      | 秒级部署网站、数据库及数百款热门 App，并采用按小时灵活计费。                                                          |
-| <a href="https://apps.fit2cloud.com/1panel/komari"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/1panel-logo-blue.png" alt="1Panel Appstore" width="180"></a> | 现代化、开源的Linux 服务器运维管理面板，提供网站、数据库、容器、文件、备份、安全与AI 管理能力，支持应用商店一键部署。 |
+| 平台                                                                                                                                                                                                     | 介绍                                                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| <a href="https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_"><img src="https://rainyun-apps.cn-nb1.rains3.com/materials/deploy-on-rainyun-cn.svg" alt="Rainyun" width="180"></a>                      | 秒级部署网站、数据库及数百款热门 App，并采用按小时灵活计费。[每月5元，立即部署](https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_) |
+| <a href="https://apps.fit2cloud.com/1panel/komari"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/1panel-logo-blue.png" alt="1Panel Appstore" width="180"></a> | 现代化、开源的Linux 服务器运维管理面板，提供网站、数据库、容器、文件、备份、安全与AI 管理能力，支持应用商店一键部署。                  |
 
 Docker、二进制文件、源码构建和更新说明，请参阅 [安装指南](https://www.komari.wiki/install/quick-start).
 
