@@ -93,14 +93,24 @@ func GetLatestTrafficBefore(ctx context.Context, entityIDs []string, before time
 	return result, nil
 }
 
+// maxResetAwareDelta is the largest per-sample increase accepted when a
+// counter appears to reset. A "reset" whose current value is larger than this
+// is treated as jitter of a still-huge counter, not a wrap or reboot leftover.
+const maxResetAwareDelta int64 = 64 << 30
+
 // TrafficCounterDelta returns a reset-aware increase between two cumulative
-// traffic counters. After a reset, the current counter is the new increase.
+// traffic counters. After a wrap or reboot, the current counter is the new
+// increase. A tiny dip of a TB-scale counter is not a reset: counting the
+// still-huge current value would inject a multi-terabyte spike.
 func TrafficCounterDelta(current, previous int64) int64 {
 	if current < 0 || previous < 0 {
 		return 0
 	}
 	if current >= previous {
 		return current - previous
+	}
+	if current > maxResetAwareDelta {
+		return 0
 	}
 	return current
 }
