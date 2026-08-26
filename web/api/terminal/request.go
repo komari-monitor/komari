@@ -7,10 +7,26 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/clients"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/connection"
 )
+
+func dispatchTerminalRequest(uuid, id string) bool {
+	if agent_runtime.IsV2Client(uuid) {
+		return agent_runtime.DispatchV2Event(uuid, v2.MethodAgentTerminal, v2.TerminalRequestParams{RequestID: id})
+	}
+	agent := agent_runtime.GetConnectedClients()[uuid]
+	if agent == nil {
+		return false
+	}
+	return agent.WriteJSON(gin.H{
+		"message":    "terminal",
+		"request_id": id,
+	}) == nil
+}
 
 func RequestTerminal(c *gin.Context) {
 	uuid := c.Param("uuid")
@@ -32,8 +48,33 @@ func RequestTerminal(c *gin.Context) {
 	if err != nil {
 		return
 	}
+
+	id := c.Query("request_id")
+	if id != "" {
+		session, ok := attachBrowser(id, conn)
+		if !ok || session.UUID != uuid {
+			conn.WriteMessage(1, []byte("Terminal session expired\n终端会话已过期\n"))
+			conn.Close()
+			return
+		}
+		conn.SetCloseHandler(func(code int, text string) error {
+			logger.InfoArgs("terminal", "Terminal browser connection closed:", code, text)
+			suspendSession(id, conn, nil)
+			return nil
+		})
+		conn.WriteJSON(gin.H{"request_id": id})
+		if !dispatchTerminalRequest(uuid, id) {
+			conn.WriteMessage(1, []byte("Client offline!\n被控端离线!\n"))
+			closeSession(id)
+			return
+		}
+		conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent...\n"))
+		maybeStartForwarding(id)
+		return
+	}
+
 	// 新建一个终端连接
-	id := utils.GenerateRandomString(32)
+	id = utils.GenerateRandomString(32)
 	session := &TerminalSession{
 		UserUUID:    user_uuid.(string),
 		UUID:        uuid,
@@ -46,49 +87,31 @@ func RequestTerminal(c *gin.Context) {
 	TerminalSessions[id] = session
 	TerminalSessionsMutex.Unlock()
 	conn.SetCloseHandler(func(code int, text string) error {
-		logger.InfoArgs("terminal", "Terminal connection closed:", code, text)
-		TerminalSessionsMutex.Lock()
-		delete(TerminalSessions, id)
-		TerminalSessionsMutex.Unlock()
-		// 通知 Agent 关闭终端连接
-		if session.Agent != nil {
-			session.Agent.Close()
-		}
+		logger.InfoArgs("terminal", "Terminal browser connection closed:", code, text)
+		suspendSession(id, conn, nil)
 		return nil
 	})
-
-	if agent_runtime.GetConnectedClients()[uuid] == nil {
-		conn.WriteMessage(1, []byte("Client offline!\n被控端离线!\n"))
+	conn.WriteJSON(gin.H{"request_id": id})
+	if !dispatchTerminalRequest(uuid, id) {
 		conn.Close()
-		TerminalSessionsMutex.Lock()
-		delete(TerminalSessions, id)
-		TerminalSessionsMutex.Unlock()
-		return
-	}
-	err = agent_runtime.GetConnectedClients()[uuid].WriteJSON(gin.H{
-		"message":    "terminal",
-		"request_id": id,
-	})
-	if err != nil {
-		conn.Close()
-		TerminalSessionsMutex.Lock()
-		delete(TerminalSessions, id)
-		TerminalSessionsMutex.Unlock()
+		closeSession(id)
 		return
 	}
 	conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent...\n"))
 	// 如果没有连接上，则关闭连接
 	time.AfterFunc(30*time.Second, func() {
+		var expired *connection.SafeConn
 		TerminalSessionsMutex.Lock()
-		if session.Agent == nil {
-			if session.Browser != nil {
-				session.Browser.WriteMessage(1, []byte("被控端连接超时 timeout\n"))
-				session.Browser.Close()
-			}
-			conn.Close()
+		if current, ok := TerminalSessions[id]; ok && current == session && current.Agent == nil {
+			expired = current.Browser
+			stopCleanup(session)
 			delete(TerminalSessions, id)
 		}
 		TerminalSessionsMutex.Unlock()
+		if expired != nil {
+			expired.WriteMessage(1, []byte("被控端连接超时 timeout\n"))
+			expired.Close()
+		}
 	})
 	//auditlog.Log(c.ClientIP(), user_uuid.(string), "request, terminal id:"+id+",client:"+session.UUID, "terminal")
 }

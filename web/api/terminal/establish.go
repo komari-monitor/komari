@@ -9,8 +9,13 @@ import (
 
 func EstablishConnection(c *gin.Context) {
 	session_id := c.Query("id")
+	TerminalSessionsMutex.Lock()
 	session, exists := TerminalSessions[session_id]
-	if !exists || session == nil || session.Browser == nil {
+	TerminalSessionsMutex.Unlock()
+	authenticatedUUID, _ := c.Get("client_uuid")
+	authenticatedString, hasAuthenticatedUUID := authenticatedUUID.(string)
+	if !exists || session == nil || session.Browser == nil ||
+		(hasAuthenticatedUUID && authenticatedString != "" && authenticatedString != session.UUID) {
 		c.JSON(404, gin.H{"status": "error", "error": "Session not found"})
 		return
 	}
@@ -21,22 +26,17 @@ func EstablishConnection(c *gin.Context) {
 	}
 	conn, err := api.UpgradeSafeConn(c)
 	if err != nil {
-		TerminalSessionsMutex.Lock()
-		if session.Browser != nil {
-			session.Browser.Close()
-		}
-		delete(TerminalSessions, session_id)
-		TerminalSessionsMutex.Unlock()
+		closeSession(session_id)
 		return
 	}
-	session.Agent = conn
+	_, ok := attachAgent(session_id, conn)
+	if !ok {
+		conn.Close()
+		return
+	}
 	conn.SetCloseHandler(func(code int, text string) error {
-		delete(TerminalSessions, session_id)
-		// 通知 Browser 关闭终端连接
-		if session.Browser != nil {
-			session.Browser.Close()
-		}
+		suspendSession(session_id, nil, conn)
 		return nil
 	})
-	go ForwardTerminal(session_id)
+	maybeStartForwarding(session_id)
 }

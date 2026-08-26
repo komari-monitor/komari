@@ -1,39 +1,64 @@
 package terminal
 
 import (
+	"encoding/json"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/web/connection"
 )
 
-func ForwardTerminal(id string) {
-	session, exists := TerminalSessions[id]
-
-	if !exists || session == nil || session.Agent == nil || session.Browser == nil {
+func ForwardTerminal(id string, browser, agent *connection.SafeConn) {
+	if browser == nil || agent == nil {
 		return
 	}
-	auditlog.Log(session.RequesterIp, session.UserUUID, "established, terminal id:"+id, "terminal")
+	TerminalSessionsMutex.Lock()
+	session := TerminalSessions[id]
+	requesterIp, userUUID := "", ""
+	if session != nil && session.Browser == browser && session.Agent == agent {
+		requesterIp, userUUID = session.RequesterIp, session.UserUUID
+	}
+	TerminalSessionsMutex.Unlock()
+	if requesterIp == "" {
+		return
+	}
+
+	auditlog.Log(requesterIp, userUUID, "established, terminal id:"+id, "terminal")
 	established_time := time.Now()
 	errChan := make(chan error, 1)
 
 	go func() {
 		for {
-			messageType, data, err := session.Browser.ReadMessage()
+			messageType, data, err := browser.ReadMessage()
 			if err != nil {
 				errChan <- err
 				return
 			}
 
 			if messageType == websocket.TextMessage {
-				if session.Agent != nil && string(data[0:1]) == "{" {
-					err = session.Agent.WriteMessage(websocket.TextMessage, data)
-				} else if session.Agent != nil {
-					err = session.Agent.WriteMessage(websocket.BinaryMessage, data)
+				var control struct {
+					Type string `json:"type"`
 				}
-			} else if session.Agent != nil {
-				// 二进制消息，原样传递
-				err = session.Agent.WriteMessage(websocket.BinaryMessage, data)
+				if json.Unmarshal(data, &control) == nil {
+					if control.Type == "heartbeat" {
+						continue
+					}
+					if control.Type == "close" {
+						_ = agent.WriteJSON(gin.H{"type": "close"})
+						closeSession(id)
+						errChan <- nil
+						return
+					}
+				}
+				if len(data) > 0 && data[0] == '{' {
+					err = agent.WriteMessage(websocket.TextMessage, data)
+				} else {
+					err = agent.WriteMessage(websocket.BinaryMessage, data)
+				}
+			} else {
+				err = agent.WriteMessage(websocket.BinaryMessage, data)
 			}
 
 			if err != nil {
@@ -45,33 +70,22 @@ func ForwardTerminal(id string) {
 
 	go func() {
 		for {
-			_, data, err := session.Agent.ReadMessage()
+			_, data, err := agent.ReadMessage()
 			if err != nil {
 				errChan <- err
 				return
 			}
-			if session.Browser != nil {
-				err = session.Browser.WriteMessage(websocket.BinaryMessage, data)
-				if err != nil {
-					errChan <- err
-					return
-				}
+			err = browser.WriteMessage(websocket.BinaryMessage, data)
+			if err != nil {
+				errChan <- err
+				return
 			}
 		}
 	}()
 
 	// 等待错误或主动关闭
 	<-errChan
-	// 关闭连接
-	if session.Agent != nil {
-		session.Agent.Close()
-	}
-	if session.Browser != nil {
-		session.Browser.Close()
-	}
+	suspendSession(id, browser, agent)
 	disconnect_time := time.Now()
-	auditlog.Log(session.RequesterIp, session.UserUUID, "disconnected, terminal id:"+id+", duration:"+disconnect_time.Sub(established_time).String(), "terminal")
-	TerminalSessionsMutex.Lock()
-	delete(TerminalSessions, id)
-	TerminalSessionsMutex.Unlock()
+	auditlog.Log(requesterIp, userUUID, "disconnected, terminal id:"+id+", duration:"+disconnect_time.Sub(established_time).String(), "terminal")
 }
