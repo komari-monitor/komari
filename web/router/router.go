@@ -41,6 +41,7 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/api/plugin/:short/*filepath", public_api.ServePluginFile)
 	// 短期文件预览令牌公开下载入口，供 Office 在线预览等服务端抓取。
 	r.GET("/api/preview/client/:uuid/file/download", filemanager.PreviewDownload)
+	r.HEAD("/api/preview/client/:uuid/file/download", filemanager.PreviewDownload)
 	// /api/clients 是 WebSocket 端点（客户端发 "get"/"get <uuid>" 拉取在线列表与最新上报），
 	// 非 JSON-RPC，保留为 WS handler。
 	r.GET("/api/clients", api.GetClients)
@@ -185,6 +186,7 @@ func registerAdminRoutes(r *gin.Engine) {
 		clientGroup.GET("/:uuid/terminal", terminal.RequestTerminal)
 		clientGroup.POST("/:uuid/file/upload", filemanager.Upload)
 		clientGroup.GET("/:uuid/file/download", filemanager.Download)
+		clientGroup.HEAD("/:uuid/file/download", filemanager.Download)
 		clientGroup.GET("/:uuid/file/preview-token", filemanager.CreatePreviewToken)
 	}
 

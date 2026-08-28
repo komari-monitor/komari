@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,12 +25,16 @@ import (
 )
 
 const (
-	TransferChunkSize    int64 = 6 * 1024 * 1024
-	MaxTransferChunkSize int64 = 128 * 1024 * 1024
-	MaxTransferSize      int64 = 8 * 1024 * 1024 * 1024
-	uploadSessionTTL           = 15 * time.Minute
-	previewTokenTTL            = 10 * time.Minute
-	maxConcurrentUploads       = 4
+	DefaultTransferChunkSize int64 = 6 * 1024 * 1024
+	MaxTransferChunkSize     int64 = 128 * 1024 * 1024
+	MaxUploadSize            int64 = 8 * 1024 * 1024 * 1024
+	minDownloadChunkSize     int64 = 1 * 1024 * 1024
+	maxDownloadPrefetch      int   = 5
+	downloadMemoryBudget     int64 = 512 * 1024 * 1024
+	downloadMemoryReserve    int64 = 64 * 1024 * 1024
+	uploadSessionTTL               = 15 * time.Minute
+	previewTokenTTL                = 10 * time.Minute
+	maxConcurrentUploads           = 4
 )
 
 var ErrTooManyUploads = errors.New("too many concurrent uploads")
@@ -52,12 +58,14 @@ type previewToken struct {
 }
 
 var (
-	uploadMu       sync.Mutex
-	uploadSessions = make(map[string]*uploadSession)
-	uploadSlots    = make(chan struct{}, maxConcurrentUploads)
-	cleanupOnce    sync.Once
-	previewTokenMu sync.Mutex
-	previewTokens  = make(map[string]previewToken)
+	uploadMu               sync.Mutex
+	uploadSessions         = make(map[string]*uploadSession)
+	uploadSlots            = make(chan struct{}, maxConcurrentUploads)
+	cleanupOnce            sync.Once
+	previewTokenMu         sync.Mutex
+	previewTokens          = make(map[string]previewToken)
+	downloadMemoryMu       sync.Mutex
+	downloadMemoryReserved int64
 )
 
 type persistedUploadSession struct {
@@ -111,13 +119,13 @@ func initRemoteUpload(c *gin.Context, clientUUID string) {
 		api.RespondError(c, http.StatusBadRequest, "path is required")
 		return
 	}
-	if request.Size < 0 || request.Size > MaxTransferSize {
-		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("size must be between 0 and %d bytes", MaxTransferSize))
+	if request.Size < 0 || request.Size > MaxUploadSize {
+		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("size must be between 0 and %d bytes", MaxUploadSize))
 		return
 	}
 	chunkSize := request.ChunkSize
 	if chunkSize == 0 {
-		chunkSize = TransferChunkSize
+		chunkSize = DefaultTransferChunkSize
 	}
 	if chunkSize <= 0 || chunkSize > MaxTransferChunkSize {
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("chunk_size must be between 1 and %d bytes", MaxTransferChunkSize))
@@ -178,7 +186,7 @@ func uploadRemoteChunk(c *gin.Context, clientUUID string) {
 	session.mu.Lock()
 	chunkSize := session.ChunkSize
 	if chunkSize <= 0 {
-		chunkSize = TransferChunkSize
+		chunkSize = DefaultTransferChunkSize
 	}
 	if chunkSize > MaxTransferChunkSize {
 		session.mu.Unlock()
@@ -256,7 +264,7 @@ func mergeRemoteUpload(c *gin.Context, clientUUID string) {
 	defer session.mu.Unlock()
 	chunkSize := session.ChunkSize
 	if chunkSize <= 0 {
-		chunkSize = TransferChunkSize
+		chunkSize = DefaultTransferChunkSize
 	}
 	_, err = Call(c.Request.Context(), clientUUID, "upload_chunk", map[string]any{
 		"path":        session.Path,
@@ -337,16 +345,20 @@ func Download(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "uuid and path are required")
 		return
 	}
+	downloadFile(c, clientUUID, path)
+}
 
+func downloadFile(c *gin.Context, clientUUID, path string) {
 	raw, err := Call(c.Request.Context(), clientUUID, "stat", map[string]any{"path": path}, "", CallOptions{Timeout: 60 * time.Second})
 	if err != nil {
 		respondTransferError(c, err)
 		return
 	}
 	var info struct {
-		Name  string `json:"name"`
-		Size  int64  `json:"size"`
-		IsDir bool   `json:"is_dir"`
+		Name       string    `json:"name"`
+		Size       int64     `json:"size"`
+		IsDir      bool      `json:"is_dir"`
+		ModifiedAt time.Time `json:"modified_at"`
 	}
 	if err := json.Unmarshal(raw, &info); err != nil {
 		api.RespondError(c, http.StatusBadGateway, "invalid file metadata from agent")
@@ -356,13 +368,14 @@ func Download(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "cannot download a directory")
 		return
 	}
-	if info.Size < 0 || info.Size > MaxTransferSize {
-		api.RespondError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("file exceeds %d bytes", MaxTransferSize))
+	if info.Size < 0 {
+		api.RespondError(c, http.StatusBadGateway, "invalid negative file size from agent")
 		return
 	}
+	etag := fmt.Sprintf("\"%x-%x\"", info.Size, info.ModifiedAt.UnixNano())
 	start, end := int64(0), info.Size-1
 	partial := false
-	if rangeHeader := strings.TrimSpace(c.GetHeader("Range")); rangeHeader != "" {
+	if rangeHeader := strings.TrimSpace(c.GetHeader("Range")); rangeHeader != "" && ifRangeAllowsRange(c.GetHeader("If-Range"), etag, info.ModifiedAt) {
 		var ok bool
 		start, end, ok = parseSingleByteRange(rangeHeader, info.Size)
 		if !ok {
@@ -389,52 +402,316 @@ func Download(c *gin.Context) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	c.Header("Content-Type", contentType)
-	c.Header("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": name}))
-	c.Header("Accept-Ranges", "bytes")
-	c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
-	c.Header("Cache-Control", "no-store")
-	if partial {
-		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, info.Size))
-		c.Status(http.StatusPartialContent)
-	} else {
-		c.Status(http.StatusOK)
+	setHeaders := func() {
+		c.Header("Content-Type", contentType)
+		c.Header("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": name}))
+		c.Header("Accept-Ranges", "bytes")
+		c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
+		c.Header("Cache-Control", "no-store")
+		c.Header("ETag", etag)
+		if !info.ModifiedAt.IsZero() {
+			c.Header("Last-Modified", info.ModifiedAt.UTC().Format(http.TimeFormat))
+		}
+		if partial {
+			c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, info.Size))
+			c.Status(http.StatusPartialContent)
+		} else {
+			c.Status(http.StatusOK)
+		}
+	}
+	if c.Request.Method == http.MethodHead || contentLength == 0 {
+		setHeaders()
+		auditFileTransfer(c, "download", clientUUID, path)
+		return
 	}
 
-	for offset := start; offset <= end; {
-		length := min(TransferChunkSize, end-offset+1)
-		chunkRaw, callErr := Call(c.Request.Context(), clientUUID, "read_chunk", map[string]any{
-			"path":   path,
-			"offset": offset,
-			"length": length,
+	var session struct {
+		DownloadID string `json:"download_id"`
+		Size       int64  `json:"size"`
+		ChunkSize  int64  `json:"chunk_size"`
+		ChunkCount int64  `json:"chunk_count"`
+	}
+	initRaw, initErr := Call(c.Request.Context(), clientUUID, "download_init", map[string]any{
+		"path":       path,
+		"offset":     start,
+		"size":       contentLength,
+		"chunk_size": DefaultTransferChunkSize,
+	}, "", CallOptions{Timeout: 60 * time.Second})
+	if initErr != nil {
+		respondTransferError(c, initErr)
+		return
+	}
+	if err := json.Unmarshal(initRaw, &session); err != nil || session.DownloadID == "" || session.Size != contentLength || session.ChunkSize <= 0 || session.ChunkSize > MaxTransferChunkSize || session.ChunkCount <= 0 {
+		respondTransferError(c, errors.New("invalid download session from agent"))
+		return
+	}
+
+	finished := false
+	defer func() {
+		operation := "download_cancel"
+		if finished {
+			operation = "download_finish"
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _ = Call(cleanupCtx, clientUUID, operation, map[string]any{"download_id": session.DownloadID}, "", CallOptions{Timeout: 30 * time.Second})
+	}()
+
+	setHeaders()
+	if err := streamDownload(c, clientUUID, session.DownloadID, start, session.Size, session.ChunkSize); err != nil {
+		return
+	}
+	finished = true
+	auditFileTransfer(c, "download", clientUUID, path)
+}
+
+type downloadChunkResult struct {
+	Index    int64
+	Offset   int64
+	Read     int64
+	Data     []byte
+	Reserved int64
+	Err      error
+}
+
+func fetchDownloadChunk(ctx context.Context, clientUUID, downloadID string, index, offset, length, reserved int64) <-chan downloadChunkResult {
+	result := make(chan downloadChunkResult, 1)
+	go func() {
+		chunkRaw, callErr := Call(ctx, clientUUID, "download_chunk", map[string]any{
+			"download_id": downloadID,
+			"chunk_index": index,
+			"offset":      offset,
+			"length":      length,
 		}, "", CallOptions{Timeout: 90 * time.Second})
 		if callErr != nil {
-			_ = c.Error(callErr)
+			result <- downloadChunkResult{Reserved: reserved, Err: callErr}
 			return
 		}
 		var chunk struct {
 			Data   string `json:"data"`
-			Read   int64  `json:"read"`
+			Index  int64  `json:"chunk_index"`
 			Offset int64  `json:"offset"`
+			Read   int64  `json:"read"`
 		}
-		if err := json.Unmarshal(chunkRaw, &chunk); err != nil || chunk.Read <= 0 || chunk.Read > length || chunk.Offset != offset {
-			_ = c.Error(errors.New("invalid download chunk from agent"))
+		if err := json.Unmarshal(chunkRaw, &chunk); err != nil {
+			result <- downloadChunkResult{Reserved: reserved, Err: errors.New("invalid download chunk from agent")}
 			return
 		}
 		data, decodeErr := base64.StdEncoding.DecodeString(chunk.Data)
 		if decodeErr != nil || int64(len(data)) != chunk.Read {
-			_ = c.Error(errors.New("invalid encoded download chunk from agent"))
+			result <- downloadChunkResult{Reserved: reserved, Err: errors.New("invalid encoded download chunk from agent")}
 			return
 		}
-		if _, err := c.Writer.Write(data); err != nil {
-			return
+		result <- downloadChunkResult{Index: chunk.Index, Offset: chunk.Offset, Read: chunk.Read, Data: data, Reserved: reserved}
+	}()
+	return result
+}
+
+type pendingDownloadChunk struct {
+	index    int64
+	offset   int64
+	length   int64
+	reserved int64
+	result   <-chan downloadChunkResult
+}
+
+func streamDownload(c *gin.Context, clientUUID, downloadID string, start, size, chunkSize int64) error {
+	end := start + size
+	offset := start
+	index := int64(0)
+	for offset < end {
+		chunkSize = fitDownloadChunkSize(chunkSize, end-offset)
+		windowSize := downloadPrefetchWindow(chunkSize, end-offset)
+		pending := make([]pendingDownloadChunk, 0, windowSize)
+		nextOffset := offset
+		for len(pending) < windowSize && nextOffset < end {
+			length := min(chunkSize, end-nextOffset)
+			reserved := max(int64(1), length*2)
+			if !reserveDownloadMemory(reserved) {
+				if len(pending) > 0 {
+					break
+				}
+				reserved = 0
+			}
+			pending = append(pending, pendingDownloadChunk{
+				index:    index,
+				offset:   nextOffset,
+				length:   length,
+				reserved: reserved,
+				result:   fetchDownloadChunk(c.Request.Context(), clientUUID, downloadID, index, nextOffset, length, reserved),
+			})
+			nextOffset += length
+			index++
 		}
-		if flusher, ok := c.Writer.(http.Flusher); ok {
-			flusher.Flush()
+
+		retryWindow := false
+		for requestIndex, request := range pending {
+			chunk := <-request.result
+			releaseDownloadMemory(request.reserved)
+			if chunk.Err != nil {
+				if isDownloadChunkTooLargeError(chunk.Err) && chunkSize > minDownloadChunkSize {
+					chunkSize = max(minDownloadChunkSize, chunkSize/2)
+					index = request.index
+					discardPendingDownloadChunks(pending[requestIndex+1:])
+					retryWindow = true
+					break
+				}
+				discardPendingDownloadChunks(pending[requestIndex+1:])
+				return chunk.Err
+			}
+			if chunk.Index != request.index || chunk.Offset != request.offset || chunk.Read != request.length || int64(len(chunk.Data)) != request.length {
+				discardPendingDownloadChunks(pending[requestIndex+1:])
+				return errors.New("invalid download chunk sequence from agent")
+			}
+			if _, err := c.Writer.Write(chunk.Data); err != nil {
+				chunk.Data = nil
+				discardPendingDownloadChunks(pending[requestIndex+1:])
+				return err
+			}
+			chunk.Data = nil
+			if flusher, ok := c.Writer.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			offset += chunk.Read
 		}
-		offset += chunk.Read
+		if retryWindow {
+			// Requests after the failed one may already be in flight. Discard
+			// their buffered results and continue from the next unwritten offset.
+			continue
+		}
+		chunkSize = growDownloadChunkSize(chunkSize, end-offset)
 	}
-	auditFileTransfer(c, "download", clientUUID, path)
+	if offset != end {
+		return errors.New("download ended before the requested range")
+	}
+	return nil
+}
+
+func downloadPrefetchWindow(chunkSize, remaining int64) int {
+	available := availableDownloadMemory()
+	if available <= 0 {
+		return 1
+	}
+	perChunk := max(int64(1), chunkSize*2)
+	window := 1 + int(available/perChunk)
+	if window > maxDownloadPrefetch {
+		window = maxDownloadPrefetch
+	}
+	remainingChunks := (remaining + chunkSize - 1) / chunkSize
+	if int64(window) > remainingChunks {
+		window = int(remainingChunks)
+	}
+	if window < 1 {
+		return 1
+	}
+	return window
+}
+
+func growDownloadChunkSize(current, remaining int64) int64 {
+	if current >= MaxTransferChunkSize || remaining <= current {
+		return min(current, remaining)
+	}
+	candidate := current + current/2
+	if candidate > MaxTransferChunkSize {
+		candidate = MaxTransferChunkSize
+	}
+	available := availableDownloadMemory()
+	if available <= 0 || candidate*2 > available {
+		return current
+	}
+	return min(candidate, remaining)
+}
+
+func fitDownloadChunkSize(current, remaining int64) int64 {
+	current = min(current, remaining)
+	available := availableDownloadMemory()
+	if available <= 0 {
+		return min(current, min(minDownloadChunkSize, remaining))
+	}
+	maxChunk := available / 2
+	if maxChunk >= minDownloadChunkSize && current > maxChunk {
+		return maxChunk
+	}
+	return current
+}
+
+func availableDownloadMemory() int64 {
+	capacity := downloadMemoryCapacity()
+	downloadMemoryMu.Lock()
+	reserved := downloadMemoryReserved
+	downloadMemoryMu.Unlock()
+	available := capacity - reserved
+	if available < 0 {
+		return 0
+	}
+	return available
+}
+
+func downloadMemoryCapacity() int64 {
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	budget := downloadMemoryBudget
+	if limit := debug.SetMemoryLimit(-1); limit > 0 && limit < budget {
+		budget = limit
+	}
+	return budget - int64(stats.Alloc) - downloadMemoryReserve
+}
+
+func reserveDownloadMemory(bytes int64) bool {
+	if bytes <= 0 {
+		return true
+	}
+	capacity := downloadMemoryCapacity()
+	downloadMemoryMu.Lock()
+	defer downloadMemoryMu.Unlock()
+	if capacity-downloadMemoryReserved < bytes {
+		return false
+	}
+	downloadMemoryReserved += bytes
+	return true
+}
+
+func releaseDownloadMemory(bytes int64) {
+	if bytes <= 0 {
+		return
+	}
+	downloadMemoryMu.Lock()
+	downloadMemoryReserved -= bytes
+	if downloadMemoryReserved < 0 {
+		downloadMemoryReserved = 0
+	}
+	downloadMemoryMu.Unlock()
+}
+
+func discardPendingDownloadChunks(pending []pendingDownloadChunk) {
+	for _, request := range pending {
+		go func(request pendingDownloadChunk) {
+			<-request.result
+			releaseDownloadMemory(request.reserved)
+		}(request)
+	}
+}
+
+func isDownloadChunkTooLargeError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "413") ||
+		strings.Contains(message, "too large") ||
+		strings.Contains(message, "request entity") ||
+		strings.Contains(message, "payload")
+}
+
+func ifRangeAllowsRange(value, etag string, modifiedAt time.Time) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	if value == etag {
+		return true
+	}
+	if timestamp, err := http.ParseTime(value); err == nil && !modifiedAt.IsZero() {
+		return !modifiedAt.UTC().Truncate(time.Second).After(timestamp)
+	}
+	return false
 }
 
 func parseSingleByteRange(value string, size int64) (int64, int64, bool) {
@@ -507,16 +784,15 @@ func CreatePreviewToken(c *gin.Context) {
 
 func PreviewDownload(c *gin.Context) {
 	clientUUID := c.Param("uuid")
-	path := strings.TrimSpace(c.Query("path"))
 	token := strings.TrimSpace(c.Query("preview_token"))
-	if clientUUID == "" || path == "" || token == "" {
-		api.RespondError(c, http.StatusBadRequest, "uuid, path and preview_token are required")
+	if clientUUID == "" || token == "" {
+		api.RespondError(c, http.StatusBadRequest, "uuid and preview_token are required")
 		return
 	}
 
 	previewTokenMu.Lock()
 	item, ok := previewTokens[token]
-	if ok && (item.ClientUUID != clientUUID || item.Path != path || time.Now().After(item.ExpiresAt)) {
+	if ok && (item.ClientUUID != clientUUID || time.Now().After(item.ExpiresAt)) {
 		delete(previewTokens, token)
 		ok = false
 	}
@@ -526,7 +802,9 @@ func PreviewDownload(c *gin.Context) {
 		api.RespondError(c, http.StatusUnauthorized, "Invalid or expired preview token")
 		return
 	}
-	Download(c)
+	// The token is bound to the exact path. Keeping the path out of the public
+	// URL avoids nested URL encoding issues for non-ASCII filenames.
+	downloadFile(c, clientUUID, item.Path)
 }
 
 func acquireUploadSession(id, clientUUID, path string, size, offset int64) (*uploadSession, bool, error) {
@@ -544,7 +822,7 @@ func acquireUploadSession(id, clientUUID, path string, size, offset int64) (*upl
 			UUID:      clientUUID,
 			Path:      path,
 			Size:      size,
-			ChunkSize: TransferChunkSize,
+			ChunkSize: DefaultTransferChunkSize,
 			ExpiresAt: time.Now().Add(uploadSessionTTL),
 			slotHeld:  true,
 		}

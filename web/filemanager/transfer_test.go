@@ -2,7 +2,9 @@ package filemanager
 
 import (
 	"errors"
+	"net/http"
 	"testing"
+	"time"
 )
 
 func TestUploadSessionLimitAndRelease(t *testing.T) {
@@ -69,6 +71,30 @@ func TestParseSingleByteRange(t *testing.T) {
 			start, end, ok := parseSingleByteRange(test.header, test.size)
 			if ok != test.ok || (ok && (start != test.start || end != test.end)) {
 				t.Fatalf("parseSingleByteRange(%q, %d) = %d-%d, %v", test.header, test.size, start, end, ok)
+			}
+		})
+	}
+}
+
+func TestIfRangeAllowsRange(t *testing.T) {
+	modifiedAt := time.Date(2026, time.August, 28, 12, 0, 0, 123456789, time.UTC)
+	etag := `"100-200"`
+	date := modifiedAt.Format(http.TimeFormat)
+
+	for _, test := range []struct {
+		name  string
+		value string
+		allow bool
+	}{
+		{name: "missing", value: "", allow: true},
+		{name: "matching etag", value: etag, allow: true},
+		{name: "matching date", value: date, allow: true},
+		{name: "stale date", value: modifiedAt.Add(-time.Minute).Format(http.TimeFormat), allow: false},
+		{name: "invalid", value: "not-a-validator", allow: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ifRangeAllowsRange(test.value, etag, modifiedAt); got != test.allow {
+				t.Fatalf("ifRangeAllowsRange(%q) = %v, want %v", test.value, got, test.allow)
 			}
 		})
 	}
