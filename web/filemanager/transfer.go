@@ -23,7 +23,8 @@ import (
 )
 
 const (
-	TransferChunkSize    int64 = 2 * 1024 * 1024
+	TransferChunkSize    int64 = 6 * 1024 * 1024
+	MaxTransferChunkSize int64 = 128 * 1024 * 1024
 	MaxTransferSize      int64 = 8 * 1024 * 1024 * 1024
 	uploadSessionTTL           = 15 * time.Minute
 	previewTokenTTL            = 10 * time.Minute
@@ -38,6 +39,7 @@ type uploadSession struct {
 	UUID       string
 	Path       string
 	Size       int64
+	ChunkSize  int64
 	NextOffset int64
 	ExpiresAt  time.Time
 	slotHeld   bool
@@ -63,6 +65,7 @@ type persistedUploadSession struct {
 	UUID       string    `json:"uuid"`
 	Path       string    `json:"path"`
 	Size       int64     `json:"size"`
+	ChunkSize  int64     `json:"chunk_size"`
 	NextOffset int64     `json:"next_offset"`
 	ExpiresAt  time.Time `json:"expires_at"`
 }
@@ -95,8 +98,9 @@ func Upload(c *gin.Context) {
 
 func initRemoteUpload(c *gin.Context, clientUUID string) {
 	var request struct {
-		Path string `json:"path" binding:"required"`
-		Size int64  `json:"size"`
+		Path      string `json:"path" binding:"required"`
+		Size      int64  `json:"size"`
+		ChunkSize int64  `json:"chunk_size"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
@@ -111,6 +115,14 @@ func initRemoteUpload(c *gin.Context, clientUUID string) {
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("size must be between 0 and %d bytes", MaxTransferSize))
 		return
 	}
+	chunkSize := request.ChunkSize
+	if chunkSize == 0 {
+		chunkSize = TransferChunkSize
+	}
+	if chunkSize <= 0 || chunkSize > MaxTransferChunkSize {
+		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("chunk_size must be between 1 and %d bytes", MaxTransferChunkSize))
+		return
+	}
 	if request.Size == 0 {
 		_, err := Call(c.Request.Context(), clientUUID, "write", map[string]any{
 			"path": request.Path,
@@ -120,7 +132,7 @@ func initRemoteUpload(c *gin.Context, clientUUID string) {
 			return
 		}
 		auditFileTransfer(c, "upload", clientUUID, request.Path)
-		api.RespondSuccess(c, gin.H{"complete": true, "chunk_size": TransferChunkSize})
+		api.RespondSuccess(c, gin.H{"complete": true, "chunk_size": chunkSize})
 		return
 	}
 
@@ -129,10 +141,14 @@ func initRemoteUpload(c *gin.Context, clientUUID string) {
 		respondTransferError(c, err)
 		return
 	}
+	session.mu.Lock()
+	session.ChunkSize = chunkSize
+	saveUploadSession(session)
+	session.mu.Unlock()
 	api.RespondSuccess(c, gin.H{
 		"upload_id":        session.ID,
-		"chunk_size":       TransferChunkSize,
-		"chunk_count":      uploadChunkCount(request.Size, TransferChunkSize),
+		"chunk_size":       chunkSize,
+		"chunk_count":      uploadChunkCount(request.Size, chunkSize),
 		"next_offset":      0,
 		"next_chunk_index": 0,
 		"complete":         false,
@@ -140,7 +156,7 @@ func initRemoteUpload(c *gin.Context, clientUUID string) {
 }
 
 func uploadRemoteChunk(c *gin.Context, clientUUID string) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, TransferChunkSize+(1<<20))
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxTransferChunkSize+(1<<20))
 	uploadID := strings.TrimSpace(c.PostForm("upload_id"))
 	index, err := strconv.ParseInt(c.PostForm("chunk_index"), 10, 64)
 	if err != nil {
@@ -160,7 +176,16 @@ func uploadRemoteChunk(c *gin.Context, clientUUID string) {
 		return
 	}
 	session.mu.Lock()
-	if index < 0 || index >= uploadChunkCount(session.Size, TransferChunkSize) {
+	chunkSize := session.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = TransferChunkSize
+	}
+	if chunkSize > MaxTransferChunkSize {
+		session.mu.Unlock()
+		api.RespondError(c, http.StatusBadRequest, "upload session chunk size exceeds the maximum")
+		return
+	}
+	if index < 0 || index >= uploadChunkCount(session.Size, chunkSize) {
 		session.mu.Unlock()
 		api.RespondError(c, http.StatusBadRequest, "invalid chunk index")
 		return
@@ -171,13 +196,13 @@ func uploadRemoteChunk(c *gin.Context, clientUUID string) {
 	sessionID := session.ID
 	session.mu.Unlock()
 
-	offset := index * TransferChunkSize
-	content, err := io.ReadAll(io.LimitReader(chunk, TransferChunkSize+1))
+	offset := index * chunkSize
+	content, err := io.ReadAll(io.LimitReader(chunk, chunkSize+1))
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "failed to read upload chunk")
 		return
 	}
-	expectedSize := min(TransferChunkSize, sessionSize-offset)
+	expectedSize := min(chunkSize, sessionSize-offset)
 	if int64(len(content)) != expectedSize {
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("chunk %d has size %d, want %d", index, len(content), expectedSize))
 		return
@@ -187,8 +212,9 @@ func uploadRemoteChunk(c *gin.Context, clientUUID string) {
 		"path":        targetPath,
 		"offset":      offset,
 		"chunk_index": index,
-		"chunk_count": uploadChunkCount(session.Size, TransferChunkSize),
+		"chunk_count": uploadChunkCount(session.Size, chunkSize),
 		"total_size":  sessionSize,
+		"chunk_size":  chunkSize,
 		"upload_id":   sessionID,
 		"first":       index == 0,
 		"final":       false,
@@ -228,12 +254,17 @@ func mergeRemoteUpload(c *gin.Context, clientUUID string) {
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	chunkSize := session.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = TransferChunkSize
+	}
 	_, err = Call(c.Request.Context(), clientUUID, "upload_chunk", map[string]any{
 		"path":        session.Path,
 		"upload_id":   session.ID,
-		"chunk_index": uploadChunkCount(session.Size, TransferChunkSize),
-		"chunk_count": uploadChunkCount(session.Size, TransferChunkSize),
+		"chunk_index": uploadChunkCount(session.Size, chunkSize),
+		"chunk_count": uploadChunkCount(session.Size, chunkSize),
 		"total_size":  session.Size,
+		"chunk_size":  chunkSize,
 		"offset":      session.Size,
 		"first":       false,
 		"final":       true,
@@ -513,6 +544,7 @@ func acquireUploadSession(id, clientUUID, path string, size, offset int64) (*upl
 			UUID:      clientUUID,
 			Path:      path,
 			Size:      size,
+			ChunkSize: TransferChunkSize,
 			ExpiresAt: time.Now().Add(uploadSessionTTL),
 			slotHeld:  true,
 		}
@@ -641,6 +673,7 @@ func saveUploadSession(session *uploadSession) {
 		UUID:       session.UUID,
 		Path:       session.Path,
 		Size:       session.Size,
+		ChunkSize:  session.ChunkSize,
 		NextOffset: session.NextOffset,
 		ExpiresAt:  session.ExpiresAt,
 	})
@@ -695,6 +728,7 @@ func restoreUploadSession(id string) *uploadSession {
 		UUID:       restored.UUID,
 		Path:       restored.Path,
 		Size:       restored.Size,
+		ChunkSize:  restored.ChunkSize,
 		NextOffset: restored.NextOffset,
 		ExpiresAt:  restored.ExpiresAt,
 	}
