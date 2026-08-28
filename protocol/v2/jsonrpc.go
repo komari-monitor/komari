@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"encoding/json"
 	"time"
 
 	v1 "github.com/komari-monitor/komari/protocol/v1"
@@ -18,6 +19,8 @@ const (
 	MethodAgentEvent      = "agent.event"
 	MethodAgentTerminal   = "agent.terminal.request"
 	MethodAgentPull       = "agent.pull"
+	MethodAgentFile       = "agent.file"
+	MethodAgentFileResult = "agent.file.result"
 )
 
 type Request struct {
@@ -94,6 +97,22 @@ type EventParams struct {
 
 type TerminalRequestParams struct {
 	RequestID string `json:"request_id"`
+}
+
+type FileOperation struct {
+	UUID      string         `json:"uuid"`
+	RequestID string         `json:"request_id"`
+	Op        string         `json:"op"`
+	Args      map[string]any `json:"args,omitempty"`
+	Data      string         `json:"data,omitempty"`
+}
+
+type FileResult struct {
+	UUID      string          `json:"uuid"`
+	RequestID string          `json:"request_id"`
+	OK        bool            `json:"ok"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     string          `json:"error,omitempty"`
 }
 
 func Success(id any, result any) Response {

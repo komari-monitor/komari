@@ -18,6 +18,7 @@ import (
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/connection"
+	"github.com/komari-monitor/komari/web/filemanager"
 )
 
 func readMaybeCompressedBody(r *http.Request) ([]byte, error) {
@@ -90,6 +91,16 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		return v2.Success(req.ID, gin.H{
 			"events": agent_runtime.WaitV2Events(uuid, params.AckEventIDs, timeout),
 		})
+	case v2.MethodAgentFileResult:
+		var params v2.FileResult
+		if err := bindV2Params(req.Params, &params); err != nil {
+			return v2.Error(req.ID, -32602, "invalid file result params", err.Error())
+		}
+		params.UUID = uuid
+		if !filemanager.Resolve(params) {
+			return v2.Error(req.ID, -32004, "unknown or expired file operation", nil)
+		}
+		return v2.Success(req.ID, gin.H{"status": "success"})
 	default:
 		return v2.Error(req.ID, -32601, "method not found", req.Method)
 	}

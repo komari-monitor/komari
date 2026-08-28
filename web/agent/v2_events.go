@@ -15,6 +15,10 @@ const (
 	v2EventQueueLimit = 128
 	v2EventTTL        = 5 * time.Minute
 	v2PingEventTTL    = 3 * time.Second
+	// File operations may include a remote read/search with a 90 second
+	// deadline, so queued file commands need a little headroom while an agent
+	// reconnects.
+	v2FileEventTTL = 2 * time.Minute
 )
 
 type v2EventQueue struct {
@@ -79,6 +83,8 @@ func EnqueueV2Event(uuid, method string, params any) v2.Event {
 	ttl := v2EventTTL
 	if method == v2.MethodAgentPing {
 		ttl = v2PingEventTTL
+	} else if method == v2.MethodAgentFile {
+		ttl = v2FileEventTTL
 	}
 	event := v2.Event{
 		ID:        newV2EventID(),
@@ -126,6 +132,13 @@ func coalesceV2EventLocked(q *v2EventQueue, event v2.Event) {
 }
 
 func v2EventCoalesceKey(event v2.Event) string {
+	if event.Method == v2.MethodAgentTerminal {
+		var params v2.TerminalRequestParams
+		if err := bindV2EventParams(event.Params, &params); err == nil && params.RequestID != "" {
+			return event.Method + ":" + params.RequestID
+		}
+		return ""
+	}
 	if event.Method != v2.MethodAgentPing {
 		return ""
 	}
