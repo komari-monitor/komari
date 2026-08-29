@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	logger "github.com/komari-monitor/komari/utils/log"
 )
 
 const (
@@ -131,6 +132,7 @@ func (transfer *streamTransfer) markConnected() error {
 }
 
 func (transfer *streamTransfer) close(err error) {
+	success := err == nil
 	if err == nil {
 		err = io.EOF
 	}
@@ -149,8 +151,16 @@ func (transfer *streamTransfer) close(err error) {
 		delete(streamTransfers, transfer.id)
 	}
 	streamTransfersMu.Unlock()
-	_ = transfer.reader.CloseWithError(err)
-	_ = transfer.writer.CloseWithError(err)
+	if success {
+		// A successful producer already closes the PipeWriter after the exact
+		// byte count. Do not close the reader side here: a consumer may still be
+		// draining the final bytes, and CloseWithError would turn a normal EOF
+		// into io.ErrClosedPipe. The writer's EOF is enough to finish readers.
+		_ = transfer.writer.CloseWithError(io.EOF)
+	} else {
+		_ = transfer.reader.CloseWithError(err)
+		_ = transfer.writer.CloseWithError(err)
+	}
 	if slotHeld {
 		<-streamSlots
 	}
@@ -197,6 +207,8 @@ func lookupStreamTransfer(c *gin.Context) (*streamTransfer, error) {
 func AgentTransfer(c *gin.Context) {
 	transfer, err := lookupStreamTransfer(c)
 	if err != nil {
+		logger.Warnf("file-transfer", "agent stream authentication failed method=%s path=%s remote=%s: %v", c.Request.Method, c.Request.URL.Path, c.ClientIP(), err)
+		_ = c.Error(err)
 		c.String(http.StatusUnauthorized, err.Error())
 		return
 	}
@@ -204,6 +216,7 @@ func AgentTransfer(c *gin.Context) {
 	switch c.Request.Method {
 	case http.MethodGet:
 		if transfer.direction != streamUploadDirection {
+			logger.Warnf("file-transfer", "agent stream method rejected id=%s direction=%s method=%s", transfer.id, transfer.direction, c.Request.Method)
 			c.String(http.StatusMethodNotAllowed, "transfer direction does not allow GET")
 			return
 		}
@@ -212,6 +225,8 @@ func AgentTransfer(c *gin.Context) {
 		if transfer.direction == streamUploadDirection {
 			if c.Request.ContentLength > 0 {
 				transfer.close(errors.New("upload transfer request must not contain a body"))
+				logger.Warnf("file-transfer", "agent upload stream sent an unexpected request body id=%s content_length=%d", transfer.id, c.Request.ContentLength)
+				_ = c.Error(errors.New("invalid upload transfer request"))
 				c.String(http.StatusBadRequest, "invalid upload transfer request")
 				return
 			}
@@ -220,10 +235,14 @@ func AgentTransfer(c *gin.Context) {
 		}
 		if c.Request.ContentLength >= 0 && c.Request.ContentLength != transfer.size {
 			transfer.close(fmt.Errorf("download stream content length %d, want %d", c.Request.ContentLength, transfer.size))
+			logger.Warnf("file-transfer", "agent download stream length mismatch id=%s got=%d want=%d", transfer.id, c.Request.ContentLength, transfer.size)
+			_ = c.Error(fmt.Errorf("download stream content length %d, want %d", c.Request.ContentLength, transfer.size))
 			c.String(http.StatusBadRequest, "invalid transfer content length")
 			return
 		}
 		if err := transfer.markConnected(); err != nil {
+			logger.Warnf("file-transfer", "agent download stream connection rejected id=%s: %v", transfer.id, err)
+			_ = c.Error(err)
 			c.String(http.StatusConflict, err.Error())
 			return
 		}
@@ -234,6 +253,8 @@ func AgentTransfer(c *gin.Context) {
 		if copyErr != nil {
 			_ = transfer.writer.CloseWithError(copyErr)
 			transfer.close(copyErr)
+			logger.Errorf("file-transfer", "agent download stream failed id=%s received=%d want=%d: %v", transfer.id, written, transfer.size, copyErr)
+			_ = c.Error(copyErr)
 			c.String(http.StatusBadRequest, copyErr.Error())
 			return
 		}
@@ -247,21 +268,34 @@ func AgentTransfer(c *gin.Context) {
 
 func serveUploadTransfer(c *gin.Context, transfer *streamTransfer) {
 	if err := transfer.markConnected(); err != nil {
+		logger.Warnf("file-transfer", "agent upload stream connection rejected id=%s: %v", transfer.id, err)
+		_ = c.Error(err)
 		c.String(http.StatusConflict, err.Error())
 		return
 	}
-	c.Header("Content-Type", "application/octet-stream")
-	c.Header("Content-Length", strconv.FormatInt(transfer.size, 10))
-	c.Header("Content-Encoding", "identity")
-	c.Header("Cache-Control", "no-store")
-	c.Header("X-Accel-Buffering", "no")
-	c.Status(http.StatusOK)
-	written, copyErr := copyExactStream(c.Writer, transfer.reader, transfer.size, true, nil)
+	committed := false
+	commitHeaders := func() {
+		if committed {
+			return
+		}
+		c.Header("Content-Type", "application/octet-stream")
+		c.Header("Content-Length", strconv.FormatInt(transfer.size, 10))
+		c.Header("Cache-Control", "no-store, no-transform")
+		c.Header("X-Accel-Buffering", "no")
+		c.Status(http.StatusOK)
+		committed = true
+	}
+	written, copyErr := copyExactStream(c.Writer, transfer.reader, transfer.size, true, commitHeaders)
 	if copyErr == nil && written != transfer.size {
 		copyErr = fmt.Errorf("upload stream ended after %d of %d bytes", written, transfer.size)
 	}
 	if copyErr != nil {
 		transfer.close(copyErr)
+		logger.Errorf("file-transfer", "agent upload stream failed id=%s sent=%d want=%d: %v", transfer.id, written, transfer.size, copyErr)
+		_ = c.Error(copyErr)
+		if !committed {
+			c.String(http.StatusBadRequest, copyErr.Error())
+		}
 		return
 	}
 	transfer.close(nil)
@@ -289,15 +323,24 @@ func streamDownloadRelay(c *gin.Context, clientUUID, path string, fileSize int64
 			if chunkIndex > 0 {
 				commit = nil
 			}
-			copyResult, callErr := streamDownloadChunk(c, clientUUID, path, fileSize, modifiedAt, offset, length, chunkIndex, commit)
+			copyResult, streamErr := streamDownloadChunk(c, clientUUID, path, fileSize, modifiedAt, offset, length, chunkIndex, commit)
 			if copyResult.err == nil && copyResult.bytes == length {
 				chunkErr = nil
 				break
 			}
-			if copyResult.err != nil {
+			// streamDownloadChunk returns the Agent/RPC error separately when a
+			// relay pipe was closed as a consequence of that error. Prefer it so
+			// the caller sees the real status/body instead of io.ErrClosedPipe.
+			chunkErr = streamErr
+			if chunkErr == nil {
 				chunkErr = copyResult.err
-			} else {
-				chunkErr = callErr
+			}
+			if chunkErr == nil {
+				chunkErr = fmt.Errorf("download chunk %d returned %d of %d bytes", chunkIndex, copyResult.bytes, length)
+			}
+			logger.Warnf("file-transfer", "download chunk failed client=%s path=%q chunk=%d offset=%d length=%d attempt=%d/%d bytes=%d: %v", clientUUID, path, chunkIndex, offset, length, attempt, streamChunkAttempts, copyResult.bytes, chunkErr)
+			if copyResult.bytes == 0 && isNonRetryableStreamError(chunkErr) {
+				return chunkErr
 			}
 			// Once a byte of this logical chunk reached the browser, retrying
 			// would overlap an already committed HTTP response. Only retry when
@@ -376,15 +419,52 @@ func streamDownloadChunk(c *gin.Context, clientUUID, path string, fileSize int64
 			contextDone = nil
 		}
 	}
+	// The bytes already delivered to the browser are authoritative. The Agent
+	// may report an error only while reading the final JSON acknowledgement
+	// after the complete body has arrived (for example after a proxy reset).
+	if copyResult.err == nil && copyResult.bytes == length {
+		return copyResult, nil
+	}
 	if copyResult.err != nil {
+		if callErr != nil && isRelayPipeError(copyResult.err) {
+			return copyResult, callErr
+		}
 		return copyResult, copyResult.err
+	}
+	if callErr != nil {
+		return copyResult, callErr
 	}
 	if copyResult.bytes != length {
 		return copyResult, fmt.Errorf("download stream returned %d of %d bytes", copyResult.bytes, length)
 	}
-	// The data body is authoritative. The Agent's final JSON ACK can be lost
-	// after the exact body has already reached the browser.
 	return copyResult, nil
+}
+
+func isRelayPipeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, io.EOF) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "closed pipe") || strings.Contains(message, "file transfer is closed")
+}
+
+func isNonRetryableStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isUnsupportedAgentFileOperation(err) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, status := range []string{" 400 ", " 401 ", " 403 ", " 404 ", " 405 ", " 409 ", " 410 ", " 411 ", " 413 ", " 415 ", " 422 ", " 501 "} {
+		if strings.Contains(message, status) {
+			return true
+		}
+	}
+	return false
 }
 
 // copyStream copies at most limit bytes using one pooled buffer.
@@ -403,6 +483,8 @@ func copyStream(dst io.Writer, src io.Reader, limit int64, flush bool, onFirstWr
 	for {
 		read, readErr := reader.Read(buffer)
 		if read > 0 {
+			// Response headers must be installed before the first Write; net/http
+			// commits them as soon as the write starts.
 			if first && onFirstWrite != nil {
 				onFirstWrite()
 				first = false

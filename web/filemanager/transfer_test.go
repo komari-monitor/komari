@@ -3,9 +3,12 @@ package filemanager
 import (
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestUploadSessionLimitAndRelease(t *testing.T) {
@@ -116,6 +119,20 @@ func TestFormatDownloadContentDisposition(t *testing.T) {
 	}
 	if strings.Contains(office, "filename*=") {
 		t.Fatalf("Office disposition = %q, must not include filename*", office)
+	}
+}
+
+func TestRespondTransferErrorMarksUnsupportedAgentAsNonRetryable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/file", nil)
+	respondTransferError(context, errors.New("unsupported file operation: upload_stream"))
+	if recorder.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotImplemented)
+	}
+	if len(context.Errors) == 0 {
+		t.Fatal("transfer error was not recorded in gin context")
 	}
 }
 

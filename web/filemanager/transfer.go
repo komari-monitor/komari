@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/auditlog"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/web/api"
 )
 
@@ -179,16 +180,19 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 	}
 	index, err := strconv.ParseInt(indexValue, 10, 64)
 	if err != nil {
+		logger.Warnf("file-transfer", "upload chunk has invalid chunk_index client=%s upload_id=%q value=%q: %v", clientUUID, uploadID, indexValue, err)
 		api.RespondError(c, http.StatusBadRequest, "chunk_index must be an integer")
 		return
 	}
 	if uploadID == "" {
+		logger.Warnf("file-transfer", "upload chunk missing upload_id client=%s", clientUUID)
 		api.RespondError(c, http.StatusBadRequest, "upload_id is required")
 		return
 	}
 
 	session, _, err := acquireUploadSession(uploadID, clientUUID, "", 0, 0)
 	if err != nil {
+		logger.Errorf("file-transfer", "upload chunk session lookup failed client=%s upload_id=%q: %v", clientUUID, uploadID, err)
 		respondTransferError(c, err)
 		return
 	}
@@ -221,12 +225,14 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 	session.mu.Unlock()
 
 	if c.Request.ContentLength >= 0 && c.Request.ContentLength != expectedSize {
+		logger.Warnf("file-transfer", "upload chunk content length mismatch client=%s upload_id=%s chunk=%d got=%d want=%d", clientUUID, uploadID, index, c.Request.ContentLength, expectedSize)
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("chunk %d has size %d, want %d", index, c.Request.ContentLength, expectedSize))
 		return
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, expectedSize+1)
 	transfer, transferErr := newStreamTransfer(c.Request.Context(), clientUUID, streamUploadDirection, expectedSize)
 	if transferErr != nil {
+		logger.Errorf("file-transfer", "upload chunk relay allocation failed client=%s upload_id=%s chunk=%d size=%d: %v", clientUUID, uploadID, index, expectedSize, transferErr)
 		respondTransferError(c, transferErr)
 		return
 	}
@@ -293,15 +299,25 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 			contextDone = nil
 		}
 	}
-	if bodyResult.err != nil {
-		respondTransferError(c, bodyResult.err)
-		return
-	}
 	if callErr != nil {
+		// Closing the relay when the Agent fails can make the browser-side
+		// copier report io.ErrClosedPipe. Preserve the Agent's original error;
+		// it usually contains the useful HTTP status/body (for example a
+		// proxy's 413) that would otherwise be hidden behind a generic 502.
+		if bodyResult.err != nil {
+			logger.Errorf("file-transfer", "upload chunk agent stream failed client=%s upload_id=%s chunk=%d offset=%d size=%d (body relay also failed after %d bytes: %v): %v", clientUUID, uploadID, index, offset, expectedSize, bodyResult.bytes, bodyResult.err, callErr)
+		} else {
+			logger.Errorf("file-transfer", "upload chunk agent stream failed client=%s upload_id=%s chunk=%d offset=%d size=%d: %v", clientUUID, uploadID, index, offset, expectedSize, callErr)
+		}
 		session.mu.Lock()
 		saveUploadSession(session)
 		session.mu.Unlock()
 		respondTransferError(c, callErr)
+		return
+	}
+	if bodyResult.err != nil {
+		logger.Errorf("file-transfer", "upload chunk body relay failed client=%s upload_id=%s chunk=%d bytes=%d want=%d: %v", clientUUID, uploadID, index, bodyResult.bytes, expectedSize, bodyResult.err)
+		respondTransferError(c, bodyResult.err)
 		return
 	}
 
@@ -421,6 +437,7 @@ func Download(c *gin.Context) {
 func downloadFile(c *gin.Context, clientUUID, path string, options downloadResponseOptions) {
 	raw, err := Call(c.Request.Context(), clientUUID, "stat", map[string]any{"path": path}, "", CallOptions{Timeout: 60 * time.Second})
 	if err != nil {
+		logger.Errorf("file-transfer", "download stat failed client=%s path=%q: %v", clientUUID, path, err)
 		respondTransferError(c, err)
 		return
 	}
@@ -431,10 +448,12 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 		ModifiedAt time.Time `json:"modified_at"`
 	}
 	if err := json.Unmarshal(raw, &info); err != nil {
+		logger.Errorf("file-transfer", "download stat response invalid client=%s path=%q: %v", clientUUID, path, err)
 		api.RespondError(c, http.StatusBadGateway, "invalid file metadata from agent")
 		return
 	}
 	if info.IsDir {
+		logger.Warnf("file-transfer", "download rejected for directory client=%s path=%q", clientUUID, path)
 		api.RespondError(c, http.StatusBadRequest, "cannot download a directory")
 		return
 	}
@@ -488,11 +507,10 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 	}
 	setHeaders := func() {
 		c.Header("Content-Type", contentType)
-		c.Header("Content-Encoding", "identity")
 		c.Header("Content-Disposition", formatDownloadContentDisposition(disposition, name, options.OfficeCompatible))
 		c.Header("Accept-Ranges", "bytes")
 		c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
-		c.Header("Cache-Control", "no-store")
+		c.Header("Cache-Control", "no-store, no-transform")
 		c.Header("X-Accel-Buffering", "no")
 		c.Header("ETag", etag)
 		if !info.ModifiedAt.IsZero() {
@@ -523,8 +541,11 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 		committed = true
 	}
 	if err := streamDownloadRelay(c, clientUUID, path, info.Size, info.ModifiedAt, start, contentLength, DefaultTransferChunkSize, commitHeaders); err != nil {
+		logger.Errorf("file-transfer", "download stream failed client=%s path=%q start=%d length=%d file_size=%d committed=%t: %v", clientUUID, path, start, contentLength, info.Size, committed, err)
 		if !committed {
 			respondTransferError(c, err)
+		} else {
+			_ = c.Error(err)
 		}
 		return
 	}
@@ -919,10 +940,25 @@ func parseInt64Query(c *gin.Context, name string) (int64, error) {
 }
 
 func respondTransferError(c *gin.Context, err error) {
+	if err == nil {
+		err = errors.New("file transfer failed")
+	}
+	if err != nil {
+		// Keep the public response concise, but retain the complete cause in
+		// Gin's request error list so the access log identifies the failing
+		// transfer stage instead of showing a bare 502.
+		_ = c.Error(err)
+	}
 	status := http.StatusBadGateway
 	switch {
 	case errors.Is(err, ErrUnsupported):
-		status = http.StatusBadRequest
+		status = http.StatusNotImplemented
+	case isUnsupportedAgentFileOperation(err):
+		// An older Agent (or an Agent with web control disabled) cannot execute
+		// the real-time stream operation. This is a protocol/configuration
+		// error, not a transient gateway failure; returning 501 prevents the
+		// browser from retrying the same chunk forever.
+		status = http.StatusNotImplemented
 	case errors.Is(err, ErrOffline):
 		status = http.StatusServiceUnavailable
 	case errors.Is(err, ErrTimeout):
@@ -936,7 +972,21 @@ func respondTransferError(c *gin.Context, err error) {
 	case errors.Is(err, ErrTooManyUploads):
 		status = http.StatusTooManyRequests
 	}
-	api.RespondError(c, status, err.Error())
+	message := err.Error()
+	if isUnsupportedAgentFileOperation(err) || errors.Is(err, ErrUnsupported) {
+		message = "Agent does not support real-time file transfer; update the Agent binary"
+	}
+	api.RespondError(c, status, message)
+}
+
+func isUnsupportedAgentFileOperation(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unsupported file operation") ||
+		strings.Contains(message, "does not support file operations") ||
+		strings.Contains(message, "web control is disabled")
 }
 
 func auditFileTransfer(c *gin.Context, action, clientUUID, path string) {
