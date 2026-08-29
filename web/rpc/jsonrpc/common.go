@@ -15,7 +15,7 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
-	"github.com/komari-monitor/komari/protocol/v1"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 
@@ -285,7 +285,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	req.BindParams(&params)
 
 	meta := rpc.MetaFromContext(ctx)
-	latest := agent_runtime.GetLatestReport() // map[string]*v1.Report (copy)
+	latest := agent_runtime.GetLatestReport()
 	onlineUUIDs := agent_runtime.GetAllOnlineUUIDs()
 	onlineSet := make(map[string]bool, len(onlineUUIDs))
 	for _, uuid := range onlineUUIDs {
@@ -350,7 +350,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	// 预取所有 ping 任务
 	pingTasks, _ := tasks.GetAllPingTasks()
 
-	appendOne := func(uuid string, rep *v1.Report) {
+	appendOne := func(uuid string, rep *v2.Report) {
 		if rep == nil {
 			return
 		}

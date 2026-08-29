@@ -565,6 +565,7 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 		c.Header("Content-Disposition", formatDownloadContentDisposition(disposition, name, options.OfficeCompatible))
 		c.Header("Accept-Ranges", "bytes")
 		c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
+		c.Header("Content-Encoding", "identity")
 		c.Header("Cache-Control", "no-store, no-transform")
 		c.Header("X-Accel-Buffering", "no")
 		c.Header("X-Komari-Transfer-Chunk-Size", strconv.FormatInt(headerChunkSize, 10))

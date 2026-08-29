@@ -5,21 +5,20 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
-	v1 "github.com/komari-monitor/komari/protocol/v1"
+	"github.com/komari-monitor/komari/internal/metricstore"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
 // ingest.go
-// agent 上报数据的传输无关处理逻辑。v1 (REST/WS) 与 v2 (JSON-RPC) 两套上报入口
-// 经过各自的协议解析后，统一调用这里的函数落库并更新运行时状态，消除重复。
+// agent 上报数据的传输无关处理逻辑。v2 的 HTTP/WebSocket JSON-RPC 入口
+// 经过协议解析后，统一调用这里的函数落库并更新运行时状态。
 
 // ingestReport 保存一次负载上报并刷新运行时状态。
-// protocolVersion 标记上报所用协议（1 或 2），用于运行时区分客户端能力。
 // markPresence 为 true 时按 POST 上报会话刷新在线状态（WS 连接自行管理在线状态，应传 false）。
-func ingestReport(uuid string, report v1.Report, protocolVersion int, markPresence bool) error {
+func ingestReport(uuid string, report v2.Report, markPresence bool) error {
 	report.UUID = uuid
 	report.UpdatedAt = time.Now().UTC()
 	if err := clients.ReportVerify(report); err != nil {
@@ -30,7 +29,7 @@ func ingestReport(uuid string, report v1.Report, protocolVersion int, markPresen
 		return err
 	}
 	agent_runtime.RecordReport(savedReport)
-	agent_runtime.SetClientProtocolVersion(uuid, protocolVersion)
+	agent_runtime.MarkV2Client(uuid)
 	if markPresence {
 		refreshPostPresence(uuid)
 	}

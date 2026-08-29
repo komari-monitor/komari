@@ -6,8 +6,6 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/utils/geoip"
-
-	"github.com/gin-gonic/gin"
 )
 
 func getClientIPType(ip net.IP) int {
@@ -79,26 +77,4 @@ func appendClientRegionFromGeoIP(info map[string]interface{}) {
 		info["region"] = region
 		return
 	}
-}
-
-func UploadBasicInfo(c *gin.Context) {
-	var cbi = map[string]interface{}{}
-	if err := c.ShouldBindJSON(&cbi); err != nil {
-		c.JSON(400, gin.H{"status": "error", "error": "Invalid or missing data"})
-		return
-	}
-
-	token := c.Query("token")
-	uuid, err := clients.GetClientUUIDByToken(token)
-	if uuid == "" || err != nil {
-		c.JSON(400, gin.H{"status": "error", "error": "Invalid token"})
-		return
-	}
-
-	if err := ingestBasicInfo(uuid, cbi, c.ClientIP()); err != nil {
-		c.JSON(500, gin.H{"status": "error", "error": err})
-		return
-	}
-
-	c.JSON(200, gin.H{"status": "success"})
 }

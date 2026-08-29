@@ -8,10 +8,10 @@ import (
 
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/metric"
-	v1 "github.com/komari-monitor/komari/protocol/v1"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
 )
 
-func reportMetricPoints(report v1.Report, trafficUp, trafficDown int64) []metric.Point {
+func reportMetricPoints(report v2.Report, trafficUp, trafficDown int64) []metric.Point {
 	entityID := report.UUID
 	ts := report.UpdatedAt
 	points := []metric.Point{

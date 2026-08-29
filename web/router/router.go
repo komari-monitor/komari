@@ -68,21 +68,13 @@ func registerAgentRoutes(r *gin.Engine) {
 
 	tokenAuthorized := r.Group("/api/clients", api.RequireRole(api.RoleAdmin, api.RoleClient))
 	{
-		// 上报类（WS / 原始流 / 兼容协议）保留 REST handler。
-		tokenAuthorized.GET("/report", client.WebSocketReport)
-		tokenAuthorized.POST("/uploadBasicInfo", client.UploadBasicInfo)
-		tokenAuthorized.POST("/report", client.UploadReport)
+		// Agent 上报统一使用 v2 JSON-RPC。
 		tokenAuthorized.GET("/v2/rpc", client.WebSocketV2RPC)
 		tokenAuthorized.POST("/v2/rpc", client.UploadV2RPC)
 		// File data uses a short-lived, raw HTTP stream opened by a file RPC.
 		tokenAuthorized.GET("/transfer/:id", filemanager.AgentTransfer)
 		tokenAuthorized.POST("/transfer/:id", filemanager.AgentTransfer)
 		tokenAuthorized.GET("/terminal", terminal.EstablishConnection)
-
-		// JSON 接口 -> RPC2 (client: 命名空间)。
-		tokenAuthorized.POST("/task/result", jsonRpc.Bind("client:taskResult", jsonRpc.WithRaw()))
-		tokenAuthorized.GET("/ping/tasks", jsonRpc.Bind("client:getPingTasks", jsonRpc.WithRaw()))
-		tokenAuthorized.POST("/ping/result", jsonRpc.Bind("client:uploadPingResult", jsonRpc.WithRaw()))
 	}
 }
 

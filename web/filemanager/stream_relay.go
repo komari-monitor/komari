@@ -280,6 +280,7 @@ func serveUploadTransfer(c *gin.Context, transfer *streamTransfer) {
 		}
 		c.Header("Content-Type", "application/octet-stream")
 		c.Header("Content-Length", strconv.FormatInt(transfer.size, 10))
+		c.Header("Content-Encoding", "identity")
 		c.Header("Cache-Control", "no-store, no-transform")
 		c.Header("X-Accel-Buffering", "no")
 		c.Status(http.StatusOK)
@@ -325,6 +326,7 @@ func streamDownloadRelay(c *gin.Context, clientUUID, path string, fileSize int64
 	for offset < end {
 		length := min(currentChunkSize, end-offset)
 		var chunkErr error
+		var lastCopyResult streamCopyResult
 		for {
 			resized := false
 			chunkErr = nil
@@ -334,6 +336,7 @@ func streamDownloadRelay(c *gin.Context, clientUUID, path string, fileSize int64
 					commit = nil
 				}
 				copyResult, streamErr := streamDownloadChunk(c, clientUUID, path, fileSize, modifiedAt, offset, length, chunkIndex, commit)
+				lastCopyResult = copyResult
 				if copyResult.err == nil && copyResult.bytes == length {
 					// The request has proven that this logical block size is
 					// accepted. Remember it immediately so concurrent/follow-up
@@ -373,6 +376,18 @@ func streamDownloadRelay(c *gin.Context, clientUUID, path string, fileSize int64
 				if copyResult.bytes == 0 && isNonRetryableStreamError(chunkErr) {
 					return chunkErr
 				}
+				if copyResult.bytes == 0 && attempt == streamChunkAttempts && isChunkTransportError(chunkErr) {
+					adaptiveUpperBound = min(adaptiveUpperBound, length)
+					if next, ok := nextReducedTransferChunkSize(length, adaptiveUpperBound); ok && next < length {
+						previousLength := length
+						currentChunkSize = next
+						c.Set(downloadChunkSizeContextKey, currentChunkSize)
+						length = min(currentChunkSize, end-offset)
+						logger.Warnf("file-transfer", "reducing download chunk size after transport failure client=%s path=%q from=%d to=%d: %v", clientUUID, path, previousLength, currentChunkSize, chunkErr)
+						resized = true
+						break
+					}
+				}
 				// Once a byte of this logical chunk reached the browser, retrying
 				// would overlap an already committed HTTP response. Only retry when
 				// the failure happened before the first byte.
@@ -389,6 +404,16 @@ func streamDownloadRelay(c *gin.Context, clientUUID, path string, fileSize int64
 			break
 		}
 		if chunkErr != nil {
+			// A downstream browser/proxy can close a long response after some
+			// bytes were delivered. The current HTTP response cannot be resumed,
+			// but the next Range request can avoid repeating the same oversized
+			// logical block by remembering a smaller probe size.
+			if lastCopyResult.bytes > 0 && isClientDisconnectError(lastCopyResult.err) {
+				if next, ok := nextReducedTransferChunkSize(currentChunkSize, currentChunkSize); ok && next < currentChunkSize {
+					rememberDownloadChunkSize(clientUUID, next)
+					logger.Warnf("file-transfer", "reducing download chunk size after downstream disconnect client=%s from=%d to=%d", clientUUID, currentChunkSize, next)
+				}
+			}
 			return chunkErr
 		}
 		offset += length
@@ -516,6 +541,46 @@ func isRelayPipeError(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "closed pipe") || strings.Contains(message, "file transfer is closed")
+}
+
+func isClientDisconnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"broken pipe",
+		"connection reset by peer",
+		"connection reset",
+		"write: closed network connection",
+		"client disconnected",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isChunkTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		" 502 ",
+		" 503 ",
+		" 504 ",
+		"broken pipe",
+		"connection reset",
+		"unexpected eof",
+		"timeout",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isNonRetryableStreamError(err error) bool {

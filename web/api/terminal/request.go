@@ -14,17 +14,7 @@ import (
 )
 
 func dispatchTerminalRequest(uuid, id string) bool {
-	if agent_runtime.IsV2Client(uuid) {
-		return agent_runtime.DispatchV2Event(uuid, v2.MethodAgentTerminal, v2.TerminalRequestParams{RequestID: id})
-	}
-	agent := agent_runtime.GetConnectedClients()[uuid]
-	if agent == nil {
-		return false
-	}
-	return agent.WriteJSON(gin.H{
-		"message":    "terminal",
-		"request_id": id,
-	}) == nil
+	return agent_runtime.DispatchV2Event(uuid, v2.MethodAgentTerminal, v2.TerminalRequestParams{RequestID: id})
 }
 
 func RequestTerminal(c *gin.Context) {

@@ -85,7 +85,7 @@ func TestRestrictedControllersRegisterUnifiedRoutes(t *testing.T) {
 			if routes["POST "+base+"/discard"] != test.discard {
 				t.Fatalf("POST %s/discard presence = %v, want %v", base, routes["POST "+base+"/discard"], test.discard)
 			}
-			if routes["GET /api/public"] || routes["GET /api/rpc2"] || routes["POST /api/clients/report"] {
+			if routes["GET /api/public"] || routes["GET /api/rpc2"] || routes["GET /api/clients/v2/rpc"] {
 				t.Fatalf("ordinary APIs leaked into restricted routes: %#v", routes)
 			}
 

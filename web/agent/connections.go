@@ -5,15 +5,15 @@ import (
 	"sync"
 	"time"
 
-	v1 "github.com/komari-monitor/komari/protocol/v1"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/web/connection"
 )
 
 var (
-	connectedClients  = make(map[string]*connection.SafeConn)
-	connectedClientV2 = make(map[string]bool)
-	latestReport      = make(map[string]*v1.Report)
-	recentReports     = make(map[string][]v1.Report)
+	connectedClients = make(map[string]*connection.SafeConn)
+	v2Clients        = make(map[string]struct{})
+	latestReport     = make(map[string]*v2.Report)
+	recentReports    = make(map[string][]v2.Report)
 	// presenceOnly stores online state for non-WebSocket agents.
 	// value keeps connectionID and a soft expiration to avoid flicker
 	presenceOnly = make(map[string]struct {
@@ -41,16 +41,17 @@ func SetConnectedClients(uuid string, conn *connection.SafeConn) {
 	connectedClients[uuid] = conn
 }
 
-func SetClientProtocolVersion(uuid string, version int) {
+func MarkV2Client(uuid string) {
 	mu.Lock()
 	defer mu.Unlock()
-	connectedClientV2[uuid] = version >= 2
+	v2Clients[uuid] = struct{}{}
 }
 
 func IsV2Client(uuid string) bool {
 	mu.RLock()
 	defer mu.RUnlock()
-	return connectedClientV2[uuid]
+	_, ok := v2Clients[uuid]
+	return ok
 }
 
 func DeleteClientConditionally(uuid string, connToRemove *connection.SafeConn) {
@@ -60,7 +61,7 @@ func DeleteClientConditionally(uuid string, connToRemove *connection.SafeConn) {
 	// 检查当前 map 里的 conn 是否就是要删除的这一个
 	if currentConn, exists := connectedClients[uuid]; exists && currentConn == connToRemove {
 		delete(connectedClients, uuid)
-		delete(connectedClientV2, uuid)
+		delete(v2Clients, uuid)
 	}
 }
 func DeleteConnectedClients(uuid string) {
@@ -68,7 +69,7 @@ func DeleteConnectedClients(uuid string) {
 	defer mu.Unlock()
 	// 只从 map 中删除，不再负责关闭连接
 	delete(connectedClients, uuid)
-	delete(connectedClientV2, uuid)
+	delete(v2Clients, uuid)
 }
 
 // SetPresence sets or clears presence for non-WebSocket agents.
@@ -121,10 +122,10 @@ func GetAllOnlineUUIDs() []string {
 	}
 	return res
 }
-func GetLatestReport() map[string]*v1.Report {
+func GetLatestReport() map[string]*v2.Report {
 	mu.RLock()
 	defer mu.RUnlock()
-	reportCopy := make(map[string]*v1.Report)
+	reportCopy := make(map[string]*v2.Report)
 	for k, v := range latestReport {
 		if v == nil {
 			continue
@@ -137,7 +138,7 @@ func GetLatestReport() map[string]*v1.Report {
 
 // RecordReport updates the latest runtime state and keeps only the short raw
 // window used by recent-status compatibility endpoints.
-func RecordReport(report v1.Report) {
+func RecordReport(report v2.Report) {
 	if report.UUID == "" {
 		return
 	}
@@ -161,30 +162,30 @@ func RecordReport(report v1.Report) {
 	insertAt := sort.Search(len(reports), func(i int) bool {
 		return reports[i].UpdatedAt.After(report.UpdatedAt)
 	})
-	reports = append(reports, v1.Report{})
+	reports = append(reports, v2.Report{})
 	copy(reports[insertAt+1:], reports[insertAt:])
 	reports[insertAt] = report
 	recentReports[report.UUID] = reports
 }
 
-func GetRecentReports(uuid string) []v1.Report {
+func GetRecentReports(uuid string) []v2.Report {
 	mu.Lock()
 	defer mu.Unlock()
 	reports := reportsAfter(recentReports[uuid], time.Now().UTC().Add(-recentReportRetention))
 	if len(reports) == 0 {
 		delete(recentReports, uuid)
-		return []v1.Report{}
+		return []v2.Report{}
 	}
 	recentReports[uuid] = reports
-	return append([]v1.Report(nil), reports...)
+	return append([]v2.Report(nil), reports...)
 }
 
-func reportsAfter(reports []v1.Report, cutoff time.Time) []v1.Report {
+func reportsAfter(reports []v2.Report, cutoff time.Time) []v2.Report {
 	first := 0
 	for first < len(reports) && reports[first].UpdatedAt.Before(cutoff) {
 		first++
 	}
-	out := make([]v1.Report, len(reports)-first)
+	out := make([]v2.Report, len(reports)-first)
 	copy(out, reports[first:])
 	return out
 }

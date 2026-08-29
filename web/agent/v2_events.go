@@ -54,12 +54,9 @@ func DispatchV2Event(uuid, method string, params any) bool {
 	return true
 }
 
-func DispatchPing(uuid string, legacy any, params v2.PingParams) bool {
+func DispatchPing(uuid string, params v2.PingParams) bool {
 	if conn := GetConnectedClients()[uuid]; conn != nil {
-		payload := legacy
-		if IsV2Client(uuid) {
-			payload = v2.Request{JSONRPC: v2.Version, Method: v2.MethodAgentPing, Params: params}
-		}
+		payload := v2.Request{JSONRPC: v2.Version, Method: v2.MethodAgentPing, Params: params}
 		if conn.WriteJSON(payload) == nil {
 			return true
 		}

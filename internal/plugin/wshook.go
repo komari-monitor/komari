@@ -22,7 +22,7 @@ const (
 )
 
 // wsFrameHookTimeout bounds one frame-level callback. The agent read pumps
-// run on deadlines (v1: 11s, v2: readWait); a frame hook must never stall
+// run on the agent read deadline; a frame hook must never stall
 // them, so the wait is cut short and the frame passes through untouched.
 const wsFrameHookTimeout = time.Second
 

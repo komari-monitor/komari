@@ -4,15 +4,15 @@ import (
 	"testing"
 	"time"
 
-	v1 "github.com/komari-monitor/komari/protocol/v1"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
 )
 
 func TestRecordReportKeepsLatestAndShortRecentWindow(t *testing.T) {
 	mu.Lock()
 	previousLatest := latestReport
 	previousRecent := recentReports
-	latestReport = make(map[string]*v1.Report)
-	recentReports = make(map[string][]v1.Report)
+	latestReport = make(map[string]*v2.Report)
+	recentReports = make(map[string][]v2.Report)
 	mu.Unlock()
 	t.Cleanup(func() {
 		mu.Lock()
@@ -22,9 +22,9 @@ func TestRecordReportKeepsLatestAndShortRecentWindow(t *testing.T) {
 	})
 
 	now := time.Now().UTC()
-	RecordReport(v1.Report{UUID: "node-a", UpdatedAt: now.Add(-2 * time.Minute), CPU: v1.CPUReport{Usage: 10}})
-	RecordReport(v1.Report{UUID: "node-a", UpdatedAt: now.Add(-30 * time.Second), CPU: v1.CPUReport{Usage: 20}})
-	RecordReport(v1.Report{UUID: "node-a", UpdatedAt: now.Add(-45 * time.Second), CPU: v1.CPUReport{Usage: 15}})
+	RecordReport(v2.Report{UUID: "node-a", UpdatedAt: now.Add(-2 * time.Minute), CPU: v2.CPUReport{Usage: 10}})
+	RecordReport(v2.Report{UUID: "node-a", UpdatedAt: now.Add(-30 * time.Second), CPU: v2.CPUReport{Usage: 20}})
+	RecordReport(v2.Report{UUID: "node-a", UpdatedAt: now.Add(-45 * time.Second), CPU: v2.CPUReport{Usage: 15}})
 
 	recent := GetRecentReports("node-a")
 	if len(recent) != 2 || recent[0].CPU.Usage != 15 || recent[1].CPU.Usage != 20 {
