@@ -136,6 +136,59 @@ func TestRespondTransferErrorMarksUnsupportedAgentAsNonRetryable(t *testing.T) {
 	}
 }
 
+func TestRespondTransferErrorPreservesPayloadTooLarge(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/file", nil)
+	respondTransferError(context, errors.New("download_stream: file transfer endpoint returned 413 Request Entity Too Large"))
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestNextReducedTransferChunkSize(t *testing.T) {
+	megabyte := int64(1024 * 1024)
+	tests := []struct {
+		name   string
+		failed int64
+		upper  int64
+		want   int64
+		wantOK bool
+	}{
+		{name: "default", failed: 25 * megabyte, upper: 25 * megabyte, want: 13 * megabyte, wantOK: true},
+		{name: "second probe", failed: 13 * megabyte, upper: 25 * megabyte, want: 7 * megabyte, wantOK: true},
+		{name: "floor", failed: 2 * megabyte, upper: 2 * megabyte, want: megabyte, wantOK: true},
+		{name: "already at floor", failed: megabyte, upper: megabyte, wantOK: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := nextReducedTransferChunkSize(test.failed, test.upper)
+			if ok != test.wantOK || (ok && got != test.want) {
+				t.Fatalf("nextReducedTransferChunkSize(%d, %d) = %d, %v; want %d, %v", test.failed, test.upper, got, ok, test.want, test.wantOK)
+			}
+		})
+	}
+}
+
+func TestDownloadChunkSizeRequestUsesSaferCachedValue(t *testing.T) {
+	downloadChunkMu.Lock()
+	downloadChunkSizes = map[string]int64{"client": 4 * 1024 * 1024}
+	downloadChunkMu.Unlock()
+	t.Cleanup(func() {
+		downloadChunkMu.Lock()
+		downloadChunkSizes = make(map[string]int64)
+		downloadChunkMu.Unlock()
+	})
+	gin.SetMode(gin.TestMode)
+	request := httptest.NewRequest(http.MethodGet, "/file?chunk_size=26214400", nil)
+	context, _ := gin.CreateTestContext(httptest.NewRecorder())
+	context.Request = request
+	if got, want := downloadChunkSizeForRequest(context, "client"), int64(4*1024*1024); got != want {
+		t.Fatalf("download chunk size = %d, want %d", got, want)
+	}
+}
+
 func resetUploadSessionsForTest() {
 	uploadMu.Lock()
 	uploadSessions = make(map[string]*uploadSession)

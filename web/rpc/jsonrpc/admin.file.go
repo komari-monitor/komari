@@ -18,7 +18,8 @@ func init() {
 	reg("fileList", adminFileList, "List a directory on an agent")
 	reg("fileListRoots", adminFileListRoots, "List filesystem roots exposed by an agent")
 	reg("fileStat", adminFileStat, "Read file metadata from an agent")
-	reg("fileRead", adminFileRead, "Read an editable file from an agent")
+	// File contents are served by the binary /file/download stream endpoint;
+	// JSON-RPC stays metadata/control-only.
 	reg("fileMkdir", adminFileMkdir, "Create a directory on an agent")
 	reg("fileDelete", adminFileDelete, "Delete a path on an agent")
 	reg("fileMove", adminFileMove, "Move or rename a path on an agent")
@@ -38,7 +39,7 @@ func adminFileListRoots(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	if err := req.BindParams(&params); err != nil {
 		return nil, invalidFileParams(err)
 	}
-	return callAgentFile(ctx, params.UUID, "list_roots", map[string]any{"path": ""}, "", "", false)
+	return callAgentFile(ctx, params.UUID, "list_roots", map[string]any{"path": ""}, "", false)
 }
 
 func adminFileList(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -49,7 +50,7 @@ func adminFileList(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Json
 	if err := requireFilePath(params.Path); err != nil {
 		return nil, err
 	}
-	return callAgentFile(ctx, params.UUID, "list", map[string]any{"path": params.Path}, "", "", false)
+	return callAgentFile(ctx, params.UUID, "list", map[string]any{"path": params.Path}, "", false)
 }
 
 func adminFileStat(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -60,18 +61,7 @@ func adminFileStat(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Json
 	if err := requireFilePath(params.Path); err != nil {
 		return nil, err
 	}
-	return callAgentFile(ctx, params.UUID, "stat", map[string]any{"path": params.Path}, "", params.Path, false)
-}
-
-func adminFileRead(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	var params filePathParams
-	if err := req.BindParams(&params); err != nil {
-		return nil, invalidFileParams(err)
-	}
-	if err := requireFilePath(params.Path); err != nil {
-		return nil, err
-	}
-	return callAgentFile(ctx, params.UUID, "read", map[string]any{"path": params.Path}, "", params.Path, false)
+	return callAgentFile(ctx, params.UUID, "stat", map[string]any{"path": params.Path}, params.Path, false)
 }
 
 func adminFileMkdir(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -85,7 +75,7 @@ func adminFileMkdir(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Jso
 	if err := requireFilePath(params.Path); err != nil {
 		return nil, err
 	}
-	return callAgentFile(ctx, params.UUID, "mkdir", map[string]any{"path": params.Path, "mode": params.Mode}, "", params.Path, true)
+	return callAgentFile(ctx, params.UUID, "mkdir", map[string]any{"path": params.Path, "mode": params.Mode}, params.Path, true)
 }
 
 func adminFileDelete(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -96,7 +86,7 @@ func adminFileDelete(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Js
 	if err := requireFilePath(params.Path); err != nil {
 		return nil, err
 	}
-	return callAgentFile(ctx, params.UUID, "delete", map[string]any{"path": params.Path}, "", params.Path, true)
+	return callAgentFile(ctx, params.UUID, "delete", map[string]any{"path": params.Path}, params.Path, true)
 }
 
 func adminFileMove(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -113,7 +103,7 @@ func adminFileMove(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Json
 	}
 	return callAgentFile(ctx, params.UUID, "move", map[string]any{
 		"source": params.Source, "destination": params.Destination,
-	}, "", params.Source+" -> "+params.Destination, true)
+	}, params.Source+" -> "+params.Destination, true)
 }
 
 func adminFileCopy(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -130,7 +120,7 @@ func adminFileCopy(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Json
 	}
 	return callAgentFile(ctx, params.UUID, "copy", map[string]any{
 		"source": params.Source, "destination": params.Destination,
-	}, "", params.Source+" -> "+params.Destination, true)
+	}, params.Source+" -> "+params.Destination, true)
 }
 func adminFileChmod(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
@@ -146,7 +136,7 @@ func adminFileChmod(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Jso
 	if strings.TrimSpace(params.Mode) == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "mode is required", nil)
 	}
-	return callAgentFile(ctx, params.UUID, "chmod", map[string]any{"path": params.Path, "mode": params.Mode}, "", params.Path, true)
+	return callAgentFile(ctx, params.UUID, "chmod", map[string]any{"path": params.Path, "mode": params.Mode}, params.Path, true)
 }
 
 func adminFileChown(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -180,7 +170,7 @@ func adminFileChown(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Jso
 	if params.Group != "" {
 		args["group"] = params.Group
 	}
-	return callAgentFile(ctx, params.UUID, "chown", args, "", params.Path, true)
+	return callAgentFile(ctx, params.UUID, "chown", args, params.Path, true)
 }
 
 func adminFileSearch(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -200,21 +190,21 @@ func adminFileSearch(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Js
 	}
 	return callAgentFileWithOptions(ctx, params.UUID, "search", map[string]any{
 		"path": params.Path, "query": params.Query, "content": params.Content,
-	}, "", params.Path, false, filemanager.CallOptions{Timeout: 90 * time.Second})
+	}, params.Path, false, filemanager.CallOptions{Timeout: 90 * time.Second})
 }
 
-func callAgentFile(ctx context.Context, uuid, operation string, args map[string]any, data, auditPath string, mutating bool) (any, *rpc.JsonRpcError) {
-	return callAgentFileWithOptions(ctx, uuid, operation, args, data, auditPath, mutating, filemanager.CallOptions{})
+func callAgentFile(ctx context.Context, uuid, operation string, args map[string]any, auditPath string, mutating bool) (any, *rpc.JsonRpcError) {
+	return callAgentFileWithOptions(ctx, uuid, operation, args, auditPath, mutating, filemanager.CallOptions{})
 }
 
-func callAgentFileWithOptions(ctx context.Context, uuid, operation string, args map[string]any, data, auditPath string, mutating bool, options filemanager.CallOptions) (any, *rpc.JsonRpcError) {
+func callAgentFileWithOptions(ctx context.Context, uuid, operation string, args map[string]any, auditPath string, mutating bool, options filemanager.CallOptions) (any, *rpc.JsonRpcError) {
 	if strings.TrimSpace(uuid) == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "uuid is required", nil)
 	}
 	if _, err := clients.GetClientByUUID(uuid); err != nil {
 		return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
 	}
-	raw, err := filemanager.Call(ctx, uuid, operation, args, data, options)
+	raw, err := filemanager.Call(ctx, uuid, operation, args, options)
 	if err != nil {
 		return nil, fileOperationError(err)
 	}

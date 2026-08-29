@@ -307,6 +307,7 @@ func serveUploadTransfer(c *gin.Context, transfer *streamTransfer) {
 // the pipe keeps the memory footprint independent of that chunk size.
 func streamDownloadRelay(c *gin.Context, clientUUID, path string, fileSize int64, modifiedAt time.Time, start, size, chunkSize int64, commitHeaders func()) error {
 	if size <= 0 {
+		rememberDownloadChunkSize(clientUUID, chunkSize)
 		return nil
 	}
 	if chunkSize <= 0 || chunkSize > MaxTransferChunkSize {
@@ -315,40 +316,77 @@ func streamDownloadRelay(c *gin.Context, clientUUID, path string, fileSize int64
 	end := start + size
 	offset := start
 	chunkIndex := int64(0)
+	currentChunkSize := chunkSize
+	c.Set(downloadChunkSizeContextKey, currentChunkSize)
+	// Keep the upper bound from the most recent 413 response. The lower bound
+	// is the configured 1 MiB floor; each retry chooses the midpoint so a
+	// restrictive proxy is discovered in logarithmic time.
+	adaptiveUpperBound := chunkSize
 	for offset < end {
-		length := min(chunkSize, end-offset)
+		length := min(currentChunkSize, end-offset)
 		var chunkErr error
-		for attempt := 1; attempt <= streamChunkAttempts; attempt++ {
-			commit := commitHeaders
-			if chunkIndex > 0 {
-				commit = nil
+		for {
+			resized := false
+			chunkErr = nil
+			for attempt := 1; attempt <= streamChunkAttempts; attempt++ {
+				commit := commitHeaders
+				if chunkIndex > 0 {
+					commit = nil
+				}
+				copyResult, streamErr := streamDownloadChunk(c, clientUUID, path, fileSize, modifiedAt, offset, length, chunkIndex, commit)
+				if copyResult.err == nil && copyResult.bytes == length {
+					// The request has proven that this logical block size is
+					// accepted. Remember it immediately so concurrent/follow-up
+					// downloads do not repeat a known probe.
+					rememberDownloadChunkSize(clientUUID, currentChunkSize)
+					chunkErr = nil
+					break
+				}
+				// streamDownloadChunk returns the Agent/RPC error separately when a
+				// relay pipe was closed as a consequence of that error. Prefer it so
+				// the caller sees the real status/body instead of io.ErrClosedPipe.
+				chunkErr = streamErr
+				if chunkErr == nil {
+					chunkErr = copyResult.err
+				}
+				if chunkErr == nil {
+					chunkErr = fmt.Errorf("download chunk %d returned %d of %d bytes", chunkIndex, copyResult.bytes, length)
+				}
+				logger.Warnf("file-transfer", "download chunk failed client=%s path=%q chunk=%d offset=%d length=%d attempt=%d/%d bytes=%d: %v", clientUUID, path, chunkIndex, offset, length, attempt, streamChunkAttempts, copyResult.bytes, chunkErr)
+
+				// A 413 is a deterministic request-size rejection. Retry the same
+				// offset with a smaller logical block before considering normal
+				// transient retry limits. No browser bytes may have been committed
+				// for this chunk when this branch is taken.
+				if copyResult.bytes == 0 && isPayloadTooLargeError(chunkErr) {
+					adaptiveUpperBound = min(adaptiveUpperBound, length)
+					if next, ok := nextReducedTransferChunkSize(length, adaptiveUpperBound); ok && next < length {
+						previousLength := length
+						currentChunkSize = next
+						c.Set(downloadChunkSizeContextKey, currentChunkSize)
+						length = min(currentChunkSize, end-offset)
+						logger.Warnf("file-transfer", "reducing download chunk size after 413 client=%s path=%q from=%d to=%d", clientUUID, path, previousLength, currentChunkSize)
+						resized = true
+						break
+					}
+				}
+				if copyResult.bytes == 0 && isNonRetryableStreamError(chunkErr) {
+					return chunkErr
+				}
+				// Once a byte of this logical chunk reached the browser, retrying
+				// would overlap an already committed HTTP response. Only retry when
+				// the failure happened before the first byte.
+				if copyResult.bytes > 0 || attempt == streamChunkAttempts || c.Request.Context().Err() != nil {
+					break
+				}
+				time.Sleep(time.Duration(attempt) * 150 * time.Millisecond)
 			}
-			copyResult, streamErr := streamDownloadChunk(c, clientUUID, path, fileSize, modifiedAt, offset, length, chunkIndex, commit)
-			if copyResult.err == nil && copyResult.bytes == length {
-				chunkErr = nil
-				break
+			if resized {
+				// Retry this offset using the newly selected block size. The
+				// attempt counter is intentionally reset for the resized request.
+				continue
 			}
-			// streamDownloadChunk returns the Agent/RPC error separately when a
-			// relay pipe was closed as a consequence of that error. Prefer it so
-			// the caller sees the real status/body instead of io.ErrClosedPipe.
-			chunkErr = streamErr
-			if chunkErr == nil {
-				chunkErr = copyResult.err
-			}
-			if chunkErr == nil {
-				chunkErr = fmt.Errorf("download chunk %d returned %d of %d bytes", chunkIndex, copyResult.bytes, length)
-			}
-			logger.Warnf("file-transfer", "download chunk failed client=%s path=%q chunk=%d offset=%d length=%d attempt=%d/%d bytes=%d: %v", clientUUID, path, chunkIndex, offset, length, attempt, streamChunkAttempts, copyResult.bytes, chunkErr)
-			if copyResult.bytes == 0 && isNonRetryableStreamError(chunkErr) {
-				return chunkErr
-			}
-			// Once a byte of this logical chunk reached the browser, retrying
-			// would overlap an already committed HTTP response. Only retry when
-			// the failure happened before the first byte.
-			if copyResult.bytes > 0 || attempt == streamChunkAttempts || c.Request.Context().Err() != nil {
-				break
-			}
-			time.Sleep(time.Duration(attempt) * 150 * time.Millisecond)
+			break
 		}
 		if chunkErr != nil {
 			return chunkErr
@@ -356,7 +394,36 @@ func streamDownloadRelay(c *gin.Context, clientUUID, path string, fileSize int64
 		offset += length
 		chunkIndex++
 	}
+	rememberDownloadChunkSize(clientUUID, currentChunkSize)
 	return nil
+}
+
+// nextReducedTransferChunkSize returns the next 1 MiB-aligned midpoint below
+// a rejected request size. upperBound is exclusive and is tightened after
+// every 413, allowing the caller to converge without probing below 1 MiB.
+func nextReducedTransferChunkSize(failedSize, upperBound int64) (int64, bool) {
+	if failedSize <= MinTransferChunkSize {
+		return 0, false
+	}
+	high := failedSize
+	if upperBound > 0 && upperBound < high {
+		high = upperBound
+	}
+	if high <= MinTransferChunkSize {
+		return MinTransferChunkSize, true
+	}
+	candidate := MinTransferChunkSize + (high-MinTransferChunkSize)/2
+	candidate = (candidate / MinTransferChunkSize) * MinTransferChunkSize
+	if candidate < MinTransferChunkSize {
+		candidate = MinTransferChunkSize
+	}
+	if candidate >= failedSize {
+		candidate = failedSize - 1
+	}
+	if candidate < MinTransferChunkSize {
+		return 0, false
+	}
+	return candidate, true
 }
 
 func streamDownloadChunk(c *gin.Context, clientUUID, path string, fileSize int64, modifiedAt time.Time, offset, length, chunkIndex int64, commitHeaders func()) (streamCopyResult, error) {
@@ -382,7 +449,7 @@ func streamDownloadChunk(c *gin.Context, clientUUID, path string, fileSize int64
 	defer cancel()
 	callDone := make(chan error, 1)
 	go func() {
-		_, callErr := Call(ctx, clientUUID, "download_stream", args, "", CallOptions{Timeout: streamCallTimeout})
+		_, callErr := Call(ctx, clientUUID, "download_stream", args, CallOptions{Timeout: streamCallTimeout})
 		callDone <- callErr
 	}()
 
@@ -461,6 +528,33 @@ func isNonRetryableStreamError(err error) bool {
 	message := strings.ToLower(err.Error())
 	for _, status := range []string{" 400 ", " 401 ", " 403 ", " 404 ", " 405 ", " 409 ", " 410 ", " 411 ", " 413 ", " 415 ", " 422 ", " 501 "} {
 		if strings.Contains(message, status) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPayloadTooLargeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var maxBytesError *http.MaxBytesError
+	if errors.As(err, &maxBytesError) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		" 413 ",
+		" 413",
+		"413 ",
+		"413:",
+		"status 413",
+		"status code 413",
+		"request entity too large",
+		"payload too large",
+		"content too large",
+	} {
+		if strings.Contains(message, marker) {
 			return true
 		}
 	}

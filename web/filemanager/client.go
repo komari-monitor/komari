@@ -36,7 +36,9 @@ type CallOptions struct {
 	Timeout time.Duration
 }
 
-func Call(ctx context.Context, uuid, op string, args map[string]any, data string, options ...CallOptions) (json.RawMessage, error) {
+// Call dispatches a metadata-only filesystem control operation. Binary file
+// data must use the HTTP transfer endpoint exposed by the transfer package.
+func Call(ctx context.Context, uuid, op string, args map[string]any, options ...CallOptions) (json.RawMessage, error) {
 	if !agent_runtime.IsV2Client(uuid) {
 		return nil, ErrUnsupported
 	}
@@ -60,7 +62,6 @@ func Call(ctx context.Context, uuid, op string, args map[string]any, data string
 		RequestID: requestID,
 		Op:        op,
 		Args:      args,
-		Data:      data,
 	})
 	if !ok {
 		return nil, ErrOffline

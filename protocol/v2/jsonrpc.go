@@ -99,12 +99,13 @@ type TerminalRequestParams struct {
 	RequestID string `json:"request_id"`
 }
 
+// FileOperation is metadata-only. File contents travel through the dedicated
+// HTTP transfer endpoint rather than through JSON-RPC.
 type FileOperation struct {
 	UUID      string         `json:"uuid"`
 	RequestID string         `json:"request_id"`
 	Op        string         `json:"op"`
 	Args      map[string]any `json:"args,omitempty"`
-	Data      string         `json:"data,omitempty"`
 }
 
 type FileResult struct {

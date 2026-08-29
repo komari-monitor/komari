@@ -23,12 +23,14 @@ import (
 )
 
 const (
-	DefaultTransferChunkSize int64 = 6 * 1024 * 1024
-	MaxTransferChunkSize     int64 = 128 * 1024 * 1024
-	MaxUploadSize            int64 = 8 * 1024 * 1024 * 1024
-	uploadSessionTTL               = 15 * time.Minute
-	previewTokenTTL                = 10 * time.Minute
-	maxConcurrentUploads           = 4
+	DefaultTransferChunkSize    int64 = 25 * 1024 * 1024
+	MinTransferChunkSize        int64 = 1 * 1024 * 1024
+	MaxTransferChunkSize        int64 = 128 * 1024 * 1024
+	MaxUploadSize               int64 = 8 * 1024 * 1024 * 1024
+	downloadChunkSizeContextKey       = "filemanager.download_chunk_size"
+	uploadSessionTTL                  = 15 * time.Minute
+	previewTokenTTL                   = 10 * time.Minute
+	maxConcurrentUploads              = 4
 )
 
 var ErrTooManyUploads = errors.New("too many concurrent uploads")
@@ -62,13 +64,59 @@ type downloadResponseOptions struct {
 }
 
 var (
-	uploadMu       sync.Mutex
-	uploadSessions = make(map[string]*uploadSession)
-	uploadSlots    = make(chan struct{}, maxConcurrentUploads)
-	cleanupOnce    sync.Once
-	previewTokenMu sync.Mutex
-	previewTokens  = make(map[string]previewToken)
+	uploadMu           sync.Mutex
+	uploadSessions     = make(map[string]*uploadSession)
+	uploadSlots        = make(chan struct{}, maxConcurrentUploads)
+	cleanupOnce        sync.Once
+	previewTokenMu     sync.Mutex
+	previewTokens      = make(map[string]previewToken)
+	downloadChunkMu    sync.RWMutex
+	downloadChunkSizes = make(map[string]int64)
 )
+
+func cachedDownloadChunkSize(clientUUID string) int64 {
+	if clientUUID == "" {
+		return DefaultTransferChunkSize
+	}
+	downloadChunkMu.RLock()
+	size := downloadChunkSizes[clientUUID]
+	downloadChunkMu.RUnlock()
+	if size < MinTransferChunkSize || size > MaxTransferChunkSize {
+		return DefaultTransferChunkSize
+	}
+	return size
+}
+
+func downloadChunkSizeForRequest(c *gin.Context, clientUUID string) int64 {
+	size := cachedDownloadChunkSize(clientUUID)
+	requested := strings.TrimSpace(c.Query("chunk_size"))
+	if requested == "" {
+		return size
+	}
+	value, err := strconv.ParseInt(requested, 10, 64)
+	if err == nil && value >= MinTransferChunkSize && value <= MaxTransferChunkSize {
+		// Keep the safer value when the browser and Server have learned
+		// different limits (for example after a process restart).
+		return min(size, value)
+	}
+	return size
+}
+
+func rememberDownloadChunkSize(clientUUID string, size int64) {
+	if clientUUID == "" || size < MinTransferChunkSize || size > MaxTransferChunkSize {
+		return
+	}
+	downloadChunkMu.Lock()
+	if existing := downloadChunkSizes[clientUUID]; existing >= MinTransferChunkSize && existing < size {
+		downloadChunkMu.Unlock()
+		return
+	}
+	if downloadChunkSizes == nil {
+		downloadChunkSizes = make(map[string]int64)
+	}
+	downloadChunkSizes[clientUUID] = size
+	downloadChunkMu.Unlock()
+}
 
 type persistedUploadSession struct {
 	ID         string    `json:"id"`
@@ -134,9 +182,9 @@ func initRemoteUpload(c *gin.Context, clientUUID string) {
 		return
 	}
 	if request.Size == 0 {
-		_, err := Call(c.Request.Context(), clientUUID, "write", map[string]any{
+		_, err := Call(c.Request.Context(), clientUUID, "create", map[string]any{
 			"path": request.Path,
-		}, "", CallOptions{Timeout: 60 * time.Second})
+		}, CallOptions{Timeout: 60 * time.Second})
 		if err != nil {
 			respondTransferError(c, err)
 			return
@@ -255,7 +303,7 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 	defer cancel()
 	callDone := make(chan error, 1)
 	go func() {
-		_, callErr := Call(ctx, clientUUID, "upload_stream", args, "", CallOptions{Timeout: streamCallTimeout})
+		_, callErr := Call(ctx, clientUUID, "upload_stream", args, CallOptions{Timeout: streamCallTimeout})
 		callDone <- callErr
 	}()
 
@@ -362,7 +410,7 @@ func mergeRemoteUpload(c *gin.Context, clientUUID string) {
 		"offset":      session.Size,
 		"first":       false,
 		"final":       true,
-	}, "", CallOptions{Timeout: 90 * time.Second})
+	}, CallOptions{Timeout: 90 * time.Second})
 	if err == nil {
 		finishUploadSession(session)
 		auditFileTransfer(c, "upload", clientUUID, session.Path)
@@ -370,7 +418,7 @@ func mergeRemoteUpload(c *gin.Context, clientUUID string) {
 		// A previous merge request may have timed out after the agent renamed the part file.
 		raw, statErr := Call(c.Request.Context(), clientUUID, "stat", map[string]any{
 			"path": session.Path,
-		}, "", CallOptions{Timeout: 60 * time.Second})
+		}, CallOptions{Timeout: 60 * time.Second})
 		if statErr == nil {
 			var info struct {
 				Size int64 `json:"size"`
@@ -417,7 +465,7 @@ func cancelUpload(c *gin.Context, clientUUID string) {
 	_, _ = Call(c.Request.Context(), clientUUID, "upload_cancel", map[string]any{
 		"upload_id": id,
 		"path":      session.Path,
-	}, "", CallOptions{Timeout: 30 * time.Second})
+	}, CallOptions{Timeout: 30 * time.Second})
 	session.mu.Lock()
 	finishUploadSession(session)
 	session.mu.Unlock()
@@ -435,7 +483,7 @@ func Download(c *gin.Context) {
 }
 
 func downloadFile(c *gin.Context, clientUUID, path string, options downloadResponseOptions) {
-	raw, err := Call(c.Request.Context(), clientUUID, "stat", map[string]any{"path": path}, "", CallOptions{Timeout: 60 * time.Second})
+	raw, err := Call(c.Request.Context(), clientUUID, "stat", map[string]any{"path": path}, CallOptions{Timeout: 60 * time.Second})
 	if err != nil {
 		logger.Errorf("file-transfer", "download stat failed client=%s path=%q: %v", clientUUID, path, err)
 		respondTransferError(c, err)
@@ -505,13 +553,21 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
+	transferChunkSize := downloadChunkSizeForRequest(c, clientUUID)
 	setHeaders := func() {
+		headerChunkSize := transferChunkSize
+		if value, exists := c.Get(downloadChunkSizeContextKey); exists {
+			if requested, ok := value.(int64); ok && requested >= MinTransferChunkSize && requested <= MaxTransferChunkSize {
+				headerChunkSize = requested
+			}
+		}
 		c.Header("Content-Type", contentType)
 		c.Header("Content-Disposition", formatDownloadContentDisposition(disposition, name, options.OfficeCompatible))
 		c.Header("Accept-Ranges", "bytes")
 		c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
 		c.Header("Cache-Control", "no-store, no-transform")
 		c.Header("X-Accel-Buffering", "no")
+		c.Header("X-Komari-Transfer-Chunk-Size", strconv.FormatInt(headerChunkSize, 10))
 		c.Header("ETag", etag)
 		if !info.ModifiedAt.IsZero() {
 			c.Header("Last-Modified", info.ModifiedAt.UTC().Format(http.TimeFormat))
@@ -525,6 +581,7 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 	}
 	if c.Request.Method == http.MethodHead || contentLength == 0 {
 		setHeaders()
+		rememberDownloadChunkSize(clientUUID, transferChunkSize)
 		auditFileTransfer(c, "download", clientUUID, path)
 		return
 	}
@@ -540,7 +597,7 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 		setHeaders()
 		committed = true
 	}
-	if err := streamDownloadRelay(c, clientUUID, path, info.Size, info.ModifiedAt, start, contentLength, DefaultTransferChunkSize, commitHeaders); err != nil {
+	if err := streamDownloadRelay(c, clientUUID, path, info.Size, info.ModifiedAt, start, contentLength, transferChunkSize, commitHeaders); err != nil {
 		logger.Errorf("file-transfer", "download stream failed client=%s path=%q start=%d length=%d file_size=%d committed=%t: %v", clientUUID, path, start, contentLength, info.Size, committed, err)
 		if !committed {
 			respondTransferError(c, err)
@@ -921,7 +978,7 @@ func cancelAgentUpload(session *uploadSession) {
 	_, _ = Call(ctx, session.UUID, "upload_cancel", map[string]any{
 		"upload_id": session.ID,
 		"path":      session.Path,
-	}, "", CallOptions{Timeout: 10 * time.Second})
+	}, CallOptions{Timeout: 10 * time.Second})
 }
 
 func uploadChunkCount(size, chunkSize int64) int64 {
@@ -951,6 +1008,10 @@ func respondTransferError(c *gin.Context, err error) {
 	}
 	status := http.StatusBadGateway
 	switch {
+	case isPayloadTooLargeError(err):
+		// Preserve a proxy/body-size rejection so the browser can renegotiate
+		// the logical chunk instead of retrying the same request forever.
+		status = http.StatusRequestEntityTooLarge
 	case errors.Is(err, ErrUnsupported):
 		status = http.StatusNotImplemented
 	case isUnsupportedAgentFileOperation(err):
