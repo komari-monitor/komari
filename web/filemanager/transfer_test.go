@@ -3,6 +3,7 @@ package filemanager
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,6 +98,24 @@ func TestIfRangeAllowsRange(t *testing.T) {
 				t.Fatalf("ifRangeAllowsRange(%q) = %v, want %v", test.value, got, test.allow)
 			}
 		})
+	}
+}
+
+func TestFormatDownloadContentDisposition(t *testing.T) {
+	regular := formatDownloadContentDisposition("inline", "中文 文档.docx", false)
+	if !strings.Contains(regular, "filename=download.docx") {
+		t.Fatalf("regular disposition = %q, want an ASCII fallback", regular)
+	}
+	if !strings.Contains(regular, "filename*=UTF-8''") {
+		t.Fatalf("regular disposition = %q, want an RFC 5987 filename", regular)
+	}
+
+	office := formatDownloadContentDisposition("inline", "中文 文档.docx", true)
+	if !strings.Contains(office, "filename=download.docx") {
+		t.Fatalf("Office disposition = %q, want an ASCII fallback", office)
+	}
+	if strings.Contains(office, "filename*=") {
+		t.Fatalf("Office disposition = %q, must not include filename*", office)
 	}
 }
 

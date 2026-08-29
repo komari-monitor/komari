@@ -74,6 +74,9 @@ func registerAgentRoutes(r *gin.Engine) {
 		tokenAuthorized.POST("/report", client.UploadReport)
 		tokenAuthorized.GET("/v2/rpc", client.WebSocketV2RPC)
 		tokenAuthorized.POST("/v2/rpc", client.UploadV2RPC)
+		// File data uses a short-lived, raw HTTP stream opened by a file RPC.
+		tokenAuthorized.GET("/transfer/:id", filemanager.AgentTransfer)
+		tokenAuthorized.POST("/transfer/:id", filemanager.AgentTransfer)
 		tokenAuthorized.GET("/terminal", terminal.EstablishConnection)
 
 		// JSON 接口 -> RPC2 (client: 命名空间)。
