@@ -27,8 +27,6 @@ type reportTrafficValues struct {
 	totalUp     int64
 	hasDown     bool
 	totalDown   int64
-	hasUptime   bool
-	uptime      int64
 }
 
 var reportTrafficStates sync.Map
@@ -386,15 +384,12 @@ func writeReportBatch(ctx context.Context, reports []v2.Report) ([]v2.Report, er
 		if !values.timestamp.IsZero() && !report.UpdatedAt.After(values.timestamp) {
 			report.UpdatedAt = values.timestamp.Add(time.Millisecond)
 		}
-		agentRestart := values.hasUptime && report.Uptime < values.uptime
-		counterResetUp := values.hasUp && report.Network.TotalUp < values.totalUp
-		counterResetDown := values.hasDown && report.Network.TotalDown < values.totalDown
 		trafficUp := int64(0)
-		if values.hasUp && !agentRestart && !counterResetUp {
+		if values.hasUp {
 			trafficUp = TrafficCounterDelta(report.Network.TotalUp, values.totalUp)
 		}
 		trafficDown := int64(0)
-		if values.hasDown && !agentRestart && !counterResetDown {
+		if values.hasDown {
 			trafficDown = TrafficCounterDelta(report.Network.TotalDown, values.totalDown)
 		}
 		points = append(points, reportMetricPoints(report, trafficUp, trafficDown)...)
@@ -403,8 +398,6 @@ func writeReportBatch(ctx context.Context, reports []v2.Report) ([]v2.Report, er
 		values.totalUp = report.Network.TotalUp
 		values.hasDown = true
 		values.totalDown = report.Network.TotalDown
-		values.hasUptime = true
-		values.uptime = report.Uptime
 		pendingStates[state] = values
 		prepared[i] = report
 	}
