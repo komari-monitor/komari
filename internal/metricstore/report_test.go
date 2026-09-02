@@ -2,14 +2,18 @@ package metricstore
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/metric"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 func useReportTestStore(t *testing.T, policy *metric.RollupPolicy) *metric.Store {
@@ -42,6 +46,124 @@ func useReportTestStore(t *testing.T, policy *metric.RollupPolicy) *metric.Store
 		_ = s.Close()
 	})
 	return s
+}
+
+type reportCounterFault struct {
+	remaining atomic.Int32
+	denied    atomic.Int32
+}
+
+func (f *reportCounterFault) denyRollupRead() bool {
+	for {
+		remaining := f.remaining.Load()
+		if remaining <= 0 {
+			return false
+		}
+		if f.remaining.CompareAndSwap(remaining, remaining-1) {
+			f.denied.Add(1)
+			return true
+		}
+	}
+}
+
+type reportSQLiteConnector struct {
+	driver *sqlite3.SQLiteDriver
+	dsn    string
+}
+
+func (c *reportSQLiteConnector) Connect(context.Context) (driver.Conn, error) {
+	return c.driver.Open(c.dsn)
+}
+
+func (c *reportSQLiteConnector) Driver() driver.Driver {
+	return c.driver
+}
+
+// useReportCounterFailureStore denies exactly two rollup reads after schema
+// setup, exercising failed counter restoration while leaving writes usable.
+func useReportCounterFailureStore(t *testing.T) (*metric.Store, *reportCounterFault) {
+	t.Helper()
+	fault := &reportCounterFault{}
+	dsn := fmt.Sprintf("file:report-counter-fault-%d?mode=memory&cache=shared", time.Now().UnixNano())
+	driver := &sqlite3.SQLiteDriver{
+		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+			conn.RegisterAuthorizer(func(op int, arg1, _, _ string) int {
+				if op == sqlite3.SQLITE_READ && arg1 == "metric_rollups" && fault.denyRollupRead() {
+					return sqlite3.SQLITE_DENY
+				}
+				return sqlite3.SQLITE_OK
+			})
+			return nil
+		},
+	}
+	db := sql.OpenDB(&reportSQLiteConnector{driver: driver, dsn: dsn})
+	s, err := metric.Open(context.Background(), metric.SQLite("", metric.WithDB(db), metric.WithMaxOpenConns(1)))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("open metric store: %v", err)
+	}
+	if err := createMetricDefinitions(context.Background(), s); err != nil {
+		_ = s.Close()
+		_ = db.Close()
+		t.Fatalf("create metric definitions: %v", err)
+	}
+	fault.remaining.Store(2)
+	storeMu.Lock()
+	previous := store
+	store = s
+	storeMu.Unlock()
+	t.Cleanup(func() {
+		clearReportTrafficStates()
+		storeMu.Lock()
+		store = previous
+		storeMu.Unlock()
+		_ = s.Close()
+		_ = db.Close()
+	})
+	return s, fault
+}
+
+func TestReportBatchCounterRestoreFailureInitializesStateOnce(t *testing.T) {
+	s, fault := useReportCounterFailureStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+	first := v2.Report{
+		UUID:      "counter-restore-failure",
+		UpdatedAt: base,
+		CPU:       v2.CPUReport{Usage: 10},
+		Network:   v2.NetworkReport{TotalUp: 100, TotalDown: 200},
+	}
+
+	if _, err := writeReportBatch(ctx, []v2.Report{first}); err != nil {
+		t.Fatalf("write first report after counter restore failure: %v", err)
+	}
+	if fault.denied.Load() != 2 {
+		t.Fatalf("counter restore queries = %d, want 2", fault.denied.Load())
+	}
+	stateValue, ok := reportTrafficStates.Load(first.UUID)
+	if !ok {
+		t.Fatal("report traffic state was not persisted")
+	}
+	state := stateValue.(*reportTrafficState)
+	state.mu.Lock()
+	initialized := state.initialized
+	state.mu.Unlock()
+	if !initialized {
+		t.Fatal("report traffic state was not initialized after restore failure")
+	}
+
+	second := first
+	second.UpdatedAt = base.Add(time.Second)
+	second.Network.TotalUp = 150
+	second.Network.TotalDown = 260
+	if _, err := writeReportBatch(ctx, []v2.Report{second}); err != nil {
+		t.Fatalf("write second report: %v", err)
+	}
+	if fault.denied.Load() != 2 {
+		t.Fatalf("counter restore queries after second batch = %d, want no repeat", fault.denied.Load())
+	}
+	assertMetricValues(t, s, MetricTrafficUp, first.UUID, base.Add(-time.Second), base.Add(2*time.Second), []float64{0, 50})
+	assertMetricValues(t, s, MetricTrafficDown, first.UUID, base.Add(-time.Second), base.Add(2*time.Second), []float64{0, 60})
 }
 
 func TestWriteReportStoresMinuteMetricsAndResetAwareTraffic(t *testing.T) {

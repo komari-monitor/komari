@@ -362,21 +362,18 @@ func writeReportBatch(ctx context.Context, reports []v2.Report) ([]v2.Report, er
 		}
 		if !values.initialized {
 			totalUp, hasUp, err := latestReportCounter(ctx, s, MetricNetTotalUp, report.UUID, report.UpdatedAt)
-			if err == nil {
+			if err != nil {
+				logger.Errorf("metricstore", "failed to restore previous upload counter for %s: %v", report.UUID, err)
+			} else {
 				values.totalUp = totalUp
 				values.hasUp = hasUp
-			} else if ctx.Err() == nil {
-				logger.Errorf("metricstore", "failed to restore previous upload counter for %s: %v", report.UUID, err)
 			}
 			totalDown, hasDown, err := latestReportCounter(ctx, s, MetricNetTotalDown, report.UUID, report.UpdatedAt)
-			if err == nil {
+			if err != nil {
+				logger.Errorf("metricstore", "failed to restore previous download counter for %s: %v", report.UUID, err)
+			} else {
 				values.totalDown = totalDown
 				values.hasDown = hasDown
-			} else if ctx.Err() == nil {
-				logger.Errorf("metricstore", "failed to restore previous download counter for %s: %v", report.UUID, err)
-			}
-			if err := ctx.Err(); err != nil {
-				return nil, err
 			}
 			values.initialized = true
 		}
@@ -402,13 +399,17 @@ func writeReportBatch(ctx context.Context, reports []v2.Report) ([]v2.Report, er
 		prepared[i] = report
 	}
 
-	if err := s.WriteBatch(ctx, points); err != nil {
-		return nil, err
-	}
+	// Persist the restored per-report traffic state even if the write below
+	// fails, so a slow or failing database does not re-issue the previous-
+	// counter queries on every batch.
 	for state, values := range pendingStates {
 		state.mu.Lock()
 		state.reportTrafficValues = values
 		state.mu.Unlock()
+	}
+
+	if err := s.WriteBatch(ctx, points); err != nil {
+		return nil, err
 	}
 	return prepared, nil
 }
