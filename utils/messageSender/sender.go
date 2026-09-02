@@ -232,7 +232,7 @@ func formatTemplateField(fieldName string, v reflect.Value) string {
 		}
 	case reflect.Struct:
 		if t, ok := v.Interface().(time.Time); ok {
-			return t.In(time.Local).Format(time.RFC3339Nano)
+			return t.In(time.Local).Format("2006-01-02 15:04:05")
 		}
 	}
 	return ""

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
@@ -88,7 +87,7 @@ func (j *JavaScriptSender) fallbackToTextMessage(event models.EventMessage) erro
 		event.Emoji, event.Emoji, event.Emoji,
 		event.Event,
 		event.Message,
-		event.Time.UTC().Format(time.RFC3339Nano))
+		event.Time.UTC().Format("2006-01-02 15:04:05"))
 	if len(event.Clients) > 0 {
 		clientNames := make([]string, 0, len(event.Clients))
 		for _, client := range event.Clients {
@@ -103,7 +102,7 @@ func (j *JavaScriptSender) fallbackToTextMessage(event models.EventMessage) erro
 			event.Event,
 			clientNames,
 			event.Message,
-			event.Time.UTC().Format(time.RFC3339Nano))
+			event.Time.UTC().Format("2006-01-02 15:04:05"))
 	}
 	return j.SendTextMessage(message, fmt.Sprint(event.Event))
 }
