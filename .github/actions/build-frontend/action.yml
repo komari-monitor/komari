@@ -23,6 +23,15 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
+    - name: Install zstd
+      shell: bash
+      run: |
+        set -euxo pipefail
+        if ! command -v zstd >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y zstd
+        fi
+
     - name: Clone and build frontend
       shell: bash
       run: |
@@ -38,9 +47,12 @@ runs:
         npm run build
         cd ..
 
-        mkdir -p web/public/defaultTheme/dist
-        rm -rf web/public/defaultTheme/dist/*
-        cp -r komari-web/dist/* web/public/defaultTheme/dist/
+        mkdir -p web/public/defaultTheme
+        rm -rf web/public/defaultTheme/dist web/public/defaultTheme/dist.tar.zst
+        test -f komari-web/dist/index.html
+        tar -cf "$RUNNER_TEMP/komari-default-dist.tar" -C komari-web/dist .
+        zstd -19 -T0 -q -f "$RUNNER_TEMP/komari-default-dist.tar" -o web/public/defaultTheme/dist.tar.zst
+        rm -f "$RUNNER_TEMP/komari-default-dist.tar"
         cp -f komari-web/komari-theme.json web/public/defaultTheme/
         if [ -f komari-web/preview.png ]; then cp -f komari-web/preview.png web/public/defaultTheme/; fi
         if [ -f komari-web/perview.png ]; then cp -f komari-web/perview.png web/public/defaultTheme/; fi

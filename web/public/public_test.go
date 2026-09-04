@@ -76,6 +76,15 @@ func TestReplaceHTMLLanguage(t *testing.T) {
 	}
 }
 
+func TestEmbeddedDistDoesNotEmbedRawFiles(t *testing.T) {
+	if _, err := PublicFS.ReadFile("defaultTheme/dist/index.html"); err == nil {
+		t.Fatal("PublicFS still embeds the raw frontend files")
+	}
+	if content, ok := defaultDistFiles[IndexFile]; !ok || len(content) == 0 {
+		t.Fatalf("embedded dist does not contain a non-empty %q", IndexFile)
+	}
+}
+
 func TestStaticRestrictedDoesNotServeCustomAssetOverride(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Chdir(t.TempDir())

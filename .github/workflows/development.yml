@@ -14,11 +14,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      #- name: Create dummy index.html
-      #  run: |
-      #    mkdir -p web/public/defaultTheme/dist
-      #    echo "<html><body><h1>This is komari development server.</h1></body></html>" > web/public/defaultTheme/dist/index.html
-
       - name: Clone and build frontend
         uses: ./.github/actions/build-frontend
 
