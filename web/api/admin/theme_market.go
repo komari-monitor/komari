@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -313,7 +312,7 @@ func InstallThemeFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "This theme does not provide an installable package")
 		return
 	}
-	data, err := downloadMarketURL(selected.Download, marketPackageMaxSize)
+	data, err := DownloadMarketURL(selected.Download, marketPackageMaxSize)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Failed to download theme: "+err.Error())
 		return
@@ -365,7 +364,7 @@ func fetchThemeMarketCatalog(source ThemeMarketSource, force bool) ([]ThemeMarke
 			return append([]ThemeMarketTheme(nil), cached.Themes...), nil
 		}
 	}
-	data, err := downloadMarketURL(source.URL, marketCatalogMaxSize)
+	data, err := DownloadMarketURL(source.URL, marketCatalogMaxSize)
 	if err != nil {
 		return nil, err
 	}
@@ -455,50 +454,6 @@ func validateMarketURLSyntax(rawURL string) error {
 		return errors.New("must be a valid HTTP or HTTPS URL")
 	}
 	return nil
-}
-
-func downloadMarketURL(rawURL string, maxSize int64) ([]byte, error) {
-	validate := func(candidate string) error {
-		parsed, err := url.Parse(candidate)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
-			return errors.New("only public HTTP and HTTPS URLs are allowed")
-		}
-		if isPrivateIP(parsed.Hostname()) {
-			return errors.New("requests to private or internal addresses are not allowed")
-		}
-		return nil
-	}
-	if err := validate(rawURL); err != nil {
-		return nil, err
-	}
-	client := &http.Client{
-		Timeout: 45 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return errors.New("too many redirects")
-			}
-			return validate(req.URL.String())
-		},
-	}
-	resp, err := client.Get(rawURL)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP status %d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxSize {
-		return nil, fmt.Errorf("response exceeds the %d byte limit", maxSize)
-	}
-	if len(data) == 0 {
-		return nil, errors.New("empty response")
-	}
-	return data, nil
 }
 
 func invalidateThemeMarketCache(rawURL string) {

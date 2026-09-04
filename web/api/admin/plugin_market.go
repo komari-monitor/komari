@@ -302,7 +302,7 @@ func InstallPluginFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "This plugin does not provide an installable package")
 		return
 	}
-	data, err := downloadMarketURL(selected.Download, marketPackageMaxSize)
+	data, err := DownloadMarketURL(selected.Download, marketPackageMaxSize)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Failed to download plugin: "+err.Error())
 		return
@@ -349,7 +349,7 @@ func fetchPluginMarketCatalog(source PluginMarketSource, force bool) ([]PluginMa
 			return append([]PluginMarketPlugin(nil), cached.Plugins...), nil
 		}
 	}
-	data, err := downloadMarketURL(source.URL, marketCatalogMaxSize)
+	data, err := DownloadMarketURL(source.URL, marketCatalogMaxSize)
 	if err != nil {
 		return nil, err
 	}
