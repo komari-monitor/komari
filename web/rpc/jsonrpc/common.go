@@ -269,6 +269,13 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 	return nodeMap, nil
 }
 
+func gpuUsageFromReport(rep *v2.Report) float32 {
+	if rep == nil || rep.GPU == nil {
+		return 0
+	}
+	return float32(rep.GPU.AverageUsage)
+}
+
 func getPublicInfo(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	info, err := database.GetPublicInfo()
 	if err != nil {
@@ -319,30 +326,33 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	}
 
 	type recordLike struct {
-		Client         string              `json:"client"`
-		Time           time.Time           `json:"time"`
-		Cpu            float32             `json:"cpu"`
-		Gpu            float32             `json:"gpu"`
-		Ram            int64               `json:"ram"`
-		RamTotal       int64               `json:"ram_total"`
-		Swap           int64               `json:"swap"`
-		SwapTotal      int64               `json:"swap_total"`
-		Load           float32             `json:"load"`
-		Load5          float32             `json:"load5"`
-		Load15         float32             `json:"load15"`
-		Temp           float32             `json:"temp"`
-		Disk           int64               `json:"disk"`
-		DiskTotal      int64               `json:"disk_total"`
-		NetIn          int64               `json:"net_in"`
-		NetOut         int64               `json:"net_out"`
-		NetTotalUp     int64               `json:"net_total_up"`
-		NetTotalDown   int64               `json:"net_total_down"`
-		Process        int                 `json:"process"`
-		Connections    int                 `json:"connections"`
-		ConnectionsUdp int                 `json:"connections_udp"`
-		Online         bool                `json:"online"`
-		Uptime         int64               `json:"uptime"`
-		Ping           map[string]pingStat `json:"ping"`
+		Client          string              `json:"client"`
+		Time            time.Time           `json:"time"`
+		Cpu             float32             `json:"cpu"`
+		Gpu             float32             `json:"gpu"`
+		GpuCount        int                 `json:"gpu_count,omitempty"`
+		GpuAverageUsage float64             `json:"gpu_average_usage,omitempty"`
+		GpuDetailedInfo []v2.GPUDeviceInfo  `json:"gpu_detailed_info,omitempty"`
+		Ram             int64               `json:"ram"`
+		RamTotal        int64               `json:"ram_total"`
+		Swap            int64               `json:"swap"`
+		SwapTotal       int64               `json:"swap_total"`
+		Load            float32             `json:"load"`
+		Load5           float32             `json:"load5"`
+		Load15          float32             `json:"load15"`
+		Temp            float32             `json:"temp"`
+		Disk            int64               `json:"disk"`
+		DiskTotal       int64               `json:"disk_total"`
+		NetIn           int64               `json:"net_in"`
+		NetOut          int64               `json:"net_out"`
+		NetTotalUp      int64               `json:"net_total_up"`
+		NetTotalDown    int64               `json:"net_total_down"`
+		Process         int                 `json:"process"`
+		Connections     int                 `json:"connections"`
+		ConnectionsUdp  int                 `json:"connections_udp"`
+		Online          bool                `json:"online"`
+		Uptime          int64               `json:"uptime"`
+		Ping            map[string]pingStat `json:"ping"`
 	}
 
 	respMap := make(map[string]recordLike, len(latest))
@@ -359,7 +369,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 			Client:         uuid,
 			Time:           rep.UpdatedAt,
 			Cpu:            float32(rep.CPU.Usage),
-			Gpu:            0,
+			Gpu:            gpuUsageFromReport(rep),
 			Ram:            rep.Ram.Used,
 			RamTotal:       rep.Ram.Total,
 			Swap:           rep.Swap.Used,
@@ -380,6 +390,11 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 			Online:         onlineSet[uuid],
 			Uptime:         rep.Uptime,
 			Ping:           stats,
+		}
+		if rep.GPU != nil {
+			rl.GpuCount = rep.GPU.Count
+			rl.GpuAverageUsage = rep.GPU.AverageUsage
+			rl.GpuDetailedInfo = rep.GPU.DetailedInfo
 		}
 		respMap[uuid] = rl
 	}
