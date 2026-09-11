@@ -551,7 +551,7 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 			Client:         params.UUID,
 			Time:           r.UpdatedAt,
 			Cpu:            float32(r.CPU.Usage),
-			Gpu:            0,
+			Gpu:            gpuUsageFromReport(&r),
 			Ram:            r.Ram.Used,
 			RamTotal:       r.Ram.Total,
 			Swap:           r.Swap.Used,
