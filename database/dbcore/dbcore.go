@@ -444,6 +444,7 @@ func doInitialize() error {
 	// 若升级时旧表仍存在，管理员可通过升级向导显式导入并清理。
 	// models.Record / models.PingRecord / models.GPURecord 结构体仍作为
 	// metric store 的读写 DTO 和旧表导入 DTO 保留在 models 包中。
+	// models.TrafficReportNotification 同样仅为旧数据库兼容保留，不再建表。
 
 	err = instance.AutoMigrate(
 		&models.User{},
@@ -452,7 +453,6 @@ func doInitialize() error {
 		&models.Clipboard{},
 		&models.LoadNotification{},
 		&models.OfflineNotification{},
-		&models.TrafficReportNotification{},
 		&models.PingTask{},
 		&models.OidcProvider{},
 		&models.MessageSenderProvider{},

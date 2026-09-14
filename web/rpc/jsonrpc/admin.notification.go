@@ -13,7 +13,7 @@ import (
 )
 
 // admin.notification.go
-// 通知相关 RPC2 方法（admin 命名空间）：负载告警、离线通知、流量报告。
+// 通知相关 RPC2 方法（admin 命名空间）：负载告警、离线通知。
 
 func init() {
 	// load notifications
@@ -26,11 +26,6 @@ func init() {
 	reg("editOfflineNotification", adminEditOfflineNotification, "Edit offline notifications")
 	reg("enableOfflineNotification", adminEnableOfflineNotification, "Enable offline notifications for clients")
 	reg("disableOfflineNotification", adminDisableOfflineNotification, "Disable offline notifications for clients")
-	// traffic report notifications
-	reg("listTrafficReportNotifications", adminListTrafficReport, "List traffic report notifications")
-	reg("editTrafficReportNotifications", adminEditTrafficReport, "Edit traffic report notifications")
-	reg("enableTrafficReportNotifications", adminEnableTrafficReport, "Enable traffic report notifications")
-	reg("disableTrafficReportNotifications", adminDisableTrafficReport, "Disable traffic report notifications")
 	// send notification
 	reg("sendNotification", adminSendNotification, "Send a notification")
 }
@@ -187,53 +182,6 @@ func adminEnableOfflineNotification(_ context.Context, req *rpc.JsonRpcRequest) 
 func adminDisableOfflineNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	if e := setOfflineNotificationEnable(req, false); e != nil {
 		return nil, e
-	}
-	return nil, nil
-}
-
-func adminListTrafficReport(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	list, err := notification.ListTrafficReportNotifications()
-	if err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to list traffic report notifications: "+err.Error(), nil)
-	}
-	return list, nil
-}
-
-func adminEditTrafficReport(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	var notifications []models.TrafficReportNotification
-	if err := req.BindParams(&notifications); err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
-	}
-	if len(notifications) == 0 {
-		return nil, rpc.MakeError(rpc.InvalidParams, "At least one notification is required", nil)
-	}
-	if err := notification.ValidateTrafficReportNotifications(notifications); err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
-	}
-	if err := notification.EditTrafficReportNotifications(notifications); err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to edit traffic report notifications: "+err.Error(), nil)
-	}
-	return nil, nil
-}
-
-func adminEnableTrafficReport(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	var uuids []string
-	if err := req.BindParams(&uuids); err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
-	}
-	if err := notification.EnableTrafficReportNotifications(uuids); err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to enable traffic report notifications: "+err.Error(), nil)
-	}
-	return nil, nil
-}
-
-func adminDisableTrafficReport(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	var uuids []string
-	if err := req.BindParams(&uuids); err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
-	}
-	if err := notification.DisableTrafficReportNotifications(uuids); err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to disable traffic report notifications: "+err.Error(), nil)
 	}
 	return nil, nil
 }
