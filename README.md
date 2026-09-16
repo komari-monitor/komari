@@ -1,69 +1,59 @@
-# Komari
-
-![Badge](https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fkomari-monitor%2Fkomari&label=&icon=github&color=%23a370f7&message=&style=flat&tz=UTC)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/komari-monitor/komari)
-
-![komari](https://socialify.git.ci/komari-monitor/komari/image?description=1&font=Inter&forks=1&issues=1&language=1&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fkomari-monitor%2Fkomari-web%2Fd54ce1288df41ead08aa19f8700186e68028a889%2Fpublic%2Ffavicon.png&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Auto)
+# SIXOSN Komari
 
 [English](./README.md) | [简体中文](./README_zh-cn.md)
 
-Komari is a lightweight, self-hosted server monitoring solution. It provides a simple and efficient way to track server performance through a web interface, with metrics collected by a lightweight agent.
+SIXOSN Komari is a security-focused, independently maintained server-monitoring distribution. It keeps Komari's lightweight monitoring experience while providing a dedicated default theme, per-node traffic billing cycles, and a deliberately reduced remote-control surface.
 
 > [!IMPORTANT]
-> This SIXOSN fork uses Glassmorphism as its embedded default theme, supports per-node traffic reset cycles, accepts only the matching `SIXOSN/komari-agent` distribution, and removes remote command execution, web terminal, and remote file-management endpoints.
+> This distribution accepts only the matching [`SIXOSN/komari-agent`](https://github.com/SIXOSN/komari-agent). Agents from other distributions are rejected by design.
 
-> [!WARNING]
-> Komari is a self-hosted monitoring and control application. Deploy it only on systems you own or are authorized to manage. You are solely responsible for how you deploy and use Komari. The developers accept no liability for unauthorized access, persistence, command execution, other misuse, or any resulting consequences.
+## Project relationship
 
-[Documentation](https://www.komari.wiki/) | [Telegram Group](https://t.me/komari_monitor)
+This repository is derived from [`komari-monitor/komari`](https://github.com/komari-monitor/komari) and is maintained independently by SIXOSN. It is not an official upstream release, and upstream support and compatibility must not be assumed.
 
-## Features
+Compatibility intentionally differs because the server and agent validate each other's SIXOSN distribution identity. Source-code licensing and legally required attribution remain in [LICENSE](./LICENSE) and [NOTICE](./NOTICE); this relationship statement does not replace those files.
 
-- **Real-time monitoring**: Displays monitoring data at one-second intervals.
-- **Lightweight and efficient**: Uses minimal system resources and works well on servers of any size.
-- **Self-hosted**: Keeps you in control of your data and privacy.
-- **Web interface**: Provides an intuitive, easy-to-use monitoring dashboard.
-- **Extensible**: Supports custom themes and plugins.
+## Distribution features
 
-## Quick Start
+- Customized Glassmorphism interface embedded as the default theme.
+- Per-node traffic reset day, reset time, and IANA time-zone configuration.
+- Mutual distribution validation between the SIXOSN server and agent.
+- Remote commands, Web SSH, browser terminals, file management, and file-transfer endpoints removed.
+- Existing databases and server settings preserved during upgrades; new traffic-cycle fields default to disabled.
+- Real-time metrics, history, themes, plugins, and self-hosted administration retained.
 
-| Platform                                                                                                                                                                                                  | Description                                                                                                                                                                                           |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| <a href="https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_"><img src="https://rainyun-apps.cn-nb1.rains3.com/materials/deploy-on-rainyun-cn.svg" alt="Rainyun" width="180"></a>                       | Deploy websites, databases, and hundreds of popular apps in seconds with flexible hourly billing. [Get started for just ¥5/month. Deploy now!](https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_) |
-| <a href="https://apps.fit2cloud.com/1panel/komari"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/1panel-logo-blue.png" alt="1Panel App Store" width="180"></a> | A modern, open-source Linux server management panel for websites, databases, containers, files, backups, security, and AI, with one-click deployment from its app store.                              |
+## Related repositories
 
-For instructions on Docker deployment, binary installation, building from source, and updates, see the [installation guide](https://www.komari.wiki/en/install/quick-start).
+- Server: [`SIXOSN/komari`](https://github.com/SIXOSN/komari)
+- Agent: [`SIXOSN/komari-agent`](https://github.com/SIXOSN/komari-agent)
+- Default theme: [`SIXOSN/komari-theme-Glassmorphism`](https://github.com/SIXOSN/komari-theme-Glassmorphism)
+- Administration frontend: [`SIXOSN/komari-web`](https://github.com/SIXOSN/komari-web)
 
-## Screenshots
+## Docker deployment
 
-| Page                | Screenshot                                                                                                                                                             |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Home Dashboard      | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A1%B5%E4%BB%AA%E8%A1%A8%E7%9B%98-en.webp" width="800" alt="Home Dashboard">               |
-| Admin Dashboard     | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E5%90%8E%E5%8F%B0%E4%BB%AA%E8%A1%A8%E7%9B%98-en.webp" width="800" alt="Admin Dashboard">              |
-| History Charts      | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E5%8E%86%E5%8F%B2%E5%9B%BE%E8%A1%A8-en.webp" width="800" alt="History Charts">                        |
-| Customizable Themes | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%8F%AF%E8%87%AA%E5%AE%9A%E4%B9%89-en.webp" width="800" alt="Customizable Themes"> |
-| Theme Market        | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%B8%82%E5%9C%BA-en.webp" width="800" alt="Theme Market">                          |
+```bash
+docker run -d \
+  --name komari \
+  --restart always \
+  -p 25774:25774 \
+  -v /path/to/komari-data:/app/data \
+  ghcr.io/sixosn/komari:1.5.0-fix2
+```
 
-## Sponsors
+Back up the mounted data directory before replacing an existing container.
 
-Interested in sponsoring Komari? Contact the developer via [email](mailto:komari@akz.moe) or [Telegram](https://t.me/mamomoe).
+## Agent installation
 
-| Sponsor                                                                                                                                                                                          | Description                                                                                                                                                                                                                                                                   |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| <a href="https://axisnow.io/zh?utm=komari"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/AxisNow.jpg" alt="AxisNow" width="180"></a> | [Self-Hosted Private CDN \| Subscription-Based CDN-Like Service \| A Fully Controlled, Flexible, Modular CDN Network](https://axisnow.io/zh?utm=komari) |
-| <a href="https://whmcs.as211392.com/aff.php?aff=110"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/dreamcloud.png" alt="Dream Cloud" width="180"></a> | Cost-effective Asia-Pacific hosting with direct connectivity and robust DDoS protection, backed by transparent capacity claims.                                                                                                                                               |
-| <a href="https://sharon.io"><img src="https://raw.githubusercontent.com/komari-monitor/public/refs/heads/main/images/sharon-networks.webp" alt="Sharon Networks" width="180"></a>                | Premium China-optimized connectivity from Asia-Pacific data centers, featuring low latency, high bandwidth, and Tbps-scale local DDoS mitigation. Join the [Telegram community](https://t.me/SharonNetwork) to participate in charitable initiatives and community giveaways. |
+Create or select a node in the administration panel and use that node's private token:
 
-## Contributors
+```bash
+wget -qO- 'https://raw.githubusercontent.com/SIXOSN/komari-agent/refs/heads/main/install.sh' \
+  | sudo bash -s -- \
+  --install-version snapshot \
+  -e 'https://your-komari.example.com' \
+  -t 'NODE_TOKEN'
+```
 
-Thanks to everyone who has contributed code, themes, plugins, documentation, translations, bug reports, or feedback to Komari.
+## Security scope
 
-<a href="https://github.com/komari-monitor/komari/graphs/contributors"><img src="https://contributors-img.web.app/image?repo=komari-monitor/komari" alt="Komari contributors" width="600"></a>
-
-## Support the Project
-
-If Komari has been useful to you, consider buying me a coffee. Thank you for your support!
-
-| WeChat Pay                                                                                                   | TRON Network                                                                                |
-| ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| ![WeChat Pay QR code](https://b2.akz.moe/awesome-pictures/%E5%BE%AE%E4%BF%A1%E8%B5%9E%E8%B5%8F%E7%A0%81.png) | ![TRON Network QR code](https://b2.akz.moe/awesome-pictures/PixPin_2026-08-07_15-16-52.png) |
+Use this software only on systems you own or are authorized to administer. Removing remote-control features reduces exposure but does not replace TLS, access control, host hardening, backups, or timely dependency updates.
