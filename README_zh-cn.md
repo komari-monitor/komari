@@ -44,15 +44,7 @@ docker run -d \
 
 ## Agent 安装
 
-在管理面板中创建或选择节点，并使用该节点自己的私密 Token：
-
-```bash
-wget -qO- 'https://raw.githubusercontent.com/SIXOSN/komari-agent/refs/heads/main/install.sh' \
-  | sudo bash -s -- \
-  --install-version snapshot \
-  -e 'https://你的面板地址' \
-  -t '节点TOKEN'
-```
+请在管理面板中创建或选择节点，并按照面板内显示的安装指引操作。本 README 不公开安装命令、凭据或兼容性实现细节。
 
 ## 安全范围
 

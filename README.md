@@ -44,15 +44,7 @@ Back up the mounted data directory before replacing an existing container.
 
 ## Agent installation
 
-Create or select a node in the administration panel and use that node's private token:
-
-```bash
-wget -qO- 'https://raw.githubusercontent.com/SIXOSN/komari-agent/refs/heads/main/install.sh' \
-  | sudo bash -s -- \
-  --install-version snapshot \
-  -e 'https://your-komari.example.com' \
-  -t 'NODE_TOKEN'
-```
+Create or select a node in the administration panel, then follow the installation guidance shown there. Installation commands, credentials, and compatibility details are intentionally not published in this README.
 
 ## Security scope
 
