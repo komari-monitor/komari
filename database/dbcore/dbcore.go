@@ -467,12 +467,5 @@ func doInitialize() error {
 	); err != nil {
 		logger.Errorf("dbcore", "Failed to create Session table, it may already exist: %v", err)
 	}
-	if err := instance.AutoMigrate(
-		&models.Task{},
-		&models.TaskResult{},
-	); err != nil {
-		logger.Errorf("dbcore", "Failed to create Task and TaskResult table, it may already exist: %v", err)
-	}
-
 	return nil
 }

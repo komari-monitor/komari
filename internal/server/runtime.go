@@ -208,13 +208,7 @@ func registerScheduledWork() {
 	}
 }
 
-const taskResultRetentionDays = 30
-
 func cleanupScheduledData() {
-	before := time.Now().UTC().Add(-24 * time.Hour * taskResultRetentionDays)
-	if err := tasks.ClearTaskResultsByTimeBefore(before); err != nil {
-		logger.Errorf("server", "Failed to clean expired task results: %v", err)
-	}
 	auditlog.RemoveOldLogs()
 	accounts.RemoveExpiredSessions()
 }

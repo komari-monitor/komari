@@ -35,7 +35,9 @@ func UpgradeWebSocket(c *gin.Context, options ...WebSocketUpgradeOption) (*webso
 	for _, option := range options {
 		option(&upgrader)
 	}
-	return upgrader.Upgrade(c.Writer, c.Request, nil)
+	responseHeader := http.Header{}
+	responseHeader.Set("X-SIXOSN-Komari-Distribution", "SIXOSN/komari")
+	return upgrader.Upgrade(c.Writer, c.Request, responseHeader)
 }
 
 // UpgradeSafeConn upgrades the request to a WebSocket and attaches the

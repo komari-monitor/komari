@@ -4,11 +4,17 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/internal/config"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/web/api"
 )
 
 func RegisterClient(c *gin.Context) {
+	if c.GetHeader(v2.DistributionHeader) != v2.AgentDistribution {
+		api.RespondError(c, 403, "Incompatible agent distribution")
+		return
+	}
+	c.Header(v2.DistributionHeader, v2.ServerDistribution)
 	auth := c.GetHeader("Authorization")
 	if auth == "" {
 		api.RespondError(c, 403, "Invalid AutoDiscovery Key")

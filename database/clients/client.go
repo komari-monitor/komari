@@ -5,6 +5,7 @@ import (
 	"fmt"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"math"
+	"regexp"
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -229,6 +230,28 @@ func SaveClient(updates map[string]interface{}) error {
 			}
 		}
 	}
+	if v, exists := updates["traffic_reset_day"]; exists {
+		value, ok := toInt(v)
+		if !ok || value < 0 || value > 31 {
+			return fmt.Errorf("traffic_reset_day must be an integer between 0 and 31")
+		}
+		updates["traffic_reset_day"] = value
+	}
+	if v, exists := updates["traffic_reset_time"]; exists {
+		value, ok := v.(string)
+		if !ok || !regexp.MustCompile(`^(?:[01]\d|2[0-3]):[0-5]\d$`).MatchString(value) {
+			return fmt.Errorf("traffic_reset_time must use HH:mm in 24-hour format")
+		}
+	}
+	if v, exists := updates["traffic_reset_timezone"]; exists {
+		value, ok := v.(string)
+		if !ok || value == "" {
+			return fmt.Errorf("traffic_reset_timezone must be a valid IANA timezone")
+		}
+		if _, err := time.LoadLocation(value); err != nil {
+			return fmt.Errorf("traffic_reset_timezone must be a valid IANA timezone: %w", err)
+		}
+	}
 	if value, exists := updates["expired_at"]; exists {
 		switch typed := value.(type) {
 		case nil:
@@ -259,4 +282,24 @@ func SaveClient(updates map[string]interface{}) error {
 		return err
 	}
 	return nil
+}
+
+func toInt(value interface{}) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case float64:
+		if typed != math.Trunc(typed) || typed < math.MinInt || typed > math.MaxInt {
+			return 0, false
+		}
+		return int(typed), true
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil || parsed < math.MinInt || parsed > math.MaxInt {
+			return 0, false
+		}
+		return int(parsed), true
+	default:
+		return 0, false
+	}
 }

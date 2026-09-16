@@ -38,10 +38,13 @@ type Client struct {
 	Group            string     `json:"group" gorm:"type:varchar(100)"`
 	Tags             string     `json:"tags" gorm:"type:text"` // split by ';'
 	Hidden           bool       `json:"hidden" gorm:"default:false"`
-	TrafficLimit     int64      `json:"traffic_limit" gorm:"type:bigint"`
-	TrafficLimitType string     `json:"traffic_limit_type" gorm:"type:varchar(10);default:'max'"` // 流量阈值类型：sum max min up down
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	TrafficLimit         int64     `json:"traffic_limit" gorm:"type:bigint"`
+	TrafficLimitType     string    `json:"traffic_limit_type" gorm:"type:varchar(10);default:'max'"`     // 流量阈值类型：sum max min up down
+	TrafficResetDay      int       `json:"traffic_reset_day" gorm:"type:int;default:0"`                  // 每月重置日：0 禁用，1-31 启用
+	TrafficResetTime     string    `json:"traffic_reset_time" gorm:"type:varchar(5);default:'00:00'"`    // HH:mm
+	TrafficResetTimezone string    `json:"traffic_reset_timezone" gorm:"type:varchar(64);default:'UTC'"` // IANA 时区
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // User represents an authenticated user

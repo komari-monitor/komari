@@ -9,6 +9,9 @@
 
 Komari is a lightweight, self-hosted server monitoring solution. It provides a simple and efficient way to track server performance through a web interface, with metrics collected by a lightweight agent.
 
+> [!IMPORTANT]
+> This SIXOSN fork uses Glassmorphism as its embedded default theme, supports per-node traffic reset cycles, accepts only the matching `SIXOSN/komari-agent` distribution, and removes remote command execution, web terminal, and remote file-management endpoints.
+
 > [!WARNING]
 > Komari is a self-hosted monitoring and control application. Deploy it only on systems you own or are authorized to manage. You are solely responsible for how you deploy and use Komari. The developers accept no liability for unauthorized access, persistence, command execution, other misuse, or any resulting consequences.
 
@@ -38,7 +41,6 @@ For instructions on Docker deployment, binary installation, building from source
 | Home Dashboard      | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A1%B5%E4%BB%AA%E8%A1%A8%E7%9B%98-en.webp" width="800" alt="Home Dashboard">               |
 | Admin Dashboard     | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E5%90%8E%E5%8F%B0%E4%BB%AA%E8%A1%A8%E7%9B%98-en.webp" width="800" alt="Admin Dashboard">              |
 | History Charts      | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E5%8E%86%E5%8F%B2%E5%9B%BE%E8%A1%A8-en.webp" width="800" alt="History Charts">                        |
-| Web Terminal        | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E7%BD%91%E9%A1%B5%E7%BB%88%E7%AB%AF.webp" width="800" alt="Web Terminal">                             |
 | Customizable Themes | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%8F%AF%E8%87%AA%E5%AE%9A%E4%B9%89-en.webp" width="800" alt="Customizable Themes"> |
 | Theme Market        | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%B8%82%E5%9C%BA-en.webp" width="800" alt="Theme Market">                          |
 

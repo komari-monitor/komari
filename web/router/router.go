@@ -6,8 +6,6 @@ import (
 	"github.com/komari-monitor/komari/web/api/admin"
 	"github.com/komari-monitor/komari/web/api/client"
 	public_api "github.com/komari-monitor/komari/web/api/public"
-	"github.com/komari-monitor/komari/web/api/terminal"
-	"github.com/komari-monitor/komari/web/filemanager"
 	"github.com/komari-monitor/komari/web/public"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
 )
@@ -39,9 +37,6 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/api/oauth_callback", public_api.OAuthCallback)
 	// 插件公开页面（visibility=public 的 iframe 页面），无需鉴权。
 	r.GET("/api/plugin/:short/*filepath", public_api.ServePluginFile)
-	// 短期文件预览令牌公开下载入口，供 Office 在线预览等服务端抓取。
-	r.GET("/api/preview/client/:uuid/file/download", filemanager.PreviewDownload)
-	r.HEAD("/api/preview/client/:uuid/file/download", filemanager.PreviewDownload)
 	// /api/clients 是 WebSocket 端点（客户端发 "get"/"get <uuid>" 拉取在线列表与最新上报），
 	// 非 JSON-RPC，保留为 WS handler。
 	r.GET("/api/clients", api.GetClients)
@@ -71,10 +66,6 @@ func registerAgentRoutes(r *gin.Engine) {
 		// Agent 上报统一使用 v2 JSON-RPC。
 		tokenAuthorized.GET("/v2/rpc", client.WebSocketV2RPC)
 		tokenAuthorized.POST("/v2/rpc", client.UploadV2RPC)
-		// File data uses a short-lived, raw HTTP stream opened by a file RPC.
-		tokenAuthorized.GET("/transfer/:id", filemanager.AgentTransfer)
-		tokenAuthorized.POST("/transfer/:id", filemanager.AgentTransfer)
-		tokenAuthorized.GET("/terminal", terminal.EstablishConnection)
 	}
 }
 
@@ -134,24 +125,11 @@ func registerAdminRoutes(r *gin.Engine) {
 
 	// --- 以下全部 JSON -> RPC2 ---
 
-	// tasks（远程执行）
-	task := g.Group("/task")
-	{
-		task.GET("/all", jsonRpc.Bind("admin:getTasks"))
-		task.POST("/exec", api.RequireSensitive2FA(), jsonRpc.Bind("admin:exec"))
-		task.GET("/:task_id", jsonRpc.Bind("admin:getTaskById", jsonRpc.WithPath("task_id")))
-		task.GET("/:task_id/result", jsonRpc.Bind("admin:getTaskResultsByTaskId", jsonRpc.WithPath("task_id")))
-		task.GET("/:task_id/result/:uuid", jsonRpc.Bind("admin:getSpecificTaskResult", jsonRpc.WithPath("task_id", "uuid")))
-		task.GET("/client/:uuid", jsonRpc.Bind("admin:getTasksByClientId", jsonRpc.WithPath("uuid")))
-	}
-
 	// settings
 	settings := g.Group("/settings")
 	{
 		settings.GET("/", jsonRpc.Bind("admin:getSettings"))
 		settings.POST("/", jsonRpc.Bind("admin:editSettings"))
-		settings.GET("/xtermjs", jsonRpc.Bind("admin:getXtermjsSettings"))
-		settings.POST("/xtermjs", jsonRpc.Bind("admin:setXtermjsSettings", jsonRpc.WithMessage("settings saved")))
 		settings.POST("/oidc", jsonRpc.Bind("admin:setOidcProvider"))
 		settings.GET("/oidc", jsonRpc.Bind("admin:getOidcProvider", jsonRpc.WithQuery("provider")))
 		settings.POST("/message-sender", jsonRpc.Bind("admin:setMessageSenderProvider"))
@@ -175,14 +153,6 @@ func registerAdminRoutes(r *gin.Engine) {
 		clientGroup.POST("/:uuid/remove", jsonRpc.Bind("admin:removeClient", jsonRpc.WithPath("uuid")))
 		clientGroup.GET("/:uuid/token", jsonRpc.Bind("admin:getClientToken", jsonRpc.WithPath("uuid"), jsonRpc.WithFlat()))
 		clientGroup.POST("/order", jsonRpc.Bind("admin:orderClients"))
-		// RequestTerminal validates 2FA only when creating a new session. Reattach
-		// requests are authenticated against the existing session owner so a short
-		// network flap does not depend on the current TOTP window.
-		clientGroup.GET("/:uuid/terminal", terminal.RequestTerminal)
-		clientGroup.POST("/:uuid/file/upload", filemanager.Upload)
-		clientGroup.GET("/:uuid/file/download", filemanager.Download)
-		clientGroup.HEAD("/:uuid/file/download", filemanager.Download)
-		clientGroup.GET("/:uuid/file/preview-token", filemanager.CreatePreviewToken)
 	}
 
 	// records
