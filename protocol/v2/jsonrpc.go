@@ -1,14 +1,13 @@
 package v2
 
 import (
-	"encoding/json"
 	"time"
 )
 
 const (
-	DistributionHeader      = "X-SIXOSN-Komari-Distribution"
-	ServerDistribution      = "SIXOSN/komari"
-	AgentDistribution       = "SIXOSN/komari-agent"
+	DistributionHeader    = "X-SIXOSN-Komari-Distribution"
+	ServerDistribution    = "SIXOSN/komari"
+	AgentDistribution     = "SIXOSN/komari-agent"
 	Version               = "2.0"
 	MethodAgentReport     = "agent.report"
 	MethodAgentBasicInfo  = "agent.basicInfo"
