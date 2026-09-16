@@ -41,7 +41,6 @@ jobs:
         uses: ./.github/actions/build-frontend
         with:
           artifact-name: komari-frontend
-          ref: ${{ needs.resolve-release.outputs.frontend_ref }}
 
   build-and-attach-binaries:
     needs: build-frontend
