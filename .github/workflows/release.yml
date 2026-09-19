@@ -209,4 +209,4 @@ jobs:
         if: steps.release.outputs.is_latest == 'true'
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: docker buildx imagetools create --tag "${REGISTRY}/${IMAGE_NAME}:latest" "${REGISTRY}/${IMAGE_NAME}:${TAG}"
+        run: docker buildx imagetools create --tag "${REGISTRY}/${IMAGE_NAME,,}:latest" "${REGISTRY}/${IMAGE_NAME,,}:${TAG}"
