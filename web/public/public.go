@@ -32,7 +32,34 @@ const (
 	// 主题内部结构定义
 	DistDir   = "dist"       // 静态资源存放目录
 	IndexFile = "index.html" // 相对于 DistDir
+
+	serviceWorkerCleanupPath = "/komari-sw-cleanup.js"
 )
+
+const browserServiceWorkerCleanupJS = `(() => {
+  const staleCacheName = /(workbox|precache|komari)/i;
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.getRegistrations()
+      .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
+      .catch(() => {});
+  }
+  if ("caches" in window) {
+    caches.keys()
+      .then((names) => Promise.all(names.filter((name) => staleCacheName.test(name)).map((name) => caches.delete(name))))
+      .catch(() => {});
+  }
+})();`
+
+const retiringServiceWorkerJS = `self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (event) => {
+  event.waitUntil((async () => {
+    const names = await caches.keys();
+    await Promise.all(names.filter((name) => /(workbox|precache|komari)/i.test(name)).map((name) => caches.delete(name)));
+    await self.registration.unregister();
+    const windows = await self.clients.matchAll({ type: "window" });
+    await Promise.all(windows.map((client) => client.navigate(client.url)));
+  })());
+});`
 
 func init() {
 	_ = os.MkdirAll("./data/theme", 0755)
@@ -86,6 +113,30 @@ func replaceHTMLLanguage(htmlStr, language string) string {
 
 func stripServiceWorkerRegistration(html string) string {
 	return strings.ReplaceAll(html, `<script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script>`, "")
+}
+
+func injectServiceWorkerCleanup(html string) string {
+	if strings.Contains(html, serviceWorkerCleanupPath) {
+		return html
+	}
+
+	cleanupTag := `<script src="` + serviceWorkerCleanupPath + `" defer></script>`
+	if strings.Contains(html, "</head>") {
+		return strings.Replace(html, "</head>", cleanupTag+"</head>", 1)
+	}
+	return cleanupTag + html
+}
+
+func setNoStoreHeaders(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	c.Header("X-Content-Type-Options", "nosniff")
+}
+
+func shouldServeSPAIndex(requestPath string) bool {
+	ext := path.Ext(requestPath)
+	return ext == "" || ext == ".html"
 }
 
 // isSafePath 验证路径是否在指定的基础目录内，防止路径穿透攻击
@@ -200,6 +251,7 @@ func static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), force
 
 	// 核心逻辑：渲染 Index.html
 	serveIndex := func(c *gin.Context) {
+		setNoStoreHeaders(c)
 		reqPath := c.Request.URL.Path
 		cfg := getConfig()
 
@@ -221,10 +273,7 @@ func static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), force
 			return
 		}
 
-		htmlStr := string(content)
-		if forceDefaultTheme {
-			htmlStr = stripServiceWorkerRegistration(htmlStr)
-		}
+		htmlStr := injectServiceWorkerCleanup(stripServiceWorkerRegistration(string(content)))
 		if language, err := c.Cookie(LanguageCookieName); err == nil {
 			htmlStr = replaceHTMLLanguage(htmlStr, language)
 		}
@@ -247,6 +296,19 @@ func static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), force
 	}
 
 	// ================= 路由定义 =================
+	// Retire service workers from older frontend builds. They can otherwise keep
+	// serving an obsolete index that references assets removed by a new release.
+	serveBrowserCleanup := func(c *gin.Context) {
+		setNoStoreHeaders(c)
+		c.Data(http.StatusOK, "application/javascript; charset=utf-8", []byte(browserServiceWorkerCleanupJS))
+	}
+	r.GET(serviceWorkerCleanupPath, serveBrowserCleanup)
+	r.GET("/registerSW.js", serveBrowserCleanup)
+	r.GET("/sw.js", func(c *gin.Context) {
+		setNoStoreHeaders(c)
+		c.Data(http.StatusOK, "application/javascript; charset=utf-8", []byte(retiringServiceWorkerJS))
+	})
+
 	// 1. Favicon 优先策略
 	r.GET("/favicon.ico", func(c *gin.Context) {
 		// 优先：./data/favicon.ico
@@ -355,13 +417,13 @@ func static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), force
 			return
 		}
 
-		// 如果资源不存在，且路径包含扩展名 (如 .js, .css, .png)，则返回 404
-		// 避免将 index.html 作为 js 文件返回导致 "Failed to fetch dynamically imported module"
-		//ext := filepath.Ext(reqPath)
-		//if ext != "" && ext != ".html" {
-		//	c.Status(http.StatusNotFound)
-		//	return
-		//}
+		// 如果资源不存在，且路径包含扩展名 (如 .js, .css, .png)，则返回 404。
+		// 避免将 index.html 作为模块或样式返回，触发严格 MIME 类型错误。
+		if !shouldServeSPAIndex(reqPath) {
+			setNoStoreHeaders(c)
+			c.Status(http.StatusNotFound)
+			return
+		}
 
 		// 路由 (如 /dashboard, /settings) -> 返回 index.html
 		serveIndex(c)

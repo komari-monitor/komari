@@ -76,6 +76,34 @@ func TestReplaceHTMLLanguage(t *testing.T) {
 	}
 }
 
+func TestFrontendCacheHardeningHelpers(t *testing.T) {
+	html := `<html><head><script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script></head><body></body></html>`
+	hardened := injectServiceWorkerCleanup(stripServiceWorkerRegistration(html))
+	if strings.Contains(hardened, `vite-plugin-pwa:register-sw`) {
+		t.Fatal("service-worker registration was not removed")
+	}
+	if strings.Count(hardened, serviceWorkerCleanupPath) != 1 {
+		t.Fatalf("cleanup script count = %d, want 1", strings.Count(hardened, serviceWorkerCleanupPath))
+	}
+	if hardened != injectServiceWorkerCleanup(hardened) {
+		t.Fatal("cleanup-script injection is not idempotent")
+	}
+
+	tests := map[string]bool{
+		"/":                           true,
+		"/instance/example-node":      true,
+		"/settings/profile.html":      true,
+		"/assets/stale-build-hash.js": false,
+		"/assets/stale-style.css":     false,
+		"/assets/logo.png":            false,
+	}
+	for requestPath, want := range tests {
+		if got := shouldServeSPAIndex(requestPath); got != want {
+			t.Errorf("shouldServeSPAIndex(%q) = %v, want %v", requestPath, got, want)
+		}
+	}
+}
+
 func TestEmbeddedDistDoesNotEmbedRawFiles(t *testing.T) {
 	if _, err := PublicFS.ReadFile("defaultTheme/dist/index.html"); err == nil {
 		t.Fatal("PublicFS still embeds the raw frontend files")
@@ -135,5 +163,68 @@ func TestStaticRestrictedDoesNotServeCustomAssetOverride(t *testing.T) {
 	}
 	if strings.Contains(string(indexBody), `vite-plugin-pwa:register-sw`) {
 		t.Fatal("restricted index still registers a service worker")
+	}
+}
+
+func TestStaticPreventsStaleFrontendCacheFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Chdir(t.TempDir())
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open config db: %v", err)
+	}
+	config.SetDb(db)
+	if err := config.Set(config.ThemeKey, DefaultTheme); err != nil {
+		t.Fatalf("set default theme: %v", err)
+	}
+
+	router := gin.New()
+	Static(router.Group("/"), func(handlers ...gin.HandlerFunc) {
+		router.NoRoute(handlers...)
+	})
+
+	indexRequest := httptest.NewRequest("GET", "/", nil)
+	indexRecorder := httptest.NewRecorder()
+	router.ServeHTTP(indexRecorder, indexRequest)
+	if indexRecorder.Code != 200 {
+		t.Fatalf("index status = %d, want 200", indexRecorder.Code)
+	}
+	if cacheControl := indexRecorder.Header().Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
+		t.Fatalf("index Cache-Control = %q, want no-store", cacheControl)
+	}
+	indexBody := indexRecorder.Body.String()
+	if strings.Contains(indexBody, `vite-plugin-pwa:register-sw`) {
+		t.Fatal("index still registers a service worker")
+	}
+	if !strings.Contains(indexBody, serviceWorkerCleanupPath) {
+		t.Fatal("index does not load the service-worker cleanup script")
+	}
+
+	assetRequest := httptest.NewRequest("GET", "/assets/stale-build-hash.js", nil)
+	assetRecorder := httptest.NewRecorder()
+	router.ServeHTTP(assetRecorder, assetRequest)
+	if assetRecorder.Code != 404 {
+		t.Fatalf("missing asset status = %d, want 404", assetRecorder.Code)
+	}
+	if contentType := assetRecorder.Header().Get("Content-Type"); strings.Contains(contentType, "text/html") {
+		t.Fatalf("missing asset Content-Type = %q, must not be HTML", contentType)
+	}
+
+	routeRequest := httptest.NewRequest("GET", "/instance/example-node", nil)
+	routeRecorder := httptest.NewRecorder()
+	router.ServeHTTP(routeRecorder, routeRequest)
+	if routeRecorder.Code != 200 {
+		t.Fatalf("SPA route status = %d, want 200", routeRecorder.Code)
+	}
+
+	workerRequest := httptest.NewRequest("GET", "/sw.js", nil)
+	workerRecorder := httptest.NewRecorder()
+	router.ServeHTTP(workerRecorder, workerRequest)
+	if workerRecorder.Code != 200 {
+		t.Fatalf("retiring service worker status = %d, want 200", workerRecorder.Code)
+	}
+	if !strings.Contains(workerRecorder.Body.String(), "registration.unregister") {
+		t.Fatal("retiring service worker does not unregister itself")
 	}
 }
