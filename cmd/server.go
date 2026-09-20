@@ -6,6 +6,7 @@ import (
 
 	appserver "github.com/komari-monitor/komari/internal/server"
 	logger "github.com/komari-monitor/komari/utils/log"
+	frontendpublic "github.com/komari-monitor/komari/web/public"
 
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/spf13/cobra"
@@ -32,6 +33,10 @@ func init() {
 // 具体各阶段的职责与顺序见 internal/server.App。这里只负责串联：
 // 任一初始化阶段失败即中止启动，避免在半初始化状态下对外提供服务。
 func RunServer() {
+	if err := frontendpublic.PrepareDefaultDist(); err != nil {
+		logger.Fatalf("server", "prepare default frontend failed: %v", err)
+	}
+
 	app := appserver.New(appserver.Options{ListenAddr: flags.Listen})
 	if err := app.Bootstrap(); err != nil {
 		_ = app.Shutdown()

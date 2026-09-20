@@ -1196,6 +1196,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment="GODEBUG=disablethp=1"
 ExecStart=${BINARY_PATH} server -l 0.0.0.0:${port}
 WorkingDirectory=${DATA_DIR}
 Restart=always
