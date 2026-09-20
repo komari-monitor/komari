@@ -1,6 +1,8 @@
 package router
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/api/admin"
@@ -19,6 +21,9 @@ import (
 func Register(r *gin.Engine) {
 	r.Any("/ping", func(c *gin.Context) {
 		c.String(200, "pong")
+	})
+	r.GET("/admin", func(c *gin.Context) {
+		c.Redirect(http.StatusFound, "/admin/dashboard")
 	})
 
 	registerPublicRoutes(r)
