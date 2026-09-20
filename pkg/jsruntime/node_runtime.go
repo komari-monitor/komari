@@ -25,6 +25,7 @@ func (r *Runtime) registerNodeModules(registry *require.Registry) {
 	r.registerNodeModule(registry, "fs", r.fsModule.Load)
 	r.registerNodeModule(registry, "child_process", r.childProcessModule.Load)
 	r.registerNodeModule(registry, "net", r.netModule.Load)
+	r.registerNodeModule(registry, "tls", r.tlsModule.Load)
 	r.registerNodeModule(registry, "http", r.httpModule.Load)
 	r.registerNodeModule(registry, "stream", streammodule.Load)
 	r.registerNodeModule(registry, "stream/promises", streammodule.LoadPromises)

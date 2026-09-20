@@ -29,6 +29,8 @@ func TestNewReturnsRuntimeWithInjectedGlobals(t *testing.T) {
 				typeof console.warn === "function" &&
 				typeof fetch === "function" &&
 				typeof XMLHttpRequest === "function" &&
+				typeof URL === "function" &&
+				typeof URLSearchParams === "function" &&
 				typeof Promise === "function" &&
 				typeof require === "function" &&
 				typeof queueMicrotask === "function" &&
@@ -46,6 +48,25 @@ func TestNewReturnsRuntimeWithInjectedGlobals(t *testing.T) {
 
 	if err := runtime.Call("sendMessage"); err != nil {
 		t.Fatalf("injected globals are not ready: %v", err)
+	}
+}
+
+func TestURLSearchParamsGlobal(t *testing.T) {
+	runtime, err := New(`
+		function sendMessage() {
+			const params = new URLSearchParams();
+			params.set("chat_id", "-100 123");
+			params.set("text", "通知 & test");
+			return params.toString() === "chat_id=-100+123&text=%E9%80%9A%E7%9F%A5+%26+test";
+		}
+	`, Options{Console: io.Discard, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	if err := runtime.Call("sendMessage"); err != nil {
+		t.Fatal(err)
 	}
 }
 

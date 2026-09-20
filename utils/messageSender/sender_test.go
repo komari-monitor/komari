@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/utils/messageSender/factory"
 )
 
 func TestParseTemplateFormatsEventTimeInLocalTimezone(t *testing.T) {
@@ -33,24 +32,5 @@ func TestParseTemplateFormatsAnyTypedEventField(t *testing.T) {
 		if got := parseTemplate("{{event}}", tc.event); got != tc.want {
 			t.Fatalf("parseTemplate with Event=%v = %q, want %q", tc.event, got, tc.want)
 		}
-	}
-}
-
-func Test(t *testing.T) {
-	senders := factory.GetAllMessageSenders()
-	if len(senders) == 0 {
-		t.Error("No message senders found")
-		return
-	}
-	cfg := factory.GetSenderConfigs()
-	if len(cfg) == 0 {
-		t.Error("No sender configs found")
-		return
-	}
-	LoadProvider("email", `{"host":"smtp.example.com","port":587,"username":"user","password":"pass"}`)
-	cp := CurrentProvider
-	if cp() == nil {
-		t.Error("Current provider is nil")
-		return
 	}
 }

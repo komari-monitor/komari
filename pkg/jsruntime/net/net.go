@@ -22,6 +22,15 @@ import (
 type Module struct {
 	runtime     *bridge.Runtime
 	allowListen bool
+	sockets     sync.Map
+}
+
+type socketState struct {
+	connection net.Conn
+	resourceID uint64
+	readerDone chan struct{}
+	detaching  atomic.Bool
+	closed     atomic.Bool
 }
 
 func New(runtime *bridge.Runtime, allowListen bool) *Module {
@@ -335,6 +344,41 @@ func (m *Module) newNetSocket(vm *goja.Runtime, connection net.Conn, onClose fun
 	return socket
 }
 
+// AttachSocket configures a JavaScript socket around an established
+// connection. It is shared with the TLS module after a handshake completes.
+func (m *Module) AttachSocket(vm *goja.Runtime, socket *goja.Object, connection net.Conn, onClose func()) bool {
+	return m.configureNetSocket(vm, socket, connection, onClose)
+}
+
+// DetachSocket stops a socket's reader and transfers ownership of its
+// connection to the caller. It is used to upgrade an SMTP connection with
+// STARTTLS without closing the underlying TCP stream.
+func (m *Module) DetachSocket(socket *goja.Object) (net.Conn, error) {
+	value, ok := m.sockets.Load(socket)
+	if !ok {
+		return nil, errors.New("socket is not connected")
+	}
+	state := value.(*socketState)
+	if !state.detaching.CompareAndSwap(false, true) {
+		return nil, errors.New("socket is already being upgraded")
+	}
+	if err := state.connection.SetReadDeadline(time.Now()); err != nil {
+		state.detaching.Store(false)
+		return nil, err
+	}
+	<-state.readerDone
+	if state.closed.Load() {
+		return nil, errors.New("socket closed during upgrade")
+	}
+	m.sockets.Delete(socket)
+	m.runtime.RemoveResource(state.resourceID)
+	if err := state.connection.SetDeadline(time.Time{}); err != nil {
+		_ = state.connection.Close()
+		return nil, err
+	}
+	return state.connection, nil
+}
+
 func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, connection net.Conn, onClose func()) bool {
 	localHost, localPort := splitNetAddress(connection.LocalAddr())
 	remoteHost, remotePort := splitNetAddress(connection.RemoteAddr())
@@ -356,12 +400,18 @@ func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, conne
 		}
 		return false
 	}
+	state := &socketState{
+		connection: connection,
+		resourceID: resourceID,
+		readerDone: make(chan struct{}),
+	}
+	m.sockets.Store(socket, state)
 	var encoding atomic.Value
 	encoding.Store("")
-	var closed atomic.Bool
 	var writes writequeue.Queue
 	closeSocket := func() {
-		if closed.CompareAndSwap(false, true) {
+		if state.closed.CompareAndSwap(false, true) {
+			m.sockets.Delete(socket)
 			m.runtime.RemoveResource(resourceID)
 			_ = connection.Close()
 			if onClose != nil {
@@ -468,6 +518,7 @@ func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, conne
 		panic(vm.NewGoError(fmt.Errorf("net.Socket.unref is not supported by jsruntime; the event loop is host-driven")))
 	})
 	go func() {
+		defer close(state.readerDone)
 		data := make([]byte, 32*1024)
 		for {
 			count, err := connection.Read(data)
@@ -490,6 +541,9 @@ func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, conne
 				<-delivered
 			}
 			if err != nil {
+				if state.detaching.Load() {
+					return
+				}
 				closeSocket()
 				m.runtime.RunOnLoop(func(vm *goja.Runtime) {
 					_ = m.runtime.RunJob(vm, "net.Socket close", func() error {

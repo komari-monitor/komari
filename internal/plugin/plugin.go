@@ -113,15 +113,16 @@ type Manager struct {
 
 // Instance is one loaded plugin runtime plus its host bindings.
 type Instance struct {
-	mu         sync.RWMutex
-	info       models.Plugin
-	dir        string
-	runtime    *jsruntime.Runtime
-	host       *jsruntime.Host
-	handlers   map[string]goja.Callable // "METHOD path" -> current route handler
-	statics    map[string]*staticConfig // mount path -> static folder config
-	rpcMethods map[string]goja.Callable // registered RPC method -> JS handler
-	cronJobs   []string                 // scheduler job names, removed on unload
+	mu                   sync.RWMutex
+	info                 models.Plugin
+	dir                  string
+	runtime              *jsruntime.Runtime
+	host                 *jsruntime.Host
+	handlers             map[string]goja.Callable // "METHOD path" -> current route handler
+	statics              map[string]*staticConfig // mount path -> static folder config
+	rpcMethods           map[string]goja.Callable // registered RPC method -> JS handler
+	cronJobs             []string                 // scheduler job names, removed on unload
+	notificationChannels map[string]struct{}
 }
 
 // global is the process-wide plugin manager.
@@ -305,8 +306,8 @@ func (m *Manager) load(short string) error {
 
 	if rt.HasFunction("load") {
 		if err := rt.CallVoid("load"); err != nil {
-			rt.Close()
 			m.dropInstance(short, inst)
+			rt.Close()
 			return fmt.Errorf("plugin %q load() failed: %w", short, err)
 		}
 	}
@@ -328,11 +329,15 @@ func (m *Manager) load(short string) error {
 // unload behavior. The caller must not hold any Manager lock.
 func (m *Manager) dropInstance(short string, inst *Instance) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.instances[short] != inst {
+		m.mu.Unlock()
 		return // replaced by a newer load or already unloaded
 	}
 	delete(m.instances, short)
+	m.mu.Unlock()
+	_ = m.unregisterNotificationChannels(inst)
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	inst.mu.Lock()
 	for method := range inst.rpcMethods {
 		rpc.Unregister(method)
@@ -384,6 +389,9 @@ func (m *Manager) unload(short string) error {
 				unloadErr = fmt.Errorf("plugin %q unload() failed: %w", short, err)
 			}
 		}
+	}
+	if err := m.unregisterNotificationChannels(inst); err != nil && unloadErr == nil {
+		unloadErr = err
 	}
 	m.mu.Lock()
 	inst.mu.Lock()

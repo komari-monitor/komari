@@ -1,110 +1,17 @@
 package messageSender
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	logger "github.com/komari-monitor/komari/utils/log"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/config"
-	"github.com/komari-monitor/komari/utils/messageSender/factory"
 )
-
-var (
-	currentProvider factory.IMessageSender
-	mu              = sync.Mutex{}
-	once            = sync.Once{}
-)
-
-func CurrentProvider() factory.IMessageSender {
-	mu.Lock()
-	defer mu.Unlock()
-	return currentProvider
-}
-
-// Shutdown 销毁当前消息发送 provider，释放其持有的资源。供关闭流程调用。
-func Shutdown() error {
-	mu.Lock()
-	defer mu.Unlock()
-	if currentProvider == nil {
-		return nil
-	}
-	err := currentProvider.Destroy()
-	currentProvider = nil
-	return err
-}
-
-func Initialize() {
-	go func() {
-		once.Do(func() {
-			all := factory.GetAllMessageSenders()
-			for _, provider := range all {
-				if _, err := database.GetMessageSenderConfigByName(provider.GetName()); err == nil {
-					continue
-				}
-				// 如果数据库中没有该提供者的配置，则保存默认配置
-				config := provider.GetConfiguration()
-				configBytes, err := json.Marshal(config)
-				if err != nil {
-					logger.Errorf("message-sender", "Failed to marshal config for provider %s: %v", provider.GetName(), err)
-					return
-				}
-				if err := database.SaveMessageSenderConfig(&models.MessageSenderProvider{
-					Name:     provider.GetName(),
-					Addition: string(configBytes),
-				}); err != nil {
-					logger.Errorf("message-sender", "Failed to save default config for provider %s: %v", provider.GetName(), err)
-					return
-				}
-			}
-		})
-	}()
-	NotificationMethod, _ := config.GetAs[string](config.NotificationMethodKey, "none")
-
-	if NotificationMethod == "" || NotificationMethod == "none" {
-		LoadProvider("empty", "{}")
-		return
-	}
-
-	// 尝试从数据库加载配置
-	senderConfig, err := database.GetMessageSenderConfigByName(NotificationMethod)
-	if err != nil {
-		// 如果没有找到配置，使用empty provider
-		LoadProvider("empty", "{}")
-		return
-	}
-	LoadProvider(NotificationMethod, senderConfig.Addition)
-}
-
-func SendTextMessage(message string, title string) error {
-	if CurrentProvider() == nil {
-		return fmt.Errorf("message sender provider is not initialized")
-	}
-	var err error
-	NotificationEnabled, err := config.GetAs[bool](config.NotificationEnabledKey, false)
-	if err != nil {
-		return err
-	}
-	if !NotificationEnabled {
-		return nil
-	}
-	for i := 0; i < 3; i++ {
-		err = CurrentProvider().SendTextMessage(message, title)
-		if err == nil {
-			auditlog.Log("", "", "Message sent: "+title, "info")
-			return nil
-		}
-	}
-	auditlog.Log("", "", "Failed to send message after 3 attempts: "+err.Error()+","+title, "error")
-	return err
-}
 
 // SendNotification 是通知发送的统一实现：解析事件中的客户端 UUID（外部传入可只含
 // UUID 字段）后委托 SendEvent。内部调用与 admin:sendNotification RPC 共用此实现。
@@ -128,9 +35,6 @@ func SendNotification(event models.EventMessage) error {
 }
 
 func SendEvent(event models.EventMessage) error {
-	if CurrentProvider() == nil {
-		return fmt.Errorf("message sender provider is not initialized")
-	}
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
 	} else {
@@ -148,33 +52,26 @@ func SendEvent(event models.EventMessage) error {
 		return nil
 	}
 
-	// 检查提供者是否实现了 IEventMessageSender 接口
-	if eventSender, ok := CurrentProvider().(factory.IEventMessageSender); ok {
-		// 如果实现了,直接调用 SendEvent
-		for i := 0; i < 3; i++ {
-			err = eventSender.SendEvent(event)
-			if err == nil || err.Error() == "short response: \x00\x00\x00\x1a\x00\x00\x00" {
-				auditlog.Log("", "", "Event message sent: "+fmt.Sprint(event.Event), "info")
-				return nil
-			}
-		}
-		auditlog.Log("", "", "Failed to send event message after 3 attempts: "+err.Error()+","+fmt.Sprint(event.Event), "error")
+	method, err := config.GetAs[string](config.NotificationMethodKey, "none")
+	if err != nil {
 		return err
 	}
-
-	// 如果没有实现,使用模板格式化为文本消息
 	messageTemplate := cfg[config.NotificationTemplateKey].(string)
-
 	messageTemplate = parseTemplate(messageTemplate, event)
 
-	for i := 0; i < 3; i++ {
-		err = CurrentProvider().SendTextMessage(messageTemplate, fmt.Sprint(event.Event))
-		if err == nil || err.Error() == "short response: \x00\x00\x00\x1a\x00\x00\x00" { // QQ 会返回这个错误，但实际上消息是发送成功的
-			auditlog.Log("", "", "Event message sent: "+fmt.Sprint(event.Event), "info")
-			return nil
-		}
+	if method == "" || method == "none" {
+		return nil
 	}
-	auditlog.Log("", "", "Failed to send event message after 3 attempts: "+err.Error()+","+fmt.Sprint(event.Event), "error")
+	err = CallNotificationChannel(context.Background(), method, Notification{
+		Event:   event,
+		Title:   fmt.Sprint(event.Event),
+		Message: messageTemplate,
+	})
+	if err == nil {
+		auditlog.Log("", "", "Event message sent: "+fmt.Sprint(event.Event), "info")
+		return nil
+	}
+	auditlog.Log("", "", "Failed to send event message: "+err.Error()+","+fmt.Sprint(event.Event), "error")
 	return err
 }
 

@@ -14,7 +14,6 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
-	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/internal/lifecycle"
@@ -23,7 +22,6 @@ import (
 	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logger "github.com/komari-monitor/komari/utils/log"
-	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/oauth"
@@ -74,11 +72,6 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 	a.reload.Register("geoip-provider", func(event config.ConfigEvent) {
 		if event.IsChanged(config.GeoIpProviderKey) {
 			go geoip.InitGeoIp()
-		}
-	})
-	a.reload.Register("message-sender", func(event config.ConfigEvent) {
-		if event.IsChanged(config.NotificationMethodKey) {
-			go messageSender.Initialize()
 		}
 	})
 	a.reload.Register("cors", func(event config.ConfigEvent) { cors.Update(event) })
@@ -187,9 +180,6 @@ func (a *App) runCleanups(ctx context.Context) error {
 func registerScheduledWork() {
 	if err := tasks.ReloadPingSchedule(); err != nil {
 		logger.ErrorArgs("server", "Failed to reload ping schedule:", err)
-	}
-	if err := d_notification.ReloadLoadNotificationSchedule(); err != nil {
-		logger.ErrorArgs("server", "Failed to reload load notification schedule:", err)
 	}
 	if err := scheduler.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
 		logger.ErrorArgs("server", "Failed to add cleanup scheduled task:", err)

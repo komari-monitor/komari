@@ -18,6 +18,7 @@ import (
 	"github.com/dop251/goja_nodejs/buffer"
 	"github.com/dop251/goja_nodejs/require"
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/pkg/jsruntime/httpbody"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -53,6 +54,8 @@ import (
 //	                                      result or rejects with an Error
 //	                                      carrying code/message/data
 //	server.registerRPC(method, handler)   register a plugin-owned RPC method
+//	server.registerNotificationChannel(id, configuration, handler)
+//	                                      register a notification channel
 //	server.getConfig()                    resolve the saved plugin configuration
 //	server.cron(expr, fn)                 run fn on the plugin event loop each
 //	                                      time the cron expression fires
@@ -218,6 +221,32 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 				panic(vm.NewTypeError("server.registerRPC requires a function handler"))
 			}
 			if err := m.registerRPC(inst.info.Short, method, fn); err != nil {
+				panic(vm.NewGoError(err))
+			}
+			return goja.Undefined()
+		})
+		_ = exports.Set("registerNotificationChannel", func(call goja.FunctionCall) goja.Value {
+			id := strings.TrimSpace(call.Argument(0).String())
+			handler, ok := goja.AssertFunction(call.Argument(2))
+			if id == "" {
+				panic(vm.NewTypeError("server.registerNotificationChannel requires a channel id"))
+			}
+			if !ok {
+				panic(vm.NewTypeError("server.registerNotificationChannel requires a function handler"))
+			}
+			rawConfiguration, err := exportJSValue(call.Argument(1))
+			if err != nil {
+				panic(vm.NewTypeError("server.registerNotificationChannel requires a managed configuration object"))
+			}
+			configurationJSON, err := json.Marshal(rawConfiguration)
+			if err != nil {
+				panic(vm.NewTypeError("server.registerNotificationChannel requires a managed configuration object"))
+			}
+			var configuration models.Configuration
+			if err := json.Unmarshal(configurationJSON, &configuration); err != nil {
+				panic(vm.NewTypeError("server.registerNotificationChannel requires a managed configuration object"))
+			}
+			if err := m.registerNotificationChannel(inst.info.Short, id, configuration, handler, host); err != nil {
 				panic(vm.NewGoError(err))
 			}
 			return goja.Undefined()

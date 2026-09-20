@@ -451,7 +451,6 @@ func doInitialize() error {
 		&models.Client{},
 		&models.Log{},
 		&models.Clipboard{},
-		&models.LoadNotification{},
 		&models.OfflineNotification{},
 		&models.PingTask{},
 		&models.OidcProvider{},
