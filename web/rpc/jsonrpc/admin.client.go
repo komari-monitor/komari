@@ -9,6 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
+	"github.com/komari-monitor/komari/web/api/client"
 )
 
 // admin.client.go
@@ -135,6 +136,7 @@ func adminRemoveClient(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	auditlog.Log(ip, actor, "delete client:"+params.UUID, "warn")
 	agent_runtime.DeleteConnectedClients(params.UUID)
 	agent_runtime.DeleteLatestReport(params.UUID)
+	client.DeleteAgentReportInterval(params.UUID)
 	return nil, nil
 }
 

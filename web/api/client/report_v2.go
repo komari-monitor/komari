@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +45,30 @@ func bindV2Params[T any](raw any, target *T) error {
 	return json.Unmarshal(b, target)
 }
 
+var agentReportIntervals sync.Map
+
+func DeleteAgentReportInterval(uuid string) {
+	agentReportIntervals.Delete(uuid)
+}
+
+func updateAgentReportInterval(uuid string, interval float64) {
+	old, exists := agentReportIntervals.Load(uuid)
+
+	if !exists {
+		agentReportIntervals.Store(uuid, interval)
+		logger.Infof("client-api", "Client %s report interval initialized: %.2f s", uuid, interval)
+		return
+	}
+
+	oldInterval := old.(float64)
+	if oldInterval == interval {
+		return
+	}
+
+	agentReportIntervals.Store(uuid, interval)
+	logger.Infof("client-api", "Client %s report interval updated: %.2f s -> %.2f s", uuid, oldInterval, interval)
+}
+
 func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 	if req.JSONRPC != v2.Version {
 		return v2.Error(req.ID, -32600, "invalid jsonrpc version", nil)
@@ -64,6 +90,12 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		var params v2.BasicInfoParams
 		if err := bindV2Params(req.Params, &params); err != nil {
 			return v2.Error(req.ID, -32602, "invalid basic info params", err.Error())
+		}
+		if value, ok := params.Info["agent_report_interval"]; ok {
+			if interval, ok := value.(float64); ok {
+				updateAgentReportInterval(uuid, interval)
+			}
+			delete(params.Info, "agent_report_interval")
 		}
 		if err := ingestBasicInfo(uuid, params.Info, ""); err != nil {
 			return v2.Error(req.ID, -32000, "failed to save basic info", err.Error())
@@ -176,10 +208,21 @@ func WebSocketV2RPC(c *gin.Context) {
 	}
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(readWait))
+		var interval float64
+		if agentReportInterval, ok := agentReportIntervals.Load(uuid); ok {
+			interval, _ = agentReportInterval.(float64)
+		}
+		waitTime := readWait
+		if interval != 0 {
+			waitTime = time.Duration((interval*2 + 3) * float64(time.Second))
+		}
+
+		conn.SetReadDeadline(time.Now().Add(waitTime))
 		_, message, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				logger.Errorf("client-api", "Client %s v2 WS wait message timeout: waitTime=%s", uuid, waitTime)
+			} else if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				logger.Errorf("client-api", "Client %s v2 connection error: %v", uuid, err)
 			}
 			return
