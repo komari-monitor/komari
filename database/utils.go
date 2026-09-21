@@ -98,7 +98,6 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		"record_preserve_time":      retention.MaxDays * 24,
 		"ping_record_preserve_time": retention.MaxDays * 24,
 		"private_site":              cst.PrivateSite,
-		"visitor_audit_enabled":     cst.VisitorAuditEnabled,
 		"theme":                     cst.Theme,
 		"theme_settings":            tc_data,
 	}, nil

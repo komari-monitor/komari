@@ -114,7 +114,7 @@ handler 退化为薄适配层：解析 gin 参数 → 调 RPC → 把响应映�
 | 命名空间 | 方法（文件） |
 | --- | --- |
 | `admin` | client CRUD、ping task、session/settings/weight、notification（load/offline/traffic）、clipboard、provider（messageSender/oidc）、task 查询、system（logs/cloudflared/exec/test）、xtermjs |
-| `public` | getMe、getNodesInformation、getPublicSettings、getVersion、getClientRecentRecords、getRecordsByUUID、getPingRecords、getPublicPingTasks、recordVisitorEvent |
+| `public` | getMe、getNodesInformation、getPublicSettings、getVersion、getClientRecentRecords、getRecordsByUUID、getPingRecords、getPublicPingTasks |
 | Agent v2 | `agent.report`、`agent.basicInfo`、`agent.pingResult`、`agent.taskResult`、`agent.pull`（`/api/clients/v2/rpc`） |
 
 ### 声明式路由桥 `Bind`

@@ -14,7 +14,6 @@ var privateSiteLoginWhitelist = map[string]bool{
 	"public:getMe":              true,
 	"public:getPublicSettings":  true,
 	"public:getVersion":         true,
-	"public:recordVisitorEvent": true,
 }
 
 // Dispatch 是所有传输入口的统一分发点：私有站点检查 → 权限校验 → 执行方法。

@@ -24,7 +24,6 @@ func TestPrivateSiteLoginWhitelist(t *testing.T) {
 		"public:getMe",
 		"public:getPublicSettings",
 		"public:getVersion",
-		"public:recordVisitorEvent",
 	}
 	for _, m := range required {
 		if !privateSiteLoginWhitelist[m] {
