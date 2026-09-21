@@ -30,7 +30,11 @@ var (
 
 func getDigestEncoder() (*zstd.Encoder, error) {
 	digestEncoderOnce.Do(func() {
-		digestEncoder, digestEncoderErr = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(1)))
+		digestEncoder, digestEncoderErr = zstd.NewWriter(nil,
+			zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(1)),
+			zstd.WithEncoderConcurrency(1),
+			zstd.WithLowerEncoderMem(true),
+		)
 	})
 	return digestEncoder, digestEncoderErr
 }
