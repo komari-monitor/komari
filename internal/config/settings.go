@@ -73,7 +73,6 @@ const (
 	LoginNotificationKey          = "login_notification"
 	TrafficLimitPercentageKey     = "traffic_limit_percentage"
 	UpdatedAtKey                  = "updated_at"
-	XtermjsSettingsKey            = "xtermjs_settings"
 	ThemeMarketSourcesKey         = "theme_market_sources"
 	PluginMarketSourcesKey        = "plugin_market_sources"
 )
