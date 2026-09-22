@@ -102,7 +102,11 @@ jobs:
         run: |
           BINARY_NAME=komari-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.binary_extension }}
           VERSION_HASH="$(git rev-parse HEAD)"
-          go build -trimpath -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${RELEASE_TAG} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}" -o "$BINARY_NAME"
+          LDFLAGS="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${RELEASE_TAG} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}"
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            LDFLAGS="$LDFLAGS -extldflags=-Wl,--strip-all"
+          fi
+          go build -trimpath -ldflags="$LDFLAGS" -o "$BINARY_NAME"
 
       - name: Upload binary to release
         env:

@@ -38,7 +38,6 @@ var legacyTimestampColumns = [...]timestampColumn{
 	{table: "clipboards", column: "created_at"},
 	{table: "clipboards", column: "updated_at"},
 	{table: "offline_notifications", column: "last_notified"},
-	{table: "load_notifications", column: "last_notified"},
 	{table: "task_results", column: "finished_at"},
 	{table: "task_results", column: "created_at"},
 	{table: "records", column: "time"},

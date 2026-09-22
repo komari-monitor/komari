@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/komari-monitor/komari/utils/messageSender/factory"
+	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/messageSender/outboundhttp"
 )
 
@@ -18,28 +19,20 @@ type WebhookSender struct {
 	Addition
 }
 
-func (w *WebhookSender) GetName() string {
-	return "webhook"
-}
-
-func (w *WebhookSender) GetConfiguration() factory.Configuration {
-	return &w.Addition
-}
-
-func (w *WebhookSender) Init() error {
+func (w *WebhookSender) Unload() error {
 	return nil
 }
 
-func (w *WebhookSender) Destroy() error {
-	return nil
-}
-
-func (w *WebhookSender) SendTextMessage(message, title string) error {
-	if w.Addition.URL == "" {
+func (w *WebhookSender) Send(_ context.Context, notification messageSender.Notification, config map[string]any) error {
+	var addition Addition
+	if err := messageSender.DecodeConfiguration(config, &addition); err != nil {
+		return err
+	}
+	if addition.URL == "" {
 		return fmt.Errorf("webhook URL is not configured")
 	}
 
-	method := strings.ToUpper(w.Addition.Method)
+	method := strings.ToUpper(addition.Method)
 	if method == "" {
 		method = "GET" // 默认使用 GET
 	}
@@ -51,9 +44,9 @@ func (w *WebhookSender) SendTextMessage(message, title string) error {
 
 	switch method {
 	case "POST":
-		req, err = w.createPOSTRequest(message, title)
+		req, err = w.createPOSTRequest(addition, notification.Message, notification.Title)
 	case "GET":
-		req, err = w.createGETRequest(message, title)
+		req, err = w.createGETRequest(addition, notification.Message, notification.Title)
 	default:
 		return fmt.Errorf("unsupported HTTP method: %s", method)
 	}
@@ -63,9 +56,9 @@ func (w *WebhookSender) SendTextMessage(message, title string) error {
 	}
 
 	// 解析并设置自定义头部
-	if w.Addition.Headers != "" {
+	if addition.Headers != "" {
 		var headers map[string]string
-		if err := json.Unmarshal([]byte(w.Addition.Headers), &headers); err == nil {
+		if err := json.Unmarshal([]byte(addition.Headers), &headers); err == nil {
 			for key, value := range headers {
 				req.Header.Set(key, value)
 			}
@@ -73,8 +66,8 @@ func (w *WebhookSender) SendTextMessage(message, title string) error {
 	}
 
 	// 设置基本认证
-	if w.Addition.Username != "" && w.Addition.Password != "" {
-		req.SetBasicAuth(w.Addition.Username, w.Addition.Password)
+	if addition.Username != "" && addition.Password != "" {
+		req.SetBasicAuth(addition.Username, addition.Password)
 	}
 
 	resp, err := client.Do(req)
@@ -91,8 +84,8 @@ func (w *WebhookSender) SendTextMessage(message, title string) error {
 	return nil
 }
 
-func (w *WebhookSender) createPOSTRequest(message, title string) (*http.Request, error) {
-	contentType := w.Addition.ContentType
+func (w *WebhookSender) createPOSTRequest(addition Addition, message, title string) (*http.Request, error) {
+	contentType := addition.ContentType
 	if contentType == "" {
 		contentType = "application/json"
 	}
@@ -100,12 +93,12 @@ func (w *WebhookSender) createPOSTRequest(message, title string) (*http.Request,
 	// 用户自定义模板，按 Content-Type 决定如何替换占位符
 	var body string
 	if isJSONContentType(contentType) {
-		body = w.replaceTemplateJSON(w.Addition.Body, message, title)
+		body = w.replaceTemplateJSON(addition.Body, message, title)
 	} else {
-		body = w.replaceTemplate(w.Addition.Body, message, title)
+		body = w.replaceTemplate(addition.Body, message, title)
 	}
 
-	req, err := http.NewRequest("POST", w.Addition.URL, bytes.NewBufferString(body))
+	req, err := http.NewRequest("POST", addition.URL, bytes.NewBufferString(body))
 	if err != nil {
 		return nil, err
 	}
@@ -114,8 +107,8 @@ func (w *WebhookSender) createPOSTRequest(message, title string) (*http.Request,
 	return req, nil
 }
 
-func (w *WebhookSender) createGETRequest(message, title string) (*http.Request, error) {
-	URL := w.replaceTemplate(w.Addition.URL, message, title)
+func (w *WebhookSender) createGETRequest(addition Addition, message, title string) (*http.Request, error) {
+	URL := w.replaceTemplate(addition.URL, message, title)
 	u, err := url.Parse(URL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %v", err)
@@ -128,6 +121,12 @@ func (w *WebhookSender) createGETRequest(message, title string) (*http.Request, 
 
 	return req, nil
 }
+
+func Register() error {
+	return messageSender.RegisterNotificationChannel("webhook", messageSender.ManagedConfiguration("Webhook", Addition{}), &WebhookSender{})
+}
+
+var _ messageSender.NotificationChannel = (*WebhookSender)(nil)
 
 // replaceTemplate 替换模板中的 {{message}} 和 {{title}} 占位符（不做转义）
 func (w *WebhookSender) replaceTemplate(template, message, title string) string {

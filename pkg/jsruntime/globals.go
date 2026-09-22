@@ -4,15 +4,17 @@ import (
 	_ "embed"
 	"fmt"
 
+	nodeurl "github.com/dop251/goja_nodejs/url"
 	"github.com/komari-monitor/komari/pkg/jsruntime/xhr"
 )
 
-// JavaScript compatibility: injects bounded timer APIs, console, Fetch API,
-// XMLHttpRequest, and queueMicrotask.
+// JavaScript compatibility: injects bounded timer APIs, console, URL APIs,
+// Fetch API, XMLHttpRequest, and queueMicrotask.
 func (r *Runtime) injectGlobals() error {
 	if err := r.consoleMod.Inject(r.vm); err != nil {
 		return fmt.Errorf("inject console: %w", err)
 	}
+	nodeurl.Enable(r.vm)
 	if err := r.timersMod.Inject(r.vm); err != nil {
 		return fmt.Errorf("inject timers: %w", err)
 	}

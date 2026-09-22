@@ -5,39 +5,52 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
 )
 
-var defaultDistFiles map[string][]byte
+var defaultDistCacheDir = "./cache/dist"
 
-func loadEmbeddedDist() (map[string][]byte, error) {
-	return decodeEmbeddedDist(embeddedDistArchive)
+func PrepareDefaultDist() error {
+	targetDir, err := filepath.Abs(defaultDistCacheDir)
+	if err != nil {
+		return fmt.Errorf("resolve embedded dist cache: %w", err)
+	}
+	if err := extractDistArchive(embeddedDistArchive, targetDir); err != nil {
+		return err
+	}
+	defaultDistCacheDir = targetDir
+	return nil
 }
 
-func decodeEmbeddedDist(archive []byte) (map[string][]byte, error) {
-	decoder, err := zstd.NewReader(nil)
+func extractDistArchive(archive []byte, targetDir string) error {
+	if err := os.RemoveAll(targetDir); err != nil {
+		return fmt.Errorf("clear embedded dist cache: %w", err)
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("create embedded dist cache: %w", err)
+	}
+
+	decoder, err := zstd.NewReader(bytes.NewReader(archive))
 	if err != nil {
-		return nil, fmt.Errorf("open zstd archive: %w", err)
+		return fmt.Errorf("open zstd archive: %w", err)
 	}
 	defer decoder.Close()
 
-	tarBytes, err := decoder.DecodeAll(archive, nil)
-	if err != nil {
-		return nil, fmt.Errorf("decode zstd archive: %w", err)
-	}
-
-	files := make(map[string][]byte)
-	reader := tar.NewReader(bytes.NewReader(tarBytes))
+	reader := tar.NewReader(decoder)
+	copyBuffer := make([]byte, 32*1024)
+	files := make(map[string]struct{})
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read tar entry: %w", err)
+			return fmt.Errorf("read tar entry: %w", err)
 		}
 
 		name := path.Clean(strings.ReplaceAll(header.Name, "\\", "/"))
@@ -48,28 +61,42 @@ func decodeEmbeddedDist(archive []byte) (map[string][]byte, error) {
 			strings.HasPrefix(name, "../") ||
 			strings.HasPrefix(name, "/") ||
 			strings.ContainsRune(name, '\x00') {
-			return nil, fmt.Errorf("invalid embedded tar path %q", name)
+			return fmt.Errorf("invalid embedded tar path %q", name)
 		}
 
+		target := filepath.Join(targetDir, filepath.FromSlash(name))
 		switch header.Typeflag {
 		case tar.TypeDir:
-			continue
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return fmt.Errorf("create embedded tar directory %q: %w", name, err)
+			}
 		case tar.TypeReg, tar.TypeRegA:
-			content, err := io.ReadAll(reader)
-			if err != nil {
-				return nil, fmt.Errorf("read tar entry %q: %w", name, err)
-			}
 			if _, exists := files[name]; exists {
-				return nil, fmt.Errorf("duplicate tar entry %q", name)
+				return fmt.Errorf("duplicate tar entry %q", name)
 			}
-			files[name] = content
+			files[name] = struct{}{}
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("create embedded tar parent for %q: %w", name, err)
+			}
+			file, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+			if err != nil {
+				return fmt.Errorf("create embedded tar entry %q: %w", name, err)
+			}
+			_, copyErr := io.CopyBuffer(file, reader, copyBuffer)
+			closeErr := file.Close()
+			if copyErr != nil {
+				return fmt.Errorf("extract embedded tar entry %q: %w", name, copyErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("close embedded tar entry %q: %w", name, closeErr)
+			}
 		default:
-			return nil, fmt.Errorf("unsupported tar entry %q type %d", name, header.Typeflag)
+			return fmt.Errorf("unsupported tar entry %q type %d", name, header.Typeflag)
 		}
 	}
 
-	if _, ok := files[IndexFile]; !ok {
-		return nil, fmt.Errorf("tar archive does not contain %q", IndexFile)
+	if info, err := os.Stat(filepath.Join(targetDir, IndexFile)); err != nil || info.IsDir() {
+		return fmt.Errorf("tar archive does not contain %q", IndexFile)
 	}
-	return files, nil
+	return nil
 }

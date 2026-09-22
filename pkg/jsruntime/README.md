@@ -365,7 +365,7 @@ const value = Buffer.from("komari").toString("hex");
 | `domainToASCII/domainToUnicode` | `可用` |
 | 旧式 `parse/format/resolve/resolveObject/urlToHttpOptions` | `未实现` |
 
-`URL` 和 `URLSearchParams` 不会自动成为全局变量，应从模块取得：
+`URL` 和 `URLSearchParams` 会作为全局变量注入，也可以从模块取得：
 
 ```js
 const { URL, URLSearchParams } = require("node:url");

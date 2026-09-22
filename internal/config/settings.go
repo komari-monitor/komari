@@ -16,7 +16,6 @@ type Settings struct {
 	AutoDiscoveryKey       string `json:"auto_discovery_key" default:""`                       // 自动发现密钥
 	ScriptDomain           string `json:"script_domain" default:""`                            // 自定义脚本域名
 	SendIpAddrToGuest      bool   `json:"send_ip_addr_to_guest" default:"false"`               // 是否向访客页面发送 IP 地址，默认 false
-	VisitorAuditEnabled    bool   `json:"visitor_audit_enabled" default:"false"`               // 是否允许公开访客事件写入审计日志，默认 false
 	SSRFProtectionEnabled  bool   `json:"ssrf_protection_enabled" default:"false"`             // 是否启用 SSRF 防护，默认关闭
 	EulaAccepted           bool   `json:"eula_accepted" default:"false"`
 	BaseScriptsURLKey      string `json:"base_scripts_url" default:""`
@@ -55,7 +54,6 @@ const (
 	AutoDiscoveryKeyKey       = "auto_discovery_key"
 	ScriptDomainKey           = "script_domain"
 	SendIpAddrToGuestKey      = "send_ip_addr_to_guest"
-	VisitorAuditEnabledKey    = "visitor_audit_enabled"
 	SSRFProtectionEnabledKey  = "ssrf_protection_enabled"
 	EulaAcceptedKey           = "eula_accepted"
 	BaseScriptsURLKey         = "base_scripts_url"
@@ -75,7 +73,6 @@ const (
 	LoginNotificationKey          = "login_notification"
 	TrafficLimitPercentageKey     = "traffic_limit_percentage"
 	UpdatedAtKey                  = "updated_at"
-	XtermjsSettingsKey            = "xtermjs_settings"
 	ThemeMarketSourcesKey         = "theme_market_sources"
 	PluginMarketSourcesKey        = "plugin_market_sources"
 )

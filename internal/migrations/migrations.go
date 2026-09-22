@@ -112,9 +112,6 @@ func Run(ctx Context) error {
 	if err := migrateLegacyClientInfo(db); err != nil {
 		return err
 	}
-	if err := migrateLegacyLoadNotification(db); err != nil {
-		return err
-	}
 	if err := migrateLegacyPingAllClientsExpansion(db); err != nil {
 		return err
 	}
@@ -173,14 +170,6 @@ func hasTableColumn(db *gorm.DB, tableName, columnName string) bool {
 		}
 	}
 	return false
-}
-
-func migrateLegacyLoadNotification(db *gorm.DB) error {
-	if db.Migrator().HasColumn(&models.LoadNotification{}, "client") {
-		logger.InfoArgs("migration", "[>0.1.4] Rebuilding LoadNotification table....")
-		return db.Migrator().DropTable(&models.LoadNotification{})
-	}
-	return nil
 }
 
 func migrateLegacyOidcConfig(db *gorm.DB) error {

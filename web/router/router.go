@@ -1,6 +1,8 @@
 package router
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/api/admin"
@@ -19,6 +21,9 @@ import (
 func Register(r *gin.Engine) {
 	r.Any("/ping", func(c *gin.Context) {
 		c.String(200, "pong")
+	})
+	r.GET("/admin", func(c *gin.Context) {
+		c.Redirect(http.StatusFound, "/admin/dashboard")
 	})
 
 	registerPublicRoutes(r)
@@ -150,12 +155,8 @@ func registerAdminRoutes(r *gin.Engine) {
 	{
 		settings.GET("/", jsonRpc.Bind("admin:getSettings"))
 		settings.POST("/", jsonRpc.Bind("admin:editSettings"))
-		settings.GET("/xtermjs", jsonRpc.Bind("admin:getXtermjsSettings"))
-		settings.POST("/xtermjs", jsonRpc.Bind("admin:setXtermjsSettings", jsonRpc.WithMessage("settings saved")))
 		settings.POST("/oidc", jsonRpc.Bind("admin:setOidcProvider"))
 		settings.GET("/oidc", jsonRpc.Bind("admin:getOidcProvider", jsonRpc.WithQuery("provider")))
-		settings.POST("/message-sender", jsonRpc.Bind("admin:setMessageSenderProvider"))
-		settings.GET("/message-sender", jsonRpc.Bind("admin:getMessageSenderProvider", jsonRpc.WithQuery("provider")))
 	}
 
 	// database storage inspection and maintenance
@@ -235,17 +236,13 @@ func registerAdminRoutes(r *gin.Engine) {
 	// notifications
 	notificationGroup := g.Group("/notification")
 	{
+		notificationGroup.GET("/channels", jsonRpc.Bind("admin:listNotificationChannels"))
+		notificationGroup.GET("/channel/configuration", jsonRpc.Bind("admin:getNotificationChannelConfiguration", jsonRpc.WithQuery("id")))
+		notificationGroup.POST("/channel/configuration", jsonRpc.Bind("admin:setNotificationChannelConfiguration"))
 		notificationGroup.GET("/offline", jsonRpc.Bind("admin:listOfflineNotifications"))
 		notificationGroup.POST("/offline/edit", jsonRpc.Bind("admin:editOfflineNotification"))
 		notificationGroup.POST("/offline/enable", jsonRpc.Bind("admin:enableOfflineNotification"))
 		notificationGroup.POST("/offline/disable", jsonRpc.Bind("admin:disableOfflineNotification"))
-		loadAlert := notificationGroup.Group("/load")
-		{
-			loadAlert.GET("/", jsonRpc.Bind("admin:getAllLoadNotifications"))
-			loadAlert.POST("/add", jsonRpc.Bind("admin:addLoadNotification"))
-			loadAlert.POST("/delete", jsonRpc.Bind("admin:deleteLoadNotification"))
-			loadAlert.POST("/edit", jsonRpc.Bind("admin:editLoadNotification"))
-		}
 	}
 
 	// ping tasks

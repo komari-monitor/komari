@@ -36,12 +36,6 @@ const (
 
 func init() {
 	_ = os.MkdirAll("./data/theme", 0755)
-
-	var err error
-	defaultDistFiles, err = loadEmbeddedDist()
-	if err != nil {
-		panic("load embedded default frontend: " + err.Error())
-	}
 }
 
 func normalizeHTMLLanguage(language string) string {
@@ -188,7 +182,8 @@ func static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), force
 		}
 
 		if strings.HasPrefix(embedPath, DistDir+"/") {
-			if content, ok := defaultDistFiles[strings.TrimPrefix(embedPath, DistDir+"/")]; ok {
+			content, err := os.ReadFile(filepath.Join(defaultDistCacheDir, filepath.FromSlash(strings.TrimPrefix(embedPath, DistDir+"/"))))
+			if err == nil {
 				return content, mime.TypeByExtension(filepath.Ext(embedPath)), true
 			}
 		} else if content, err := fs.ReadFile(defaultThemeFS, embedPath); err == nil {
