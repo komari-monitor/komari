@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
-	logger "github.com/komari-monitor/komari/utils/log"
 	"io"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	logger "github.com/komari-monitor/komari/utils/log"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -221,7 +222,7 @@ func WebSocketV2RPC(c *gin.Context) {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				logger.Errorf("client-api", "Client %s v2 WS wait message timeout: waitTime=%s", uuid, waitTime)
+				logger.Errorf("client-api", "Client %s v2 WS read timeout: no message received within %s, closing connection", uuid, waitTime)
 			} else if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				logger.Errorf("client-api", "Client %s v2 connection error: %v", uuid, err)
 			}
