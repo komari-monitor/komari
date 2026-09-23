@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -183,12 +184,15 @@ func WebSocketV2RPC(c *gin.Context) {
 	if !pushQueuedV2Events(conn, uuid) {
 		return
 	}
+	setWebSocketPingHandler(conn, v2WebSocketReadWait, v2WebSocketWriteWait)
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(readWait))
+		conn.SetReadDeadline(time.Now().Add(v2WebSocketReadWait))
 		_, message, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				logger.Errorf("client-api", "Client %s v2 heartbeat timed out after %s", uuid, v2WebSocketReadWait)
+			} else if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				logger.Errorf("client-api", "Client %s v2 connection error: %v", uuid, err)
 			}
 			return

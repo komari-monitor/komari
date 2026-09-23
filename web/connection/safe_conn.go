@@ -128,6 +128,19 @@ func (sc *SafeConn) WriteMessage(messageType int, data []byte) error {
 	return sc.writeFrame(messageType, data)
 }
 
+func (sc *SafeConn) WriteControl(messageType int, data []byte, deadline time.Time) error {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if sc.interceptor == nil || sc.info == nil {
+		return sc.conn.WriteControl(messageType, data, deadline)
+	}
+	newType, newData, drop := sc.interceptor.OnSend(sc.info, messageType, data)
+	if drop {
+		return nil
+	}
+	return sc.conn.WriteControl(newType, newData, deadline)
+}
+
 // WriteJSON encodes v then sends it as one text frame through the wsSend
 // hook chain.
 func (sc *SafeConn) WriteJSON(v interface{}) error {
@@ -164,6 +177,10 @@ func (sc *SafeConn) ReadJSON(v interface{}) error {
 
 func (sc *SafeConn) SetReadDeadline(t time.Time) error {
 	return sc.conn.SetReadDeadline(t)
+}
+
+func (sc *SafeConn) SetPingHandler(h func(string) error) {
+	sc.conn.SetPingHandler(h)
 }
 
 func (sc *SafeConn) GetConn() *websocket.Conn {

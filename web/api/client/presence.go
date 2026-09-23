@@ -9,8 +9,6 @@ import (
 )
 
 const (
-	// 如果超过这个时间没有收到任何消息，则认为连接已死
-	readWait        = 11 * time.Second
 	postPresenceTTL = 35 * time.Second
 )
 

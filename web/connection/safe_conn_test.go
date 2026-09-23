@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -129,6 +130,62 @@ func TestSafeConnInterceptorWired(t *testing.T) {
 	if info == nil || info.ID != sc.ID || info.Path != "/api/clients/v2/rpc" {
 		t.Fatalf("frame info = %+v", info)
 	}
+}
+
+func TestSafeConnPingHandlerWritesPongThroughInterceptor(t *testing.T) {
+	pong := make(chan string, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.SetPongHandler(func(data string) error {
+			pong <- data
+			return nil
+		})
+		if err := conn.WriteControl(websocket.PingMessage, []byte("heartbeat"), time.Now().Add(time.Second)); err != nil {
+			return
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	sc := dialEcho(t, server)
+	defer sc.Close()
+	rec := &recordingInterceptor{}
+	sc.SetInterceptor(&ConnInfo{ID: sc.ID, Path: "/x"}, rec)
+	sc.SetPingHandler(func(data string) error {
+		return sc.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(time.Second))
+	})
+	if err := sc.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		_, _, err := sc.ReadMessage()
+		readDone <- err
+	}()
+
+	select {
+	case data := <-pong:
+		if data != "heartbeat" {
+			t.Fatalf("pong data = %q, want heartbeat", data)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("did not receive pong")
+	}
+	_, _, sends, _ := rec.calls()
+	if len(sends) != 1 || sends[0] != "heartbeat" {
+		t.Fatalf("interceptor sends = %v, want heartbeat pong", sends)
+	}
+
+	_ = sc.Close()
+	<-readDone
 }
 
 // TestSafeConnRewriteAndWriteJSON 验证帧改写（读侧）与 WriteJSON 走同一拦截通道。
