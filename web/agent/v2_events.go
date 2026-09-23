@@ -82,6 +82,8 @@ func EnqueueV2Event(uuid, method string, params any) v2.Event {
 		ttl = v2PingEventTTL
 	} else if method == v2.MethodAgentFile {
 		ttl = v2FileEventTTL
+	} else if method == v2.MethodAgentStartupConfig {
+		ttl = 20 * time.Second
 	}
 	event := v2.Event{
 		ID:        newV2EventID(),

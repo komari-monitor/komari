@@ -51,6 +51,7 @@ func useReportTestStore(t *testing.T, policy *metric.RollupPolicy) *metric.Store
 type reportCounterFault struct {
 	remaining atomic.Int32
 	denied    atomic.Int32
+	failWrite atomic.Bool
 }
 
 func (f *reportCounterFault) denyRollupRead() bool {
@@ -88,6 +89,9 @@ func useReportCounterFailureStore(t *testing.T) (*metric.Store, *reportCounterFa
 	driver := &sqlite3.SQLiteDriver{
 		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
 			conn.RegisterAuthorizer(func(op int, arg1, _, _ string) int {
+				if op == sqlite3.SQLITE_TRANSACTION && arg1 == "BEGIN" && fault.failWrite.Load() {
+					return sqlite3.SQLITE_DENY
+				}
 				if op == sqlite3.SQLITE_READ && arg1 == "metric_rollups" && fault.denyRollupRead() {
 					return sqlite3.SQLITE_DENY
 				}
@@ -164,6 +168,76 @@ func TestReportBatchCounterRestoreFailureInitializesStateOnce(t *testing.T) {
 	}
 	assertMetricValues(t, s, MetricTrafficUp, first.UUID, base.Add(-time.Second), base.Add(2*time.Second), []float64{0, 50})
 	assertMetricValues(t, s, MetricTrafficDown, first.UUID, base.Add(-time.Second), base.Add(2*time.Second), []float64{0, 60})
+}
+
+func TestReportBatchRetryDoesNotCountHistoricalTraffic(t *testing.T) {
+	for _, existingBaseline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing-baseline-%v", existingBaseline), func(t *testing.T) {
+			s, fault := useReportCounterFailureStore(t)
+			fault.remaining.Store(0)
+			ctx := context.Background()
+			base := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
+			report := v2.Report{
+				UUID: "retry-node", UpdatedAt: base,
+				Network: v2.NetworkReport{TotalUp: 12 << 30, TotalDown: 30 << 30},
+			}
+			if existingBaseline {
+				if _, err := writeReportBatch(ctx, []v2.Report{report}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			first := report
+			first.UpdatedAt = base.Add(3 * time.Second)
+			first.Network.TotalUp += 100
+			first.Network.TotalDown += 200
+			second := first
+			second.UpdatedAt = base.Add(6 * time.Second)
+			second.Network.TotalUp += 50
+			second.Network.TotalDown += 60
+			pending := []v2.Report{first, second}
+
+			fault.failWrite.Store(true)
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := writePendingReports(ctx, &pending); err == nil {
+					t.Fatal("expected injected rollup write failure")
+				}
+				if len(pending) != 2 {
+					t.Fatal("failed reports were removed from pending batch")
+				}
+				value, _ := reportTrafficStates.Load(report.UUID)
+				state := value.(*reportTrafficState)
+				state.mu.Lock()
+				baseline := state.reportTrafficValues
+				state.mu.Unlock()
+				if baseline.hasUp != existingBaseline || baseline.hasDown != existingBaseline ||
+					(existingBaseline && (baseline.totalUp != report.Network.TotalUp ||
+						baseline.totalDown != report.Network.TotalDown || !baseline.timestamp.Equal(base))) {
+					t.Fatal("failed write advanced the committed counter baseline")
+				}
+			}
+			fault.failWrite.Store(false)
+			if err := writePendingReports(ctx, &pending); err != nil {
+				t.Fatalf("retry failed: %v", err)
+			}
+			if len(pending) != 0 {
+				t.Fatal("successful reports remained pending")
+			}
+
+			wantUp, wantDown := []float64{0, 50}, []float64{0, 60}
+			if existingBaseline {
+				wantUp, wantDown = []float64{0, 100, 50}, []float64{0, 200, 60}
+			}
+			assertMetricValues(t, s, MetricTrafficUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), wantUp)
+			assertMetricValues(t, s, MetricTrafficDown, report.UUID, base.Add(-time.Second), base.Add(time.Minute), wantDown)
+			var sumUp, sumDown float64
+			for i := range wantUp {
+				sumUp += wantUp[i]
+				sumDown += wantDown[i]
+			}
+			assertMetricAggregate(t, s, MetricTrafficUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggSum, sumUp, len(wantUp))
+			assertMetricAggregate(t, s, MetricTrafficDown, report.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggSum, sumDown, len(wantDown))
+		})
+	}
 }
 
 func TestWriteReportStoresMinuteMetricsAndResetAwareTraffic(t *testing.T) {

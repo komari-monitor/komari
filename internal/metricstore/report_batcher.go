@@ -29,7 +29,10 @@ type reportTrafficValues struct {
 	totalDown   int64
 }
 
-var reportTrafficStates sync.Map
+var (
+	reportTrafficStates sync.Map
+	reportWriteMu       sync.Mutex
+)
 
 const (
 	reportBatchInterval     = 3 * time.Second
@@ -342,6 +345,11 @@ func writeReportBatch(ctx context.Context, reports []v2.Report) ([]v2.Report, er
 	}
 	defer storeOperations.ReleaseShared()
 
+	// Serialize baseline reads and commits, including direct writes without
+	// the background batcher.
+	reportWriteMu.Lock()
+	defer reportWriteMu.Unlock()
+
 	s := GetStore()
 	if s == nil {
 		return nil, fmt.Errorf("metric store not enabled")
@@ -376,6 +384,12 @@ func writeReportBatch(ctx context.Context, reports []v2.Report) ([]v2.Report, er
 				values.hasDown = hasDown
 			}
 			values.initialized = true
+			// Keep only the restored baseline on failure. WriteBatch may have
+			// accepted raw samples before a rollup flush fails, so restoring
+			// again on retry could otherwise read this uncommitted batch.
+			state.mu.Lock()
+			state.reportTrafficValues = values
+			state.mu.Unlock()
 		}
 
 		if !values.timestamp.IsZero() && !report.UpdatedAt.After(values.timestamp) {
@@ -399,17 +413,17 @@ func writeReportBatch(ctx context.Context, reports []v2.Report) ([]v2.Report, er
 		prepared[i] = report
 	}
 
-	// Persist the restored per-report traffic state even if the write below
-	// fails, so a slow or failing database does not re-issue the previous-
-	// counter queries on every batch.
+	if err := s.WriteBatch(ctx, points); err != nil {
+		return nil, err
+	}
+
+	// Advance counters and timestamps only after success. Retried batches
+	// must replace the same samples, not manufacture resets or new timestamps.
 	for state, values := range pendingStates {
 		state.mu.Lock()
 		state.reportTrafficValues = values
 		state.mu.Unlock()
 	}
 
-	if err := s.WriteBatch(ctx, points); err != nil {
-		return nil, err
-	}
 	return prepared, nil
 }

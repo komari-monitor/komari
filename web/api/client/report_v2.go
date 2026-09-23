@@ -115,6 +115,15 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 			return v2.Error(req.ID, -32004, "unknown or expired file operation", nil)
 		}
 		return v2.Success(req.ID, gin.H{"status": "success"})
+	case v2.MethodAgentStartupConfigResult:
+		var params v2.StartupConfigResult
+		if err := bindV2Params(req.Params, &params); err != nil {
+			return v2.Error(req.ID, -32602, "invalid startup configuration result", nil)
+		}
+		if !agent_runtime.ResolveStartupConfig(uuid, params) {
+			return v2.Error(req.ID, -32004, "unknown or expired startup configuration request", nil)
+		}
+		return v2.Success(req.ID, gin.H{"status": "success"})
 	default:
 		return v2.Error(req.ID, -32601, "method not found", req.Method)
 	}
