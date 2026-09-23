@@ -21,6 +21,7 @@ const (
 	MethodAgentFileResult          = "agent.file.result"
 	MethodAgentStartupConfig       = "agent.startupConfig"
 	MethodAgentStartupConfigResult = "agent.startupConfig.result"
+	MethodAgentSwitchVersion       = "agent.switchVersion"
 )
 
 type Request struct {
@@ -194,6 +195,10 @@ type StartupConfigResult struct {
 	RequestID string         `json:"request_id"`
 	Config    map[string]any `json:"config,omitempty"`
 	Error     string         `json:"error,omitempty"`
+}
+
+type SwitchVersionParams struct {
+	Version string `json:"version"`
 }
 
 // FileOperation is metadata-only. File contents travel through the dedicated
