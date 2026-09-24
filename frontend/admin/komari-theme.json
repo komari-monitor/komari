@@ -1,0 +1,162 @@
+{
+  "name": "Komari",
+  "short": "default",
+  "description": "SIXOSN Komari administration frontend",
+  "version": "1.0.0",
+  "author": "SIXOSN",
+  "url": "https://github.com/SIXOSN/komari-web",
+  "preview": "dist/assets/edit_117847723_p0.webp",
+  "configuration": {
+    "type": "managed",
+    "name": {
+      "en": "Default Theme Settings",
+      "zh-CN": "默认主题设置",
+      "ja": "デフォルトテーマ設定"
+    },
+    "data": [
+      {
+        "name": {
+          "en": "General Settings",
+          "zh-CN": "通用设置",
+          "ja": "一般設定"
+        },
+        "type": "title"
+      },
+      {
+        "key": "showIpTagsInCard",
+        "name": {
+          "en": "Show IP tags in card",
+          "zh-CN": "在卡片中显示IP标签",
+          "ja": "カードにIPタグを表示"
+        },
+        "type": "switch",
+        "default": true,
+        "help": {
+          "en": "Enable to show IPv4/IPv6 tags in the server list on the homepage. Requires enabling the 'Show partial IP address to visitors' option in settings.",
+          "zh-CN": "开启以在首页服务器列表中显示IPv4/IPv6标签，需要在设置中开启向访客显示部分IP地址功能。",
+          "ja": "ホームページのサーバーリストにIPv4/IPv6タグを表示するには、有効にします。設定で「訪問者に部分的なIPアドレスを表示する」オプションを有効にする必要があります。"
+        }
+      },
+      {
+        "key": "showServerListInDetails",
+        "default": true,
+        "type": "switch",
+        "name": {
+          "en": "Show server list in details",
+          "zh-CN": "在详情页显示服务器列表",
+          "ja": "詳細ページにサーバーリストを表示"
+        },
+        "help": {
+          "en": "Enable to show the server list in the details page of each server. This allows users to easily navigate to other servers without returning to the homepage.",
+          "zh-CN": "开启以在每个服务器的详情页中显示服务器列表，方便用户无需返回首页即可轻松导航到其他服务器。",
+          "ja": "各サーバーの詳細ページにサーバーリストを表示するには、有効にします。これにより、ユーザーはホームページに戻ることなく、他のサーバーに簡単に移動できます。"
+        }
+      },
+      {
+        "key": "backgroundImageUrlDesktop",
+        "type": "string",
+        "default": "",
+        "name": {
+          "en": "Background Image URL (Desktop)",
+          "zh-CN": "背景图片URL（桌面端）",
+          "ja": "背景画像のURL（デスクトップ）"
+        },
+        "help": {
+          "en": "Set a custom background image for the homepage on desktop devices.",
+          "zh-CN": "为桌面端首页设置自定义背景图片。",
+          "ja": "デスクトップデバイスのホームページのカスタム背景画像を設定します。"
+        }
+      },
+      {
+        "key": "backgroundImageUrlMobile",
+        "type": "string",
+        "default": "",
+        "name": {
+          "en": "Background Image URL (Mobile)",
+          "zh-CN": "背景图片URL（移动端）",
+          "ja": "背景画像のURL（モバイル）"
+        },
+        "help": {
+          "en": "Set a custom background image for the homepage on mobile devices. If empty, the desktop background will be used.",
+          "zh-CN": "为移动端首页设置自定义背景图片。如果为空，将使用桌面端背景。",
+          "ja": "モバイルデバイスのホームページのカスタム背景画像を設定します。空の場合、デスクトップの背景が使用されます。"
+        }
+      },
+      {
+        "key": "offlineServerPosition",
+        "type": "select",
+        "name": {
+          "en": "Offline Server Position",
+          "zh-CN": "离线节点位置",
+          "ja": "オフラインサーバーの位置"
+        },
+        "help": {
+          "en": "Set the display position of offline servers. First: offline servers are displayed first; Keep: sorted by weight regardless of online status; Last: offline servers are displayed last.",
+          "zh-CN": "设置离线节点的显示位置。First：离线节点显示在最前；Keep：按权重排序不区分在线状态；Last：离线节点显示在最后。",
+          "ja": "オフラインサーバーの表示位置を設定します。First：オフラインサーバーが最初に表示されます。Keep：オンライン状態に関係なく重みでソートされます。Last：オフラインサーバーが最後に表示されます。"
+        },
+        "options": "First,Keep,Last",
+        "default": "Last"
+      },
+      {
+        "key": "customFooterHtml",
+        "type": "richtext",
+        "name": {
+          "en": "Custom Footer HTML",
+          "zh-CN": "自定义页脚HTML",
+          "ja": "カスタムフッターHTML"
+        },
+        "help": {
+          "en": "Set custom HTML content for the footer to replace build and version information.",
+          "zh-CN": "设置自定义页脚HTML内容以替代构建和版本信息。",
+          "ja": "ビルドおよびバージョン情報を置き換えるカスタムフッターHTMLの内容を設定します。"
+        },
+        "default": ""
+      },
+      {
+        "key": "mainContentWidth",
+        "type": "number",
+        "name": {
+          "en": "Main Content Max Width",
+          "zh-CN": "主要内容宽度",
+          "ja": "メインコンテンツの最大幅"
+        },
+        "help": {
+          "en": "Adjust the maximum width of the main content area as a percentage of viewport width (vw). Set to 100 for full width.",
+          "zh-CN": "调整主要内容的最大宽度，单位为视口宽度的百分比（vw）。设置为100以使用全宽。",
+          "ja": "メインコンテンツエリアの最大幅をビューポート幅のパーセンテージ（vw）で調整します。全幅にするには100に設定します。"
+        },
+        "default": 100
+      },
+      {
+        "name": {
+          "en": "Chart Settings",
+          "zh-CN": "图表设置",
+          "zh-TW": "圖表設定",
+          "ja": "グラフ設定",
+          "id-ID": "Pengaturan Grafik"
+        },
+        "type": "title"
+      },
+      {
+        "key": "chartDashboardTemplate",
+        "type": "richtext",
+        "name": {
+          "en": "Global Chart Template",
+          "zh-CN": "全局图表模板",
+          "zh-TW": "全域圖表範本",
+          "ja": "グローバルグラフテンプレート",
+          "id-ID": "Templat Grafik Global"
+        },
+        "help": {
+          "en": "Arrange and resize the charts on an instance details page, then click Save as global template there. The saved JSON is used as the default layout whenever a details page is opened.",
+          "zh-CN": "请先在实例详情页排列图表并调整尺寸，然后点击“保存为全局模板”。保存后的 JSON 会在每次进入详情页时作为默认布局读取。",
+          "zh-TW": "請先在實例詳情頁排列圖表並調整尺寸，然後點擊「儲存為全域範本」。儲存後的 JSON 會在每次進入詳情頁時作為預設版面配置讀取。",
+          "ja": "インスタンス詳細ページでグラフの順序とサイズを調整し、そこで「グローバルテンプレートとして保存」をクリックしてください。保存された JSON は詳細ページを開くたびに既定のレイアウトとして読み込まれます。",
+          "id-ID": "Atur urutan dan ukuran grafik di halaman detail instans, lalu klik Simpan sebagai templat global. JSON yang disimpan digunakan sebagai tata letak default setiap kali halaman detail dibuka."
+        },
+        "default": "[\n  {\n    \"id\": \"cpu\",\n    \"title\": \"CPU\",\n    \"metrics\": [\n      \"cpu.usage\",\n      \"load.average\"\n    ],\n    \"size\": \"small\"\n  },\n  {\n    \"id\": \"memory\",\n    \"title\": \"Memory\",\n    \"metrics\": [\n      \"memory.used\",\n      \"swap.used\"\n    ],\n    \"size\": \"small\"\n  },\n  {\n    \"id\": \"disk\",\n    \"title\": \"Disk\",\n    \"metrics\": [\n      \"disk.used\"\n    ],\n    \"size\": \"small\"\n  },\n  {\n    \"id\": \"network\",\n    \"title\": \"Network\",\n    \"metrics\": [\n      \"net.in.rate\",\n      \"net.out.rate\",\n      \"net.total.down\",\n      \"net.total.up\"\n    ],\n    \"size\": \"large\"\n  },\n  {\n    \"id\": \"ping\",\n    \"title\": \"Latency\",\n    \"metrics\": [\n      \"ping.latency_ms\"\n    ],\n    \"size\": \"large\"\n  }\n]"
+      }
+    ]
+  }
+}

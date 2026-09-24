@@ -25,3 +25,9 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+Integrated frontend sources:
+- Glassmorphism public frontend: https://github.com/SIXOSN/komari-theme-Glassmorphism
+  Original theme credits and MIT license are preserved under frontend/public/LICENSE.
+- Administration frontend: https://github.com/SIXOSN/komari-web
+  Derived from https://github.com/komari-monitor/komari-web.

@@ -1,0 +1,78 @@
+{
+  "name": "SIXOSN Glassmorphism",
+  "short": "default",
+  "description": "SIXOSN customized Glassmorphism theme with scheduled monthly traffic counters",
+  "version": "3.3.9",
+  "author": "SIXOSN",
+  "url": "https://github.com/SIXOSN/komari",
+  "preview": "preview.png",
+  "configuration": {
+    "type": "managed",
+    "name": "页面设置",
+    "data": [
+      { "name": "01 · 基础与外观", "type": "title" },
+      { "key": "themeMode", "name": "默认主题模式", "type": "select", "default": "beijing", "options": "beijing,light,dark", "help": "beijing=北京时间自动； light=亮色； dark=暗色。" },
+      { "key": "dataUpdateInterval", "name": "数据更新间隔", "type": "number", "default": 3, "help": "实时数据刷新间隔，单位：秒（建议 1-10 秒）" },
+      { "key": "rpcTransportMode", "name": "RPC 连接模式", "type": "select", "default": "http", "options": "http,websocket", "help": "HTTP 兼容性更好；反代支持时可改 websocket。" },
+      { "key": "defaultViewMode", "name": "默认视图模式", "type": "select", "default": "card", "options": "card,list", "help": "节点列表的默认显示模式" },
+      { "key": "nodeCardSize", "name": "节点卡片尺寸", "type": "select", "default": "compact", "options": "mini,compact,comfortable,large", "help": "从高密度 mini 到宽松 large；默认 compact。" },
+
+      { "name": "02 · 首页布局", "type": "title" },
+      { "key": "alertEnabled", "name": "启用公告", "type": "switch", "default": false, "help": "在首页显示自定义公告" },
+      { "key": "alertTitle", "name": "公告标题", "type": "string", "default": "", "help": "公告的标题内容" },
+      { "key": "alertContent", "name": "公告内容", "type": "richtext", "default": "", "help": "公告的详细内容（支持简单 Markdown 格式）" },
+      { "key": "stopEarth", "name": "停止地球旋转", "type": "switch", "default": false, "help": "开启后地球默认不自动旋转，用户仍可手动拖拽查看" },
+      { "key": "earthRenderer", "name": "地球样式", "type": "select", "default": "realistic", "options": "realistic,cobe,tiled", "help": "realistic=贴图，cobe=点阵，tiled=平铺地图。" },
+      { "key": "hideEarth", "name": "隐藏地球", "type": "switch", "default": false, "help": "隐藏地球后仅显示总览卡片" },
+      { "key": "hideGeneralCard", "name": "隐藏头部", "type": "switch", "default": false, "help": "隐藏地球和总览卡片" },
+      { "key": "visitorInfoEnabled", "name": "显示访客信息", "type": "switch", "default": true, "help": "显示底部访客 IP 条和左下角访客详情卡片" },
+      { "key": "glassColorPreset", "name": "毛玻璃配色方案", "type": "select", "default": "翡翠", "options": "翡翠,柔和,高对比,午夜,自定义", "help": "选择“自定义”后读取下方 JSON。" },
+      { "key": "colorVisionMode", "name": "色觉辅助配色", "type": "select", "default": "标准", "options": "标准,色觉友好", "help": "色觉友好使用蓝、蓝绿、橙、朱红、紫红，并为图表和状态增加线型、纹理、文字或图标区分。" },
+      { "key": "glassCustomColors", "name": "自定义毛玻璃颜色 JSON", "type": "richtext", "default": "{\"lightCard\":\"#f1f5f9bd\",\"lightControl\":\"#e2e8f0c2\",\"lightText\":\"#14151a\",\"lightMutedText\":\"#3f4552\",\"lightBorder\":\"#cbd5e199\",\"darkCard\":\"#0d111ad9\",\"darkControl\":\"#101624cc\",\"darkText\":\"#f7f8fb\",\"darkMutedText\":\"#d6dae4\",\"darkBorder\":\"#ffffff2e\"}", "help": "lightCard/darkCard=卡片； lightControl/darkControl=控制条； lightText/darkText=主文字； lightMutedText/darkMutedText=次文字； lightBorder/darkBorder=边框。支持 #RRGGBB 和 #RRGGBBAA。" },
+
+      { "name": "03 · 首页总览卡片", "type": "title" },
+      { "key": "generalCardPreset", "name": "头部卡片方案", "type": "select", "default": "基础", "options": "官方,基础,运维,资源,财务,流量,GPU,资产,完整,自定义", "help": "完整=展示全部可用卡片；自定义时读取下方 keys，顺序就是显示顺序。" },
+      { "key": "generalCardKeys", "name": "自定义头部卡片 keys", "type": "richtext", "default": "memory\ndisk\nremainingValue\ntotalTraffic\nuploadSpeed\ndownloadSpeed", "help": "逗号、空格或换行分隔。 currentTime=当前时间； memory=内存； disk=硬盘； remainingValue=剩余价值； totalTraffic=累计流量； uploadSpeed=实时上行； downloadSpeed=实时下行； onlineNodes=在线节点； offlineNodes=离线节点； avgCpu=平均CPU； avgGpu=平均GPU； avgLoad=平均负载； swap=交换内存； processes=进程总数； connections=连接总数； cpuCores=CPU核心； gpuNodes=GPU节点； gpuPeakNode=GPU峰值节点； trafficQuota=流量配额； trafficPeak=实时峰值； uploadPeakNode=上行最高节点； downloadPeakNode=下行最高节点； highLoadNodes=高负载节点； expiringNodes=即将到期； trafficWarnings=流量预警； connectionPeakNode=连接峰值节点； regionDistribution=地区分布； systemDistribution=系统分布； virtualizationDistribution=虚拟化分布； monthlyCost=月费用； yearlyCost=年费用。" },
+
+      { "name": "04 · 高级工具与隐私", "type": "title" },
+      { "key": "homeToolsEnabled", "name": "登录后显示高级工具", "type": "switch", "default": true, "help": "显示拓扑、性价比、健康、导出和审计工具。" },
+      { "key": "hideAdminEntryWhenLoggedOut", "name": "隐藏后台入口", "type": "switch", "default": false, "help": "未登录时隐藏顶部后台管理入口" },
+      { "key": "hidePriceWhenLoggedOut", "name": "未登录隐藏价格", "type": "switch", "default": false, "help": "未登录时隐藏节点卡片/列表中的价格、剩余价值和费用类卡片；在线天数仍会显示" },
+      { "key": "providerAliases", "name": "厂商自定义别名", "type": "string", "default": "", "help": "格式：Provider:alias1,alias2;Provider2:alias。" },
+      { "key": "exportSecondaryPassword", "name": "导出二级密码", "type": "string", "default": "", "help": "可选。设置后，快照导出在已登录基础上还需要输入该二级密码；留空则只校验登录。" },
+      { "key": "disablePageAnimation", "name": "减弱过渡动画", "type": "switch", "default": false, "help": "减少页面过渡动画效果，提升访问速度和响应性" },
+
+      { "name": "05 · 节点卡片、列表与快捷控制", "type": "title" },
+      { "key": "homeQuickControlsEnabled", "name": "显示主页快捷控制", "type": "switch", "default": true, "help": "在节点分组旁显示收藏、总流量、峰值、离线、高负载、即将到期等快捷按钮" },
+      { "key": "homeQuickControlPreset", "name": "快捷控制方案", "type": "select", "default": "完整", "options": "基础,流量,运维,完整,自定义", "help": "自定义时读取下方 keys。" },
+      { "key": "homeQuickControlKeys", "name": "自定义快捷按钮 keys", "type": "richtext", "default": "favorite\ntotalTraffic\npeak\noffline", "help": "逗号、空格或换行分隔。 favorite=收藏； totalTraffic=总流量； upload=上行； download=下行； peak=实时峰值； offline=离线； highLoad=高负载； expiring=即将到期。" },
+      { "key": "nodeListMetadataEnabled", "name": "列表信息栏", "type": "switch", "default": true, "help": "在列表视图显示节点信息栏；关闭后隐藏厂商、地区、ASN 和标签信息列。" },
+      { "key": "nodeListMetadataFields", "name": "列表信息字段 keys", "type": "richtext", "default": "provider\nregion\nasn", "help": "逗号、空格或换行分隔。 provider=厂商； region=地区； city=城市； asn=ASN； tags=自定义标签； group=分组。" },
+      { "key": "nodeListCustomTagsVisible", "name": "列表显示自定义标签", "type": "switch", "default": true, "help": "列表信息字段包含 tags 时，是否显示节点自定义标签；无标签节点不会显示空标签。" },
+      { "key": "offlineNodesLast", "name": "离线节点置底", "type": "switch", "default": false, "help": "筛选或排序时优先显示在线节点。" },
+      { "key": "homeHighLoadThreshold", "name": "高负载阈值", "type": "number", "default": 80, "help": "CPU、内存或硬盘占用达到该百分比时归为高负载节点（1-100）" },
+      { "key": "homeTrafficWarningThreshold", "name": "流量预警阈值", "type": "number", "default": 80, "help": "节点流量配额使用率达到该百分比时归为流量预警（1-100）" },
+      { "key": "homeExpiringDays", "name": "即将到期天数", "type": "number", "default": 30, "help": "节点剩余天数小于等于该值时归为即将到期（1-3650）" },
+      { "key": "diskPredictionEnabled", "name": "启用磁盘耗尽预测", "type": "switch", "default": false, "help": "基于负载历史里的磁盘用量趋势预测耗尽时间；样本少于 2 天或未增长时不显示" },
+      { "key": "diskPredictionThresholdDays", "name": "磁盘预测预警天数", "type": "number", "default": 30, "help": "预计剩余天数小于等于该值时在节点卡片和详情负载图中显示提示（1-3650）" },
+
+      { "name": "06 · 节点详情概览卡片", "type": "title" },
+      { "key": "nodeDetailSectionTabsEnabled", "name": "详情页分区标签页", "type": "switch", "default": false, "help": "默认关闭，保持节点详情页纵向连续展示；开启后按概览、负载、延迟分区显示。" },
+      { "key": "detailMetricCardPreset", "name": "详情概览卡片方案", "type": "select", "default": "财务", "options": "财务,状态,资源,网络,GPU,综合,自定义", "help": "宽屏每行 4 张，中屏 3 张，移动端 2 张。财务/状态/网络/GPU=8 张；资源=12 张；综合=16 张；自定义读取下方 keys。" },
+      { "key": "detailMetricCardKeys", "name": "自定义详情卡片 keys", "type": "richtext", "default": "nodePrice\nmonthlyCost\nremainingTime\nremainingValue\ntotalTraffic\ntrafficQuota\nuptime\nconnections", "help": "逗号、空格或换行分隔。 nodePrice=节点价格； monthlyCost=月均支出； remainingTime=剩余时间； remainingValue=剩余价值； cpuUsage=CPU使用率； gpuUsage=GPU使用率； memoryUsage=内存使用率； swapUsage=交换内存使用率； diskUsage=硬盘使用率； load=系统负载； temperature=系统温度； processes=进程数； connections=连接数； uptime=运行时间； uploadSpeed=实时上行； downloadSpeed=实时下行； totalTraffic=累计流量； trafficQuota=流量配额。" },
+
+      { "name": "07 · 节点详情图表", "type": "title" },
+      { "key": "gpuChartEnabled", "name": "显示 GPU 指标图", "type": "switch", "default": false, "help": "控制 GPU 利用率、设备、显存和 GPU 温度序列；无 GPU 数据时自动隐藏。" },
+      { "key": "chartDashboardPreset", "name": "详情负载图方案", "type": "select", "default": "默认", "options": "默认,精简,资源,网络,GPU,延迟,运维,完整,自定义", "help": "资源、网络、GPU、延迟和运维按指标族组合；完整覆盖官方 25 个指标。自定义读取下方 keys。" },
+      { "key": "chartDashboardTemplate", "name": "自定义详情图表 keys", "type": "richtext", "default": "cpu\nmemory\ndisk\nnetwork\ngpu\nconnections\nprocess", "help": "逗号、空格或换行分隔。 cpu=CPU/负载； memory=RAM/Swap及总量； disk=磁盘/总量； network=实时上下行； traffic=累计与周期流量； gpu=GPU/设备利用率； gpuMemory=GPU显存/总量； temperature=系统/GPU温度； connections=TCP/UDP； process=进程； ping=Ping延迟； pingLoss=Ping丢包。旧 JSON 仍兼容。" },
+
+      { "name": "08 · 自定义背景", "type": "title" },
+      { "key": "backgroundEnabled", "name": "启用自定义背景", "type": "switch", "default": false, "help": "启用后可设置自定义图片或视频作为页面背景" },
+      { "key": "backgroundType", "name": "背景类型", "type": "select", "default": "image", "options": "image,video", "help": "image=图片； video=视频。" },
+      { "key": "lightBackgroundUrl", "name": "亮色模式背景地址", "type": "string", "default": "", "help": "支持 http(s) URL、站内 / 路径；持久本地文件放在 data/theme/user-assets/ 后填写 local:文件名。" },
+      { "key": "darkBackgroundUrl", "name": "暗色模式背景地址", "type": "string", "default": "", "help": "支持 http(s) URL、站内 / 路径；持久本地文件放在 data/theme/user-assets/ 后填写 local:文件名。" },
+      { "key": "backgroundBlur", "name": "背景模糊半径", "type": "number", "default": 0, "help": "背景的高斯模糊半径（单位：px），0 表示不模糊" },
+      { "key": "backgroundOverlay", "name": "背景遮罩强度", "type": "number", "default": 0, "help": "范围 -100 到 100；0 关闭，正数加深，负数降低透明度。" }
+    ]
+  }
+}

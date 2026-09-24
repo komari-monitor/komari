@@ -1,0 +1,20 @@
+export type NodeInfo = {
+  uuid: string;
+  name: string;
+  cpu_name: string;
+  arch: string;
+  cpu_cores: number;
+  os: string;
+  gpu_name: string;
+  ipv4: string;
+  ipv6: string;
+  region: string;
+  mem_total: number;
+  swap_total: number;
+  disk_total: number;
+  version: string;
+  weigth: number;
+  markup: string;
+  CreatedAt: string;
+  UpdatedAt: string;
+};

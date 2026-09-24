@@ -15,19 +15,18 @@ Compatibility intentionally differs because the server and agent validate each o
 
 ## Distribution features
 
-- Customized Glassmorphism interface embedded as the default theme.
+- Glassmorphism public interface and administration frontend built from source in this repository.
 - Per-node traffic reset day, reset time, and IANA time-zone configuration.
 - Mutual distribution validation between the SIXOSN server and agent.
 - Remote commands, Web SSH, browser terminals, file management, and file-transfer endpoints removed.
 - Existing databases and server settings preserved during upgrades; new traffic-cycle fields default to disabled.
-- Real-time metrics, history, themes, plugins, and self-hosted administration retained.
+- Real-time metrics, history, plugins, and self-hosted administration retained.
 
 ## Related repositories
 
 - Server: [`SIXOSN/komari`](https://github.com/SIXOSN/komari)
 - Agent: [`SIXOSN/komari-agent`](https://github.com/SIXOSN/komari-agent)
-- Default theme: [`SIXOSN/komari-theme-Glassmorphism`](https://github.com/SIXOSN/komari-theme-Glassmorphism)
-- Administration frontend: [`SIXOSN/komari-web`](https://github.com/SIXOSN/komari-web)
+- Frontend source: [`frontend/public`](./frontend/public) and [`frontend/admin`](./frontend/admin)
 
 ## Docker deployment
 

@@ -21,7 +21,6 @@ type Purpose string
 const (
 	PurposeBackup Purpose = "backup"
 	PurposePlugin Purpose = "plugin"
-	PurposeTheme  Purpose = "theme"
 )
 
 var ErrNotFound = errors.New("upload not found")
@@ -201,7 +200,7 @@ func (s *Store) load(uploadID string) (Session, error) {
 }
 
 func isKnownPurpose(purpose Purpose) bool {
-	return purpose == PurposeBackup || purpose == PurposePlugin || purpose == PurposeTheme
+	return purpose == PurposeBackup || purpose == PurposePlugin
 }
 
 func validUploadID(uploadID string) bool {

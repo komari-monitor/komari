@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="/favicon.ico" />
+    <title>Komari Monitor</title>
+    <meta name="description" content="A simple server monitor tool." />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#dff8fb" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Komari Monitor" />
+    <link rel="manifest" href="/admin-app/manifest.json" />
+    <link rel="apple-touch-icon" href="/admin-app/assets/pwa-icon.png" />
+    <style>
+      .legacy-browser-message {
+        display: none;
+        padding: 24px;
+        font:
+          16px/1.6 -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          sans-serif;
+      }
+      .no-esm .legacy-browser-message {
+        display: block;
+      }
+    </style>
+    <script>
+      ;(function () {
+        try {
+          var officialAppRoute = /^\/(admin|terminal|manage)(\/|$)/
+          if (officialAppRoute.test(location.pathname)) {
+            var officialRoute = location.pathname + location.search + location.hash
+            var adminEntry = '/admin-app/index.html'
+            try {
+              sessionStorage.setItem('komariOfficialAppRoute', officialRoute)
+              location.replace(adminEntry)
+            } catch {
+              location.replace(adminEntry + '?__komari_route=' + encodeURIComponent(officialRoute))
+            }
+            return
+          }
+
+          var root = document.documentElement
+          var css = window.CSS
+          var supportsModernColor =
+            !!css &&
+            css.supports('color', 'oklch(0.5 0.1 120)') &&
+            css.supports('color', 'color-mix(in srgb, red 50%, white)')
+          if (!supportsModernColor) root.classList.add('legacy-webkit')
+          if (!('noModule' in document.createElement('script'))) root.classList.add('no-esm')
+
+          var mode = localStorage.getItem('themeMode')
+          var isDark = mode === 'dark'
+
+          if (mode !== 'dark' && mode !== 'light') {
+            var hour = Number(
+              new Intl.DateTimeFormat('en-US', {
+                hour: '2-digit',
+                hour12: false,
+                timeZone: 'Asia/Shanghai',
+              }).format(new Date()),
+            )
+            if (hour === 24) hour = 0
+            isDark = Number.isFinite(hour) ? hour < 7 || hour >= 19 : true
+          }
+
+          root.classList.toggle('dark', isDark)
+          root.style.colorScheme = isDark ? 'dark' : 'light'
+        } catch (error) {
+          document.documentElement.classList.add('dark')
+          document.documentElement.classList.add('legacy-webkit')
+          document.documentElement.style.colorScheme = 'dark'
+        }
+      })()
+    </script>
+  </head>
+
+  <body>
+    <div class="legacy-browser-message" role="alert">
+      当前 iOS 浏览器内核版本过低，请升级到 iOS 15.4 或更高版本后访问。
+    </div>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

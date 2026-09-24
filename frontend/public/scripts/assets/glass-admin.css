@@ -1,0 +1,267 @@
+:root {
+  --background: #eef2f5 !important;
+  --foreground: #172026 !important;
+  --card: rgb(255 255 255 / 68%) !important;
+  --card-foreground: #172026 !important;
+  --popover: rgb(255 255 255 / 94%) !important;
+  --popover-foreground: #172026 !important;
+  --primary: #087f5b !important;
+  --primary-foreground: #f8fffc !important;
+  --secondary: #e2e8ec !important;
+  --secondary-foreground: #27343d !important;
+  --muted: #e7ecef !important;
+  --muted-foreground: #52616b !important;
+  --accent: #dce9e5 !important;
+  --accent-foreground: #075e45 !important;
+  --border: rgb(68 83 94 / 22%) !important;
+  --input: rgb(68 83 94 / 26%) !important;
+  --ring: #0b8f68 !important;
+  --sidebar: rgb(247 250 251 / 86%) !important;
+  --sidebar-foreground: #1d2930 !important;
+  --sidebar-primary: #087f5b !important;
+  --sidebar-primary-foreground: #f8fffc !important;
+  --sidebar-accent: #dce9e5 !important;
+  --sidebar-accent-foreground: #075e45 !important;
+  --sidebar-border: rgb(68 83 94 / 20%) !important;
+  --radius: 0.5rem !important;
+  --accent-1: #f4fbfa !important;
+  --accent-2: #e9f8f4 !important;
+  --accent-3: #d3f0e9 !important;
+  --accent-4: #b8e7dc !important;
+  --accent-5: #98dacb !important;
+  --accent-6: #70cbb8 !important;
+  --accent-7: #3fbaa2 !important;
+  --accent-8: #18a987 !important;
+  --accent-9: #079b75 !important;
+  --accent-10: #058765 !important;
+  --accent-11: #08785d !important;
+  --accent-12: #153b32 !important;
+}
+
+:root.dark,
+.dark {
+  --background: #0c1117 !important;
+  --foreground: #edf3f5 !important;
+  --card: rgb(15 24 35 / 62%) !important;
+  --card-foreground: #edf3f5 !important;
+  --popover: rgb(19 27 35 / 96%) !important;
+  --popover-foreground: #edf3f5 !important;
+  --primary: #3ccf91 !important;
+  --primary-foreground: #06291e !important;
+  --secondary: #202b34 !important;
+  --secondary-foreground: #e4ecef !important;
+  --muted: #202a33 !important;
+  --muted-foreground: #a9b6be !important;
+  --accent: #163b31 !important;
+  --accent-foreground: #a8f0d2 !important;
+  --border: rgb(214 228 234 / 16%) !important;
+  --input: rgb(214 228 234 / 20%) !important;
+  --ring: #48d9a0 !important;
+  --sidebar: rgb(13 20 27 / 90%) !important;
+  --sidebar-foreground: #edf3f5 !important;
+  --sidebar-primary: #3ccf91 !important;
+  --sidebar-primary-foreground: #06291e !important;
+  --sidebar-accent: #163b31 !important;
+  --sidebar-accent-foreground: #a8f0d2 !important;
+  --sidebar-border: rgb(214 228 234 / 14%) !important;
+  --accent-1: #0b1718 !important;
+  --accent-2: #0d201f !important;
+  --accent-3: #10352f !important;
+  --accent-4: #12473c !important;
+  --accent-5: #15594a !important;
+  --accent-6: #196b59 !important;
+  --accent-7: #1c826b !important;
+  --accent-8: #20a181 !important;
+  --accent-9: #31c99a !important;
+  --accent-10: #45d6a8 !important;
+  --accent-11: #72e4be !important;
+  --accent-12: #c5f5e5 !important;
+}
+
+html,
+body,
+#root,
+.radix-themes {
+  min-height: 100%;
+  background-color: transparent !important;
+  color: var(--foreground);
+}
+
+.radix-themes {
+  --color-background: transparent !important;
+}
+
+body {
+  letter-spacing: 0;
+  background-color: var(--background) !important;
+  background-image:
+    linear-gradient(rgb(25 111 126 / 9%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(25 111 126 / 9%) 1px, transparent 1px),
+    linear-gradient(132deg, rgb(49 198 217 / 34%), transparent 48%),
+    linear-gradient(310deg, rgb(156 117 232 / 30%), transparent 48%),
+    linear-gradient(18deg, rgb(50 201 143 / 23%), transparent 43%) !important;
+  background-attachment: fixed !important;
+  background-size:
+    36px 36px,
+    36px 36px,
+    100% 100%,
+    100% 100%,
+    100% 100% !important;
+}
+
+.dark body {
+  background-image:
+    linear-gradient(rgb(180 236 244 / 6%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(180 236 244 / 6%) 1px, transparent 1px),
+    linear-gradient(132deg, rgb(16 145 174 / 42%), transparent 48%),
+    linear-gradient(310deg, rgb(117 78 196 / 38%), transparent 48%),
+    linear-gradient(18deg, rgb(22 145 102 / 30%), transparent 43%) !important;
+}
+
+#root .theme-root > .rt-Grid {
+  background-color: transparent !important;
+}
+
+#root .theme-root > .rt-Grid > nav {
+  border-bottom: 1px solid var(--border) !important;
+  background-color: rgb(248 251 252 / 58%) !important;
+  box-shadow:
+    0 8px 28px rgb(18 27 34 / 9%),
+    inset 0 -1px 0 rgb(255 255 255 / 38%);
+  backdrop-filter: blur(18px) saturate(145%);
+}
+
+.dark #root .theme-root > .rt-Grid > nav {
+  background-color: rgb(10 16 25 / 58%) !important;
+}
+
+#root .theme-root > .rt-Grid > div[style*='background-color: var(--accent-1)'] {
+  border-right: 1px solid var(--sidebar-border) !important;
+  background-color: rgb(247 250 251 / 56%) !important;
+  box-shadow: inset -1px 0 rgb(255 255 255 / 32%);
+  backdrop-filter: blur(18px) saturate(145%);
+}
+
+.dark #root .theme-root > .rt-Grid > div[style*='background-color: var(--accent-1)'] {
+  background-color: rgb(10 17 27 / 58%) !important;
+}
+
+#root .theme-root > .rt-Grid > div[style*='background-color: var(--accent-3)'] {
+  background-color: rgb(238 244 246 / 16%) !important;
+}
+
+.dark #root .theme-root > .rt-Grid > div[style*='background-color: var(--accent-3)'] {
+  background-color: rgb(9 14 22 / 14%) !important;
+}
+
+#root .rt-TableRoot,
+#root table {
+  overflow: hidden;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px;
+  background-color: rgb(255 255 255 / 42%) !important;
+  box-shadow:
+    0 16px 42px rgb(18 27 34 / 11%),
+    inset 0 1px 0 rgb(255 255 255 / 58%);
+  backdrop-filter: blur(14px) saturate(140%);
+}
+
+.dark #root .rt-TableRoot,
+.dark #root table {
+  background-color: rgb(12 19 30 / 42%) !important;
+}
+
+#root thead,
+#root .rt-TableHeader {
+  background-color: rgb(213 240 236 / 56%) !important;
+}
+
+.dark #root thead,
+.dark #root .rt-TableHeader {
+  background-color: rgb(15 65 59 / 48%) !important;
+}
+
+#root tbody tr {
+  background-color: transparent !important;
+}
+
+#root tbody tr:hover {
+  background-color: rgb(42 151 119 / 9%) !important;
+}
+
+.rt-Card {
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  background-color: var(--card) !important;
+  box-shadow:
+    0 12px 30px rgb(18 27 34 / 11%),
+    inset 0 1px 0 rgb(255 255 255 / 34%) !important;
+}
+
+.rt-DialogContent,
+.rt-PopoverContent,
+.rt-DropdownMenuContent,
+.rt-BaseMenuContent {
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  background-color: var(--card) !important;
+  box-shadow:
+    0 18px 46px rgb(18 27 34 / 16%),
+    inset 0 1px 0 rgb(255 255 255 / 38%) !important;
+  backdrop-filter: blur(18px) saturate(140%);
+}
+
+.dark .rt-Card {
+  box-shadow:
+    0 14px 34px rgb(0 0 0 / 24%),
+    inset 0 1px 0 rgb(255 255 255 / 8%) !important;
+}
+
+.dark .rt-DialogContent,
+.dark .rt-PopoverContent,
+.dark .rt-DropdownMenuContent,
+.dark .rt-BaseMenuContent {
+  box-shadow: 0 16px 42px rgb(0 0 0 / 30%) !important;
+}
+
+.rt-TextFieldRoot,
+.rt-TextAreaRoot,
+.rt-SelectTrigger,
+input,
+select,
+textarea {
+  border-color: var(--input) !important;
+  border-radius: 6px !important;
+}
+
+.rt-Button,
+.rt-IconButton,
+button {
+  border-radius: 6px !important;
+}
+
+.rt-TableRoot,
+table {
+  border-color: var(--border) !important;
+}
+
+aside,
+[data-sidebar='sidebar'] {
+  border-color: var(--sidebar-border) !important;
+  background-color: var(--sidebar) !important;
+  backdrop-filter: blur(20px);
+}
+
+::selection {
+  background: rgb(24 168 121 / 28%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

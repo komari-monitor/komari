@@ -1,16 +1,10 @@
-name: Build frontend theme
-description: Build the SIXOSN Glassmorphism fork as Komari's embedded default theme.
+name: Build frontend
+description: Build the in-repository Glassmorphism public and admin frontends.
 
 inputs:
   node-version:
     description: Node.js version available to theme build scripts.
     default: "23"
-  repository:
-    description: Theme repository URL.
-    default: https://github.com/SIXOSN/komari-theme-Glassmorphism
-  ref:
-    description: Optional theme ref to build. Uses the repository default branch when empty.
-    default: "sixosn/traffic-cycle-default"
   artifact-name:
     description: Optional artifact name for the packed frontend theme.
     default: ""
@@ -28,6 +22,11 @@ runs:
       with:
         bun-version: latest
 
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 11.19.0
+
     - name: Install zstd
       shell: bash
       run: |
@@ -37,31 +36,28 @@ runs:
           sudo apt-get install -y zstd
         fi
 
-    - name: Clone and build frontend
+    - name: Build frontend
       shell: bash
       run: |
         set -euxo pipefail
-        rm -rf komari-default-theme
-        if [ -n "${{ inputs.ref }}" ]; then
-          git clone --depth=1 --branch "${{ inputs.ref }}" "${{ inputs.repository }}" komari-default-theme
-        else
-          git clone --depth=1 "${{ inputs.repository }}" komari-default-theme
-        fi
-        cd komari-default-theme
+        pnpm --dir frontend/admin install --frozen-lockfile
+        pnpm --dir frontend/admin exec tsc -b
+        pnpm --dir frontend/admin exec vite build --base=/admin-app/
+        cd frontend/public
         bun install
+        KOMARI_ADMIN_DIST_READY=1 bun run sync:admin
         bun run build-only
-        cd ..
+        cd ../..
 
         mkdir -p web/public/defaultTheme
         rm -rf web/public/defaultTheme/dist web/public/defaultTheme/dist.tar.zst
-        test -f komari-default-theme/dist/index.html
-        tar -cf "$RUNNER_TEMP/komari-default-dist.tar" -C komari-default-theme/dist .
+        test -f frontend/public/dist/index.html
+        tar -cf "$RUNNER_TEMP/komari-default-dist.tar" -C frontend/public/dist .
         zstd -19 -T0 -q -f "$RUNNER_TEMP/komari-default-dist.tar" -o web/public/defaultTheme/dist.tar.zst
         rm -f "$RUNNER_TEMP/komari-default-dist.tar"
-        cp -f komari-default-theme/komari-theme.json web/public/defaultTheme/
-        node -e 'const fs=require("fs"); const p="web/public/defaultTheme/komari-theme.json"; const m=JSON.parse(fs.readFileSync(p,"utf8")); m.short="default"; m.name="SIXOSN Glassmorphism"; m.url="https://github.com/SIXOSN/komari-theme-Glassmorphism"; fs.writeFileSync(p, JSON.stringify(m, null, 2)+"\n")'
-        if [ -f komari-default-theme/docs/preview.png ]; then cp -f komari-default-theme/docs/preview.png web/public/defaultTheme/preview.png; fi
-        if [ -f komari-default-theme/preview.png ]; then cp -f komari-default-theme/preview.png web/public/defaultTheme/preview.png; fi
+        cp -f frontend/public/komari-theme.json web/public/defaultTheme/
+        node -e 'const fs=require("fs"); const p="web/public/defaultTheme/komari-theme.json"; const m=JSON.parse(fs.readFileSync(p,"utf8")); m.short="default"; m.name="SIXOSN Glassmorphism"; m.url="https://github.com/SIXOSN/komari"; fs.writeFileSync(p, JSON.stringify(m, null, 2)+"\n")'
+        if [ -f frontend/public/preview.png ]; then cp -f frontend/public/preview.png web/public/defaultTheme/preview.png; fi
         if [ -f web/public/defaultTheme/preview.png ] && [ ! -f web/public/defaultTheme/perview.png ]; then cp -f web/public/defaultTheme/preview.png web/public/defaultTheme/perview.png; fi
         if [ -f web/public/defaultTheme/perview.png ] && [ ! -f web/public/defaultTheme/preview.png ]; then cp -f web/public/defaultTheme/perview.png web/public/defaultTheme/preview.png; fi
 

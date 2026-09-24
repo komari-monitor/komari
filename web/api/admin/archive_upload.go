@@ -16,7 +16,6 @@ func NewArchiveUploadHandler() *upload.Handler {
 	return upload.NewHandler(upload.DefaultStore, map[upload.Purpose]upload.Finalizer{
 		upload.PurposeBackup: finalizeBackupUpload,
 		upload.PurposePlugin: finalizePluginUpload,
-		upload.PurposeTheme:  finalizeThemeUpload,
 	})
 }
 
@@ -59,12 +58,4 @@ func finalizePluginUpload(session upload.Session) (upload.Result, error) {
 		return upload.Result{}, err
 	}
 	return upload.Result{Message: "插件上传成功", Data: info}, nil
-}
-
-func finalizeThemeUpload(session upload.Session) (upload.Result, error) {
-	info, err := extractAndValidateTheme(session.ArchivePath)
-	if err != nil {
-		return upload.Result{}, err
-	}
-	return upload.Result{Message: "主题上传成功", Data: info}, nil
 }

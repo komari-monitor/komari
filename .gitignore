@@ -38,3 +38,11 @@ komari
 .codex
 
 /web/filemanager/data
+/frontend/admin/node_modules/
+/frontend/admin/dist/
+/frontend/public/node_modules/
+/frontend/public/dist/
+/frontend/public/public/admin-app/
+/frontend/public/komari-theme-Glassmorphism-build-*.zip
+
+/web/public/defaultTheme/

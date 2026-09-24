@@ -2,6 +2,7 @@ package public
 
 import (
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -113,15 +114,24 @@ func TestEmbeddedDistDoesNotEmbedRawFiles(t *testing.T) {
 	}
 }
 
-func TestStaticRestrictedDoesNotServeCustomAssetOverride(t *testing.T) {
+func TestStaticDoesNotServeLegacyCustomTheme(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Chdir(t.TempDir())
-	assetPath := filepath.Join("data", "theme", "custom", "dist", "assets")
+	assetName := ""
+	for name := range defaultDistFiles {
+		if strings.HasPrefix(name, "assets/") && strings.HasSuffix(name, ".css") {
+			assetName = name
+			break
+		}
+	}
+	if assetName == "" {
+		t.Fatal("embedded frontend has no CSS asset")
+	}
+	assetPath := filepath.Join("data", "theme", "custom", "dist", filepath.Dir(assetName))
 	if err := os.MkdirAll(assetPath, 0o755); err != nil {
 		t.Fatalf("create custom theme asset directory: %v", err)
 	}
-	const assetName = "about-D4JKo971.css"
-	if err := os.WriteFile(filepath.Join(assetPath, assetName), []byte("custom override"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join("data", "theme", "custom", "dist", assetName), []byte("custom override"), 0o644); err != nil {
 		t.Fatalf("write custom theme asset: %v", err)
 	}
 
@@ -135,10 +145,10 @@ func TestStaticRestrictedDoesNotServeCustomAssetOverride(t *testing.T) {
 	}
 
 	router := gin.New()
-	StaticRestricted(router.Group("/"), func(handlers ...gin.HandlerFunc) {
+	Static(router.Group("/"), func(handlers ...gin.HandlerFunc) {
 		router.NoRoute(handlers...)
 	})
-	for _, requestPath := range []string{"/assets/" + assetName} {
+	for _, requestPath := range []string{"/" + assetName} {
 		request := httptest.NewRequest("GET", requestPath, nil)
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, request)
@@ -150,8 +160,14 @@ func TestStaticRestrictedDoesNotServeCustomAssetOverride(t *testing.T) {
 			t.Fatalf("read restricted asset %s: %v", requestPath, err)
 		}
 		if string(body) == "custom override" {
-			t.Fatalf("restricted listener served a custom theme asset override for %s", requestPath)
+			t.Fatalf("served a legacy custom theme asset override for %s", requestPath)
 		}
+	}
+	customRequest := httptest.NewRequest("GET", "/themes/custom/dist/"+assetName, nil)
+	customRecorder := httptest.NewRecorder()
+	router.ServeHTTP(customRecorder, customRequest)
+	if customRecorder.Code != http.StatusNotFound {
+		t.Fatalf("custom theme route status = %d, want 404", customRecorder.Code)
 	}
 
 	indexRequest := httptest.NewRequest("GET", "/database-recovery", nil)

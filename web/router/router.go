@@ -91,22 +91,7 @@ func registerAdminRoutes(r *gin.Engine) {
 	g.PUT("/update/favicon", admin.UploadFavicon)
 	g.POST("/update/favicon", admin.DeleteFavicon)
 
-	// theme 的安装流程通过统一的分片上传接口；其余主题接口保留 REST handler。
-	theme := g.Group("/theme")
-	{
-		theme.GET("/list", admin.ListThemes)
-		theme.POST("/delete", admin.DeleteTheme)
-		theme.GET("/set", admin.SetTheme)
-		theme.POST("/update", admin.UpdateTheme)
-		theme.POST("/import", admin.ImportTheme)
-		theme.POST("/settings", admin.UpdateThemeSettings)
-		theme.GET("/market/sources", admin.ListThemeMarketSources)
-		theme.POST("/market/sources", admin.CreateThemeMarketSource)
-		theme.PUT("/market/sources/:id", admin.UpdateThemeMarketSource)
-		theme.DELETE("/market/sources/:id", admin.DeleteThemeMarketSource)
-		theme.GET("/market/catalog", admin.ListThemeMarketCatalog)
-		theme.POST("/market/install", admin.InstallThemeFromMarket)
-	}
+	g.POST("/page/settings", admin.UpdatePageSettings)
 
 	// 2FA 含二维码 PNG / 敏感操作，保留 REST handler。
 	twoFactor := g.Group("/2fa")

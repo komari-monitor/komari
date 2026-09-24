@@ -15,19 +15,18 @@ SIXOSN Komari 是一个注重安全、独立维护的服务器监控发行版。
 
 ## 定制特性
 
-- 内置定制版 Glassmorphism，并作为默认界面。
+- Glassmorphism 公开界面和管理前端源码均内置于本仓库。
 - 每台服务器可分别设置流量重置日、重置时间及 IANA 时区。
 - SIXOSN 服务端与 Agent 进行双向发行版身份校验。
 - 移除远程命令、Web SSH、网页终端、文件管理和文件传输接口。
 - 升级沿用现有数据库与服务器设置；新增流量周期字段默认关闭。
-- 保留实时指标、历史记录、主题、插件及自托管管理功能。
+- 保留实时指标、历史记录、插件及自托管管理功能。
 
 ## 相关仓库
 
 - 服务端：[`SIXOSN/komari`](https://github.com/SIXOSN/komari)
 - Agent：[`SIXOSN/komari-agent`](https://github.com/SIXOSN/komari-agent)
-- 默认主题：[`SIXOSN/komari-theme-Glassmorphism`](https://github.com/SIXOSN/komari-theme-Glassmorphism)
-- 管理前端：[`SIXOSN/komari-web`](https://github.com/SIXOSN/komari-web)
+- 前端源码：[`frontend/public`](./frontend/public) 和 [`frontend/admin`](./frontend/admin)
 
 ## Docker 部署
 

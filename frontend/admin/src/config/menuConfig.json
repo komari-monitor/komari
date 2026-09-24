@@ -1,0 +1,153 @@
+{
+  "menu": [
+    {
+      "labelKey": "common.dashboard",
+      "path": "/admin/dashboard",
+      "icon": "LayoutDashboard"
+    },
+    {
+      "labelKey": "common.serverList",
+      "path": "/admin/servers",
+      "icon": "Server"
+    },
+    {
+      "labelKey": "operations.title",
+      "path": "/admin/ping",
+      "icon": "Bolt",
+      "children": [
+        {
+          "labelKey": "ping.title",
+          "path": "/admin/ping",
+          "icon": "Activity"
+        },
+        {
+          "labelKey": "sessions.title",
+          "path": "/admin/sessions",
+          "icon": "Users"
+        }
+      ]
+    },
+    {
+      "labelKey": "notification.title",
+      "path": "/admin/notification/channels",
+      "icon": "Bell",
+      "children": [
+        {
+          "labelKey": "notification.channels.title",
+          "path": "/admin/notification/channels",
+          "icon": "MessageCircleMore"
+        },
+        {
+          "labelKey": "notification.general.title",
+          "path": "/admin/notification/general",
+          "icon": "Ellipsis"
+        },
+        {
+          "labelKey": "notification.offline.title",
+          "path": "/admin/notification/offline",
+          "icon": "Unplug"
+        },
+        {
+          "labelKey": "loadAlert.title",
+          "path": "/admin/notification/load",
+          "icon": "TrendingUp"
+        }
+      ]
+    },
+    {
+      "labelKey": "plugin.title",
+      "path": "/admin/plugins",
+      "icon": "Blocks",
+      "children": [
+        {
+          "labelKey": "plugin.manage",
+          "path": "/admin/plugins",
+          "icon": "Blocks"
+        },
+        {
+          "labelKey": "plugin.market",
+          "path": "/admin/market/plugins",
+          "icon": "Store"
+        },
+        {
+          "labelKey": "plugin.config",
+          "path": "/admin/plugins/config",
+          "icon": "Settings2"
+        }
+      ]
+    },
+    {
+      "labelKey": "system.title",
+      "path": "/admin/settings/site",
+      "icon": "Bolt",
+      "children": [
+        {
+          "labelKey": "settings.page.title",
+          "path": "/admin/settings/page",
+          "icon": "Palette"
+        },
+        {
+          "labelKey": "settings.site.title",
+          "path": "/admin/settings/site",
+          "icon": "Home"
+        },
+        {
+          "labelKey": "settings.general.title",
+          "path": "/admin/settings/general",
+          "icon": "Ellipsis"
+        },
+        {
+          "labelKey": "settings.sign_on.title",
+          "path": "/admin/settings/sign-on",
+          "icon": "CircleArrowRight"
+        },
+        {
+          "labelKey": "settings.metrics.title",
+          "path": "/admin/settings/metrics",
+          "icon": "Database"
+        },
+        {
+          "labelKey": "logs.title",
+          "path": "/admin/logs",
+          "icon": "FileText"
+        },
+        {
+          "labelKey": "pprof.title",
+          "path": "/admin/pprof",
+          "icon": "Activity"
+        }
+      ]
+    },
+    {
+      "labelKey": "account.menu",
+      "path": "/admin/account",
+      "icon": "UserCircle",
+      "children": [
+        {
+          "labelKey": "account.title",
+          "path": "/admin/account",
+          "icon": "UserCircle"
+        },
+        {
+          "labelKey": "common.about",
+          "path": "/admin/about",
+          "icon": "AtSign"
+        }
+      ]
+    },
+    {
+      "labelKey": "common.documentation",
+      "path": "https://komari-document.pages.dev/",
+      "icon": "Book",
+      "newTab": true,
+      "bottom": true
+    },
+    {
+      "labelKey": "common.home",
+      "path": "/",
+      "icon": "Home",
+      "newTab": true,
+      "bottom": true
+    }
+  ]
+}

@@ -1,20 +1,10 @@
-# SIXOSN Komari customization
+# SIXOSN frontend integration
 
-This fork builds [`SIXOSN/komari-theme-Glassmorphism`](https://github.com/SIXOSN/komari-theme-Glassmorphism) branch `sixosn/traffic-cycle-default` as Komari's embedded `default` theme.
+Glassmorphism public pages and the administration frontend now live in this repository:
 
-## Scheduled traffic counters
+- `frontend/public`: Vue public dashboard and page-setting schema.
+- `frontend/admin`: React administration console, including System → Page Settings.
 
-The customized theme calculates upload and download usage from Komari's persisted `traffic.up` and `traffic.down` delta metrics. It does not alter or reset the operating system or Agent cumulative network counters.
+The build action compiles both local sources, copies the admin bundle into the public bundle, and embeds the final archive in the Go binary. It no longer clones the archived theme repository. Existing `theme_settings` values remain in the default page configuration row; when an older installation selected an external theme, the first public-settings read copies that row into the built-in page configuration if no default row exists.
 
-The schedule is configured in **Admin → Theme settings**:
-
-- Enable cycle traffic counter
-- Monthly reset day (`1`–`31`; shorter months use their last day)
-- Reset time (`HH:mm`)
-- IANA timezone (for example `Asia/Shanghai`, `Asia/Singapore`, `UTC`)
-
-At the configured boundary the displayed cycle advances automatically. Traffic quota percentages, node cards, list rows, overview cards, comparisons and the instance detail page all use the current-cycle value. If Metric Store data is temporarily unavailable, the UI keeps the original cumulative counters as a compatibility fallback.
-
-## Build contract
-
-The composite action at `.github/actions/build-frontend/action.yml` clones and builds the customized theme with Bun, normalizes its embedded manifest to `short: default`, and packages `dist/` as `web/public/defaultTheme/dist.tar.zst` before compiling Komari.
+Theme installation, switching, market, and theme uploads are removed. The page editor saves to `POST /api/admin/page/settings`. The public response keeps `theme: "default"` and `theme_settings` for compatibility with existing frontend code.

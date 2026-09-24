@@ -3,8 +3,6 @@ package database
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -60,8 +58,25 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		return nil, err
 	}
 	db := dbcore.GetDBInstance()
+	if cst.Theme != "" && cst.Theme != "default" {
+		// Migrate the active theme's saved page values once, then retire the
+		// selector. This preserves the user's current Glassmorphism settings
+		// even when an older default configuration row already exists.
+		var legacy models.ThemeConfiguration
+		if err := db.Where("short = ?", cst.Theme).First(&legacy).Error; err == nil {
+			var migrated models.ThemeConfiguration
+			if err := db.Where("short = ?", "default").
+				Assign(models.ThemeConfiguration{Short: "default", Data: legacy.Data}).
+				FirstOrCreate(&migrated).Error; err != nil {
+				return nil, err
+			}
+		}
+		if err := config.Set(config.ThemeKey, "default"); err != nil {
+			return nil, err
+		}
+	}
 	tc := models.ThemeConfiguration{}
-	err = db.Model(&models.ThemeConfiguration{}).Where("short = ?", cst.Theme).First(&tc).Error
+	err = db.Model(&models.ThemeConfiguration{}).Where("short = ?", "default").First(&tc).Error
 	if err != nil {
 		tc.Data = "{}"
 	}
@@ -70,15 +85,13 @@ func GetPublicInfo() (map[string]interface{}, error) {
 	if err != nil {
 		logger.Infof("database", "%v", err)
 	}
-	items := themeConfigurationItems(cst.Theme)
-	if cst.Theme != "default" {
-		for _, item := range items {
-			if item.Key == "" {
-				continue
-			}
-			if _, exists := tc_data[item.Key]; !exists {
-				tc_data[item.Key] = managedconfig.DefaultValue(item)
-			}
+	items := pageConfigurationItems()
+	for _, item := range items {
+		if item.Key == "" {
+			continue
+		}
+		if _, exists := tc_data[item.Key]; !exists {
+			tc_data[item.Key] = managedconfig.DefaultValue(item)
 		}
 	}
 	if err := managedconfig.ResolveForOutput(tc_data, items); err != nil {
@@ -99,23 +112,16 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		"ping_record_preserve_time": retention.MaxDays * 24,
 		"private_site":              cst.PrivateSite,
 		"visitor_audit_enabled":     cst.VisitorAuditEnabled,
-		"theme":                     cst.Theme,
+		"theme":                     "default",
 		"theme_settings":            tc_data,
 	}, nil
 }
 
-func themeConfigurationItems(short string) []models.ManagedThemeConfigurationItem {
+func pageConfigurationItems() []models.ManagedThemeConfigurationItem {
 	var manifest models.Theme
-	if short == "default" {
-		data, err := public.PublicFS.ReadFile("defaultTheme/komari-theme.json")
-		if err != nil || json.Unmarshal(data, &manifest) != nil {
-			return nil
-		}
-	} else {
-		data, err := os.ReadFile(filepath.Join("./data/theme", short, "komari-theme.json"))
-		if err != nil || json.Unmarshal(data, &manifest) != nil {
-			return nil
-		}
+	data, err := public.PublicFS.ReadFile("defaultTheme/komari-theme.json")
+	if err != nil || json.Unmarshal(data, &manifest) != nil {
+		return nil
 	}
 	return managedconfig.Items(manifest.Configuration)
 }
