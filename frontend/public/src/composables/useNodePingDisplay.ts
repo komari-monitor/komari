@@ -1,6 +1,7 @@
 import type { MaybeRefOrGetter } from 'vue'
 import { computed, toValue } from 'vue'
 import { useNodePingStats } from '@/composables/useNodePingStats'
+import { useRouteResults } from '@/composables/useRouteResults'
 import { PING_SUMMARY_MAX_COUNT } from '@/constants/load'
 import { useAppStore } from '@/stores/app'
 import { formatDateTime } from '@/utils/helper'
@@ -11,6 +12,17 @@ export interface NodePingBar {
   key: string
   className: string
   tooltip: string
+}
+
+export interface NodePingTaskPanel {
+  id: number
+  name: string
+  latencyDisplay: string
+  lossDisplay: string
+  latencyBars: NodePingBar[]
+  lossBars: NodePingBar[]
+  routeLabel: string
+  routeTooltip: string
 }
 
 interface UseNodePingDisplayOptions {
@@ -52,6 +64,7 @@ export function useNodePingDisplay(
   options: UseNodePingDisplayOptions = {},
 ) {
   const appStore = useAppStore()
+  const routeResults = useRouteResults()
 
   const pingStatsEnabled = computed(() => {
     if (toValue(options.enabled) === false)
@@ -146,6 +159,44 @@ export function useNodePingDisplay(
     return `平均延迟 ${Math.round(pingStats.avgLatency.value)} ms`
   })
 
+  const taskPanels = computed<NodePingTaskPanel[]>(() => pingStats.taskStats.value.map(task => {
+    const routeResult = routeResults.value.find(result => result.uuid === toValue(uuid) && result.task_id === task.id)
+    const buildBars = (metric: NodePingMetric): NodePingBar[] => {
+      const points = task.history
+      if (!points.length)
+        return buildEmptyPingBars(metric)
+      return points.map((point, index) => {
+        const value = point[metric]
+        return {
+          key: `${task.id}-${metric}-${point.time}-${index}`,
+          className: value === null
+            ? 'bg-muted-foreground/15'
+            : metric === 'latency' ? getLatencyToneClass(value) : getLossToneClass(value),
+          tooltip: value === null
+            ? `${formatDateTime(point.time, 'HH:mm:ss')}\n无采样数据`
+            : metric === 'latency'
+              ? `${formatDateTime(point.time, 'HH:mm:ss')}\n${Math.round(value)} ms`
+              : `${formatDateTime(point.time, 'HH:mm:ss')}\n${value.toFixed(1)}%`,
+        }
+      })
+    }
+
+    return {
+      id: task.id,
+      name: task.name,
+      latencyDisplay: task.avgLatency === null ? '-' : `${Math.round(task.avgLatency)}ms`,
+      lossDisplay: task.loss === null ? '-' : `${task.loss.toFixed(1)}%`,
+      latencyBars: buildBars('latency'),
+      lossBars: buildBars('loss'),
+      routeLabel: task.type === 'tcp'
+        ? routeResult?.label || (routeResult ? '无法判断' : '待检测')
+        : '',
+      routeTooltip: routeResult?.checked_at
+        ? `回国路由检测时间：${formatDateTime(routeResult.checked_at)}`
+        : '等待 Agent 探测回国路由',
+    }
+  }))
+
   const lossPanelTooltip = computed(() => {
     if (!pingStats.hasData.value) {
       if (pingStats.loading.value)
@@ -169,5 +220,6 @@ export function useNodePingDisplay(
     lossDisplay,
     latencyPanelTooltip,
     lossPanelTooltip,
+    taskPanels,
   }
 }

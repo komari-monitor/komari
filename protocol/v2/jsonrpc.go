@@ -13,6 +13,8 @@ const (
 	MethodAgentBasicInfo  = "agent.basicInfo"
 	MethodAgentPingResult = "agent.pingResult"
 	MethodAgentPing       = "agent.ping"
+	MethodAgentRouteTrace = "agent.routeTrace"
+	MethodAgentRouteResult = "agent.routeResult"
 	MethodAgentMessage    = "agent.message"
 	MethodAgentEvent      = "agent.event"
 	MethodAgentPull       = "agent.pull"
@@ -150,6 +152,14 @@ type PingParams struct {
 	TaskID uint   `json:"ping_task_id"`
 	Type   string `json:"ping_type"`
 	Target string `json:"ping_target"`
+}
+
+type RouteResultParams struct {
+	TaskID     uint      `json:"task_id"`
+	Target     string    `json:"target"`
+	Hops       []string  `json:"hops"`
+	Error      string    `json:"error"`
+	FinishedAt time.Time `json:"finished_at"`
 }
 
 type MessageParams struct {

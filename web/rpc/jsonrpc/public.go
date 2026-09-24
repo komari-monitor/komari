@@ -30,6 +30,27 @@ func init() {
 	regPublic("getRecordsByUUID", publicGetRecordsByUUID, "Get load records for a client")
 	regPublic("getPingRecords", publicGetPingRecords, "Get ping records")
 	regPublic("getPublicPingTasks", publicGetPublicPingTasks, "List public ping tasks")
+	regPublic("getRouteResults", publicGetRouteResults, "List classified TCP Ping routes")
+}
+
+func publicGetRouteResults(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	clientList, err := clients.GetAllClientBasicInfo()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to retrieve client information: "+err.Error(), nil)
+	}
+	visible := make(map[string]bool, len(clientList))
+	for _, client := range clientList {
+		if !client.Hidden || isLoginFromCtx(ctx) {
+			visible[client.UUID] = true
+		}
+	}
+	results := make([]agent_runtime.RouteResult, 0)
+	for _, result := range agent_runtime.ListRouteResults() {
+		if visible[result.UUID] {
+			results = append(results, result)
+		}
+	}
+	return results, nil
 }
 
 func regPublic(name string, h rpc.Handler, summary string) {

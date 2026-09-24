@@ -260,6 +260,14 @@ export interface PingTaskInfo {
   type?: string
 }
 
+export interface RouteResult {
+  uuid: string
+  task_id: number
+  label: string
+  status: 'ok' | 'unknown' | 'error'
+  checked_at: string
+}
+
 export interface AuditLogEntry {
   id: number
   ip: string
@@ -988,6 +996,10 @@ export class KomariRpc {
 
   async getPublicPingTasks(): Promise<PingTaskInfo[]> {
     return this.client.call<PingTaskInfo[]>('public:getPublicPingTasks')
+  }
+
+  async getRouteResults(): Promise<RouteResult[]> {
+    return this.client.call<RouteResult[]>('public:getRouteResults')
   }
 
   async listPublicMetricDefinitions(): Promise<MetricDefinition[]> {

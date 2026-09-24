@@ -22,6 +22,13 @@ var manager = &PingTaskManager{
 	tasks: make(map[int][]models.PingTask),
 }
 
+var routeTraceSchedule = struct {
+	sync.Mutex
+	last map[string]time.Time
+}{last: make(map[string]time.Time)}
+
+const routeTraceInterval = 6 * time.Hour
+
 // Reload 重载时间表
 func (m *PingTaskManager) Reload(pingTasks []models.PingTask) error {
 	m.mu.Lock()
@@ -67,6 +74,25 @@ func executePingTask(ctx context.Context, task models.PingTask) {
 		}
 
 		agent_runtime.DispatchPing(clientUUID, v2.PingParams{TaskID: task.Id, Type: task.Type, Target: task.Target})
+		if task.Type == "tcp" {
+			key := fmt.Sprintf("%s:%d:%s", clientUUID, task.Id, task.Target)
+			routeTraceSchedule.Lock()
+			last := routeTraceSchedule.last[key]
+			shouldTrace := time.Since(last) >= routeTraceInterval
+			if shouldTrace {
+				routeTraceSchedule.last[key] = time.Now()
+			}
+			routeTraceSchedule.Unlock()
+			if shouldTrace {
+				if !agent_runtime.DispatchV2Event(clientUUID, v2.MethodAgentRouteTrace, v2.PingParams{
+					TaskID: task.Id, Type: task.Type, Target: task.Target,
+				}) {
+					routeTraceSchedule.Lock()
+					delete(routeTraceSchedule.last, key)
+					routeTraceSchedule.Unlock()
+				}
+			}
+		}
 	}
 }
 

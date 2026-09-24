@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/tasks"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils/notifier"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
@@ -75,6 +76,23 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		if err := ingestPingResult(uuid, params.TaskID, params.Value); err != nil {
 			return v2.Error(req.ID, -32000, "failed to save ping result", err.Error())
 		}
+		return v2.Success(req.ID, gin.H{"status": "success"})
+	case v2.MethodAgentRouteResult:
+		var params v2.RouteResultParams
+		if err := bindV2Params(req.Params, &params); err != nil {
+			return v2.Error(req.ID, -32602, "invalid route result params", err.Error())
+		}
+		validTask := false
+		for _, task := range tasks.GetPingTasksByClient(uuid) {
+			if task.Id == params.TaskID && task.Type == "tcp" && task.Target == params.Target {
+				validTask = true
+				break
+			}
+		}
+		if !validTask || len(params.Hops) > 28 {
+			return v2.Error(req.ID, -32602, "route result does not match a TCP Ping task", nil)
+		}
+		go agent_runtime.RecordRouteResult(uuid, params.TaskID, params.Hops, params.Error)
 		return v2.Success(req.ID, gin.H{"status": "success"})
 	case v2.MethodAgentPull:
 		var params v2.PullParams
