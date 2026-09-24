@@ -36,7 +36,7 @@ docker run -d \
   --restart always \
   -p 25774:25774 \
   -v /path/to/komari-data:/app/data \
-  ghcr.io/sixosn/komari:1.5.0-fix4
+  ghcr.io/sixosn/komari:1.5.0-fix5
 ```
 
 Back up the mounted data directory before replacing an existing container.

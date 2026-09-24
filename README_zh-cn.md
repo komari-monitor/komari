@@ -36,7 +36,7 @@ docker run -d \
   --restart always \
   -p 25774:25774 \
   -v /path/to/komari-data:/app/data \
-  ghcr.io/sixosn/komari:1.5.0-fix4
+  ghcr.io/sixosn/komari:1.5.0-fix5
 ```
 
 替换现有容器前，请先备份挂载的数据目录。
