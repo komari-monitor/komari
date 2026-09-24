@@ -11,7 +11,7 @@ import { useAppStore } from '@/stores/app'
 import { formatBytesPerSecondWithConfig, formatBytesWithConfig, formatDateTime, getStatus, getUptimeDays } from '@/utils/helper'
 import { getDiskPercentage, getMemoryPercentage, getTrafficCounters, getTrafficUsed, getTrafficUsedPercentage, hasTrafficLimit } from '@/utils/nodeMetricsHelper'
 import { getOSImage, getOSName } from '@/utils/osImageHelper'
-import { getRegionCode, getRegionDisplayName } from '@/utils/regionHelper'
+import { getDisplayFlagCode, getRegionCode, getRegionDisplayName } from '@/utils/regionHelper'
 import { formatCurrencyValue, formatPriceWithCycle, getDaysUntilExpired, getExpireStatus, getRemainingValue, isFreePrice, parseTags } from '@/utils/tagHelper'
 
 const props = withDefaults(defineProps<{
@@ -251,7 +251,7 @@ function hasRegion(region: string | null | undefined): boolean {
         <img :src="getOSImage(props.node.os)" :alt="getOSName(props.node.os)" class="size-4">
         <img
           v-if="hasRegion(props.node.region)"
-          :src="`/images/flags/${getRegionCode(props.node.region)}.svg`"
+          :src="`/images/flags/${getDisplayFlagCode(props.node.region, appStore.taiwanFlagAsChina)}.svg`"
           :alt="getRegionAltText(props.node.region)"
           class="size-5 shrink-0"
         >

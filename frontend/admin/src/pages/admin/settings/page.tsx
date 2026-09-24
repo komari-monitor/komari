@@ -164,7 +164,7 @@ const PageSettings: React.FC = () => {
     <Flex
       direction="column"
       gap="4"
-      className="km-page-admin-theme-managed h-full min-h-0 p-2 md:p-4"
+      className="km-page-admin-theme-managed min-h-0 flex-1 overflow-hidden p-2 md:p-4"
     >
       {error && (
         <Callout.Root color="red">

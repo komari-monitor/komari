@@ -33,6 +33,7 @@
       { "name": "03 · 首页总览卡片", "type": "title" },
       { "key": "generalCardPreset", "name": "头部卡片方案", "type": "select", "default": "基础", "options": "官方,基础,运维,资源,财务,流量,GPU,资产,完整,自定义", "help": "完整=展示全部可用卡片；自定义时读取下方 keys，顺序就是显示顺序。" },
       { "key": "generalCardKeys", "name": "自定义头部卡片 keys", "type": "richtext", "default": "memory\ndisk\nremainingValue\ntotalTraffic\nuploadSpeed\ndownloadSpeed", "help": "逗号、空格或换行分隔。 currentTime=当前时间； memory=内存； disk=硬盘； remainingValue=剩余价值； totalTraffic=累计流量； uploadSpeed=实时上行； downloadSpeed=实时下行； onlineNodes=在线节点； offlineNodes=离线节点； avgCpu=平均CPU； avgGpu=平均GPU； avgLoad=平均负载； swap=交换内存； processes=进程总数； connections=连接总数； cpuCores=CPU核心； gpuNodes=GPU节点； gpuPeakNode=GPU峰值节点； trafficQuota=流量配额； trafficPeak=实时峰值； uploadPeakNode=上行最高节点； downloadPeakNode=下行最高节点； highLoadNodes=高负载节点； expiringNodes=即将到期； trafficWarnings=流量预警； connectionPeakNode=连接峰值节点； regionDistribution=地区分布； systemDistribution=系统分布； virtualizationDistribution=虚拟化分布； monthlyCost=月费用； yearlyCost=年费用。" },
+      { "key": "taiwanFlagAsChina", "name": "台湾地区显示中国旗帜", "type": "switch", "default": false, "help": "开启后节点卡片、列表、地球和详情中的台湾旗帜改为中国旗帜；地区名称与位置不变。" },
 
       { "name": "04 · 高级工具与隐私", "type": "title" },
       { "key": "homeToolsEnabled", "name": "登录后显示高级工具", "type": "switch", "default": true, "help": "显示拓扑、性价比、健康、导出和审计工具。" },

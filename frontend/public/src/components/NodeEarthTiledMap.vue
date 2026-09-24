@@ -2,10 +2,13 @@
 import type { NodeData } from '@/stores/nodes'
 import { computed } from 'vue'
 import { useNodeGeoClusters } from '@/composables/useNodeGeoClusters'
+import { useAppStore } from '@/stores/app'
+import { getDisplayFlagCode } from '@/utils/regionHelper'
 
 const props = defineProps<{
   nodes?: NodeData[]
 }>()
+const appStore = useAppStore()
 
 const MAP_WIDTH = 1440
 const MAP_HEIGHT = 720
@@ -114,7 +117,7 @@ const clusterMarkers = computed<ClusterMarker[]>(() => regionClusters.value.map(
               <circle :cx="marker.x" :cy="marker.y" r="3.8" class="city-dot" :class="marker.statusClass" />
               <image
                 v-if="marker.code"
-                :href="`/images/flags/${marker.code}.svg`"
+                :href="`/images/flags/${getDisplayFlagCode(marker.code, appStore.taiwanFlagAsChina)}.svg`"
                 :x="marker.x - 13"
                 :y="marker.y - 34"
                 width="26"
@@ -145,7 +148,7 @@ const clusterMarkers = computed<ClusterMarker[]>(() => regionClusters.value.map(
         </div>
         <div v-for="marker in clusterMarkers" :key="marker.id" class="legend-item" :class="marker.statusClass">
           <span class="legend-index">{{ marker.index }}</span>
-          <img v-if="marker.code" :src="`/images/flags/${marker.code}.svg`" :alt="marker.code" class="legend-flag">
+          <img v-if="marker.code" :src="`/images/flags/${getDisplayFlagCode(marker.code, appStore.taiwanFlagAsChina)}.svg`" :alt="marker.code" class="legend-flag">
           <span class="legend-copy">
             <span v-if="marker.label" class="legend-name">{{ marker.label }}</span>
             <span class="legend-meta">{{ marker.meta }}</span>

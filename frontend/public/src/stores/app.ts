@@ -1015,6 +1015,8 @@ const useAppStore = defineStore('app', () => {
 
   const hideGeneralCard = computed<boolean>(() => readBooleanSetting(themeSettings.value, 'hideGeneralCard', false))
 
+  const taiwanFlagAsChina = computed<boolean>(() => readBooleanSetting(themeSettings.value, 'taiwanFlagAsChina', false))
+
   const visitorInfoEnabled = computed<boolean>(() => readBooleanSetting(themeSettings.value, 'visitorInfoEnabled', true))
 
   const generalCardEnabledMap = computed<Record<GeneralCardKey, boolean>>(() => {
@@ -1317,6 +1319,7 @@ const useAppStore = defineStore('app', () => {
     earthRenderer,
     hideEarth,
     hideGeneralCard,
+    taiwanFlagAsChina,
     visitorInfoEnabled,
     generalCardEnabledMap,
     generalCardOrder,

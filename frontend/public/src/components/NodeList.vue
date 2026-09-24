@@ -16,7 +16,7 @@ import { formatCityNameZh } from '@/utils/cityNameHelper'
 import { formatBytesPerSecondWithConfig, formatBytesWithConfig, formatDateTime, formatUptimeWithFormat, getStatus } from '@/utils/helper'
 import { getRealtimeTotalSpeed, getTrafficCounters, getTrafficUsed, getTrafficUsedPercentage, hasTrafficLimit } from '@/utils/nodeMetricsHelper'
 import { getOSImage, getOSName } from '@/utils/osImageHelper'
-import { getRegionCode, getRegionDisplayName } from '@/utils/regionHelper'
+import { getDisplayFlagCode, getRegionCode, getRegionDisplayName } from '@/utils/regionHelper'
 import { formatPriceWithCycle, getDaysUntilExpired, getExpireStatus, parseTags } from '@/utils/tagHelper'
 
 interface ColumnConfig {
@@ -212,7 +212,7 @@ const nodeMetadataItemsByUuid = computed(() => {
 })
 
 function getFlagSrc(region: string): string {
-  return `/images/flags/${getRegionCode(region)}.svg`
+  return `/images/flags/${getDisplayFlagCode(region, appStore.taiwanFlagAsChina)}.svg`
 }
 
 function getRegionAltText(region: string): string {

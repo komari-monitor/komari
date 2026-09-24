@@ -12,6 +12,7 @@ import createGlobe from 'cobe'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useNodeGeoClusters } from '@/composables/useNodeGeoClusters'
 import { useAppStore } from '@/stores/app'
+import { getDisplayFlagCode } from '@/utils/regionHelper'
 
 const props = defineProps<{
   nodes?: NodeData[]
@@ -380,7 +381,7 @@ function onPointerUp(e: PointerEvent) {
       class="absolute left-0 top-0 z-3 rounded-[0.18rem] transition-[opacity,filter] duration-300"
     >
       <img
-        :src="`/images/flags/${label.code}.svg`" :alt="label.code"
+        :src="`/images/flags/${getDisplayFlagCode(label.code, appStore.taiwanFlagAsChina)}.svg`" :alt="label.code"
         class="block size-5 rounded-[0.18rem] shadow-[0_8px_20px_rgb(15_23_42/0.24)]"
       >
     </div>

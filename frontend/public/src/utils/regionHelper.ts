@@ -1643,6 +1643,12 @@ export function getRegionCode(regionEmoji: string): string {
   return regionInfo.code
 }
 
+/** 仅替换展示用的旗帜素材，不改变节点的地区代码和地理位置。 */
+export function getDisplayFlagCode(region: string, taiwanFlagAsChina: boolean): string {
+  const code = getRegionCode(region)
+  return taiwanFlagAsChina && code.toUpperCase() === 'TW' ? 'CN' : code
+}
+
 /**
  * 根据地区代码获取emoji
  * @param code 地区代码（如：HK, CN, US）

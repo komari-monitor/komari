@@ -10,6 +10,7 @@ import {
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useNodeGeoClusters } from '@/composables/useNodeGeoClusters'
 import { useAppStore } from '@/stores/app'
+import { getDisplayFlagCode } from '@/utils/regionHelper'
 
 const props = defineProps<{
   nodes?: NodeData[]
@@ -96,7 +97,7 @@ function createLabelElement(data: object): HTMLElement {
 
   const flag = document.createElement('img')
   flag.className = 'earth-label-flag'
-  flag.src = `/images/flags/${label.code}.svg`
+  flag.src = `/images/flags/${getDisplayFlagCode(label.code, appStore.taiwanFlagAsChina)}.svg`
   flag.alt = label.code
   root.appendChild(flag)
 
@@ -284,6 +285,12 @@ watch(() => regionClusters.value.map(clusterKey).join(','), () => {
 
 watch(() => appStore.isDark, () => {
   applyMaterialStyle()
+})
+
+watch(() => appStore.taiwanFlagAsChina, () => {
+  globeHostRef.value?.querySelectorAll<HTMLImageElement>('.earth-label-flag').forEach((flag) => {
+    flag.src = `/images/flags/${getDisplayFlagCode(flag.alt, appStore.taiwanFlagAsChina)}.svg`
+  })
 })
 
 watch(() => appStore.stopEarth, (stopped) => {

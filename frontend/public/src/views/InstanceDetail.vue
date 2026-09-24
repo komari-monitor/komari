@@ -22,7 +22,7 @@ import { gpuUsageFromStatus } from '@/utils/gpuHelper'
 import { formatBytesPerSecondWithConfig, formatBytesWithConfig, formatDateTime, formatUptimeWithFormat } from '@/utils/helper'
 import { getTrafficCounters, getTrafficUsed } from '@/utils/nodeMetricsHelper'
 import { getOSImage, getOSName } from '@/utils/osImageHelper'
-import { getRegionCode, getRegionDisplayName } from '@/utils/regionHelper'
+import { getDisplayFlagCode, getRegionCode, getRegionDisplayName } from '@/utils/regionHelper'
 
 import { formatPrice, formatPriceWithCycle, getExpireStatus, getExpireText, isFreePrice, parseTags } from '@/utils/tagHelper'
 
@@ -478,7 +478,7 @@ const metricCards = computed<MetricCard[]>(() => appStore.detailMetricCardOrder.
           <Icon icon="tabler:arrow-left" :width="16" :height="16" />
         </Button>
         <div class="min-w-0 text-lg font-bold flex gap-2 items-center">
-          <img :src="`/images/flags/${getRegionCode(data.region)}.svg`" :alt="getRegionAltText(data.region)" class="size-6">
+          <img :src="`/images/flags/${getDisplayFlagCode(data.region, appStore.taiwanFlagAsChina)}.svg`" :alt="getRegionAltText(data.region)" class="size-6">
           <span class="truncate">{{ data.name }}</span>
         </div>
         <Badge :variant="data.online ? 'default' : 'destructive'" class="text-xs !rounded">
