@@ -769,6 +769,7 @@
     "title": "Notification"
   },
   "routeTrace": {
+    "diagnostics": "Hop diagnostics", "refresh": "Refresh", "diagnosticsHint": "Admins only; shows the last 24 hours and clears on server restart.", "noDiagnostics": "No diagnostics for this server yet. Run a route check first.", "passes": "passes", "rawPasses": "View raw passes", "passNumber": "Pass {{number}}",
     "title": "Route tracing", "description": "Periodically trace enabled TCP latency points. Route names follow measurement point names.", "target": "Route trace address", "targetPlaceholder": "Leave blank to use each latency target", "targetHint": "Enter a hostname or host:port; leave blank to use the point target.", "interval": "Route trace interval (hours)", "intervalError": "Enter a whole number of hours from 1 to 168", "familyServer": "Address family by server", "familyHint": "IPv4 is the default. Select IPv6 or both; a target without an AAAA record cannot be traced over IPv6. Requires an IPv6-capable Agent.", "save": "Save settings", "manual": "Targeted route check", "selectServer": "Select server", "runNow": "Run now", "manualHint": "Immediately trace every enabled TCP point on the selected server.", "dispatched": "Dispatched {{count}} route checks", "noEligibleTask": "Nothing dispatched: the server may be offline or have no enabled TCP points."
   },
   "operations": {

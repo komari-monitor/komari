@@ -21,10 +21,30 @@ type RouteResult struct {
 	CheckedAt time.Time `json:"checked_at"`
 }
 
+// RouteDiagnostic contains bounded, transient evidence for admins only.
+// Never expose this through the public route-results endpoint.
+type RouteDiagnostic struct {
+	RouteResult
+	Target     string               `json:"target"`
+	ResolvedIP string               `json:"resolved_ip"`
+	Attempts   int                  `json:"attempts"`
+	Error      string               `json:"error,omitempty"`
+	Hops       []RouteDiagnosticHop `json:"hops"`
+	Samples    [][]string           `json:"samples"`
+}
+
+type RouteDiagnosticHop struct {
+	TTL     int      `json:"ttl"`
+	Address string   `json:"address,omitempty"`
+	Country string   `json:"country,omitempty"`
+	ASNs    []string `json:"asns,omitempty"`
+}
+
 var routeResults = struct {
 	sync.RWMutex
-	items map[string]RouteResult
-}{items: make(map[string]RouteResult)}
+	items       map[string]RouteResult
+	diagnostics map[string]RouteDiagnostic
+}{items: make(map[string]RouteResult), diagnostics: make(map[string]RouteDiagnostic)}
 
 type asnCacheEntry struct {
 	asns      []string
@@ -45,7 +65,7 @@ func stringID(id uint) string {
 }
 
 // RecordRouteResult resolves visible public hops to origin ASNs in the background.
-func RecordRouteResult(uuid string, taskID uint, family string, hops []string, traceError string) {
+func RecordRouteResult(uuid string, taskID uint, family, target, resolvedIP string, attempts int, hops []string, samples [][]string, traceError string) {
 	if family == "" {
 		family = "ipv4" // Reports from older forked agents.
 	}
@@ -53,7 +73,8 @@ func RecordRouteResult(uuid string, taskID uint, family string, hops []string, t
 	if len(hops) > 28 {
 		hops = hops[:28]
 	}
-	result.Label = classifyRoute(lookupRouteHops(hops))
+	lookedUp := lookupRouteHops(hops)
+	result.Label = classifyRoute(lookedUp)
 	if result.Label != "" {
 		result.Status = "ok"
 	} else if traceError != "" {
@@ -63,8 +84,55 @@ func RecordRouteResult(uuid string, taskID uint, family string, hops []string, t
 		}
 	}
 	routeResults.Lock()
-	routeResults.items[routeResultKey(uuid, taskID, family)] = result
+	key := routeResultKey(uuid, taskID, family)
+	routeResults.items[key] = result
+	if net.ParseIP(resolvedIP) == nil {
+		resolvedIP = ""
+	}
+	if attempts < 0 || attempts > 3 {
+		attempts = 0
+	}
+	if len(traceError) > 512 {
+		traceError = traceError[:512]
+	}
+	diagnostic := RouteDiagnostic{RouteResult: result, Target: target, ResolvedIP: resolvedIP, Attempts: attempts, Error: traceError, Hops: make([]RouteDiagnosticHop, 0, len(hops)), Samples: samples}
+	byTTL := make(map[int]routeHop, len(lookedUp))
+	for _, hop := range lookedUp {
+		byTTL[hop.ttl] = hop
+	}
+	for index := range hops {
+		hop := RouteDiagnosticHop{TTL: index + 1, Address: hops[index]}
+		if enriched, ok := byTTL[index+1]; ok {
+			hop.Country = enriched.country
+			hop.ASNs = enriched.asns
+		}
+		diagnostic.Hops = append(diagnostic.Hops, hop)
+	}
+	routeResults.diagnostics[key] = diagnostic
+	if len(routeResults.diagnostics) > 1024 {
+		var oldestKey string
+		var oldestTime time.Time
+		for candidateKey, candidate := range routeResults.diagnostics {
+			if oldestKey == "" || candidate.CheckedAt.Before(oldestTime) {
+				oldestKey, oldestTime = candidateKey, candidate.CheckedAt
+			}
+		}
+		delete(routeResults.diagnostics, oldestKey)
+	}
 	routeResults.Unlock()
+}
+
+// ListRouteDiagnostics is only called by an admin-only RPC method.
+func ListRouteDiagnostics() []RouteDiagnostic {
+	routeResults.RLock()
+	defer routeResults.RUnlock()
+	out := make([]RouteDiagnostic, 0, len(routeResults.diagnostics))
+	for _, result := range routeResults.diagnostics {
+		if time.Since(result.CheckedAt) <= 24*time.Hour {
+			out = append(out, result)
+		}
+	}
+	return out
 }
 
 func ListRouteResults() []RouteResult {

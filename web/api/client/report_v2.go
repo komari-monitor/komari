@@ -97,10 +97,15 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 				break
 			}
 		}
-		if !validTask || len(params.Hops) > 28 {
+		if !validTask || len(params.Hops) > 28 || len(params.Samples) > 3 {
 			return v2.Error(req.ID, -32602, "route result does not match a TCP Ping task", nil)
 		}
-		go agent_runtime.RecordRouteResult(uuid, params.TaskID, params.Family, params.Hops, params.Error)
+		for _, sample := range params.Samples {
+			if len(sample) > 28 {
+				return v2.Error(req.ID, -32602, "route sample is too long", nil)
+			}
+		}
+		go agent_runtime.RecordRouteResult(uuid, params.TaskID, params.Family, params.Target, params.ResolvedIP, params.Attempts, params.Hops, params.Samples, params.Error)
 		return v2.Success(req.ID, gin.H{"status": "success"})
 	case v2.MethodAgentPull:
 		var params v2.PullParams

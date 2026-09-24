@@ -8,6 +8,7 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
 // admin.ping.go
@@ -42,6 +43,13 @@ func init() {
 	RegisterWithGroupAndMeta("traceRoutes", rpc.RoleAdmin, adminTraceRoutes, &rpc.MethodMeta{
 		Name: "admin:traceRoutes", Summary: "Trace all TCP measurement points for one server", Returns: "{ dispatched: int }",
 	})
+	RegisterWithGroupAndMeta("getRouteDiagnostics", rpc.RoleAdmin, adminGetRouteDiagnostics, &rpc.MethodMeta{
+		Name: "admin:getRouteDiagnostics", Summary: "List recent route hops for administrator diagnosis", Returns: "RouteDiagnostic[]",
+	})
+}
+
+func adminGetRouteDiagnostics(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	return agent_runtime.ListRouteDiagnostics(), nil
 }
 
 func adminTraceRoutes(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {

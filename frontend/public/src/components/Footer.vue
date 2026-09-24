@@ -6,9 +6,6 @@ import { getSharedApi } from '@/utils/api'
 
 const api = getSharedApi()
 
-const buildVersion = __BUILD_VERSION__
-const buildGitHash = __BUILD_GIT_HASH__
-
 const serverVersion = ref<VersionInfo | null>(null)
 
 onMounted(async () => {
@@ -25,7 +22,7 @@ const formattedServerVersion = computed(() => serverVersion.value?.version ?? ''
 
 <template>
   <footer class="w-full max-w-[1280px] mx-auto p-4">
-    <div class="flex w-full flex-row justify-between gap-4 text-xs text-muted-foreground">
+    <div class="flex w-full flex-row gap-4 text-xs text-muted-foreground">
       <div class="flex gap-1 items-center">
         Powered by
         <DataTooltip
@@ -38,21 +35,6 @@ const formattedServerVersion = computed(() => serverVersion.value?.version ?? ''
             class="transition-opacity hover:opacity-80"
           >
             <span class="font-medium text-foreground">SIXOSN Komari</span>
-          </a>
-        </DataTooltip>
-      </div>
-      <div class="flex flex-wrap gap-1 items-center justify-end text-right">
-        Theme by
-        <DataTooltip
-          as="span"
-          placement="top"
-          :content="`v${buildVersion}\n${buildGitHash}`"
-        >
-          <a
-            href="https://github.com/SIXOSN/komari" target="_blank" rel="noopener noreferrer"
-            class="transition-opacity hover:opacity-80"
-          >
-            <span class="font-medium text-foreground">SIXOSN Glassmorphism</span>
           </a>
         </DataTooltip>
       </div>

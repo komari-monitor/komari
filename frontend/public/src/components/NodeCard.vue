@@ -458,7 +458,7 @@ function hasRegion(region: string | null | undefined): boolean {
                 <span
                   v-if="task.routeBadges.length === 1"
                   class="shrink-0 rounded px-1 py-0.5 text-[10px] font-medium"
-                  :class="task.routeBadges[0]?.warning ? 'border border-amber-400/50 bg-amber-400/20 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'"
+                  :class="task.routeBadges[0]?.warning ? 'ring-1 ring-inset ring-amber-400/50 bg-amber-400/20 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'"
                   :title="task.routeBadges[0]?.tooltip"
                 >{{ task.routeBadges[0]?.label }}</span>
               </span>
@@ -473,7 +473,7 @@ function hasRegion(region: string | null | undefined): boolean {
                 v-for="badge in task.routeBadges"
                 :key="badge.family"
                 class="rounded px-1 py-0.5 font-medium"
-                :class="badge.warning ? 'border border-amber-400/50 bg-amber-400/20 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'"
+                :class="badge.warning ? 'ring-1 ring-inset ring-amber-400/50 bg-amber-400/20 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'"
                 :title="badge.tooltip"
               >{{ badge.family === 'ipv6' ? '6' : '4' }}·{{ badge.label }}</span>
             </div>

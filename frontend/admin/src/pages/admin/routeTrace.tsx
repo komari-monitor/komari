@@ -7,6 +7,21 @@ import { NodeDetailsProvider, useNodeDetails } from "@/contexts/NodeDetailsConte
 import { useRPC2Call } from "@/contexts/RPC2Context";
 import { updateSettingsWithToast, useSettings } from "@/lib/api";
 
+type RouteDiagnostic = {
+  uuid: string;
+  task_id: number;
+  family: string;
+  label: string;
+  status: string;
+  checked_at: string;
+  target: string;
+  resolved_ip: string;
+  attempts: number;
+  error?: string;
+  hops: { ttl: number; address?: string; country?: string; asns?: string[] }[];
+  samples?: string[][];
+};
+
 export default function RouteTrace() {
   return <NodeDetailsProvider><RouteTraceSettings /></NodeDetailsProvider>;
 }
@@ -22,6 +37,27 @@ function RouteTraceSettings() {
   const [families, setFamilies] = React.useState<Record<string, "ipv4" | "ipv6" | "both">>({});
   const [server, setServer] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const [diagnostics, setDiagnostics] = React.useState<RouteDiagnostic[]>([]);
+  const [diagnosticError, setDiagnosticError] = React.useState("");
+
+  const refreshDiagnostics = React.useCallback(async () => {
+    try {
+      setDiagnostics(await call<Record<string, never>, RouteDiagnostic[]>("admin:getRouteDiagnostics", {}));
+      setDiagnosticError("");
+    } catch (cause) {
+      setDiagnosticError(String(cause));
+    }
+  }, [call]);
+
+  React.useEffect(() => {
+    void refreshDiagnostics();
+    const timer = window.setInterval(() => void refreshDiagnostics(), 10_000);
+    return () => window.clearInterval(timer);
+  }, [refreshDiagnostics]);
+
+  const selectedDiagnostics = diagnostics
+    .filter((item) => item.uuid === server)
+    .sort((left, right) => right.checked_at.localeCompare(left.checked_at));
 
   React.useEffect(() => {
     if (settings) {
@@ -112,6 +148,41 @@ function RouteTraceSettings() {
         <Button disabled={busy || !server} onClick={trigger}>{t("routeTrace.runNow")}</Button>
       </Flex>
       <Text size="2" color="gray">{t("routeTrace.manualHint")}</Text>
+      <Flex direction="column" gap="3">
+        <Flex gap="3" align="center">
+          <Text size="5" weight="bold">{t("routeTrace.diagnostics")}</Text>
+          <Button variant="soft" size="1" onClick={() => void refreshDiagnostics()}>{t("routeTrace.refresh")}</Button>
+        </Flex>
+        <Text size="2" color="gray">{t("routeTrace.diagnosticsHint")}</Text>
+        {diagnosticError && <Text color="red" size="2">{diagnosticError}</Text>}
+        {!server && <Text color="gray" size="2">{t("routeTrace.selectServer")}</Text>}
+        {server && selectedDiagnostics.length === 0 && <Text color="gray" size="2">{t("routeTrace.noDiagnostics")}</Text>}
+        {selectedDiagnostics.map((item) => (
+          <div key={`${item.task_id}:${item.family}`} className="rounded-lg border border-gray-500/30 p-3">
+            <Text weight="bold">#{item.task_id} · {item.family.toUpperCase()} · {item.label || t("common.unknown")}</Text>
+            <Text as="p" size="2" color="gray">{item.target} → {item.resolved_ip || "—"} · {item.attempts} {t("routeTrace.passes")} · {new Date(item.checked_at).toLocaleString()}</Text>
+            {item.error && <Text as="p" size="2" color="red">{item.error}</Text>}
+            <div className="mt-2 max-h-64 overflow-auto rounded bg-black/20 p-2 font-mono text-xs">
+              {item.hops.map((hop) => (
+                <div key={hop.ttl}>{String(hop.ttl).padStart(2, "0")}　{hop.address || "*"}　{hop.country || ""}　{hop.asns?.map((asn) => `AS${asn}`).join(", ") || ""}</div>
+              ))}
+            </div>
+            {(item.samples?.length || 0) > 1 && (
+              <details className="mt-2 text-xs">
+                <summary className="cursor-pointer">{t("routeTrace.rawPasses")}</summary>
+                <div className="mt-2 max-h-64 overflow-auto rounded bg-black/20 p-2 font-mono">
+                  {item.samples?.map((sample, pass) => (
+                    <div key={pass} className="mb-2">
+                      <div>{t("routeTrace.passNumber", { number: pass + 1 })}</div>
+                      {sample.map((address, ttl) => <div key={ttl}>{String(ttl + 1).padStart(2, "0")}　{address || "*"}</div>)}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+        ))}
+      </Flex>
     </Flex>
   );
 }

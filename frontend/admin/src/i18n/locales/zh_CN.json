@@ -774,6 +774,7 @@
     "title": "通知"
   },
   "routeTrace": {
+    "diagnostics": "逐跳诊断", "refresh": "刷新", "diagnosticsHint": "仅管理员可见；显示最近 24 小时的结果，服务重启后清空。", "noDiagnostics": "该服务器暂无诊断结果，请先执行路由检测。", "passes": "轮探测", "rawPasses": "查看各轮原始跳点", "passNumber": "第 {{number}} 轮",
     "title": "路由追踪", "description": "定期检测已启用的 TCP 延迟测速点，线路名称与测速点名称一致。", "target": "路由追踪地址", "targetPlaceholder": "留空使用各延迟测速点的地址", "targetHint": "可填写主机名或主机名:端口；留空时分别使用 IPv4/IPv6 测速目标。", "interval": "路由追踪间隔（小时）", "intervalError": "请输入 1 至 168 的整数小时", "familyServer": "按服务器选择路由地址族", "familyHint": "默认跟随测速点检测 IPv4 和 IPv6；可按服务器限定显示类型。目标无对应地址时显示无法检测。需要更新到支持 IPv6 的 Agent。", "save": "保存设置", "manual": "指定路由检测", "selectServer": "选择服务器", "runNow": "立即检测", "manualHint": "立即检测所选服务器已启用的所有 TCP 测速点。", "dispatched": "已下发 {{count}} 个路由检测任务", "noEligibleTask": "未下发任务：服务器可能离线，或没有已启用的 TCP 测速点。"
   },
   "operations": {

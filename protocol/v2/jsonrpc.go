@@ -156,12 +156,15 @@ type PingParams struct {
 }
 
 type RouteResultParams struct {
-	TaskID     uint      `json:"task_id"`
-	Target     string    `json:"target"`
-	Family     string    `json:"family,omitempty"`
-	Hops       []string  `json:"hops"`
-	Error      string    `json:"error"`
-	FinishedAt time.Time `json:"finished_at"`
+	TaskID     uint       `json:"task_id"`
+	Target     string     `json:"target"`
+	Family     string     `json:"family,omitempty"`
+	ResolvedIP string     `json:"resolved_ip,omitempty"`
+	Attempts   int        `json:"attempts,omitempty"`
+	Hops       []string   `json:"hops"`
+	Samples    [][]string `json:"samples,omitempty"`
+	Error      string     `json:"error"`
+	FinishedAt time.Time  `json:"finished_at"`
 }
 
 type MessageParams struct {
