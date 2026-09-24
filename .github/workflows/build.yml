@@ -14,7 +14,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test ./web/agent
+      - run: |
+          go test ./web/agent
+          go test ./utils/geoip/route_country.go ./utils/geoip/route_country_test.go
 
   build-frontend:
     runs-on: ubuntu-latest

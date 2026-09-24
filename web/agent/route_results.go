@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/komari-monitor/komari/utils/geoip"
 )
 
 // RouteResult exposes only a classification, not the internal hop addresses.
@@ -27,13 +29,6 @@ var routeResults = struct {
 type asnCacheEntry struct {
 	asns      []string
 	expiresAt time.Time
-}
-
-// routeHop keeps the trace order: an ASN seen at the destination does not
-// necessarily describe the network used to enter mainland China.
-type routeHop struct {
-	address net.IP
-	asns    []string
 }
 
 var routeASNCache = struct {
@@ -83,21 +78,7 @@ func ListRouteResults() []RouteResult {
 }
 
 func lookupRouteHops(hops []string) []routeHop {
-	seen := make(map[string]bool)
-	var ordered []routeHop
-	for _, hop := range hops {
-		ip := net.ParseIP(hop)
-		if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
-			continue
-		}
-		if !seen[ip.String()] {
-			seen[ip.String()] = true
-			ordered = append(ordered, routeHop{address: ip})
-		}
-	}
-	if len(ordered) > 20 {
-		ordered = ordered[len(ordered)-20:]
-	}
+	ordered := parseRouteHops(hops)
 	var wg sync.WaitGroup
 	limit := make(chan struct{}, 6)
 	for index := range ordered {
@@ -107,6 +88,7 @@ func lookupRouteHops(hops []string) []routeHop {
 			limit <- struct{}{}
 			defer func() { <-limit }()
 			ordered[index].asns = lookupOriginASNs(ordered[index].address.String())
+			ordered[index].country = geoip.LookupRouteCountry(ordered[index].address)
 		}(index)
 	}
 	wg.Wait()
@@ -147,130 +129,4 @@ func lookupOriginASNs(address string) []string {
 	routeASNCache.items[address] = asnCacheEntry{asns: asns, expiresAt: time.Now().Add(ttl)}
 	routeASNCache.Unlock()
 	return asns
-}
-
-func cymruDNSName(ip net.IP) string {
-	if v4 := ip.To4(); v4 != nil {
-		return strings.Join([]string{
-			strconv.Itoa(int(v4[3])), strconv.Itoa(int(v4[2])),
-			strconv.Itoa(int(v4[1])), strconv.Itoa(int(v4[0])),
-		}, ".") + ".origin.asn.cymru.com"
-	}
-	var nibbles []string
-	for index := len(ip.To16()) - 1; index >= 0; index-- {
-		value := ip[index]
-		nibbles = append(nibbles, strconv.FormatUint(uint64(value&15), 16), strconv.FormatUint(uint64(value>>4), 16))
-	}
-	return strings.Join(nibbles, ".") + ".origin6.asn.cymru.com"
-}
-
-func hasASN(hop routeHop, asn string) bool {
-	for _, candidate := range hop.asns {
-		if candidate == asn {
-			return true
-		}
-	}
-	return false
-}
-
-func inIPv4Prefix(hop routeHop, first, second byte) bool {
-	ip := hop.address.To4()
-	return ip != nil && ip[0] == first && ip[1] == second
-}
-
-func hasASNIn(hops []routeHop, asn string) bool {
-	for _, hop := range hops {
-		if hasASN(hop, asn) {
-			return true
-		}
-	}
-	return false
-}
-
-// domesticNetwork identifies the first visible Chinese backbone, not a
-// potentially overseas international gateway such as CTGNet or CMI.
-func domesticNetwork(hop routeHop) string {
-	switch {
-	case inIPv4Prefix(hop, 59, 43) || hasASN(hop, "4809"):
-		return "CN2"
-	case inIPv4Prefix(hop, 202, 97) || hasASN(hop, "4134"):
-		return "163"
-	case hasASN(hop, "9929"):
-		return "9929"
-	case hasASN(hop, "4837"):
-		return "4837"
-	case hasASN(hop, "4808"):
-		return "4808"
-	case hasASN(hop, "58807"):
-		return "CMIN2"
-	case hasASN(hop, "9808"):
-		return "CMNET"
-	case hasASN(hop, "4538"):
-		return "CERNET"
-	case hasASN(hop, "7497"):
-		return "CSTNET"
-	default:
-		return ""
-	}
-}
-
-func classifyRoute(hops []routeHop) string {
-	// These two backbone prefixes are stronger evidence of the mainland path
-	// than an ASN that may also appear on an overseas-facing router.
-	entryIndex := -1
-	for index, hop := range hops {
-		if inIPv4Prefix(hop, 59, 43) || inIPv4Prefix(hop, 202, 97) {
-			entryIndex = index
-			break
-		}
-	}
-	if entryIndex < 0 {
-		for index, hop := range hops {
-			if domesticNetwork(hop) != "" {
-				entryIndex = index
-				break
-			}
-		}
-	}
-	if entryIndex >= 0 {
-		index := entryIndex
-		entry := domesticNetwork(hops[index])
-		switch entry {
-		case "CN2":
-			if hasASNIn(hops[:index], "23764") {
-				return "CTGGIA"
-			}
-			for _, later := range hops[index+1:] {
-				if domesticNetwork(later) == "CN2" {
-					continue
-				}
-				if inIPv4Prefix(later, 202, 97) {
-					return "CN2GT"
-				}
-				break
-			}
-			return "CN2GIA" // A path label, not proof of a purchased service tier.
-		case "4837":
-			if hasASNIn(hops[:index], "10099") {
-				return "10099"
-			}
-		case "CMNET":
-			if hasASNIn(hops[:index], "58453") {
-				return "CMI"
-			}
-		}
-		return entry
-	}
-	// A visible international gateway is useful even when the mainland hops
-	// do not respond; it is not evidence of a particular premium tier.
-	switch {
-	case hasASNIn(hops, "23764"):
-		return "CTGNet"
-	case hasASNIn(hops, "10099"):
-		return "10099"
-	case hasASNIn(hops, "58453"):
-		return "CMI"
-	default:
-		return ""
-	}
 }

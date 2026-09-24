@@ -17,6 +17,8 @@ func (a *App) InitProviders() error {
 
 	go geoip.InitGeoIp()
 	a.addCleanup("geoip", func(context.Context) error { return geoip.Shutdown() })
+	stopRouteCountry := geoip.StartRouteCountryUpdater()
+	a.addCleanup("route-country", func(context.Context) error { return stopRouteCountry() })
 
 	messageSender.Initialize()
 	a.addCleanup("message-sender", func(context.Context) error { return messageSender.Shutdown() })
