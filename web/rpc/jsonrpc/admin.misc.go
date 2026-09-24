@@ -146,6 +146,9 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if err := validateMetricRollupSettingChanges(cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
+	if err := validateRouteTraceSettingChanges(cfg); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+	}
 
 	// 若本次修改涉及 metrics 数据库配置，则在落库前先用「当前配置 + 本次改动」
 	// 合并出的目标配置做一次连接测试。metric store 始终启用，只要触及 metrics
@@ -203,6 +206,28 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 
 	auditSettingsUpdate(ctx, cfg)
 	return nil, nil
+}
+
+func validateRouteTraceSettingChanges(cfg map[string]interface{}) error {
+	if value, ok := cfg[config.RouteTraceTargetKey]; ok {
+		target, ok := value.(string)
+		if !ok {
+			return errors.New("route trace target must be a string")
+		}
+		target = strings.TrimSpace(target)
+		if len(target) > 255 || strings.ContainsAny(target, " \t\r\n/") {
+			return errors.New("route trace target must be a host or host:port (up to 255 characters)")
+		}
+		cfg[config.RouteTraceTargetKey] = target
+	}
+	if value, ok := cfg[config.RouteTraceIntervalHoursKey]; ok {
+		hours, ok := value.(float64)
+		if !ok || hours != math.Trunc(hours) || hours < 1 || hours > 168 {
+			return errors.New("route trace interval must be an integer from 1 to 168 hours")
+		}
+		cfg[config.RouteTraceIntervalHoursKey] = int(hours)
+	}
+	return nil
 }
 
 func auditSettingsUpdate(ctx context.Context, cfg map[string]interface{}) {

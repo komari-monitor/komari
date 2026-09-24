@@ -28,8 +28,10 @@ type Settings struct {
 	OAuthProvider        string `json:"o_auth_provider" default:"github"`
 	DisablePasswordLogin bool   `json:"disable_password_login" default:"false"`
 	// 自定义美化
-	CustomHead string `json:"custom_head" default:""`
-	CustomBody string `json:"custom_body" default:""`
+	CustomHead              string `json:"custom_head" default:""`
+	CustomBody              string `json:"custom_body" default:""`
+	RouteTraceTarget        string `json:"route_trace_target" default:""`
+	RouteTraceIntervalHours int    `json:"route_trace_interval_hours" default:"6"`
 
 	// 通知
 	NotificationEnabled        bool    `json:"notification_enabled" default:"true"` // 通知总开关
@@ -43,29 +45,31 @@ type Settings struct {
 }
 
 const (
-	SitenameKey               = "sitename"
-	DescriptionKey            = "description"
-	CorsOriginCheckEnabledKey = "cors_origin_check_enabled"
-	CorsAllowedOriginsKey     = "cors_allowed_origins"
-	WsOriginCheckEnabledKey   = "ws_origin_check_enabled"
-	WsAllowedOriginsKey       = "ws_allowed_origins"
-	ThemeKey                  = "theme"
-	PrivateSiteKey            = "private_site"
-	ApiKeyKey                 = "api_key"
-	AutoDiscoveryKeyKey       = "auto_discovery_key"
-	ScriptDomainKey           = "script_domain"
-	SendIpAddrToGuestKey      = "send_ip_addr_to_guest"
-	VisitorAuditEnabledKey    = "visitor_audit_enabled"
-	SSRFProtectionEnabledKey  = "ssrf_protection_enabled"
-	EulaAcceptedKey           = "eula_accepted"
-	BaseScriptsURLKey         = "base_scripts_url"
-	GeoIpEnabledKey           = "geo_ip_enabled"
-	GeoIpProviderKey          = "geo_ip_provider"
-	OAuthEnabledKey           = "o_auth_enabled"
-	OAuthProviderKey          = "o_auth_provider"
-	DisablePasswordLoginKey   = "disable_password_login"
-	CustomHeadKey             = "custom_head"
-	CustomBodyKey             = "custom_body"
+	SitenameKey                = "sitename"
+	DescriptionKey             = "description"
+	CorsOriginCheckEnabledKey  = "cors_origin_check_enabled"
+	CorsAllowedOriginsKey      = "cors_allowed_origins"
+	WsOriginCheckEnabledKey    = "ws_origin_check_enabled"
+	WsAllowedOriginsKey        = "ws_allowed_origins"
+	ThemeKey                   = "theme"
+	PrivateSiteKey             = "private_site"
+	ApiKeyKey                  = "api_key"
+	AutoDiscoveryKeyKey        = "auto_discovery_key"
+	ScriptDomainKey            = "script_domain"
+	SendIpAddrToGuestKey       = "send_ip_addr_to_guest"
+	VisitorAuditEnabledKey     = "visitor_audit_enabled"
+	SSRFProtectionEnabledKey   = "ssrf_protection_enabled"
+	EulaAcceptedKey            = "eula_accepted"
+	BaseScriptsURLKey          = "base_scripts_url"
+	GeoIpEnabledKey            = "geo_ip_enabled"
+	GeoIpProviderKey           = "geo_ip_provider"
+	OAuthEnabledKey            = "o_auth_enabled"
+	OAuthProviderKey           = "o_auth_provider"
+	DisablePasswordLoginKey    = "disable_password_login"
+	CustomHeadKey              = "custom_head"
+	CustomBodyKey              = "custom_body"
+	RouteTraceTargetKey        = "route_trace_target"
+	RouteTraceIntervalHoursKey = "route_trace_interval_hours"
 
 	NotificationEnabledKey        = "notification_enabled"
 	NotificationMethodKey         = "notification_method"

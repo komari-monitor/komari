@@ -6,6 +6,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/utils"
 )
 
 // admin.ping.go
@@ -37,6 +38,23 @@ func init() {
 		Summary: "Reorder ping tasks (map of id->weight)",
 		Returns: "null",
 	})
+	RegisterWithGroupAndMeta("traceRoutes", rpc.RoleAdmin, adminTraceRoutes, &rpc.MethodMeta{
+		Name: "admin:traceRoutes", Summary: "Trace all TCP measurement points for one server", Returns: "{ dispatched: int }",
+	})
+}
+
+func adminTraceRoutes(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params struct {
+		UUID string `json:"uuid"`
+	}
+	if err := req.BindParams(&params); err != nil || params.UUID == "" {
+		return nil, rpc.MakeError(rpc.InvalidParams, "uuid is required", nil)
+	}
+	list, err := tasks.GetAllPingTasks()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
+	}
+	return map[string]any{"dispatched": utils.TriggerRouteTraceForClient(params.UUID, list)}, nil
 }
 
 func adminAddPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {

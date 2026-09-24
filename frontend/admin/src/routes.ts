@@ -221,6 +221,10 @@ export const routes: RouteObject[] = [
         ),
       },
       {
+        path: "route-trace",
+        element: React.createElement(lazy(() => import("./pages/admin/routeTrace"))),
+      },
+      {
         path: "about",
         element: React.createElement(lazy(() => import("./pages/admin/about"))),
       },

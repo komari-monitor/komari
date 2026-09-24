@@ -21,6 +21,11 @@
           "icon": "Activity"
         },
         {
+          "labelKey": "routeTrace.title",
+          "path": "/admin/route-trace",
+          "icon": "Route"
+        },
+        {
           "labelKey": "sessions.title",
           "path": "/admin/sessions",
           "icon": "Users"
