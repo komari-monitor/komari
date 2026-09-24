@@ -78,7 +78,7 @@ function RouteTraceSettings() {
       <Flex gap="3" align="center" wrap="wrap">
         <Select.Root value={server} onValueChange={setServer}>
           <Select.Trigger placeholder={t("routeTrace.selectServer")} />
-          <Select.Content>
+          <Select.Content className="km-route-trace-select-content" position="popper">
             {nodeDetail.map((node) => <Select.Item key={node.uuid} value={node.uuid}>{node.name}</Select.Item>)}
           </Select.Content>
         </Select.Root>

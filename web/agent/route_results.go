@@ -48,7 +48,7 @@ func RecordRouteResult(uuid string, taskID uint, hops []string, traceError strin
 		hops = hops[:28]
 	}
 	asns := lookupRouteASNs(hops)
-	result.Label = classifyRouteASNs(asns)
+	result.Label = classifyRoute(hops, asns)
 	if result.Label != "" {
 		result.Status = "ok"
 	} else if traceError != "" {
@@ -141,16 +141,28 @@ func lookupOriginASNs(address string) []string {
 	return asns
 }
 
-func classifyRouteASNs(asns map[string]bool) string {
+func classifyRoute(hops []string, asns map[string]bool) string {
+	cn2Backbone := false
+	for _, hop := range hops {
+		ip := net.ParseIP(hop).To4()
+		if ip != nil && ip[0] == 59 && ip[1] == 43 {
+			cn2Backbone = true
+			break
+		}
+	}
+	cn2 := cn2Backbone || asns["4809"]
 	switch {
-	case asns["4809"]:
+	// CTGNet alone also carries ordinary transit; require evidence of CN2.
+	case asns["23764"] && cn2:
+		return "CTGGIA"
+	case cn2:
 		return "CN2"
 	case asns["9929"]:
 		return "9929"
 	case asns["58807"]:
 		return "CMIN2"
 	case asns["23764"]:
-		return "CTG"
+		return "CTGNet"
 	case asns["4134"]:
 		return "163"
 	case asns["4837"]:

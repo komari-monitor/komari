@@ -35,6 +35,18 @@ interface UseNodePingDisplayOptions {
 
 const EMPTY_PING_BAR_COUNT = 20
 
+const ROUTE_NAMES: Record<string, string> = {
+  CTGGIA: '中国电信 CTGNet / CN2 GIA（依据可见跳点推断）',
+  CN2: '中国电信 CN2 骨干网（无法单独确认 GIA 服务等级）',
+  CTGNet: '中国电信 CTGNet（无法单独确认 GIA 服务等级）',
+  '163': '中国电信 ChinaNet 163 骨干网',
+  '9929': '中国联通 AS9929 精品网',
+  '4837': '中国联通 AS4837 骨干网',
+  CMIN2: '中国移动 CMIN2 精品网',
+  CMI: '中国移动 CMI 国际网',
+  CMNET: '中国移动 CMNET 骨干网',
+}
+
 function getLatencyToneClass(latency: number): string {
   if (latency <= 60)
     return 'bg-signal-1'
@@ -192,7 +204,7 @@ export function useNodePingDisplay(
         ? routeResult?.label || (routeResult ? '无法判断' : '待检测')
         : '',
       routeTooltip: routeResult?.checked_at
-        ? `回国路由检测时间：${formatDateTime(routeResult.checked_at)}`
+        ? `${ROUTE_NAMES[routeResult.label] ?? routeResult.label ?? '线路无法判断'}\n回国路由检测时间：${formatDateTime(routeResult.checked_at)}`
         : '等待 Agent 探测回国路由',
     }
   }))

@@ -211,6 +211,21 @@ body {
   backdrop-filter: blur(18px) saturate(140%);
 }
 
+/* The route server picker is portalled outside the translucent settings card. */
+.rt-SelectContent.km-route-trace-select-content {
+  z-index: 1000;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  background: #fff !important;
+  color: var(--popover-foreground) !important;
+  box-shadow: 0 18px 46px rgb(0 0 0 / 28%) !important;
+  backdrop-filter: blur(18px) saturate(140%);
+}
+
+.dark .rt-SelectContent.km-route-trace-select-content {
+  background: #131b23 !important;
+}
+
 .dark .rt-Card {
   box-shadow:
     0 14px 34px rgb(0 0 0 / 24%),

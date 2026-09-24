@@ -451,17 +451,17 @@ function hasRegion(region: string | null | undefined): boolean {
             :aria-label="`${props.node.name} ${task.name} 延迟 ${task.latencyDisplay} 丢包 ${task.lossDisplay}，打开监测`"
             @click.stop="emit('pingClick')"
           >
-            <div class="flex min-w-0 flex-col gap-1 text-xs leading-none">
-              <span class="flex min-w-0 items-center gap-1.5 font-medium">
+            <div class="flex min-w-0 items-center justify-between gap-1 text-xs leading-none">
+              <span class="flex min-w-0 items-center gap-1 font-medium">
                 <span class="size-2 shrink-0 rounded-full bg-success" />
-                <span class="truncate">{{ task.name }}</span>
+                <span class="truncate" :title="task.name">{{ task.name }}</span>
                 <span
                   v-if="task.routeLabel"
                   class="shrink-0 rounded bg-emerald-500/10 px-1 py-0.5 text-[10px] font-medium text-emerald-500"
                   :title="task.routeTooltip"
                 >{{ task.routeLabel }}</span>
               </span>
-              <span class="flex shrink-0 items-center gap-2 whitespace-nowrap text-[11px] text-muted-foreground tabular-nums">
+              <span class="flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-muted-foreground tabular-nums">
                 <span>延迟 <strong class="font-medium text-foreground">{{ task.latencyDisplay }}</strong></span>
                 <span>丢包 <strong class="font-medium text-foreground">{{ task.lossDisplay }}</strong></span>
                 <Icon icon="tabler:info-circle" width="13" height="13" aria-hidden="true" />
