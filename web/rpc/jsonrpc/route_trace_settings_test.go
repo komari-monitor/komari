@@ -20,6 +20,9 @@ func TestValidateRouteTraceSettingChanges(t *testing.T) {
 		{"oversize interval", map[string]interface{}{config.RouteTraceIntervalHoursKey: float64(169)}, false},
 		{"url target", map[string]interface{}{config.RouteTraceTargetKey: "https://example.com"}, false},
 		{"space target", map[string]interface{}{config.RouteTraceTargetKey: "example .com"}, false},
+		{"families both", map[string]interface{}{config.RouteTraceFamiliesKey: `{"node-a":"both"}`}, true},
+		{"families ipv6", map[string]interface{}{config.RouteTraceFamiliesKey: `{"node-a":"ipv6"}`}, true},
+		{"families invalid", map[string]interface{}{config.RouteTraceFamiliesKey: `{"node-a":"auto"}`}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

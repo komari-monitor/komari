@@ -85,3 +85,33 @@ func TestGetPingTasksByClientOrdersByWeightThenID(t *testing.T) {
 		t.Fatalf("ping task order = %#v, want ids [%d %d]", ordered, items[1].Id, items[0].Id)
 	}
 }
+
+func TestGetEditablePingTasksGroupsIPv6Child(t *testing.T) {
+	flags.DatabaseType = flags.DatabaseTypeSQLite
+	flags.DatabaseFile = "file:ping_task_dual_stack?mode=memory&cache=shared"
+	db := dbcore.GetDBInstance()
+	parent := models.PingTask{Name: "dual", Type: "tcp", Target: "v4.example:443", IPFamilies: models.StringArray{"ipv4", "ipv6"}, Family: "ipv4", Enabled: true, Interval: 60}
+	if err := db.Create(&parent).Error; err != nil {
+		t.Fatal(err)
+	}
+	child := models.PingTask{Name: "dual", Type: "tcp", Target: "[2001:db8::1]:443", ParentID: parent.Id, Family: "ipv6", Enabled: true, Interval: 60}
+	if err := db.Create(&child).Error; err != nil {
+		t.Fatal(err)
+	}
+	editable, err := GetEditablePingTasks()
+	if err != nil {
+		t.Fatalf("editable tasks: %+v, err=%v", editable, err)
+	}
+	for _, item := range editable {
+		if item.Id == child.Id {
+			t.Fatal("IPv6 child must not appear as a separate admin task")
+		}
+		if item.Id == parent.Id {
+			if item.TargetIPv6 != child.Target || !item.HasFamily("ipv6") {
+				t.Fatalf("dual-stack settings lost: %+v", item)
+			}
+			return
+		}
+	}
+	t.Fatal("dual-stack parent missing from admin tasks")
+}

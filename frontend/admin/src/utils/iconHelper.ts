@@ -25,6 +25,7 @@ import {
   Blocks,
   Settings2,
   LayoutDashboard,
+  Route,
   SquareTerminal
 } from "lucide-react";
 
@@ -56,6 +57,7 @@ export const iconMap: Record<string, React.ComponentType<any>> = {
   Blocks,
   Settings2,
   LayoutDashboard,
+  Route,
   SquareTerminal,
 };
 // 解析插件/插件页面声明的 icon：

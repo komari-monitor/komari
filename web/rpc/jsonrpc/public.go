@@ -46,11 +46,20 @@ func publicGetRouteResults(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rp
 	}
 	results := make([]agent_runtime.RouteResult, 0)
 	for _, result := range agent_runtime.ListRouteResults() {
-		if visible[result.UUID] {
+		if visible[result.UUID] && routeFamilyVisible(result.Family, utils.RouteFamiliesForClient(result.UUID)) {
 			results = append(results, result)
 		}
 	}
 	return results, nil
+}
+
+func routeFamilyVisible(family string, configured []string) bool {
+	for _, selected := range configured {
+		if family == selected {
+			return true
+		}
+	}
+	return false
 }
 
 func regPublic(name string, h rpc.Handler, summary string) {
@@ -240,17 +249,34 @@ func publicGetPublicPingTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *r
 		Type      string   `json:"type"`
 		Interval  int      `json:"interval"`
 	}
-	out := make([]publicPingTask, len(pingTasks))
-	for i, task := range pingTasks {
-		out[i] = publicPingTask{
+	parents := make(map[uint]models.PingTask)
+	for _, task := range pingTasks {
+		if task.ParentID == 0 {
+			parents[task.Id] = task
+		}
+	}
+	out := make([]publicPingTask, 0, len(pingTasks))
+	for _, task := range pingTasks {
+		if !task.Active() {
+			continue
+		}
+		name := task.Name
+		if task.ParentID != 0 {
+			if parent, ok := parents[task.ParentID]; ok && parent.HasFamily("ipv4") {
+				name += " · IPv6"
+			}
+		} else if task.HasFamily("ipv6") {
+			name += " · IPv4"
+		}
+		out = append(out, publicPingTask{
 			Id:        task.Id,
 			Weight:    task.Weight,
-			Name:      task.Name,
+			Name:      name,
 			Clients:   task.Clients,
 			DefaultOn: task.DefaultOn,
 			Type:      task.Type,
 			Interval:  task.Interval,
-		}
+		})
 	}
 	return out, nil
 }

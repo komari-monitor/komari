@@ -774,6 +774,7 @@
     "title": "通知"
   },
   "routeTrace": {
+    "familyServer": "サーバー別のアドレスファミリー", "familyHint": "既定は IPv4。IPv6 または両方を選択できます。AAAA レコードがない場合は IPv6 を検査できません。Agent の更新が必要です。",
     "title": "経路追跡", "description": "有効な TCP 遅延測定地点を定期的に追跡します。経路名は測定地点名を使用します。", "target": "経路追跡先", "targetPlaceholder": "空欄の場合は各遅延測定先を使用", "targetHint": "ホスト名またはホスト名:ポートを入力します。", "interval": "追跡間隔（時間）", "intervalError": "1～168 の整数を入力してください", "save": "設定を保存", "manual": "指定経路検査", "selectServer": "サーバーを選択", "runNow": "今すぐ実行", "manualHint": "選択したサーバーの有効な TCP 測定地点をすべて追跡します。", "dispatched": "{{count}} 件の追跡を送信しました", "noEligibleTask": "送信なし：サーバーがオフラインか、有効な TCP 測定地点がありません。"
   },
   "operations": {
@@ -782,6 +783,7 @@
   },
   "page_not_found": "残念ながら、ページは小鞠に食べられてしまいました。",
   "ping": {
+    "ipFamily": "IP アドレス種別（複数選択可）", "targetIPv4": "IPv4 ターゲット", "targetIPv6": "IPv6 ターゲット",
     "all_servers": "すべてのサーバー",
     "all_servers_description": "有効にすると、現在および今後追加されるサーバーでこの監視が実行されます。",
     "default_on": "新規サーバーで既定有効",

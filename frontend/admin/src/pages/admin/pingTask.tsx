@@ -80,6 +80,7 @@ const AddButton: React.FC = () => {
   const [selectedType, setSelectedType] = React.useState<
     "icmp" | "tcp" | "http"
   >("icmp");
+  const [selectedFamilies, setSelectedFamilies] = React.useState<Array<"ipv4" | "ipv6">>(["ipv4"]);
   const [saving, setSaving] = React.useState(false);
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -87,10 +88,13 @@ const AddButton: React.FC = () => {
       toast.error(t("ping.default_on_description"));
       return;
     }
+    const formData = new FormData(e.currentTarget);
     const payload = {
       name: e.currentTarget.ping_name.value,
       type: selectedType,
-      target: e.currentTarget.ping_target.value,
+      target: String(formData.get("ping_target") || ""),
+      target_ipv6: String(formData.get("ping_target_ipv6") || ""),
+      ip_families: selectedFamilies,
       default_on: defaultOn,
       clients: selected,
       interval: parseInt(e.currentTarget.interval.value, 10),
@@ -109,6 +113,7 @@ const AddButton: React.FC = () => {
           setSelected([]);
           setDefaultOn(false);
           setSelectedType("icmp");
+          setSelectedFamilies(["ipv4"]);
           toast.success(t("common.success"));
         } else {
           response
@@ -152,15 +157,25 @@ const AddButton: React.FC = () => {
               <Select.Content>
                 <Select.Item value="icmp">ICMP</Select.Item>
                 <Select.Item value="tcp">TCP</Select.Item>
-                <Select.Item value="http">HTTP</Select.Item>
               </Select.Content>
             </Select.Root>
-            <label htmlFor="ping_target">{t("ping.target")}</label>
-            <TextField.Root
-              id="ping_target"
-              name="ping_target"
-              placeholder="1.1.1.1 | 1.1.1.1:80 | https://1.1.1.1"
-            />
+            <label>{t("ping.ipFamily")}</label>
+            <Flex gap="4">
+              {(["ipv4", "ipv6"] as const).map((family) => <label key={family} className="flex items-center gap-2 font-normal">
+                <Checkbox checked={selectedFamilies.includes(family)} onCheckedChange={(checked) => setSelectedFamilies((current) => {
+                  if (checked) return [...current, family];
+                  return current.length > 1 ? current.filter((item) => item !== family) : current;
+                })} />{family.toUpperCase()}
+              </label>)}
+            </Flex>
+            {selectedFamilies.includes("ipv4") && <>
+              <label htmlFor="ping_target">{t("ping.targetIPv4")}</label>
+              <TextField.Root id="ping_target" name="ping_target" required placeholder="1.1.1.1 | 1.1.1.1:80" />
+            </>}
+            {selectedFamilies.includes("ipv6") && <>
+              <label htmlFor="ping_target_ipv6">{t("ping.targetIPv6")}</label>
+              <TextField.Root id="ping_target_ipv6" name="ping_target_ipv6" required placeholder="[2606:4700:4700::1111]:80" />
+            </>}
             <label htmlFor="ping_server">{t("common.server")}</label>
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-start gap-2">

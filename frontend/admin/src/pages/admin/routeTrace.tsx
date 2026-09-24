@@ -18,6 +18,8 @@ function RouteTraceSettings() {
   const { call } = useRPC2Call();
   const [target, setTarget] = React.useState("");
   const [hours, setHours] = React.useState("6");
+  const [familyServer, setFamilyServer] = React.useState("");
+  const [families, setFamilies] = React.useState<Record<string, "ipv4" | "ipv6" | "both">>({});
   const [server, setServer] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
@@ -25,6 +27,11 @@ function RouteTraceSettings() {
     if (settings) {
       setTarget(String(settings.route_trace_target ?? ""));
       setHours(String(settings.route_trace_interval_hours ?? 6));
+      try {
+        setFamilies(JSON.parse(String(settings.route_trace_families || "{}")));
+      } catch {
+        setFamilies({});
+      }
     }
   }, [settings]);
 
@@ -39,7 +46,7 @@ function RouteTraceSettings() {
     }
     setBusy(true);
     try {
-      await updateSettingsWithToast({ route_trace_target: target.trim(), route_trace_interval_hours: interval }, t);
+      await updateSettingsWithToast({ route_trace_target: target.trim(), route_trace_interval_hours: interval, route_trace_families: JSON.stringify(families) }, t);
     } finally {
       setBusy(false);
     }
@@ -72,6 +79,26 @@ function RouteTraceSettings() {
       <Flex direction="column" gap="2">
         <Text as="label" weight="medium">{t("routeTrace.interval")}</Text>
         <TextField.Root type="number" min="1" max="168" step="1" value={hours} onChange={(event) => setHours(event.target.value)} />
+      </Flex>
+      <Flex direction="column" gap="2">
+        <Text as="label" weight="medium">{t("routeTrace.familyServer")}</Text>
+        <Flex gap="3" align="center" wrap="wrap">
+          <Select.Root value={familyServer} onValueChange={setFamilyServer}>
+            <Select.Trigger placeholder={t("routeTrace.selectServer")} />
+            <Select.Content className="km-route-trace-select-content" position="popper">
+              {nodeDetail.map((node) => <Select.Item key={node.uuid} value={node.uuid}>{node.name}</Select.Item>)}
+            </Select.Content>
+          </Select.Root>
+          <Select.Root disabled={!familyServer} value={families[familyServer] || "both"} onValueChange={(value) => setFamilies((previous) => ({ ...previous, [familyServer]: value as "ipv4" | "ipv6" | "both" }))}>
+            <Select.Trigger />
+            <Select.Content position="popper">
+              <Select.Item value="ipv4">IPv4</Select.Item>
+              <Select.Item value="ipv6">IPv6</Select.Item>
+              <Select.Item value="both">IPv4 + IPv6</Select.Item>
+            </Select.Content>
+          </Select.Root>
+        </Flex>
+        <Text size="2" color="gray">{t("routeTrace.familyHint")}</Text>
       </Flex>
       <Button disabled={busy} onClick={save}>{t("routeTrace.save")}</Button>
       <Text size="5" weight="bold">{t("routeTrace.manual")}</Text>

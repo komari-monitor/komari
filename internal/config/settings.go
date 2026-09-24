@@ -32,6 +32,7 @@ type Settings struct {
 	CustomBody              string `json:"custom_body" default:""`
 	RouteTraceTarget        string `json:"route_trace_target" default:""`
 	RouteTraceIntervalHours int    `json:"route_trace_interval_hours" default:"6"`
+	RouteTraceFamilies      string `json:"route_trace_families" default:""` // JSON map: server UUID -> ipv4, ipv6, or both
 
 	// 通知
 	NotificationEnabled        bool    `json:"notification_enabled" default:"true"` // 通知总开关
@@ -70,6 +71,7 @@ const (
 	CustomBodyKey              = "custom_body"
 	RouteTraceTargetKey        = "route_trace_target"
 	RouteTraceIntervalHoursKey = "route_trace_interval_hours"
+	RouteTraceFamiliesKey      = "route_trace_families"
 
 	NotificationEnabledKey        = "notification_enabled"
 	NotificationMethodKey         = "notification_method"

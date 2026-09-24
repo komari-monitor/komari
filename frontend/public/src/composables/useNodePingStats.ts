@@ -650,7 +650,8 @@ function buildStats(records: PingRecord[], metricStats?: PingMetricTaskStats[], 
 }
 
 function buildTaskStats(nodeUuid: string, state: SharedPingRecordsState): NodePingTaskStats[] {
-  const records = state.recordsByClient.get(nodeUuid) ?? []
+	const activeTaskIds = state.tasks ? new Set(state.tasks.map(task => task.id)) : null
+	const records = (state.recordsByClient.get(nodeUuid) ?? []).filter(record => !activeTaskIds || activeTaskIds.has(record.task_id))
   const recordsByTask = new Map<number, PingRecord[]>()
   for (const record of records) {
     const taskRecords = recordsByTask.get(record.task_id) ?? []
@@ -659,8 +660,11 @@ function buildTaskStats(nodeUuid: string, state: SharedPingRecordsState): NodePi
   }
 
   const metricStatsByTask = new Map<number, PingMetricTaskStats>()
-  for (const stat of state.metricStats ?? [])
-    metricStatsByTask.set(normalizeTaskId(stat.task_id), stat)
+  for (const stat of state.metricStats ?? []) {
+    const id = normalizeTaskId(stat.task_id)
+    if (!activeTaskIds || activeTaskIds.has(id))
+      metricStatsByTask.set(id, stat)
+  }
 
   const tasks = new Map<number, { name: string, summary?: PingTaskInfo }>()
   for (const task of state.tasks ?? [])
@@ -763,9 +767,12 @@ export function useNodePingStats(
     if (!state)
       return readStatsCache(nodeUuid, hours, maxCount) ?? createEmptyStats()
 
-    const records = state.recordsByClient.get(nodeUuid) ?? []
-    return records.length || state.metricStats?.length
-      ? buildStats(records, state.metricStats, state.metricLossPoints)
+	const activeTaskIds = state.tasks ? new Set(state.tasks.map(task => task.id)) : null
+	const records = (state.recordsByClient.get(nodeUuid) ?? []).filter(record => !activeTaskIds || activeTaskIds.has(record.task_id))
+	const metricStats = state.metricStats?.filter(stat => !activeTaskIds || activeTaskIds.has(normalizeTaskId(stat.task_id)))
+	const lossPoints = state.metricLossPoints?.filter(point => !activeTaskIds || activeTaskIds.has(point.taskId))
+    return records.length || metricStats?.length
+      ? buildStats(records, metricStats, lossPoints)
       : createEmptyStats()
   })
 

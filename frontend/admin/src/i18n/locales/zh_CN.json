@@ -774,7 +774,7 @@
     "title": "通知"
   },
   "routeTrace": {
-    "title": "路由追踪", "description": "定期检测已启用的 TCP 延迟测速点，线路名称与测速点名称一致。", "target": "路由追踪地址", "targetPlaceholder": "留空使用各延迟测速点的地址", "targetHint": "可填写主机名或主机名:端口；留空时使用测速点地址。", "interval": "路由追踪间隔（小时）", "intervalError": "请输入 1 至 168 的整数小时", "save": "保存设置", "manual": "指定路由检测", "selectServer": "选择服务器", "runNow": "立即检测", "manualHint": "立即检测所选服务器已启用的所有 TCP 测速点。", "dispatched": "已下发 {{count}} 个路由检测任务", "noEligibleTask": "未下发任务：服务器可能离线，或没有已启用的 TCP 测速点。"
+    "title": "路由追踪", "description": "定期检测已启用的 TCP 延迟测速点，线路名称与测速点名称一致。", "target": "路由追踪地址", "targetPlaceholder": "留空使用各延迟测速点的地址", "targetHint": "可填写主机名或主机名:端口；留空时分别使用 IPv4/IPv6 测速目标。", "interval": "路由追踪间隔（小时）", "intervalError": "请输入 1 至 168 的整数小时", "familyServer": "按服务器选择路由地址族", "familyHint": "默认跟随测速点检测 IPv4 和 IPv6；可按服务器限定显示类型。目标无对应地址时显示无法检测。需要更新到支持 IPv6 的 Agent。", "save": "保存设置", "manual": "指定路由检测", "selectServer": "选择服务器", "runNow": "立即检测", "manualHint": "立即检测所选服务器已启用的所有 TCP 测速点。", "dispatched": "已下发 {{count}} 个路由检测任务", "noEligibleTask": "未下发任务：服务器可能离线，或没有已启用的 TCP 测速点。"
   },
   "operations": {
     "title": "运维",
@@ -782,6 +782,7 @@
   },
   "page_not_found": "真不巧，网页被小鞠吃掉了。",
   "ping": {
+    "ipFamily": "IP 检测类型（可多选）", "targetIPv4": "IPv4 目标", "targetIPv6": "IPv6 目标",
     "all_servers": "全部服务器",
     "all_servers_description": "勾选后，当前和后续新增的服务器都会开启该监测。",
     "default_on": "默认开启",

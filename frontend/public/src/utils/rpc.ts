@@ -263,6 +263,7 @@ export interface PingTaskInfo {
 export interface RouteResult {
   uuid: string
   task_id: number
+  family: 'ipv4' | 'ipv6'
   label: string
   status: 'ok' | 'unknown' | 'error'
   checked_at: string

@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -209,6 +210,21 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 }
 
 func validateRouteTraceSettingChanges(cfg map[string]interface{}) error {
+	if value, ok := cfg[config.RouteTraceFamiliesKey]; ok {
+		raw, ok := value.(string)
+		if !ok || len(raw) > 65536 {
+			return errors.New("route trace family settings must be a JSON string of at most 65536 bytes")
+		}
+		var choices map[string]string
+		if err := json.Unmarshal([]byte(raw), &choices); err != nil || choices == nil {
+			return errors.New("route trace family settings must be a JSON object")
+		}
+		for uuid, family := range choices {
+			if uuid == "" || len(uuid) > 128 || strings.ContainsAny(uuid, " \t\r\n") || (family != "ipv4" && family != "ipv6" && family != "both") {
+				return errors.New("invalid route trace family selection")
+			}
+		}
+	}
 	if value, ok := cfg[config.RouteTraceTargetKey]; ok {
 		target, ok := value.(string)
 		if !ok {

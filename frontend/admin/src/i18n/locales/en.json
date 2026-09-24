@@ -769,7 +769,7 @@
     "title": "Notification"
   },
   "routeTrace": {
-    "title": "Route tracing", "description": "Periodically trace enabled TCP latency points. Route names follow measurement point names.", "target": "Route trace address", "targetPlaceholder": "Leave blank to use each latency target", "targetHint": "Enter a hostname or host:port; leave blank to use the point target.", "interval": "Route trace interval (hours)", "intervalError": "Enter a whole number of hours from 1 to 168", "save": "Save settings", "manual": "Targeted route check", "selectServer": "Select server", "runNow": "Run now", "manualHint": "Immediately trace every enabled TCP point on the selected server.", "dispatched": "Dispatched {{count}} route checks", "noEligibleTask": "Nothing dispatched: the server may be offline or have no enabled TCP points."
+    "title": "Route tracing", "description": "Periodically trace enabled TCP latency points. Route names follow measurement point names.", "target": "Route trace address", "targetPlaceholder": "Leave blank to use each latency target", "targetHint": "Enter a hostname or host:port; leave blank to use the point target.", "interval": "Route trace interval (hours)", "intervalError": "Enter a whole number of hours from 1 to 168", "familyServer": "Address family by server", "familyHint": "IPv4 is the default. Select IPv6 or both; a target without an AAAA record cannot be traced over IPv6. Requires an IPv6-capable Agent.", "save": "Save settings", "manual": "Targeted route check", "selectServer": "Select server", "runNow": "Run now", "manualHint": "Immediately trace every enabled TCP point on the selected server.", "dispatched": "Dispatched {{count}} route checks", "noEligibleTask": "Nothing dispatched: the server may be offline or have no enabled TCP points."
   },
   "operations": {
     "title": "Operations",
@@ -777,6 +777,7 @@
   },
   "page_not_found": "The server cannot find the specific page you're trying to access.",
   "ping": {
+    "ipFamily": "IP address family (select one or both)", "targetIPv4": "IPv4 target", "targetIPv6": "IPv6 target",
     "all_servers": "All servers",
     "all_servers_description": "When enabled, current and future servers will run this monitor.",
     "default_on": "Default on for new servers",

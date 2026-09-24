@@ -5,19 +5,19 @@ import (
 )
 
 const (
-	DistributionHeader    = "X-SIXOSN-Komari-Distribution"
-	ServerDistribution    = "SIXOSN/komari"
-	AgentDistribution     = "SIXOSN/komari-agent"
-	Version               = "2.0"
-	MethodAgentReport     = "agent.report"
-	MethodAgentBasicInfo  = "agent.basicInfo"
-	MethodAgentPingResult = "agent.pingResult"
-	MethodAgentPing       = "agent.ping"
-	MethodAgentRouteTrace = "agent.routeTrace"
+	DistributionHeader     = "X-SIXOSN-Komari-Distribution"
+	ServerDistribution     = "SIXOSN/komari"
+	AgentDistribution      = "SIXOSN/komari-agent"
+	Version                = "2.0"
+	MethodAgentReport      = "agent.report"
+	MethodAgentBasicInfo   = "agent.basicInfo"
+	MethodAgentPingResult  = "agent.pingResult"
+	MethodAgentPing        = "agent.ping"
+	MethodAgentRouteTrace  = "agent.routeTrace"
 	MethodAgentRouteResult = "agent.routeResult"
-	MethodAgentMessage    = "agent.message"
-	MethodAgentEvent      = "agent.event"
-	MethodAgentPull       = "agent.pull"
+	MethodAgentMessage     = "agent.message"
+	MethodAgentEvent       = "agent.event"
+	MethodAgentPull        = "agent.pull"
 )
 
 type Request struct {
@@ -152,11 +152,13 @@ type PingParams struct {
 	TaskID uint   `json:"ping_task_id"`
 	Type   string `json:"ping_type"`
 	Target string `json:"ping_target"`
+	Family string `json:"ip_family,omitempty"`
 }
 
 type RouteResultParams struct {
 	TaskID     uint      `json:"task_id"`
 	Target     string    `json:"target"`
+	Family     string    `json:"family,omitempty"`
 	Hops       []string  `json:"hops"`
 	Error      string    `json:"error"`
 	FinishedAt time.Time `json:"finished_at"`

@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
@@ -59,21 +60,26 @@ func adminTraceRoutes(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Jso
 
 func adminAddPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
-		Clients   []string `json:"clients"`
-		DefaultOn bool     `json:"default_on"`
-		Name      string   `json:"name"`
-		Target    string   `json:"target"`
-		TaskType  string   `json:"type"`
-		Interval  int      `json:"interval"`
+		Clients    []string           `json:"clients"`
+		DefaultOn  bool               `json:"default_on"`
+		Name       string             `json:"name"`
+		Target     string             `json:"target"`
+		TargetIPv6 string             `json:"target_ipv6"`
+		IPFamilies models.StringArray `json:"ip_families"`
+		TaskType   string             `json:"type"`
+		Interval   int                `json:"interval"`
 	}
 	req.BindParams(&params)
-	if params.Name == "" || params.Target == "" || params.TaskType == "" || params.Interval == 0 {
-		return nil, rpc.MakeError(rpc.InvalidParams, "name, target, type and interval are required", nil)
+	if params.Name == "" || params.TaskType == "" || params.Interval == 0 {
+		return nil, rpc.MakeError(rpc.InvalidParams, "name, type and interval are required", nil)
+	}
+	if err := validatePingTaskTargets(params.TaskType, params.Target, params.TargetIPv6, params.IPFamilies); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
 	if !params.DefaultOn && len(params.Clients) == 0 {
 		return nil, rpc.MakeError(rpc.InvalidParams, "clients is required when default_on is false", nil)
 	}
-	taskID, err := tasks.AddPingTask(params.Clients, params.DefaultOn, params.Name, params.Target, params.TaskType, params.Interval)
+	taskID, err := tasks.AddDualStackPingTask(params.Clients, params.DefaultOn, params.Name, params.Target, params.TargetIPv6, params.TaskType, params.Interval, params.IPFamilies)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
@@ -106,6 +112,9 @@ func adminEditPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Js
 		if task == nil {
 			return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request data", nil)
 		}
+		if err := validatePingTaskTargets(task.Type, task.Target, task.TargetIPv6, task.IPFamilies); err != nil {
+			return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+		}
 	}
 	if err := tasks.EditPingTask(params.Tasks); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
@@ -114,11 +123,34 @@ func adminEditPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Js
 }
 
 func adminGetAllPingTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	list, err := tasks.GetAllPingTasks()
+	list, err := tasks.GetEditablePingTasks()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
 	return list, nil
+}
+
+func validatePingTaskTargets(taskType, target, targetIPv6 string, families models.StringArray) error {
+	if len(families) == 0 {
+		families = models.StringArray{"ipv4"}
+	}
+	seen := map[string]bool{}
+	for _, family := range families {
+		if (family != "ipv4" && family != "ipv6") || seen[family] {
+			return fmt.Errorf("invalid IP address family selection")
+		}
+		seen[family] = true
+	}
+	if seen["ipv6"] && taskType != "icmp" && taskType != "tcp" {
+		return fmt.Errorf("IPv6 is supported only for ICMP or TCP tasks")
+	}
+	if seen["ipv4"] && target == "" {
+		return fmt.Errorf("IPv4 target is required")
+	}
+	if seen["ipv6"] && targetIPv6 == "" {
+		return fmt.Errorf("IPv6 target is required")
+	}
+	return nil
 }
 
 func adminOrderPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {

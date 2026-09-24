@@ -774,6 +774,7 @@
     "title": "通知"
   },
   "routeTrace": {
+    "familyServer": "依伺服器選擇路由位址族", "familyHint": "預設 IPv4；可選 IPv6 或兩者。沒有 AAAA 記錄時無法偵測 IPv6；需更新 Agent。",
     "title": "路由追蹤", "description": "定期檢測已啟用的 TCP 延遲測速點，線路名稱與測速點名稱一致。", "target": "路由追蹤地址", "targetPlaceholder": "留空使用各延遲測速點的地址", "targetHint": "可填寫主機名稱或主機名稱:連接埠；留空時使用測速點地址。", "interval": "路由追蹤間隔（小時）", "intervalError": "請輸入 1 至 168 的整數小時", "save": "儲存設定", "manual": "指定路由檢測", "selectServer": "選擇伺服器", "runNow": "立即檢測", "manualHint": "立即檢測所選伺服器已啟用的所有 TCP 測速點。", "dispatched": "已下發 {{count}} 個路由檢測任務", "noEligibleTask": "未下發任務：伺服器可能離線，或沒有已啟用的 TCP 測速點。"
   },
   "operations": {
@@ -782,6 +783,7 @@
   },
   "page_not_found": "真不巧，網頁被小鞠吃掉了。",
   "ping": {
+    "ipFamily": "IP 檢測類型（可多選）", "targetIPv4": "IPv4 目標", "targetIPv6": "IPv6 目標",
     "all_servers": "全部伺服器",
     "all_servers_description": "勾選後，當前和後續新增的伺服器都會開啟該監測。",
     "default_on": "預設啟用",

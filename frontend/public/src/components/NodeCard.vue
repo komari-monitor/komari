@@ -456,16 +456,26 @@ function hasRegion(region: string | null | undefined): boolean {
                 <span class="size-2 shrink-0 rounded-full bg-success" />
                 <span class="truncate" :title="task.name">{{ task.name }}</span>
                 <span
-                  v-if="task.routeLabel"
-                  class="shrink-0 rounded bg-emerald-500/10 px-1 py-0.5 text-[10px] font-medium text-emerald-500"
-                  :title="task.routeTooltip"
-                >{{ task.routeLabel }}</span>
+                  v-if="task.routeBadges.length === 1"
+                  class="shrink-0 rounded px-1 py-0.5 text-[10px] font-medium"
+                  :class="task.routeBadges[0]?.warning ? 'border border-amber-400/50 bg-amber-400/20 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'"
+                  :title="task.routeBadges[0]?.tooltip"
+                >{{ task.routeBadges[0]?.label }}</span>
               </span>
               <span class="flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-muted-foreground tabular-nums">
                 <span>延迟 <strong class="font-medium text-foreground">{{ task.latencyDisplay }}</strong></span>
                 <span>丢包 <strong class="font-medium text-foreground">{{ task.lossDisplay }}</strong></span>
                 <Icon icon="tabler:info-circle" width="13" height="13" aria-hidden="true" />
               </span>
+            </div>
+            <div v-if="task.routeBadges.length > 1" class="mt-1 flex gap-1 text-[10px]">
+              <span
+                v-for="badge in task.routeBadges"
+                :key="badge.family"
+                class="rounded px-1 py-0.5 font-medium"
+                :class="badge.warning ? 'border border-amber-400/50 bg-amber-400/20 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'"
+                :title="badge.tooltip"
+              >{{ badge.family === 'ipv6' ? '6' : '4' }}·{{ badge.label }}</span>
             </div>
             <div class="mt-1.5 flex items-center gap-1.5">
               <span class="w-8 shrink-0 whitespace-nowrap text-[10px] leading-none text-sky-400">● <span class="text-muted-foreground">延迟</span></span>

@@ -774,6 +774,7 @@
     "title": "Notifikasi"
   },
   "routeTrace": {
+    "familyServer": "Keluarga alamat per server", "familyHint": "IPv4 adalah bawaan. Pilih IPv6 atau keduanya. Tanpa rekaman AAAA, IPv6 tidak dapat dilacak. Agent perlu diperbarui.",
     "title": "Pelacakan rute", "description": "Lacak titik latensi TCP aktif secara berkala. Nama rute mengikuti nama titik pengukuran.", "target": "Alamat pelacakan rute", "targetPlaceholder": "Kosongkan untuk memakai target latensi", "targetHint": "Masukkan nama host atau host:port; kosongkan untuk memakai target titik.", "interval": "Interval pelacakan (jam)", "intervalError": "Masukkan bilangan bulat 1 hingga 168 jam", "save": "Simpan pengaturan", "manual": "Pemeriksaan rute tertentu", "selectServer": "Pilih server", "runNow": "Jalankan sekarang", "manualHint": "Lacak semua titik TCP aktif di server terpilih sekarang.", "dispatched": "{{count}} pemeriksaan rute dikirim", "noEligibleTask": "Tidak ada tugas: server mungkin offline atau tidak memiliki titik TCP aktif."
   },
   "operations": {
@@ -782,6 +783,7 @@
   },
   "page_not_found": "Server tidak dapat menemukan halaman yang Anda minta.",
   "ping": {
+    "ipFamily": "Jenis alamat IP (pilih satu atau keduanya)", "targetIPv4": "Target IPv4", "targetIPv6": "Target IPv6",
     "all_servers": "Semua server",
     "all_servers_description": "Jika diaktifkan, server saat ini dan server baru berikutnya akan menjalankan pemantauan ini.",
     "default_on": "Aktif default untuk server baru",

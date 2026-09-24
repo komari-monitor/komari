@@ -194,6 +194,8 @@ const Row = ({
     name: task.name || "",
     type: task.type || "icmp",
     target: task.target || "",
+    target_ipv6: task.target_ipv6 || "",
+    ip_families: (task.ip_families?.length ? task.ip_families : ["ipv4"]) as Array<"ipv4" | "ipv6">,
     clients: task.clients || [],
     default_on: task.default_on || false,
     interval: task.interval || 60,
@@ -215,6 +217,8 @@ const Row = ({
             name: newForm.name,
             type: newForm.type,
             target: newForm.target,
+            target_ipv6: newForm.target_ipv6,
+            ip_families: newForm.ip_families,
             default_on: newForm.default_on,
             clients: newForm.clients,
             interval: newForm.interval,
@@ -336,7 +340,7 @@ const Row = ({
           </NodeSelectorDialog>
         </Flex>
       </TableCell>
-      <TableCell>{task.target}</TableCell>
+      <TableCell>{task.ip_families?.includes("ipv4") !== false && <div>IPv4: {task.target}</div>}{task.ip_families?.includes("ipv6") && <div>IPv6: {task.target_ipv6}</div>}</TableCell>
       <TableCell>{task.type}</TableCell>
       <TableCell>{task.interval}</TableCell>
       <TableCell className="flex items-center gap-2">
@@ -373,17 +377,28 @@ const Row = ({
                 <Select.Content>
                   <Select.Item value="icmp">ICMP</Select.Item>
                   <Select.Item value="tcp">TCP</Select.Item>
-                  <Select.Item value="http">HTTP</Select.Item>
+                  {form.type === "http" && <Select.Item value="http">HTTP</Select.Item>}
                 </Select.Content>
               </Select.Root>
-              <label>{t("ping.target")}</label>
-              <TextField.Root
-                value={form.target}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, target: e.target.value }))
-                }
-                required
-              />
+              {form.type !== "http" && <>
+                <label>{t("ping.ipFamily")}</label>
+                <Flex gap="4">
+                  {(["ipv4", "ipv6"] as const).map((family) => <label key={family} className="flex items-center gap-2 font-normal">
+                    <Checkbox checked={form.ip_families.includes(family)} onCheckedChange={(checked) => setForm((current) => ({
+                      ...current,
+                      ip_families: checked ? [...current.ip_families, family] : current.ip_families.length > 1 ? current.ip_families.filter((item) => item !== family) : current.ip_families,
+                    }))} />{family.toUpperCase()}
+                  </label>)}
+                </Flex>
+              </>}
+              {(form.type === "http" || form.ip_families.includes("ipv4")) && <>
+                <label>{form.type === "http" ? t("ping.target") : t("ping.targetIPv4")}</label>
+                <TextField.Root value={form.target} onChange={(e) => setForm((f) => ({ ...f, target: e.target.value }))} required />
+              </>}
+              {form.type !== "http" && form.ip_families.includes("ipv6") && <>
+                <label>{t("ping.targetIPv6")}</label>
+                <TextField.Root value={form.target_ipv6} onChange={(e) => setForm((f) => ({ ...f, target_ipv6: e.target.value }))} required />
+              </>}
               <label>{t("common.server")}</label>
               <Flex direction="column" gap="2">
                 <NodeSelectorDialog

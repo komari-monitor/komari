@@ -14,19 +14,38 @@ import (
 
 // AddPingTask 创建延迟监测任务。defaultOn 表示新加入的服务器是否自动开启此监测。
 func AddPingTask(clients []string, defaultOn bool, name string, target, task_type string, interval int) (uint, error) {
+	return AddDualStackPingTask(clients, defaultOn, name, target, "", task_type, interval, nil)
+}
+
+func AddDualStackPingTask(clients []string, defaultOn bool, name, target, targetIPv6, taskType string, interval int, families models.StringArray) (uint, error) {
 	db := dbcore.GetDBInstance()
 	normalizedClients := normalizePingClients(models.StringArray(clients))
 	task := models.PingTask{
-		Clients:   normalizedClients,
-		DefaultOn: defaultOn,
-		Name:      name,
-		Type:      task_type,
-		Target:    target,
-		Interval:  interval,
+		Clients:    normalizedClients,
+		DefaultOn:  defaultOn,
+		Name:       name,
+		Type:       taskType,
+		Target:     target,
+		IPFamilies: families,
+		Family:     "ipv4",
+		Enabled:    true,
+		Interval:   interval,
 	}
 	err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&task).Error; err != nil {
 			return err
+		}
+		if task.HasFamily("ipv6") {
+			child := task
+			child.Id = 0
+			child.ParentID = task.Id
+			child.Family = "ipv6"
+			child.Weight = int(task.Id)
+			child.Target = targetIPv6
+			child.IPFamilies = nil
+			if err := tx.Create(&child).Error; err != nil {
+				return err
+			}
 		}
 
 		// Append by id to avoid races between concurrent create requests.
@@ -48,13 +67,18 @@ func AddPingTask(clients []string, defaultOn bool, name string, target, task_typ
 }
 
 func DeletePingTask(id []uint) error {
+	db := dbcore.GetDBInstance()
+	var childIDs []uint
+	if err := db.Model(&models.PingTask{}).Where("parent_id IN ?", id).Pluck("id", &childIDs).Error; err != nil {
+		return err
+	}
+	id = append(id, childIDs...)
 	// The metric store is independent from the main database, so clean it first
 	// to avoid leaving history that can no longer be addressed through the task.
 	if err := DeletePingRecords(id); err != nil {
 		return err
 	}
 
-	db := dbcore.GetDBInstance()
 	result := db.Where("id IN ?", id).Delete(&models.PingTask{})
 	if result.RowsAffected == 0 {
 		return gorm.ErrRecordNotFound
@@ -67,6 +91,13 @@ func DeletePingTask(id []uint) error {
 func EditPingTask(tasks []*models.PingTask) error {
 	db := dbcore.GetDBInstance()
 	for _, task := range tasks {
+		var current models.PingTask
+		if err := db.First(&current, task.Id).Error; err != nil {
+			return err
+		}
+		if task.IPFamilies == nil {
+			task.IPFamilies = current.IPFamilies
+		}
 		task.Clients = normalizePingClients(task.Clients)
 		// 使用 map 显式更新，避免 GORM struct Updates 跳过 false/0/空切片等零值。
 		updates := map[string]interface{}{
@@ -75,11 +106,47 @@ func EditPingTask(tasks []*models.PingTask) error {
 			"all_clients": task.DefaultOn,
 			"type":        task.Type,
 			"target":      task.Target,
+			"ip_families": task.IPFamilies,
 			"interval":    task.Interval,
 		}
-		result := db.Model(&models.PingTask{}).Where("id = ?", task.Id).Updates(updates)
-		if result.RowsAffected == 0 {
-			return gorm.ErrRecordNotFound
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			result := tx.Model(&models.PingTask{}).Where("id = ? AND parent_id = 0", task.Id).Updates(updates)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				return gorm.ErrRecordNotFound
+			}
+			var child models.PingTask
+			err := tx.Where("parent_id = ? AND family = ?", task.Id, "ipv6").First(&child).Error
+			if err != nil && err != gorm.ErrRecordNotFound {
+				return err
+			}
+			if err == gorm.ErrRecordNotFound {
+				if !task.HasFamily("ipv6") {
+					return nil
+				}
+				child = *task
+				child.Id = 0
+				child.ParentID = task.Id
+				child.Family = "ipv6"
+				child.Weight = int(task.Id)
+				child.Target = task.TargetIPv6
+				child.Enabled = true
+				child.IPFamilies = nil
+				return tx.Create(&child).Error
+			}
+			childTarget := task.TargetIPv6
+			if childTarget == "" {
+				childTarget = child.Target
+			}
+			return tx.Model(&child).Updates(map[string]interface{}{
+				"name": task.Name, "clients": task.Clients, "all_clients": task.DefaultOn,
+				"type": task.Type, "target": childTarget, "interval": task.Interval,
+				"enabled": task.HasFamily("ipv6"),
+			}).Error
+		}); err != nil {
+			return err
 		}
 	}
 	ReloadPingSchedule()
@@ -101,6 +168,33 @@ func GetAllPingTasks() ([]models.PingTask, error) {
 		return nil, err
 	}
 	return tasks, nil
+}
+
+func GetEditablePingTasks() ([]models.PingTask, error) {
+	all, err := GetAllPingTasks()
+	if err != nil {
+		return nil, err
+	}
+	children := make(map[uint]models.PingTask)
+	for _, task := range all {
+		if task.ParentID != 0 && task.Family == "ipv6" {
+			children[task.ParentID] = task
+		}
+	}
+	out := make([]models.PingTask, 0, len(all))
+	for _, task := range all {
+		if task.ParentID != 0 {
+			continue
+		}
+		if len(task.IPFamilies) == 0 {
+			task.IPFamilies = models.StringArray{"ipv4"}
+		}
+		if child, ok := children[task.Id]; ok {
+			task.TargetIPv6 = child.Target
+		}
+		out = append(out, task)
+	}
+	return out, nil
 }
 
 // GetPingTasksByClient 获取指定服务器需要执行的延迟监测任务。
@@ -142,6 +236,9 @@ func UpdatePingTaskOrder(order map[uint]int) error {
 			result := tx.Model(&models.PingTask{}).Where("id = ?", id).Update("weight", weight)
 			if result.Error != nil {
 				return result.Error
+			}
+			if err := tx.Model(&models.PingTask{}).Where("parent_id = ?", id).Update("weight", weight).Error; err != nil {
+				return err
 			}
 		}
 		return nil
