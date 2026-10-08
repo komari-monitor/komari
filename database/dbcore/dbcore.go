@@ -186,6 +186,13 @@ const (
 // versionID 是当前构建的版本标识，由 SetVersionID 在 Initialize 前注入。
 var versionID string
 
+// nil means a fresh install; an empty value means an unmarked legacy install.
+var lastRunVersion *string
+
+func LastRunVersion() *string {
+	return lastRunVersion
+}
+
 // dbFileExistedAtStartup 记录本次进程启动、打开数据库之前 komari.db 是否已存在，
 // 用于区分“全新安装”与“从旧版升级（无版本标记）”。在 doInitialize 打开数据库
 // 之前采集。
@@ -221,13 +228,17 @@ func resolveDatabaseFile() string {
 //
 // 备份失败不阻止启动，但打印明确错误；备份成功（或无需备份）后写入/更新版本。
 func backupOnVersionUpgrade() {
-	if versionID == "" {
-		return
-	}
-
 	prevVersion, readErr := config.GetAs[string](SystemVersionKey)
 	prevVersion = strings.TrimSpace(prevVersion)
 	versionRecorded := readErr == nil && prevVersion != ""
+	lastRunVersion = nil
+	if versionRecorded || dbFileExistedAtStartup {
+		lastRunVersion = &prevVersion
+	}
+
+	if versionID == "" {
+		return
+	}
 
 	// 版本未变化，无需备份。
 	if versionRecorded && prevVersion == versionID {

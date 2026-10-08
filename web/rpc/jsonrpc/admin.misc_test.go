@@ -1,10 +1,35 @@
 package jsonrpc
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/internal/metricstore"
 )
+
+func TestAdminGetLastRunVersion(t *testing.T) {
+	result, rpcErr := adminGetLastRunVersion(context.Background(), nil)
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		LastRunVersion *string `json:"last_run_version"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	want := dbcore.LastRunVersion()
+	if (payload.LastRunVersion == nil) != (want == nil) ||
+		(want != nil && *payload.LastRunVersion != *want) {
+		t.Fatalf("unexpected last run version: %s", data)
+	}
+}
 
 func TestMetricKeysTouched(t *testing.T) {
 	if !metricKeysTouched(map[string]interface{}{metricstore.MetricDBDSNKey: "metrics.db"}) {
