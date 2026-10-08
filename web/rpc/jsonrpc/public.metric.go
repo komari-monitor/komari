@@ -111,6 +111,7 @@ type publicPingMetricTaskStats struct {
 	Avg             *float64          `json:"avg,omitempty"`
 	Latest          *float64          `json:"latest,omitempty"`
 	P50             *float64          `json:"p50,omitempty"`
+	P95             *float64          `json:"p95,omitempty"`
 	P99             *float64          `json:"p99,omitempty"`
 	StdDev          *float64          `json:"stddev,omitempty"`
 	P99P50Ratio     float64           `json:"p99_p50_ratio"`
@@ -169,6 +170,12 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	}
 
 	requestedEntityIDs := normalizeStringList(params.EntityIDs, []string{params.EntityID})
+	if len(requestedEntityIDs) == 0 {
+		return nil, rpc.MakeError(rpc.InvalidParams, "entity_id is required; use public:getDashboardSummary for fleet overview cards", nil)
+	}
+	if len(requestedEntityIDs) > 1 {
+		return nil, rpc.MakeError(rpc.InvalidParams, "queryMetrics accepts a single entity_id; open charts per node or use public:getDashboardSummary", nil)
+	}
 	entityIDs, rpcErr := publicMetricEntityIDs(ctx, requestedEntityIDs)
 	if rpcErr != nil {
 		return nil, rpcErr
@@ -200,6 +207,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 
 	metricFillEmpty := resolveMetricFillEmpty(params)
 	useRaw := publicMetricUsesRawWindow(start, end, queryNow)
+
 	definitions := make(map[string]metric.Definition, len(metricKeys))
 	rawValues := make(map[string][]metric.Point)
 	rollupValues := make(map[string]map[metric.Aggregation][]metric.AggregatePoint)
@@ -453,12 +461,13 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	}
 	taskFilter := normalizePingMetricTaskIDs(params.TaskID, params.TaskIDs)
 
-	maxPoints := params.MaxPoints
-	if maxPoints <= 0 {
-		maxPoints = defaultMetricQueryPoints
-	}
 	now := time.Now().UTC()
-	interval := metricDownsampleInterval(end.Sub(start), maxPoints)
+	// Collapse the whole window into one bucket per entity/task so stats do
+	// not materialize tens/hundreds of thousands of intermediate points.
+	interval := end.Sub(start)
+	if interval <= 0 {
+		interval = time.Hour
+	}
 	interval = store.CompatibleSeriesInterval(start, now, interval)
 
 	groupsByEntity, err := loadPublicPingMetricAggregateGroups(ctx, store, entityIDs, start, end, interval, now)
@@ -538,6 +547,13 @@ func splitPublicMetricSeries(base publicMetricSeries) []publicMetricSeries {
 		item := base
 		item.EntityID = group.entityID
 		item.Tags = group.tags
+		// Tags/labels already live on the series; repeating them on every
+		// point balloons a 24h dashboard payload by many megabytes and was the
+		// dominant cause of multi-tens-of-seconds transfers.
+		for i := range group.points {
+			group.points[i].Tags = nil
+			group.points[i].Labels = nil
+		}
 		item.Points = group.points
 		item.Count = len(group.points)
 		out = append(out, item)
@@ -581,7 +597,6 @@ func adaptiveFillPublicMetricSeries(series publicMetricSeries, start, end time.T
 		return publicMetricPoint{
 			Time:  at.UTC(),
 			Value: nil,
-			Tags:  series.Tags,
 		}
 	}
 	filled := make([]publicMetricPoint, 0, len(series.Points)+2)
@@ -772,6 +787,7 @@ type publicPingMetricAggregateGroups struct {
 	Max           map[string][]metric.AggregatePoint
 	Last          map[string][]metric.AggregatePoint
 	P50           map[string][]metric.AggregatePoint
+	P95           map[string][]metric.AggregatePoint
 	P99           map[string][]metric.AggregatePoint
 	StdDev        map[string][]metric.AggregatePoint
 	Loss          map[string][]metric.AggregatePoint
@@ -779,18 +795,17 @@ type publicPingMetricAggregateGroups struct {
 }
 
 func loadPublicPingMetricAggregateGroups(ctx context.Context, store *metric.Store, entityIDs []string, start, end time.Time, interval time.Duration, now time.Time) (map[string]publicPingMetricAggregateGroups, error) {
-	latencyAggregations := []metric.Aggregation{
-		metric.AggAvg,
-		metric.AggMin,
-		metric.AggMax,
-		metric.AggLast,
-		metric.AggP50,
-		metric.AggP99,
-		metric.AggStdDev,
-	}
 	loaded, err := store.SeriesBatch(ctx, metric.BatchSeriesQuery{
 		Specs: []metric.BatchSeriesSpec{
-			{MetricName: metricstore.MetricPingLatency, Aggregations: latencyAggregations, Interval: interval, PreserveSeries: true},
+			{
+				MetricName: metricstore.MetricPingLatency,
+				Aggregations: []metric.Aggregation{
+					metric.AggAvg, metric.AggMin, metric.AggMax, metric.AggLast, metric.AggStdDev,
+					metric.AggP50, metric.AggP95, metric.AggP99,
+				},
+				Interval:       interval,
+				PreserveSeries: true,
+			},
 			{MetricName: metricstore.MetricPingLoss, Aggregations: []metric.Aggregation{metric.AggAvg}, Interval: interval, PreserveSeries: true},
 		},
 		EntityIDs: entityIDs,
@@ -802,6 +817,9 @@ func loadPublicPingMetricAggregateGroups(ctx context.Context, store *metric.Stor
 		return nil, err
 	}
 	latency := loaded.Values[metricstore.MetricPingLatency]
+	if latency == nil {
+		latency = make(map[metric.Aggregation][]metric.AggregatePoint)
+	}
 	lossPoints := loaded.Values[metricstore.MetricPingLoss][metric.AggAvg]
 
 	avg := groupPingMetricAggregatePointsByEntity(latency[metric.AggAvg])
@@ -809,12 +827,13 @@ func loadPublicPingMetricAggregateGroups(ctx context.Context, store *metric.Stor
 	maximum := groupPingMetricAggregatePointsByEntity(latency[metric.AggMax])
 	last := groupPingMetricAggregatePointsByEntity(latency[metric.AggLast])
 	p50 := groupPingMetricAggregatePointsByEntity(latency[metric.AggP50])
+	p95 := groupPingMetricAggregatePointsByEntity(latency[metric.AggP95])
 	p99 := groupPingMetricAggregatePointsByEntity(latency[metric.AggP99])
 	stddev := groupPingMetricAggregatePointsByEntity(latency[metric.AggStdDev])
 	loss := groupPingMetricAggregatePointsByEntity(lossPoints)
 
 	entitySet := make(map[string]struct{})
-	for _, groups := range []map[string]map[string][]metric.AggregatePoint{avg, minimum, maximum, last, p50, p99, stddev, loss} {
+	for _, groups := range []map[string]map[string][]metric.AggregatePoint{avg, minimum, maximum, last, p50, p95, p99, stddev, loss} {
 		for currentEntityID := range groups {
 			entitySet[currentEntityID] = struct{}{}
 		}
@@ -828,6 +847,7 @@ func loadPublicPingMetricAggregateGroups(ctx context.Context, store *metric.Stor
 			Max:           maximum[currentEntityID],
 			Last:          last[currentEntityID],
 			P50:           p50[currentEntityID],
+			P95:           p95[currentEntityID],
 			P99:           p99[currentEntityID],
 			StdDev:        stddev[currentEntityID],
 			Loss:          entityLoss,
@@ -868,7 +888,7 @@ func pingMetricGroupsHaveData(groups map[string][]metric.AggregatePoint) bool {
 func publicPingStatsFromAggregateGroups(entityID string, groups publicPingMetricAggregateGroups, taskMap map[string]models.PingTask, taskFilter map[string]bool) []publicPingMetricTaskStats {
 	taskIDs := make(map[string]struct{})
 	for _, group := range []map[string][]metric.AggregatePoint{
-		groups.Avg, groups.Min, groups.Max, groups.Last, groups.P50, groups.P99, groups.StdDev, groups.Loss,
+		groups.Avg, groups.Min, groups.Max, groups.Last, groups.P50, groups.P95, groups.P99, groups.StdDev, groups.Loss,
 	} {
 		for taskID := range group {
 			taskIDs[taskID] = struct{}{}
@@ -892,6 +912,7 @@ func publicPingStatsFromAggregateGroups(entityID string, groups publicPingMetric
 		lossRate, valid, approximate := publicPingLossRate(groups.Avg[taskID], groups.Loss[taskID], total, groups.LossAvailable)
 		avg, _ := weightedAggregateValue(groups.Avg[taskID], true)
 		p50, _ := weightedAggregateValue(groups.P50[taskID], true)
+		p95, _ := weightedAggregateValue(groups.P95[taskID], true)
 		p99, _ := weightedAggregateValue(groups.P99[taskID], true)
 		stddev, _ := weightedAggregateValue(groups.StdDev[taskID], false)
 		minimum := positiveAggregateMin(groups.Min[taskID])
@@ -914,6 +935,7 @@ func publicPingStatsFromAggregateGroups(entityID string, groups publicPingMetric
 			Avg:             avg,
 			Latest:          latest,
 			P50:             p50,
+			P95:             p95,
 			P99:             p99,
 			StdDev:          stddev,
 		}

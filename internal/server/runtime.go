@@ -80,7 +80,7 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 // BuildRouter constructs the normal application router and starts reloads.
 func (a *App) BuildRouter() error {
 	r := gin.New()
-	r.Use(logger.GinLogger(), logger.GinRecovery())
+	r.Use(logger.GinLogger(), logger.GinRecovery(), gzipJSONResponses())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
 	r.Use(cors.Middleware(), api.IdentityMiddleware(), api.PrivateSiteMiddleware(), noStoreAPIResponses())
 

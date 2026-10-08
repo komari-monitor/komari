@@ -91,9 +91,9 @@ func appendPlaceholders[T ~string](d dialect, args *[]any, values []T) []string 
 
 func (d sqliteDialect) renderRollupRead(tables tables, indexName string, plan rollupReadPlan) renderedSQL {
 	seriesJSON, _ := json.Marshal(plan.SeriesIDs)
-	args := []any{plan.ResolutionID, plan.StartMilli, plan.EndMilli, string(seriesJSON)}
+	args := []any{string(seriesJSON), plan.ResolutionID, plan.StartMilli, plan.EndMilli}
 	return renderedSQL{
-		Query: fmt.Sprintf("SELECT %s FROM %s r INDEXED BY %s WHERE r.resolution_id = %s AND r.bucket_milli >= %s AND r.bucket_milli <= %s AND r.series_id IN (SELECT CAST(value AS INTEGER) FROM json_each(%s)) ORDER BY r.bucket_milli ASC, r.series_id ASC, r.label_id ASC",
+		Query: fmt.Sprintf("SELECT %s FROM %s r INDEXED BY %s WHERE r.series_id IN (SELECT CAST(value AS INTEGER) FROM json_each(%s)) AND r.resolution_id = %s AND r.bucket_milli >= %s AND r.bucket_milli <= %s ORDER BY r.bucket_milli ASC, r.series_id ASC, r.label_id ASC",
 			rollupReadColumns(plan.Fields), tables.rollups, indexName,
 			d.placeholder(1), d.placeholder(2), d.placeholder(3), d.placeholder(4)),
 		Args: args,
@@ -101,24 +101,28 @@ func (d sqliteDialect) renderRollupRead(tables tables, indexName string, plan ro
 }
 
 func (d mysqlDialect) renderRollupRead(tables tables, indexName string, plan rollupReadPlan) renderedSQL {
-	args := []any{plan.ResolutionID, plan.StartMilli, plan.EndMilli}
+	args := make([]any, 0, len(plan.SeriesIDs)+3)
 	seriesPlaceholders := make([]string, 0, len(plan.SeriesIDs))
 	for _, seriesID := range plan.SeriesIDs {
 		args = append(args, seriesID)
 		seriesPlaceholders = append(seriesPlaceholders, d.placeholder(len(args)))
 	}
+	args = append(args, plan.ResolutionID, plan.StartMilli, plan.EndMilli)
+	resolutionPlaceholder := d.placeholder(len(args) - 2)
+	startPlaceholder := d.placeholder(len(args) - 1)
+	endPlaceholder := d.placeholder(len(args))
 	return renderedSQL{
-		Query: fmt.Sprintf("SELECT %s FROM %s r FORCE INDEX (%s) WHERE r.resolution_id = %s AND r.bucket_milli >= %s AND r.bucket_milli <= %s AND r.series_id IN (%s) ORDER BY r.bucket_milli ASC, r.series_id ASC, r.label_id ASC",
+		Query: fmt.Sprintf("SELECT %s FROM %s r FORCE INDEX (%s) WHERE r.series_id IN (%s) AND r.resolution_id = %s AND r.bucket_milli >= %s AND r.bucket_milli <= %s ORDER BY r.bucket_milli ASC, r.series_id ASC, r.label_id ASC",
 			rollupReadColumns(plan.Fields), tables.rollups, indexName,
-			d.placeholder(1), d.placeholder(2), d.placeholder(3), strings.Join(seriesPlaceholders, ", ")),
+			strings.Join(seriesPlaceholders, ", "), resolutionPlaceholder, startPlaceholder, endPlaceholder),
 		Args: args,
 	}
 }
 
 func (d postgresDialect) renderRollupRead(tables tables, _ string, plan rollupReadPlan) renderedSQL {
-	args := []any{plan.ResolutionID, plan.StartMilli, plan.EndMilli, plan.SeriesIDs}
+	args := []any{plan.SeriesIDs, plan.ResolutionID, plan.StartMilli, plan.EndMilli}
 	return renderedSQL{
-		Query: fmt.Sprintf("SELECT %s FROM %s r WHERE r.resolution_id = %s AND r.bucket_milli >= %s AND r.bucket_milli <= %s AND r.series_id = ANY(%s::bigint[]) ORDER BY r.bucket_milli ASC, r.series_id ASC, r.label_id ASC",
+		Query: fmt.Sprintf("SELECT %s FROM %s r WHERE r.series_id = ANY(%s::bigint[]) AND r.resolution_id = %s AND r.bucket_milli >= %s AND r.bucket_milli <= %s ORDER BY r.bucket_milli ASC, r.series_id ASC, r.label_id ASC",
 			rollupReadColumns(plan.Fields), tables.rollups,
 			d.placeholder(1), d.placeholder(2), d.placeholder(3), d.placeholder(4)),
 		Args: args,
