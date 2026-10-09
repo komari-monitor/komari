@@ -205,6 +205,7 @@ func TestMaintenanceMappings(t *testing.T) {
 		labels:      "Metric_label_sets",
 		resolutions: "Metric_resolutions",
 		rollups:     "Metric_rollups",
+		dashboard:   "Metric_dashboard_buckets",
 	}
 
 	tests := []struct {
@@ -227,9 +228,9 @@ func TestMaintenanceMappings(t *testing.T) {
 			name:       "mysql",
 			driver:     DriverMySQL,
 			action:     MaintenanceOptimize,
-			reclaim:    "OPTIMIZE TABLE `Metric_definitions`, `Metric_series`, `Metric_label_sets`, `Metric_resolutions`, `Metric_rollups`",
-			sizeParts:  []string{"information_schema.TABLES", "TABLE_SCHEMA = DATABASE()", "TABLE_NAME IN (?, ?, ?, ?, ?)"},
-			sizeArgs:   []any{"Metric_definitions", "Metric_series", "Metric_label_sets", "Metric_resolutions", "Metric_rollups"},
+			reclaim:    "OPTIMIZE TABLE `Metric_definitions`, `Metric_series`, `Metric_label_sets`, `Metric_resolutions`, `Metric_rollups`, `Metric_dashboard_buckets`",
+			sizeParts:  []string{"information_schema.TABLES", "TABLE_SCHEMA = DATABASE()", "TABLE_NAME IN (?, ?, ?, ?, ?, ?)"},
+			sizeArgs:   []any{"Metric_definitions", "Metric_series", "Metric_label_sets", "Metric_resolutions", "Metric_rollups", "Metric_dashboard_buckets"},
 			hasSizeSQL: true,
 		},
 		{
