@@ -24,7 +24,7 @@ func EstablishConnection(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
 		return
 	}
-	conn, err := api.UpgradeSafeConn(c)
+	conn, err := api.UpgradeSafeConn(c, api.EnableWebSocketCompression)
 	if err != nil {
 		closeSession(session_id)
 		return

@@ -89,7 +89,7 @@ func headerOrQueryTwoFACode(c *gin.Context) string {
 }
 
 func serveWebSocket(c *gin.Context) {
-	conn, err := api.UpgradeSafeConn(c)
+	conn, err := api.UpgradeSafeConn(c, api.EnableWebSocketCompression)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
