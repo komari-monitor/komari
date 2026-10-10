@@ -175,7 +175,17 @@ func (s *Store) deleteRollupBucketTx(ctx context.Context, metricName string, int
 		s.tables.series, s.dialect.placeholder(3), s.dialect.placeholder(4), s.dialect.placeholder(5),
 		s.tables.labels, s.dialect.placeholder(6))
 	_, err := tx.ExecContext(ctx, query, key.bucket, interval.Milliseconds(), metricName, key.entityID, key.tagsHash, key.labelsHash)
-	return err
+	if err != nil {
+		return err
+	}
+	// Only the 5-minute tier is mirrored into dashboard_buckets. Deleting a
+	// 1-minute (or coarser) rollup must not wipe the dashboard row that shares
+	// a bucket_milli boundary — that emptied the table and forced empty /
+	// fallback dashboard reads in production.
+	if interval == DashboardBucketInterval && IsDashboardMetric(metricName) {
+		return s.deleteDashboardBucketTx(ctx, metricName, key, tx)
+	}
+	return nil
 }
 
 func buildCoarserBucketsFromDelta(delta map[rollupKey]*rollupBucket, interval time.Duration, compression float64) map[rollupKey]*rollupBucket {
@@ -306,7 +316,13 @@ func (s *Store) deleteRollupTierTx(ctx context.Context, metricName string, inter
 	sqlText := fmt.Sprintf(`DELETE FROM %s WHERE resolution_id IN (SELECT id FROM %s WHERE resolution_milli = %s) AND series_id IN (SELECT id FROM %s WHERE metric_name = %s)`,
 		s.tables.rollups, s.tables.resolutions, s.dialect.placeholder(1), s.tables.series, s.dialect.placeholder(2))
 	_, err := tx.ExecContext(ctx, sqlText, interval.Milliseconds(), metricName)
-	return err
+	if err != nil {
+		return err
+	}
+	if interval == DashboardBucketInterval {
+		return s.deleteDashboardForMetricTx(ctx, metricName, tx)
+	}
+	return nil
 }
 
 func (s *Store) deleteRollupsBeforeTx(ctx context.Context, metricName string, interval time.Duration, beforeMilli int64, tx *sql.Tx) error {
@@ -316,13 +332,21 @@ func (s *Store) deleteRollupsBeforeTx(ctx context.Context, metricName string, in
 	// still inside retention. At most one extra bucket per series is retained.
 	beforeMilli = bucketStartMillis(beforeMilli, interval.Milliseconds())
 	_, err := tx.ExecContext(ctx, sqlText, interval.Milliseconds(), metricName, beforeMilli)
-	return err
+	if err != nil {
+		return err
+	}
+	if interval == DashboardBucketInterval {
+		return s.deleteDashboardBeforeTx(ctx, metricName, beforeMilli, tx)
+	}
+	return nil
 }
 
 func (s *Store) deleteRollupsForMetricTx(ctx context.Context, metricName string, tx *sql.Tx) error {
 	sqlText := fmt.Sprintf("DELETE FROM %s WHERE series_id IN (SELECT id FROM %s WHERE metric_name = %s)", s.tables.rollups, s.tables.series, s.dialect.placeholder(1))
-	_, err := tx.ExecContext(ctx, sqlText, metricName)
-	return err
+	if _, err := tx.ExecContext(ctx, sqlText, metricName); err != nil {
+		return err
+	}
+	return s.deleteDashboardForMetricTx(ctx, metricName, tx)
 }
 
 func sortRollupKeys(keys []rollupKey) {

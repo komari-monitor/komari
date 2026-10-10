@@ -315,6 +315,19 @@ func (s *Store) upsertClosedCoarseBucketsTx(ctx context.Context, metricName stri
 			return 0, err
 		}
 	}
+	// Coarse parents bypass upsertRollupWithDictionaryTx (no merge read). Mirror
+	// 5-minute dashboard metrics here or dashboard_buckets freezes after the
+	// startup backfill while rollups keep advancing.
+	if interval == DashboardBucketInterval && IsDashboardMetric(metricName) {
+		for _, key := range keys {
+			bucket := buckets[key]
+			norm := key
+			norm.bucket = normalizeBucketMillis(key.bucket)
+			if err := s.mirrorRollupToDashboardTx(ctx, metricName, interval, norm, bucket, tx); err != nil {
+				return 0, err
+			}
+		}
+	}
 	return len(rows), nil
 }
 
