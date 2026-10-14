@@ -30,7 +30,7 @@ func Initialize() (err error) {
 	if err := javascript.Register(); err != nil {
 		return err
 	}
-	registered = append(registered, "javascript")
+	registered = append(registered, javascript.ChannelID)
 	for _, item := range messageSender.ListNotificationChannels() {
 		if _, err := database.GetMessageSenderConfigByName(item.ID); err == nil {
 			continue
@@ -58,7 +58,7 @@ func Initialize() (err error) {
 // Shutdown unregisters the built-in channels and releases their runtimes.
 func Shutdown() error {
 	return errors.Join(
-		messageSender.UnregisterNotificationChannel("javascript"),
+		messageSender.UnregisterNotificationChannel(javascript.ChannelID),
 		messageSender.UnregisterNotificationChannel("webhook"),
 	)
 }

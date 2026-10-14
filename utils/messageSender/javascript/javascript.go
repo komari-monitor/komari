@@ -18,6 +18,9 @@ import (
 // DataDir confines notification scripts' filesystem and local module access.
 var DataDir = "./data/notification/javascript"
 
+// ChannelID is also the key of existing JavaScript configurations in the database.
+const ChannelID = "Javascript"
+
 const executionTimeout = 30 * time.Second
 
 type JavaScriptSender struct {
@@ -100,7 +103,7 @@ func (j *JavaScriptSender) Unload() error {
 }
 
 func Register() error {
-	return messageSender.RegisterNotificationChannel("javascript", messageSender.ManagedConfiguration("JavaScript", Addition{}), &JavaScriptSender{})
+	return messageSender.RegisterNotificationChannel(ChannelID, messageSender.ManagedConfiguration("JavaScript", Addition{}), &JavaScriptSender{})
 }
 
 var _ messageSender.NotificationChannel = (*JavaScriptSender)(nil)
