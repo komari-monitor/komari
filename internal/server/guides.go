@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"time"
+
+	logger "github.com/komari-monitor/komari/utils/log"
 
 	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/internal/migrations"
 	installweb "github.com/komari-monitor/komari/web/install"
 	migrationweb "github.com/komari-monitor/komari/web/migration"
@@ -33,7 +36,27 @@ func (r DatabaseMigrationRequirement) Required() bool { return r.mode != "" }
 // when both inputs exist, then the startup loop detects the legacy tables on
 // its next pass.
 func (a *App) DatabaseMigrationRequired() (DatabaseMigrationRequirement, error) {
-	structureRequired, err := metricstore.StructureUpgradeRequired(context.Background())
+	var requirement DatabaseMigrationRequirement
+	attempt := 0
+	err := retryMetricStoreConnection(metricStoreReconnectAttempts, metricStoreReconnectInterval, func() error {
+		attempt++
+		// Inspection opens the metric database before ConnectMetricStoreWithRetry.
+		// Give this read-only phase the same bounded retries and per-attempt
+		// deadline, rather than entering manual recovery on its first failure.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var err error
+		requirement, err = a.databaseMigrationRequired(ctx)
+		if err != nil {
+			logger.Warn("server", "Database migration inspection attempt failed", "attempt", attempt, "max_attempts", metricStoreReconnectAttempts, "error", redactMetricStoreError(err))
+		}
+		return err
+	})
+	return requirement, err
+}
+
+func (a *App) databaseMigrationRequired(ctx context.Context) (DatabaseMigrationRequirement, error) {
+	structureRequired, err := metricstore.StructureUpgradeRequired(ctx)
 	if err != nil {
 		return DatabaseMigrationRequirement{}, err
 	}
