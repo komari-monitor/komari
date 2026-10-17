@@ -62,6 +62,6 @@ Thanks to everyone who has contributed code, themes, plugins, documentation, tra
 
 If Komari has been useful to you, consider buying me a coffee. Thank you for your support!
 
-| WeChat Pay                                                                                                   | TRON Network                                                                                |
-| ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| ![WeChat Pay QR code](https://b2.akz.moe/awesome-pictures/%E5%BE%AE%E4%BF%A1%E8%B5%9E%E8%B5%8F%E7%A0%81.png) | ![TRON Network QR code](https://b2.akz.moe/awesome-pictures/PixPin_2026-08-07_15-16-52.png) |
+| TRON Network                                                                                |
+| ------------------------------------------------------------------------------------------- |
+| ![TRON Network QR code](https://b2.akz.moe/awesome-pictures/PixPin_2026-08-07_15-16-52.png) |
