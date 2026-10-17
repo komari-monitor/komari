@@ -37,6 +37,7 @@ type dialect interface {
 	blobType() string
 	renderSeriesDictionary(tables tables, indexName string, plan seriesDictionaryPlan) renderedSQL
 	renderRollupRead(tables tables, indexName string, plan rollupReadPlan) renderedSQL
+	renderDashboardRead(tables tables, indexName string, plan dashboardReadPlan) renderedSQL
 }
 
 // tables stores the physical table names used by a Store.
@@ -60,6 +61,8 @@ type tables struct {
 	//
 	// rollups 是降采样 rollup 表。
 	rollups    string
+	// dashboard mirrors 5-minute rollup rows for dashboard metrics only.
+	dashboard  string
 	watermarks string
 	state      string
 }

@@ -163,7 +163,12 @@ func (s *Store) seriesBatchAt(ctx context.Context, query BatchSeriesQuery, now t
 	s.rollupViewMu.RLock()
 	defer s.rollupViewMu.RUnlock()
 	for _, group := range orderedGroups {
-		if err := s.scanPersistedRollupGroup(ctx, query, group, seriesByID, accumulators); err != nil {
+		if s.dashboardGroupEligible(group, query.Start) {
+			_, err = s.scanDashboardRollupGroup(ctx, query, group, seriesByIdentity, accumulators)
+		} else {
+			_, err = s.scanPersistedRollupGroup(ctx, query, group, seriesByID, accumulators)
+		}
+		if err != nil {
 			return BatchSeriesResult{}, err
 		}
 		if err := s.scanMemoryRollupGroup(query, group, seriesByIdentity, accumulators); err != nil {
@@ -236,7 +241,7 @@ func (s *Store) loadSeriesDictionary(ctx context.Context, plan seriesDictionaryP
 	return byID, byIdentity, rows.Err()
 }
 
-func (s *Store) scanPersistedRollupGroup(ctx context.Context, query BatchSeriesQuery, group *batchSeriesGroup, seriesByID map[int64]*seriesReadMeta, accumulators map[string]*metricSeriesAccumulator) error {
+func (s *Store) scanPersistedRollupGroup(ctx context.Context, query BatchSeriesQuery, group *batchSeriesGroup, seriesByID map[int64]*seriesReadMeta, accumulators map[string]*metricSeriesAccumulator) (int, error) {
 	seriesIDs := make([]int64, 0)
 	for seriesID, meta := range seriesByID {
 		if _, ok := group.metricNames[meta.metricName]; ok {
@@ -244,14 +249,14 @@ func (s *Store) scanPersistedRollupGroup(ctx context.Context, query BatchSeriesQ
 		}
 	}
 	if len(seriesIDs) == 0 {
-		return nil
+		return 0, nil
 	}
 	sort.Slice(seriesIDs, func(i, j int) bool { return seriesIDs[i] < seriesIDs[j] })
 	resolutionID, found, err := s.resolveResolutionID(ctx, group.key.resolution)
 	if err != nil || !found {
-		return err
+		return 0, err
 	}
-	rendered := s.dialect.renderRollupRead(s.tables, s.cfg.TablePrefix+"rollups_resolution_bucket_idx", rollupReadPlan{
+	rendered := s.dialect.renderRollupRead(s.tables, RollupsSeriesResolutionBucketIndex(s.cfg.TablePrefix), rollupReadPlan{
 		SeriesIDs:    seriesIDs,
 		ResolutionID: resolutionID,
 		StartMilli:   bucketStartMillis(query.Start.UnixMilli(), group.key.resolution.Milliseconds()),
@@ -260,7 +265,7 @@ func (s *Store) scanPersistedRollupGroup(ctx context.Context, query BatchSeriesQ
 	})
 	rows, err := s.reader().QueryContext(ctx, rendered.Query, rendered.Args...)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer rows.Close()
 	var seriesID, bucket, count, firstTS, lastTS int64
@@ -288,21 +293,23 @@ func (s *Store) scanPersistedRollupGroup(ctx context.Context, query BatchSeriesQ
 	if group.fields&rollupReadDigest != 0 {
 		destinations = append(destinations, &digestBlob)
 	}
+	rowCount := 0
 	for rows.Next() {
 		err = rows.Scan(destinations...)
 		if err != nil {
-			return err
+			return rowCount, err
 		}
 		meta := seriesByID[seriesID]
 		accumulator := accumulators[meta.metricName]
 		state := accumulator.consume(meta, bucket, count, sum, sumSq, min, max, firstVal, firstTS, lastVal, lastTS, nil)
-		if accumulator.needDigest {
+		if group.fields&rollupReadDigest != 0 && accumulator.needDigest {
 			if err := mergeEncodedRollupDigest(state.summary.digest, count, min, max, digestBlob); err != nil {
-				return err
+				return rowCount, err
 			}
 		}
+		rowCount++
 	}
-	return rows.Err()
+	return rowCount, rows.Err()
 }
 
 func rollupFieldsForAggregations(aggregations []Aggregation) rollupReadFields {

@@ -122,8 +122,26 @@ func InitializeStore() error {
 	storeMu.Unlock()
 	clearStoreClosing()
 
+	// Full-window mirror reconcile must not run under the 30s Open timeout or
+	// the HTTP listener never binds (502 while the process looks "active").
+	go reconcileDashboardMirror(s)
+
 	logger.Infof("metricstore", "Metric store initialized successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
 	return nil
+}
+
+func reconcileDashboardMirror(s *metric.Store) {
+	if s == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	started := time.Now()
+	if err := s.ReconcileDashboardBuckets(ctx); err != nil {
+		logger.Errorf("metricstore", "Dashboard mirror reconcile failed after %s: %v", time.Since(started).Round(time.Millisecond), err)
+		return
+	}
+	logger.Infof("metricstore", "Dashboard mirror ready (covered_from=%s, took %s)", s.DashboardCoveredFrom().Format(time.RFC3339), time.Since(started).Round(time.Millisecond))
 }
 
 // RecoverStore opens, persists, and activates a replacement store selected
@@ -190,6 +208,7 @@ func RecoverStore(ctx context.Context, cfg *MetricStoreConfig) error {
 			logger.Errorf("metricstore", "Failed to close previous metric store during recovery: %v", closeErr)
 		}
 	}
+	go reconcileDashboardMirror(s)
 	logger.Infof("metricstore", "Metric store recovered successfully (driver=%s)", recovered.Driver)
 	return nil
 }
@@ -252,6 +271,7 @@ func Reload(ctx context.Context) error {
 		}
 	}
 
+	go reconcileDashboardMirror(s)
 	logger.Infof("metricstore", "Metric store reloaded successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
 	return nil
 }

@@ -72,6 +72,19 @@ func (s *Store) normalizedSchemaStatements() []string {
 			upper_rowid BIGINT NOT NULL, cursor_rowid BIGINT NOT NULL,
 			updated_at_milli BIGINT NOT NULL
 		)`, s.tables.state),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+			metric_name VARCHAR(191) NOT NULL, entity_id VARCHAR(191) NOT NULL,
+			tags_hash VARCHAR(64) NOT NULL, tags %s NOT NULL,
+			labels_hash VARCHAR(64) NOT NULL, labels %s NOT NULL,
+			bucket_milli BIGINT NOT NULL,
+			count BIGINT NOT NULL, sum DOUBLE PRECISION NOT NULL, sum_sq DOUBLE PRECISION NOT NULL,
+			min_val DOUBLE PRECISION NOT NULL, max_val DOUBLE PRECISION NOT NULL,
+			first_val DOUBLE PRECISION NOT NULL, first_ts_milli BIGINT NOT NULL,
+			last_val DOUBLE PRECISION NOT NULL, last_ts_milli BIGINT NOT NULL,
+			digest %s,
+			UNIQUE(metric_name, entity_id, tags_hash, labels_hash, bucket_milli),
+			FOREIGN KEY (metric_name) REFERENCES %s(name) ON DELETE CASCADE
+		)`, s.tables.dashboard, jsonType, jsonType, d.blobType(), s.tables.definitions),
 	}
 }
 
@@ -93,7 +106,18 @@ func normalizedIndexesFor(prefix string, tables tables) []normalizedIndex {
 	return []normalizedIndex{
 		{name: prefix + "series_metric_entity_idx", table: tables.series, columns: "metric_name, entity_id"},
 		{name: prefix + "rollups_resolution_bucket_idx", table: tables.rollups, columns: "resolution_id, bucket_milli"},
+		// Entity-scoped dashboard reads filter many series_ids in a time window;
+		// leading with series_id avoids scanning every rollup row at that resolution.
+		{name: prefix + "rollups_series_resolution_bucket_idx", table: tables.rollups, columns: "series_id, resolution_id, bucket_milli"},
+		{name: prefix + "dashboard_metric_bucket_idx", table: tables.dashboard, columns: "metric_name, entity_id, bucket_milli"},
+		{name: prefix + "dashboard_bucket_milli_idx", table: tables.dashboard, columns: "bucket_milli"},
 	}
+}
+
+// RollupsSeriesResolutionBucketIndex returns the rollup index used for
+// multi-series time-range queries.
+func RollupsSeriesResolutionBucketIndex(tablePrefix string) string {
+	return tablePrefix + "rollups_series_resolution_bucket_idx"
 }
 
 func (s *Store) createNormalizedIndexes(ctx context.Context) error {

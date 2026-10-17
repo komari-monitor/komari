@@ -468,6 +468,9 @@ func (s *Store) Restructure(ctx context.Context, report func(RestructureProgress
 	if err := s.replaceLegacyTables(ctx, shadow); err != nil {
 		return RestructureResult{}, err
 	}
+	if err := s.ensureDashboardBuckets(ctx); err != nil {
+		return RestructureResult{}, err
+	}
 	if err := s.validateNormalizedRestructure(ctx, len(definitions)); err != nil {
 		return RestructureResult{}, fmt.Errorf("validate rebuilt schema after switch: %w", err)
 	}
@@ -533,6 +536,9 @@ func (s *Store) rebuildNormalizedSchema(ctx context.Context, report func(Restruc
 		report(progress)
 	}
 	if err := s.replaceLegacyTables(ctx, shadow); err != nil {
+		return RestructureResult{}, err
+	}
+	if err := s.ensureDashboardBuckets(ctx); err != nil {
 		return RestructureResult{}, err
 	}
 	if err := s.validateNormalizedRestructure(ctx, len(definitions)); err != nil {
@@ -704,6 +710,9 @@ func (s *Store) DiscardHistory(ctx context.Context, report func(RestructureProgr
 		report(RestructureProgress{Phase: "switching", RowsDone: rowsTotal, RowsTotal: rowsTotal, MetricsDone: len(definitions), MetricsTotal: len(definitions)})
 	}
 	if err := s.replaceLegacyTables(ctx, shadow); err != nil {
+		return RestructureResult{}, err
+	}
+	if err := s.ensureDashboardBuckets(ctx); err != nil {
 		return RestructureResult{}, err
 	}
 	if err := s.validateNormalizedRestructure(ctx, len(definitions)); err != nil {
