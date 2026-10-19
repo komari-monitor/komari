@@ -1,10 +1,11 @@
 package metric
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -445,17 +446,17 @@ func (s *Store) deleteRollupsForMetricTx(ctx context.Context, metricName string,
 }
 
 func sortRollupKeys(keys []rollupKey) {
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].bucket != keys[j].bucket {
-			return keys[i].bucket < keys[j].bucket
+	slices.SortFunc(keys, func(a, b rollupKey) int {
+		if c := cmp.Compare(a.bucket, b.bucket); c != 0 {
+			return c
 		}
-		if keys[i].entityID != keys[j].entityID {
-			return keys[i].entityID < keys[j].entityID
+		if c := cmp.Compare(a.entityID, b.entityID); c != 0 {
+			return c
 		}
-		if keys[i].tagsHash != keys[j].tagsHash {
-			return keys[i].tagsHash < keys[j].tagsHash
+		if c := cmp.Compare(a.tagsHash, b.tagsHash); c != 0 {
+			return c
 		}
-		return keys[i].labelsHash < keys[j].labelsHash
+		return cmp.Compare(a.labelsHash, b.labelsHash)
 	})
 }
 

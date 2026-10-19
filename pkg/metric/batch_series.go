@@ -1,10 +1,11 @@
 package metric
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 )
@@ -41,7 +42,7 @@ type rollupRateSample struct {
 }
 
 type rollupAggregateState struct {
-	summary     *rollupBucket
+	summary     *queryRollupSummary
 	rateSamples []rollupRateSample
 	tags        map[string]string
 }
@@ -54,6 +55,7 @@ type metricSeriesAccumulator struct {
 	needRate    bool
 	groups      map[rollupKey]*rollupAggregateState
 	rateGroups  map[rollupKey]*rollupAggregateState
+	states      *queryStateArena
 }
 
 // SeriesBatch is the single rollup query implementation. It resolves metric
@@ -94,12 +96,14 @@ func (s *Store) seriesBatchAt(ctx context.Context, query BatchSeriesQuery, now t
 		Definitions: definitions,
 		Values:      make(map[string]map[Aggregation][]AggregatePoint, len(query.Specs)),
 	}
+	var states queryStateArena
+	defer states.release() // Includes SQL, decoding, cancellation and output errors.
 	accumulators := make(map[string]*metricSeriesAccumulator, len(query.Specs))
 	groups := make(map[batchSeriesGroupKey]*batchSeriesGroup)
 	for _, spec := range query.Specs {
 		values := make(map[Aggregation][]AggregatePoint, len(spec.Aggregations))
 		accumulator := &metricSeriesAccumulator{
-			spec: spec, compression: s.cfg.RollupPolicy.compression(),
+			spec: spec, compression: s.cfg.RollupPolicy.compression(), states: &states,
 			groups: make(map[rollupKey]*rollupAggregateState), rateGroups: make(map[rollupKey]*rollupAggregateState),
 		}
 		for _, aggregation := range spec.Aggregations {
@@ -153,11 +157,17 @@ func (s *Store) seriesBatchAt(ctx context.Context, query BatchSeriesQuery, now t
 	for _, group := range groups {
 		orderedGroups = append(orderedGroups, group)
 	}
-	sort.Slice(orderedGroups, func(i, j int) bool {
-		if orderedGroups[i].key.resolution != orderedGroups[j].key.resolution {
-			return orderedGroups[i].key.resolution < orderedGroups[j].key.resolution
+	slices.SortFunc(orderedGroups, func(a, b *batchSeriesGroup) int {
+		if c := cmp.Compare(a.key.resolution, b.key.resolution); c != 0 {
+			return c
 		}
-		return !orderedGroups[i].key.needDigest && orderedGroups[j].key.needDigest
+		if a.key.needDigest == b.key.needDigest {
+			return 0
+		}
+		if a.key.needDigest {
+			return 1
+		}
+		return -1
 	})
 
 	s.rollupViewMu.RLock()
@@ -246,7 +256,7 @@ func (s *Store) scanPersistedRollupGroup(ctx context.Context, query BatchSeriesQ
 	if len(seriesIDs) == 0 {
 		return nil
 	}
-	sort.Slice(seriesIDs, func(i, j int) bool { return seriesIDs[i] < seriesIDs[j] })
+	slices.Sort(seriesIDs)
 	resolutionID, found, err := s.resolveResolutionID(ctx, group.key.resolution)
 	if err != nil || !found {
 		return err
@@ -456,13 +466,13 @@ func (a *metricSeriesAccumulator) consume(meta *seriesReadMeta, sourceBucket, co
 	if a.needSummary {
 		state := a.groups[key]
 		if state == nil {
-			state = &rollupAggregateState{summary: newRollupBucketWithDigest(a.compression, a.needDigest)}
+			state = a.states.acquire(a.compression, true, a.needDigest)
 			if a.spec.PreserveSeries {
 				state.tags = meta.tags
 			}
 			a.groups[key] = state
 		}
-		mergeRollupValues(state.summary, count, sum, sumSq, min, max, firstVal, firstTS, lastVal, lastTS, digest, a.needDigest)
+		state.summary.merge(count, sum, sumSq, min, max, firstVal, firstTS, lastVal, lastTS, digest, a.needDigest)
 		if !a.needRate {
 			return state
 		}
@@ -475,6 +485,8 @@ func (a *metricSeriesAccumulator) consume(meta *seriesReadMeta, sourceBucket, co
 		}
 		state := a.rateGroups[rateKey]
 		if state == nil {
+			// Rate-only state is smaller than a summary slot; do not reserve an
+			// unused summary/digest for every rate output bucket.
 			state = &rollupAggregateState{tags: meta.tags}
 			a.rateGroups[rateKey] = state
 		}
@@ -547,7 +559,7 @@ func (a *metricSeriesAccumulator) points(order Order) (map[Aggregation][]Aggrega
 		rateKeys = make([]rollupKey, 0, len(a.rateGroups))
 		for key, state := range a.rateGroups {
 			rateKeys = append(rateKeys, key)
-			sort.SliceStable(state.rateSamples, func(i, j int) bool { return state.rateSamples[i].timestamp < state.rateSamples[j].timestamp })
+			slices.SortStableFunc(state.rateSamples, func(a, b rollupRateSample) int { return cmp.Compare(a.timestamp, b.timestamp) })
 		}
 		sortRollupKeys(rateKeys)
 	}

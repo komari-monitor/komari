@@ -1,10 +1,11 @@
 package metric
 
 import (
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"math"
-	"sort"
+	"slices"
 )
 
 // TDigest is a mergeable sketch for estimating arbitrary quantiles of a stream
@@ -193,9 +194,7 @@ func (t *TDigest) process() {
 		t.processed = true
 		return
 	}
-	sort.Slice(t.centroids, func(i, j int) bool {
-		return t.centroids[i].mean < t.centroids[j].mean
-	})
+	slices.SortFunc(t.centroids, func(a, b centroid) int { return cmp.Compare(a.mean, b.mean) })
 	total := t.count
 	merged := t.centroids[:0]
 	cur := t.centroids[0]
