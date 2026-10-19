@@ -62,6 +62,7 @@ func writePingRecords(ctx context.Context, records []models.PingRecord) error {
 	return s.WriteBatch(ctx, points)
 }
 
+// GetPingRecords returns legacy-shaped ping records, newest first.
 func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, end time.Time) ([]models.PingRecord, error) {
 	s := GetStore()
 	if s == nil {
@@ -83,7 +84,7 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 		query.Tags = map[string]string{"task_id": fmt.Sprintf("%d", taskID)}
 	}
 
-	interval := pingQueryInterval(end.Sub(start), 4000)
+	interval := downsampleInterval(end.Sub(start), 4000)
 	interval = s.CompatibleSeriesInterval(start, time.Now().UTC(), interval)
 	points, err := s.Series(ctx, metric.AggregateQuery{
 		Query:          query,
@@ -116,18 +117,4 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 	})
 
 	return records, nil
-}
-
-func pingQueryInterval(rangeDuration time.Duration, maxPoints int) time.Duration {
-	if maxPoints <= 0 {
-		maxPoints = 4000
-	}
-	if rangeDuration <= 0 {
-		return time.Second
-	}
-	interval := time.Duration((rangeDuration.Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints))
-	if interval < time.Second {
-		return time.Second
-	}
-	return metric.FloorStandardInterval(interval)
 }

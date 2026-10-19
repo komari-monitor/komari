@@ -73,7 +73,15 @@ func canonicalTags(m map[string]string) (string, error) {
 // tags_hash key 列。相同标签 map（无论 Go map 迭代顺序如何）都会得到相同 hash，
 // 因此每种不同标签组合都会成为自己的 rollup 序列；空或 nil 标签 map 会得到 "{}"
 // 的指纹。
+const (
+	emptyTagsHash = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+	emptyTagsJSON = "{}"
+)
+
 func tagsFingerprint(m map[string]string) (hash string, canonical string, err error) {
+	if len(m) == 0 {
+		return emptyTagsHash, emptyTagsJSON, nil
+	}
 	canonical, err = canonicalTags(m)
 	if err != nil {
 		return "", "", err

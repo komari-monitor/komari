@@ -365,6 +365,7 @@ func (s *Store) NeedsRestructure(ctx context.Context) (bool, error) {
 // tables. It is intentionally explicit and intended for the
 // authenticated upgrade guide; normal startup never mutates an existing schema.
 func (s *Store) Restructure(ctx context.Context, report func(RestructureProgress)) (RestructureResult, error) {
+	defer s.invalidateDefinitionCache()
 	if err := s.ensureOpen(); err != nil {
 		return RestructureResult{}, err
 	}
@@ -641,6 +642,7 @@ func (s *Store) copyNormalizedRollups(ctx context.Context, shadow *Store, defini
 // the normalized schema as part of the operation; already-normalized stores are
 // cleared in place. Metric definitions and retention settings are preserved.
 func (s *Store) DiscardHistory(ctx context.Context, report func(RestructureProgress)) (RestructureResult, error) {
+	defer s.invalidateDefinitionCache()
 	if err := s.ensureOpen(); err != nil {
 		return RestructureResult{}, err
 	}

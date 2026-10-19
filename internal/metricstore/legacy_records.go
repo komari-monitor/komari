@@ -64,20 +64,29 @@ func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, c
 	interval := recordSeriesInterval(s, start, end, now)
 	recordMap := make(map[recordSeriesKey]*models.Record)
 
+	specs := make([]metric.BatchSeriesSpec, 0, len(loadRecordMetricNames))
 	for _, metricName := range loadRecordMetricNames {
-		points, err := s.Series(ctx, metric.AggregateQuery{
-			Query: metric.Query{
-				MetricName: metricName,
-				EntityID:   clientUUID,
-				Start:      start,
-				End:        end,
-				Order:      metric.OrderAsc,
-			},
-			Aggregation: recordMetricAggregation(metricName),
-			Interval:    interval,
-		}, now)
-		if err != nil {
-			return nil, fmt.Errorf("failed to query metric %s: %w", metricName, err)
+		specs = append(specs, metric.BatchSeriesSpec{
+			MetricName:   metricName,
+			Aggregations: []metric.Aggregation{recordMetricAggregation(metricName)},
+			Interval:     interval,
+		})
+	}
+	loaded, err := s.SeriesBatch(ctx, metric.BatchSeriesQuery{
+		Specs:     specs,
+		EntityIDs: []string{clientUUID},
+		Start:     start,
+		End:       end,
+		Order:     metric.OrderAsc,
+	}, now)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query metrics: %w", err)
+	}
+	for metricName, aggMap := range loaded.Values {
+		agg := recordMetricAggregation(metricName)
+		points, ok := aggMap[agg]
+		if !ok {
+			continue
 		}
 		for _, point := range points {
 			entityID := point.EntityID
@@ -150,19 +159,15 @@ func recordMetricAggregation(metricName string) metric.Aggregation {
 }
 
 func recordSeriesInterval(s *metric.Store, start, end, now time.Time) time.Duration {
-	interval := recordDownsampleInterval(end.Sub(start), 500)
+	interval := downsampleInterval(end.Sub(start), 500)
 	return s.CompatibleSeriesInterval(start, now, interval)
 }
 
-func recordDownsampleInterval(rangeDuration time.Duration, maxPoints int) time.Duration {
-	if maxPoints <= 0 {
-		maxPoints = 500
-	}
-	nanos := rangeDuration.Nanoseconds()
-	if nanos <= 0 {
-		return time.Second
-	}
-	interval := time.Duration((nanos + int64(maxPoints) - 1) / int64(maxPoints))
+// downsampleInterval returns the standard interval that keeps rangeDuration
+// within about maxPoints buckets, never finer than one second.
+func downsampleInterval(rangeDuration time.Duration, maxPoints int) time.Duration {
+	points := time.Duration(maxPoints)
+	interval := (rangeDuration + points - 1) / points
 	if interval < time.Second {
 		return time.Second
 	}
@@ -307,7 +312,3 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 
 	return records, nil
 }
-
-// GetPingRecords 从 metric store 查询兼容旧接口的 ping 记录。
-//
-// 旧接口过去直接读取 ping_records。这里使用与 queryMetrics 相同的 Series

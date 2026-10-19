@@ -3,6 +3,7 @@ package metric
 import (
 	"context"
 	"database/sql"
+	"math"
 	"sort"
 	"time"
 )
@@ -95,6 +96,7 @@ func (s *Store) addCoarseChildren(metricName string, interval time.Duration, hig
 				children: make(map[rollupKey]*rollupBucket),
 			}
 			s.coarse[parentKey] = parent
+			s.noteCoarseCloseLocked(parentKey)
 		}
 		parent.children[childKey] = child.clone(true)
 	}
@@ -168,9 +170,15 @@ func (s *Store) filterClosedCoarseRollups(ctx context.Context, closed []closedCo
 func (s *Store) takeClosedCoarseRollups(now time.Time) []closedCoarseRollup {
 	s.coarseMu.Lock()
 	defer s.coarseMu.Unlock()
+	nowMilli := now.UnixMilli()
+	if s.coarseNextClose > nowMilli {
+		return nil
+	}
 	var interval time.Duration
+	nextClose := int64(math.MaxInt64)
 	for key := range s.coarse {
-		if key.bucket+key.interval.Milliseconds()+coarseRollupGrace.Milliseconds() > now.UnixMilli() {
+		if closeAt := coarseCloseAt(key); closeAt > nowMilli {
+			nextClose = min(nextClose, closeAt)
 			continue
 		}
 		if interval == 0 || key.interval < interval {
@@ -178,11 +186,14 @@ func (s *Store) takeClosedCoarseRollups(now time.Time) []closedCoarseRollup {
 		}
 	}
 	if interval == 0 {
+		s.coarseNextClose = nextClose
 		return nil
 	}
+	// coarseNextClose stays <= now: closable parents of coarser tiers remain
+	// and the caller takes them on its next pass.
 	closed := make([]closedCoarseRollup, 0)
 	for key, parent := range s.coarse {
-		if key.interval != interval || key.bucket+key.interval.Milliseconds()+coarseRollupGrace.Milliseconds() > now.UnixMilli() {
+		if key.interval != interval || coarseCloseAt(key) > nowMilli {
 			continue
 		}
 		bucket := newRollupBucket(s.cfg.RollupPolicy.compression())
@@ -206,6 +217,19 @@ func (s *Store) takeClosedCoarseRollups(now time.Time) []closedCoarseRollup {
 	return closed
 }
 
+// coarseCloseAt is when a parent leaves its late-arrival window.
+func coarseCloseAt(key coarseRollupKey) int64 {
+	return key.bucket + key.interval.Milliseconds() + coarseRollupGrace.Milliseconds()
+}
+
+// noteCoarseCloseLocked keeps coarseNextClose a lower bound after inserting
+// a parent. The caller must hold coarseMu.
+func (s *Store) noteCoarseCloseLocked(key coarseRollupKey) {
+	if closeAt := coarseCloseAt(key); closeAt < s.coarseNextClose {
+		s.coarseNextClose = closeAt
+	}
+}
+
 func (s *Store) restoreClosedCoarseRollups(closed []closedCoarseRollup) {
 	s.coarseMu.Lock()
 	defer s.coarseMu.Unlock()
@@ -213,6 +237,7 @@ func (s *Store) restoreClosedCoarseRollups(closed []closedCoarseRollup) {
 		if _, exists := s.coarse[item.key]; exists {
 			continue
 		}
+		s.noteCoarseCloseLocked(item.key)
 		s.coarse[item.key] = &coarseRollup{
 			higher:   append([]time.Duration(nil), item.higher...),
 			children: item.children,

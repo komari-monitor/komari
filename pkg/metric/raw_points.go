@@ -167,18 +167,31 @@ func (s *Store) writeRawPointsAt(points []preparedMetricPoint, now time.Time) ma
 	dirtyLabels := make(map[*rawSeries]struct{})
 	s.rawMu.Lock()
 	defer s.rawMu.Unlock()
-	s.compressRawBeforeLocked("", directCutoff)
-	s.pruneRawBeforeLocked("", rawCutoff)
+	// Age only the series this batch touches, so a write costs O(points)
+	// rather than O(all series). Idle series are aged by trimRawWindow; raw
+	// readers clamp visibility by wall time, so that lag is not observable.
+	aged := make(map[*rawSeries]struct{})
 	for _, point := range points {
 		if point.timestamp < rawCutoff {
 			continue
 		}
 		key := rawSeriesKey{metricName: point.metricName, entityID: point.entityID, tagsHash: point.tagsHash}
 		series := s.raw[key]
+		if series != nil {
+			if _, ok := aged[series]; !ok {
+				compressRawSeries(series, directCutoff)
+				pruneRawSeries(series, rawCutoff)
+				if series.empty() {
+					delete(s.raw, key)
+					series = nil
+				}
+			}
+		}
 		if series == nil {
 			series = &rawSeries{tagsJSON: point.tagsJSON, labelIDs: make(map[string]uint32)}
 			s.raw[key] = series
 		}
+		aged[series] = struct{}{}
 		labelID, ok := series.labelIDs[point.labelsHash]
 		if !ok {
 			labelID = uint32(len(series.labelsJSON))
@@ -513,23 +526,31 @@ func (s *Store) pruneRawBeforeLocked(metricName string, beforeMilli int64) int64
 		if metricName != "" && key.metricName != metricName {
 			continue
 		}
-		compressedDeleted := pruneCompressedRawSamples(&series.compressed, beforeMilli)
-		deleted += int64(compressedDeleted)
-		directIndex := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= beforeMilli })
-		if directIndex > 0 {
-			deleted += int64(directIndex)
-			copy(series.samples, series.samples[directIndex:])
-			series.samples = series.samples[:len(series.samples)-directIndex]
-		}
-		if series.compressed.count == 0 && len(series.samples) == 0 {
+		deleted += pruneRawSeries(series, beforeMilli)
+		if series.empty() {
 			delete(s.raw, key)
-			continue
-		}
-		if compressedDeleted > 0 || directIndex > 0 {
-			compactRawLabels(series)
 		}
 	}
 	return deleted
+}
+
+func (s *rawSeries) empty() bool {
+	return s.compressed.count == 0 && len(s.samples) == 0
+}
+
+// pruneRawSeries drops samples older than beforeMilli and returns how many
+// were removed.
+func pruneRawSeries(series *rawSeries, beforeMilli int64) int64 {
+	compressedDeleted := pruneCompressedRawSamples(&series.compressed, beforeMilli)
+	directIndex := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= beforeMilli })
+	if directIndex > 0 {
+		copy(series.samples, series.samples[directIndex:])
+		series.samples = series.samples[:len(series.samples)-directIndex]
+	}
+	if (compressedDeleted > 0 || directIndex > 0) && !series.empty() {
+		compactRawLabels(series)
+	}
+	return int64(compressedDeleted + directIndex)
 }
 
 func pruneCompressedRawSamples(samples *compressedRawSamples, beforeMilli int64) int {
@@ -560,16 +581,22 @@ func (s *Store) compressRawBeforeLocked(metricName string, beforeMilli int64) {
 		if metricName != "" && key.metricName != metricName {
 			continue
 		}
-		index := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= beforeMilli })
-		if index == 0 {
-			continue
-		}
-		series.compressed.append(series.samples[:index])
-		copy(series.samples, series.samples[index:])
-		series.samples = series.samples[:len(series.samples)-index]
-		if len(series.samples) == 0 {
-			series.samples = nil
-		}
+		compressRawSeries(series, beforeMilli)
+	}
+}
+
+// compressRawSeries moves direct samples older than beforeMilli into the
+// compressed block.
+func compressRawSeries(series *rawSeries, beforeMilli int64) {
+	index := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= beforeMilli })
+	if index == 0 {
+		return
+	}
+	series.compressed.append(series.samples[:index])
+	copy(series.samples, series.samples[index:])
+	series.samples = series.samples[:len(series.samples)-index]
+	if len(series.samples) == 0 {
+		series.samples = nil
 	}
 }
 
