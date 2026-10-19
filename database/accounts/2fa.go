@@ -35,21 +35,11 @@ func Enable2Fa(uuid, secret string) error {
 func Verify2Fa(uuid, code string) (bool, error) {
 	db := dbcore.GetDBInstance()
 	var user models.User
-	err := db.Where("uuid = ?", uuid).First(&user).Error
-	if err != nil {
+	if err := db.Where("uuid = ?", uuid).First(&user).Error; err != nil {
 		return false, err
 	}
-
-	if user.TwoFactor == "" {
-		return false, nil // 用户未启用2FA
-	}
-
-	valid := totp.Validate(code, user.TwoFactor)
-	if !valid {
-		return false, nil
-	}
-
-	return true, nil
+	// 用户未启用2FA时视为校验失败
+	return user.TwoFactor != "" && totp.Validate(code, user.TwoFactor), nil
 }
 
 func Disable2Fa(uuid string) error {

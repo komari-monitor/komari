@@ -193,7 +193,7 @@ func registerScheduledWork() {
 	if err := scheduler.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
 		logger.ErrorArgs("server", "Failed to add traffic notification task:", err)
 	}
-	if err := scheduler.AddFunc("notifier:expire", "0 0 9 * * *", notifier.CheckExpireScheduledWork); err != nil {
+	if err := scheduler.AddFunc("notifier:expire", "0 0 9 * * *", notifier.CheckExpire); err != nil {
 		logger.ErrorArgs("server", "Failed to add expire notification task:", err)
 	}
 }

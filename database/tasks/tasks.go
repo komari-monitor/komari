@@ -9,7 +9,6 @@ import (
 
 func CreateTask(taskId string, clients []string, command string) error {
 	db := dbcore.GetDBInstance()
-	// Create a new task in the database with clients as JSON array
 	task := models.Task{
 		TaskId:  taskId,
 		Clients: models.StringArray(clients),
@@ -29,10 +28,10 @@ func CreateTask(taskId string, clients []string, command string) error {
 			CreatedAt:  time.Now().UTC(),
 		})
 	}
-	if len(taskResults) > 0 {
-		return db.Create(&taskResults).Error
+	if len(taskResults) == 0 {
+		return nil
 	}
-	return nil
+	return db.Create(&taskResults).Error
 }
 func GetTaskByTaskId(taskId string) (*models.Task, error) {
 	var task models.Task

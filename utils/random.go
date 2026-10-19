@@ -5,9 +5,6 @@ import (
 )
 
 func GenerateRandomString(length int) string {
-	if length <= 0 {
-		return ""
-	}
 	const charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 	const n = byte(len(charset))                       // 62
 	const threshold = byte(256 - (256 % len(charset))) // 248
@@ -15,9 +12,7 @@ func GenerateRandomString(length int) string {
 	out := make([]byte, 0, length)
 	buf := make([]byte, length)
 	for len(out) < length {
-		if _, err := rand.Read(buf); err != nil {
-			return ""
-		}
+		rand.Read(buf)
 		for _, b := range buf {
 			if b < threshold {
 				out = append(out, charset[int(b%n)])

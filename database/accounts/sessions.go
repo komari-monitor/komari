@@ -16,13 +16,10 @@ import (
 )
 
 // GetAllSessions 获取所有会话
-func GetAllSessions() (sessions []models.Session, err error) {
+func GetAllSessions() ([]models.Session, error) {
 	db := dbcore.GetDBInstance()
-	err = db.Find(&sessions).Error
-	if err != nil {
-		return nil, err
-	}
-	return sessions, nil
+	var sessions []models.Session
+	return sessions, db.Find(&sessions).Error
 }
 
 // CreateSession 创建新会话
@@ -57,19 +54,14 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 		}
 	}()
 
-	err := db.Create(&sessionRecord).Error
-	if err != nil {
-		return "", err
-	}
-	return session, nil
+	return session, db.Create(&sessionRecord).Error
 }
 
 // GetSession 根据会话 ID 获取 UUID
-func GetSession(session string) (uuid string, err error) {
+func GetSession(session string) (string, error) {
 	db := dbcore.GetDBInstance()
 	var sessionRecord models.Session
-	err = db.Where("session = ?", session).First(&sessionRecord).Error
-	if err != nil {
+	if err := db.Where("session = ?", session).First(&sessionRecord).Error; err != nil {
 		return "", err
 	}
 
@@ -83,32 +75,22 @@ func GetSession(session string) (uuid string, err error) {
 }
 
 func GetUserBySession(session string) (models.User, error) {
-	db := dbcore.GetDBInstance()
 	var sessionRecord models.Session
-	err := db.Where("session = ?", session).First(&sessionRecord).Error
-	if err != nil {
+	if err := dbcore.GetDBInstance().Where("session = ?", session).First(&sessionRecord).Error; err != nil {
 		return models.User{}, err
 	}
 	return GetUserByUUID(sessionRecord.UUID)
 }
 
 // DeleteSession 删除指定会话
-func DeleteSession(session string) (err error) {
+func DeleteSession(session string) error {
 	db := dbcore.GetDBInstance()
-	result := db.Where("session = ?", session).Delete(&models.Session{})
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
+	return db.Where("session = ?", session).Delete(&models.Session{}).Error
 }
 
 func DeleteAllSessions() error {
 	db := dbcore.GetDBInstance()
-	result := db.Where("1 = 1").Delete(&models.Session{})
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
+	return db.Where("1 = 1").Delete(&models.Session{}).Error
 }
 
 func UpdateLatest(session, useragent, ip string) error {
@@ -122,9 +104,5 @@ func UpdateLatest(session, useragent, ip string) error {
 
 func RemoveExpiredSessions() error {
 	db := dbcore.GetDBInstance()
-	result := db.Where("expires < ?", time.Now().UTC()).Delete(&models.Session{})
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
+	return db.Where("expires < ?", time.Now().UTC()).Delete(&models.Session{}).Error
 }

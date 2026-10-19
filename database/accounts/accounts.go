@@ -14,15 +14,12 @@ import (
 
 const constantSalt = "06Wm4Jv1Hkxx"
 
-// CheckPassword 检查密码是否正确
-//
-// 如果密码正确，返回用户的 UUID 和 true；否则返回空字符串和 false
-func CheckPassword(username, passwd string) (uuid string, success bool) {
+// CheckPassword 检查密码，正确时返回用户 UUID 和 true
+func CheckPassword(username, passwd string) (uuid string, ok bool) {
 	db := dbcore.GetDBInstance()
 	var user models.User
 	result := db.Where("username = ?", username).First(&user)
 	if result.Error != nil {
-		// 静默处理错误，不显示日志
 		return "", false
 	}
 	if hashPasswd(passwd) != user.Passwd {
@@ -32,7 +29,7 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 }
 
 // ForceResetPassword 强制重置用户密码
-func ForceResetPassword(username, passwd string) (err error) {
+func ForceResetPassword(username, passwd string) error {
 	db := dbcore.GetDBInstance()
 	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashPasswd(passwd))
 	if result.Error != nil {
@@ -46,82 +43,54 @@ func ForceResetPassword(username, passwd string) (err error) {
 
 // hashPasswd 对密码进行加盐哈希
 func hashPasswd(passwd string) string {
-	saltedPassword := passwd + constantSalt
-	hash := sha256.New()
-	hash.Write([]byte(saltedPassword))
-	hashedPassword := base64.StdEncoding.EncodeToString(hash.Sum(nil))
-	return hashedPassword
+	h := sha256.Sum256([]byte(passwd + constantSalt))
+	return base64.StdEncoding.EncodeToString(h[:])
 }
 
 func CreateAccount(username, passwd string) (user models.User, err error) {
 	return CreateAccountWithDB(dbcore.GetDBInstance(), username, passwd)
 }
 
-func CreateAccountWithDB(db *gorm.DB, username, passwd string) (user models.User, err error) {
-	hashedPassword := hashPasswd(passwd)
-	user = models.User{
+func CreateAccountWithDB(db *gorm.DB, username, passwd string) (models.User, error) {
+	user := models.User{
 		UUID:     uuid.New().String(),
 		Username: username,
-		Passwd:   hashedPassword,
+		Passwd:   hashPasswd(passwd),
 	}
-	err = db.Create(&user).Error
-	if err != nil {
-		return models.User{}, err
-	}
-	return user, nil
+	return user, db.Create(&user).Error
 }
 
 func DeleteAccountByUsername(username string) (err error) {
 	return DeleteAccountByUsernameWithDB(dbcore.GetDBInstance(), username)
 }
 
-func DeleteAccountByUsernameWithDB(db *gorm.DB, username string) (err error) {
-	err = db.Where("username = ?", username).Delete(&models.User{}).Error
-	if err != nil {
-		return err
-	}
-	return nil
+func DeleteAccountByUsernameWithDB(db *gorm.DB, username string) error {
+	return db.Where("username = ?", username).Delete(&models.User{}).Error
 }
 
-func GetUserByUUID(uuid string) (user models.User, err error) {
+func GetUserByUUID(uuid string) (models.User, error) {
+	var user models.User
+	return user, dbcore.GetDBInstance().Where("uuid = ?", uuid).First(&user).Error
+}
+
+// GetUserBySSO 通过 SSO 信息获取用户
+func GetUserBySSO(ssoID string) (models.User, error) {
 	db := dbcore.GetDBInstance()
-	err = db.Where("uuid = ?", uuid).First(&user).Error
-	if err != nil {
-		return models.User{}, err
+	var user models.User
+	if err := db.Where("sso_id = ?", ssoID).First(&user).Error; err != nil {
+		return models.User{}, fmt.Errorf("用户不存在：%s", ssoID)
 	}
 	return user, nil
 }
 
-// 通过 SSO 信息获取用户
-func GetUserBySSO(ssoID string) (user models.User, err error) {
-	db := dbcore.GetDBInstance()
-
-	// 首先尝试查找已存在的用户
-	err = db.Where("sso_id = ?", ssoID).First(&user).Error
-	if err == nil {
-		return user, nil
-	}
-
-	// 如果找不到用户，返回明确的错误信息
-	return models.User{}, fmt.Errorf("用户不存在：%s", ssoID)
-}
-
 func BindingExternalAccount(uuid string, sso_id string) error {
 	db := dbcore.GetDBInstance()
-	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("sso_id", sso_id).Error
-	if err != nil {
-		return err
-	}
-	return nil
+	return db.Model(&models.User{}).Where("uuid = ?", uuid).Update("sso_id", sso_id).Error
 }
 
 func UnbindExternalAccount(uuid string) error {
 	db := dbcore.GetDBInstance()
-	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("sso_id", "").Error
-	if err != nil {
-		return err
-	}
-	return nil
+	return db.Model(&models.User{}).Where("uuid = ?", uuid).Update("sso_id", "").Error
 }
 
 func UpdateUser(uuid string, name, password, sso_type *string) error {
@@ -143,8 +112,7 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 		updates["sso_type"] = *sso_type
 	}
 	updates["updated_at"] = time.Now().UTC()
-	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Updates(updates).Error
-	if err != nil {
+	if err := db.Model(&models.User{}).Where("uuid = ?", uuid).Updates(updates).Error; err != nil {
 		return err
 	}
 	if password != nil {

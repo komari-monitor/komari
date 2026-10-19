@@ -75,9 +75,6 @@ func (s *State) saveLocked() {
 	file := struct {
 		Plugins map[string]PluginState `json:"plugins"`
 	}{Plugins: s.current}
-	data, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		return
-	}
+	data, _ := json.MarshalIndent(file, "", "  ")
 	_ = os.WriteFile(s.path, data, 0644)
 }

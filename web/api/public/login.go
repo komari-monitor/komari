@@ -1,8 +1,6 @@
 package public
 
 import (
-	"encoding/json"
-	"io"
 	"net/http"
 
 	"github.com/komari-monitor/komari/database/accounts"
@@ -41,14 +39,8 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
-		return
-	}
 	var data LoginRequest
-	err = json.Unmarshal(bodyBytes, &data)
-	if err != nil {
+	if err := c.ShouldBindJSON(&data); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
 		return
 	}

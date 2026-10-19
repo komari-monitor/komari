@@ -414,9 +414,6 @@ func pathWithinBaseDir(baseDir, path string) bool {
 // Close stops the event loop and cancels its pending timers. A closed runtime
 // cannot be called again.
 func (r *Runtime) Close() {
-	if r == nil {
-		return
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -443,9 +440,6 @@ func (r *Runtime) closeHostResources() {
 // HasFunction reports whether name resolves to a callable JavaScript
 // function.
 func (r *Runtime) HasFunction(name string) bool {
-	if r == nil {
-		return false
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -481,10 +475,6 @@ func (r *Runtime) CallVoid(name string, args ...any) error {
 }
 
 func (r *Runtime) call(name string, requireTruthy bool, args ...any) error {
-	if r == nil {
-		return errors.New("JavaScript runtime is nil")
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {

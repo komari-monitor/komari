@@ -8,6 +8,7 @@ package api
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -31,7 +32,7 @@ func IdentifyPrincipal(c *gin.Context) *rpc.Principal {
 
 	// 3. Client Token(agent 客户端)
 	if token := extractClientToken(c); token != "" {
-		if uuid, err := checkTokenAndGetUUID(token); err == nil && uuid != "" {
+		if uuid, err := clients.GetClientUUIDByToken(token); err == nil {
 			return rpc.NewAgentPrincipal(uuid)
 		}
 	}
@@ -47,10 +48,7 @@ func SetPrincipal(c *gin.Context, p *rpc.Principal) {
 
 // GetPrincipal 读取已识别的主体;若中间件未运行则返回 nil。
 func GetPrincipal(c *gin.Context) *rpc.Principal {
-	if v, ok := c.Get(principalContextKey); ok {
-		if p, ok := v.(*rpc.Principal); ok {
-			return p
-		}
-	}
-	return nil
+	p, _ := c.Get(principalContextKey)
+	principal, _ := p.(*rpc.Principal)
+	return principal
 }

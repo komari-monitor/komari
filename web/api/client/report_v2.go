@@ -247,13 +247,9 @@ func clientUUIDFromContext(c *gin.Context) (string, bool) {
 }
 
 func notifierOnline(uuid string, connID int64) {
-	go func() {
-		defer func() { _ = recover() }()
-		notifier.OnlineNotification(uuid, connID)
-	}()
+	go notifier.OnlineNotification(uuid, connID)
 }
 
 func notifierOffline(uuid string, connID int64) {
-	defer func() { _ = recover() }()
 	notifier.OfflineNotification(uuid, connID)
 }

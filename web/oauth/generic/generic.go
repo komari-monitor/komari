@@ -24,7 +24,7 @@ func (g *Generic) GetConfiguration() factory.Configuration {
 func (g *Generic) GetAuthorizationURL(redirectURI string) (string, string) {
 	state := utils.GenerateRandomString(16)
 
-	// 构建GitHub OAuth授权URL
+	// 构建 OAuth 授权URL
 	authURL := fmt.Sprintf(
 		"%s?client_id=%s&state=%s&scope=%s&redirect_uri=%s&response_type=code",
 		g.Addition.AuthURL,
@@ -46,11 +46,7 @@ func (g *Generic) OnCallback(ctx *gin.Context, state string, query map[string]st
 	if _, ok := g.stateCache.Get(state); !ok {
 		return factory.OidcCallback{}, fmt.Errorf("invalid state")
 	}
-	if state == "" {
-		return factory.OidcCallback{}, fmt.Errorf("invalid state")
-	}
 
-	// 获取code
 	if code == "" {
 		return factory.OidcCallback{}, fmt.Errorf("no code provided")
 	}

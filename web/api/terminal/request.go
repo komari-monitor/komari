@@ -111,5 +111,4 @@ func RequestTerminal(c *gin.Context) {
 		return
 	}
 	conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent...\n"))
-	//auditlog.Log(c.ClientIP(), userID, "request, terminal id:"+id+",client:"+session.UUID, "terminal")
 }

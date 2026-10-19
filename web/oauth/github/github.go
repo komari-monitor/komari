@@ -13,10 +13,6 @@ import (
 	"github.com/patrickmn/go-cache"
 )
 
-func init() {
-
-}
-
 func (g *Github) GetName() string {
 	return "github"
 }
@@ -40,19 +36,13 @@ func (g *Github) OnCallback(ctx *gin.Context, state string, query map[string]str
 	code := query["code"]
 
 	// 验证state防止CSRF攻击
-	// state, _ := c.Cookie("oauth_state")
 	if g.stateCache == nil {
 		return factory.OidcCallback{}, fmt.Errorf("state cache not initialized")
 	}
 	if _, ok := g.stateCache.Get(state); !ok {
 		return factory.OidcCallback{}, fmt.Errorf("invalid state")
 	}
-	if state == "" {
-		return factory.OidcCallback{}, fmt.Errorf("invalid state")
-	}
 
-	// 获取code
-	//code := c.Query("code")
 	if code == "" {
 		return factory.OidcCallback{}, fmt.Errorf("no code provided")
 	}

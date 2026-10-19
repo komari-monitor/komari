@@ -53,13 +53,6 @@ func openStoreWithDefaultRetention(ctx context.Context, cfg *MetricStoreConfig, 
 	return s, nil
 }
 
-// OpenStore opens an isolated metric store using the supplied configuration.
-// It is used by the pre-start upgrade flow before the process-wide store is
-// initialized. The caller owns the returned store and must close it.
-// func OpenStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, error) {
-// 	return openStore(ctx, cfg)
-// }
-
 // OpenStoreForMigration opens an isolated target and uses the legacy data span
 // as the initial retention for definitions that do not exist yet. Existing
 // definitions keep their configured retention, including an explicit zero.
@@ -130,10 +123,6 @@ func InitializeStore() error {
 // from the restricted recovery page. It records that target as the current
 // manual-migration source, but does not copy data from the unavailable store.
 func RecoverStore(ctx context.Context, cfg *MetricStoreConfig) error {
-	if cfg == nil {
-		return fmt.Errorf("metric store recovery config is nil")
-	}
-
 	storeInitMu.Lock()
 	defer storeInitMu.Unlock()
 	if err := storeOperations.Acquire(ctx); err != nil {

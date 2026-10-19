@@ -9,19 +9,16 @@ import (
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 )
 
-func GetClientUUIDByToken(token string) (clientUUID string, err error) {
-	db := dbcore.GetDBInstance()
+func GetClientUUIDByToken(token string) (string, error) {
 	var client models.Client
-	err = db.Where("token = ?", token).First(&client).Error
-	if err != nil {
+	if err := dbcore.GetDBInstance().Where("token = ?", token).First(&client).Error; err != nil {
 		return "", err
 	}
 	return client.UUID, nil
 }
 
-// 检查数据防止异常数据导致数据库损坏
+// ReportVerify 检查上报数据，防止异常数据导致数据库损坏
 func ReportVerify(report v2.Report) error {
-	// 防止输入不合理范围
 	if report.CPU.Usage < 0 || report.CPU.Usage > 100 {
 		return fmt.Errorf("CPU.Usage must be between 0 and 100")
 	}
@@ -56,28 +53,24 @@ func ReportVerify(report v2.Report) error {
 	}
 
 	// [int64] 防止数据溢出
-	// Ram 验证
 	if err := checkInt64("Ram.Used", report.Ram.Used); err != nil {
 		return err
 	}
 	if err := checkInt64("Ram.Total", report.Ram.Total); err != nil {
 		return err
 	}
-	// Swap 验证
 	if err := checkInt64("Swap.Used", report.Swap.Used); err != nil {
 		return err
 	}
 	if err := checkInt64("Swap.Total", report.Swap.Total); err != nil {
 		return err
 	}
-	// Disk 验证
 	if err := checkInt64("Disk.Used", report.Disk.Used); err != nil {
 		return err
 	}
 	if err := checkInt64("Disk.Total", report.Disk.Total); err != nil {
 		return err
 	}
-	// Network 验证
 	if err := checkInt64("Network.Up", report.Network.Up); err != nil {
 		return err
 	}
@@ -90,7 +83,7 @@ func ReportVerify(report v2.Report) error {
 	if err := checkInt64("Network.TotalDown", report.Network.TotalDown); err != nil {
 		return err
 	}
-	// 拒绝所有负数Int
+	// 拒绝所有负数 Int
 	if report.Process < 0 {
 		return fmt.Errorf("Process must be non-negative: %d", report.Process)
 	}

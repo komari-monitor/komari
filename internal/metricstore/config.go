@@ -65,9 +65,6 @@ func targetFingerprint(cfg *MetricStoreConfig) string {
 // autoMigrate 控制是否在 Open 时自动建表：正式初始化/热加载时为 true，
 // 仅做连接测试时为 false（不写入 schema，避免对目标库产生副作用）。
 func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config, error) {
-	if cfg == nil {
-		return metric.Config{}, fmt.Errorf("metric store config is nil")
-	}
 	driver := ResolveDriverFromConfig(cfg.Driver, cfg.DSN)
 
 	tablePrefix := cfg.TablePrefix
@@ -131,10 +128,6 @@ func defaultRollupPolicy() metric.RollupPolicy {
 }
 
 func rollupPolicyFromConfig(cfg *MetricStoreConfig) (metric.RollupPolicy, error) {
-	if cfg == nil {
-		return metric.RollupPolicy{}, fmt.Errorf("metric store config is nil")
-	}
-
 	minuteRetention := cfg.RollupMinuteRetentionMinutes
 	fiveMinuteRetention := cfg.RollupFiveMinuteRetentionMinutes
 	hourRetention := cfg.RollupHourRetentionHours
