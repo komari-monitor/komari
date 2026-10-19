@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -84,6 +85,14 @@ type Store struct {
 	//
 	// closed 表示 Close 是否已经被调用。
 	closed bool
+	// dashboardReady is set only after ensureDashboardBuckets has reconciled
+	// the full retention window from rollups. A non-empty table alone is not
+	// enough: partial entity/time coverage must not hide rollup data.
+	dashboardReady atomic.Bool
+	// dashboardCoveredFromMilli is the earliest bucket milli the mirror is
+	// guaranteed to cover (retention backfill cutoff, advanced by cleanup).
+	// Queries that start earlier must read rollups.
+	dashboardCoveredFromMilli atomic.Int64
 }
 
 // Open initializes a Store from a Config.
@@ -117,6 +126,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 			resolutions: tableName(cfg.TablePrefix, "resolutions"),
 			labels:      tableName(cfg.TablePrefix, "label_sets"),
 			rollups:     tableName(cfg.TablePrefix, "rollups"),
+			dashboard:   tableName(cfg.TablePrefix, "dashboard_buckets"),
 			watermarks:  tableName(cfg.TablePrefix, "compaction_watermarks"),
 			state:       tableName(cfg.TablePrefix, "store_state"),
 		},
@@ -789,6 +799,9 @@ func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error
 	if err != nil {
 		return 0, err
 	}
+	if err := s.deleteDashboardForEntityTx(ctx, entityID, tx); err != nil {
+		return 0, err
+	}
 	rollups, err := res.RowsAffected()
 	if err != nil {
 		return 0, err
@@ -1317,10 +1330,24 @@ func (s *Store) CleanupExpired(ctx context.Context, now time.Time) (int64, error
 			return total, err
 		}
 		total += deleted
+		if key.interval == DashboardBucketInterval {
+			dashboardDeleted, err := s.deleteDashboardGroupTx(ctx, groups[key], key.beforeMilli, key.all, tx)
+			if err != nil {
+				return total, err
+			}
+			total += dashboardDeleted
+		}
+	}
+	dashboardCutoff := dashboardRetentionCutoffMilli(now)
+	if dashboardDeleted, err := s.cleanupDashboardBucketsBeforeTx(ctx, dashboardCutoff, tx); err != nil {
+		return total, err
+	} else {
+		total += dashboardDeleted
 	}
 	if err := tx.Commit(); err != nil {
 		return total, err
 	}
+	s.advanceDashboardCoverage(dashboardCutoff)
 
 	for _, name := range disabled {
 		raw, rawErr := s.deleteRawPoints(name, "", nil)
@@ -1352,7 +1379,14 @@ func (s *Store) deleteRollupsForMetricsTx(ctx context.Context, names []string, t
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := s.deleteDashboardForMetricsTx(ctx, names, tx); err != nil {
+		return rows, err
+	}
+	return rows, nil
 }
 
 func (s *Store) deleteRollupGroupTx(ctx context.Context, names []string, interval time.Duration, beforeMilli int64, all bool, tx *sql.Tx) (int64, error) {

@@ -213,11 +213,14 @@ func (s *Store) upsertRollupWithDictionaryTx(ctx context.Context, metricName str
 	if err != nil {
 		return err
 	}
-	return s.upsertNormalizedRollupRowsTx(ctx, []normalizedRollupRow{{
+	if err := s.upsertNormalizedRollupRowsTx(ctx, []normalizedRollupRow{{
 		seriesID: seriesID, resolutionID: resolutionID, labelID: labelID,
 		bucketMilli: key.bucket, count: bucket.count, sum: bucket.sum, sumSq: bucket.sumSq,
 		min: bucket.min, max: bucket.max, firstVal: bucket.firstVal, firstTSMilli: bucket.firstTS,
 		lastVal: bucket.lastVal, lastTSMilli: bucket.lastTS, digest: bucket.encodedDigest(),
 		createdAtMilli: timeMillis(time.Now()),
-	}}, tx)
+	}}, tx); err != nil {
+		return err
+	}
+	return s.mirrorRollupToDashboardTx(ctx, metricName, interval, key, bucket, tx)
 }

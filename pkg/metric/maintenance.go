@@ -345,7 +345,7 @@ func managedReclaimQuery(driver Driver, t tables) (string, error) {
 }
 
 func managedTableNames(t tables) []string {
-	return []string{t.definitions, t.series, t.labels, t.resolutions, t.rollups}
+	return []string{t.definitions, t.series, t.labels, t.resolutions, t.rollups, t.dashboard}
 }
 
 func quoteMaintenanceIdentifier(driver Driver, identifier string) string {

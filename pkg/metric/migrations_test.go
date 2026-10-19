@@ -22,6 +22,7 @@ func TestNormalizedSchemaDeclaresPortableForeignKeys(t *testing.T) {
 			ddl := strings.Join(s.normalizedSchemaStatements(), "\n")
 			for _, clause := range []string{
 				"FOREIGN KEY (metric_name) REFERENCES er_definitions(name) ON DELETE CASCADE",
+				"UNIQUE(metric_name, entity_id, tags_hash, labels_hash, bucket_milli)",
 				"FOREIGN KEY (series_id) REFERENCES er_series(id) ON DELETE CASCADE",
 				"FOREIGN KEY (resolution_id) REFERENCES er_resolutions(id) ON DELETE CASCADE",
 				"FOREIGN KEY (label_id) REFERENCES er_label_sets(id) ON DELETE CASCADE",
