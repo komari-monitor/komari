@@ -39,6 +39,7 @@ var (
 const (
 	reportBatchInterval     = 3 * time.Second
 	reportBatchQueueSize    = 512
+	pingBatchQueueSize      = 4096
 	pingBatchMaxRecords     = 512
 	reportBatchWriteTimeout = 10 * time.Second
 	// Longer gaps have no reliable per-bucket traffic attribution.
@@ -81,7 +82,7 @@ func StartReportBatcher() {
 	}
 	worker := &reportBatchWorker{
 		queue:     make(chan v2.Report, reportBatchQueueSize),
-		pingQueue: make(chan models.PingRecord, reportBatchQueueSize),
+		pingQueue: make(chan models.PingRecord, pingBatchQueueSize),
 		requests:  make(chan reportBatchRequest, 1),
 		done:      make(chan struct{}),
 	}
@@ -213,7 +214,7 @@ func (w *reportBatchWorker) run() {
 		select {
 		case request := <-w.requests:
 			pending = append(pending, drainQueue(w.queue, reportBatchQueueSize)...)
-			pendingPings = append(pendingPings, drainQueue(w.pingQueue, reportBatchQueueSize)...)
+			pendingPings = append(pendingPings, drainQueue(w.pingQueue, pingBatchQueueSize)...)
 			err := errors.Join(
 				writePendingReports(request.ctx, &pending),
 				writePendingPingRecords(request.ctx, &pendingPings),
@@ -228,7 +229,7 @@ func (w *reportBatchWorker) run() {
 			}
 			request.done <- err
 		case <-ticker.C:
-			pendingPings = append(pendingPings, drainQueue(w.pingQueue, reportBatchQueueSize)...)
+			pendingPings = append(pendingPings, drainQueue(w.pingQueue, pingBatchQueueSize)...)
 			if err := writePendingPingRecords(context.Background(), &pendingPings); err != nil {
 				logger.Errorf("metricstore", "failed to flush ping batch: %v", err)
 			}
