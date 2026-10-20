@@ -71,11 +71,17 @@ type Store struct {
 	hotMu      sync.RWMutex
 	hot        map[hotRollupKey]*rollupBucket
 	hotReplace map[hotRollupKey]struct{}
+	// hotOldest is a lower bound on every hot key's bucket, letting a write
+	// skip the closed-bucket scan. Zero forces a scan that recomputes it.
+	hotOldest int64
 	// coarseMu protects in-memory parent buckets. Coarser tiers are only
 	// materialized once their source window has remained closed long enough for
 	// the raw late-arrival window to pass.
 	coarseMu sync.RWMutex
 	coarse   map[coarseRollupKey]*coarseRollup
+	// coarseNextClose is a lower bound on when any coarse parent can close.
+	// Zero forces a scan that recomputes it.
+	coarseNextClose int64
 	// mu protects closed state.
 	//
 	// mu 保护 closed 状态。
@@ -84,6 +90,50 @@ type Store struct {
 	//
 	// closed 表示 Close 是否已经被调用。
 	closed bool
+	// definitionCache memoizes retention days by metric name for the write
+	// path. Every definition change made through this Store invalidates it;
+	// definitionCacheTTL bounds staleness from changes made elsewhere.
+	definitionCacheMu  sync.Mutex
+	definitionCache    map[string]int
+	definitionCacheAt  time.Time
+	definitionCacheGen uint64
+}
+
+const definitionCacheTTL = time.Second
+
+func (s *Store) invalidateDefinitionCache() {
+	s.definitionCacheMu.Lock()
+	s.definitionCache = nil
+	s.definitionCacheGen++
+	s.definitionCacheMu.Unlock()
+}
+
+// metricRetentions returns retention days keyed by metric name. The returned
+// map is shared and must not be modified.
+func (s *Store) metricRetentions(ctx context.Context, reload bool) (map[string]int, error) {
+	s.definitionCacheMu.Lock()
+	cached, gen := s.definitionCache, s.definitionCacheGen
+	fresh := cached != nil && time.Since(s.definitionCacheAt) < definitionCacheTTL
+	s.definitionCacheMu.Unlock()
+	if fresh && !reload {
+		return cached, nil
+	}
+	defs, err := s.ListMetrics(ctx)
+	if err != nil {
+		return nil, err
+	}
+	retentions := make(map[string]int, len(defs))
+	for _, def := range defs {
+		retentions[def.Name] = def.RetentionDays
+	}
+	s.definitionCacheMu.Lock()
+	// A change committed while ListMetrics ran may not be visible in defs.
+	if s.definitionCacheGen == gen {
+		s.definitionCache = retentions
+		s.definitionCacheAt = time.Now()
+	}
+	s.definitionCacheMu.Unlock()
+	return retentions, nil
 }
 
 // Open initializes a Store from a Config.
@@ -426,6 +476,7 @@ func (s *Store) ExecContext(ctx context.Context, query string, args ...any) (sql
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
+	defer s.invalidateDefinitionCache()
 	return s.db.ExecContext(ctx, query, args...)
 }
 
@@ -455,6 +506,7 @@ func (s *Store) CreateMetric(ctx context.Context, def Definition) error {
 	if err := def.Validate(); err != nil {
 		return err
 	}
+	defer s.invalidateDefinitionCache()
 	// Fail fast on an existing name so CreateMetric has create-only semantics.
 	// The plain INSERT below still enforces this at the database via the
 	// primary-key/unique constraint, closing the check-then-insert race.
@@ -508,6 +560,7 @@ func (s *Store) UpsertMetric(ctx context.Context, def Definition) error {
 		s.retentionMu.Lock()
 		defer s.retentionMu.Unlock()
 	}
+	defer s.invalidateDefinitionCache()
 	metadata, err := encodeMap(def.Metadata)
 	if err != nil {
 		return err
@@ -592,6 +645,7 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	}
 	s.retentionMu.Lock()
 	defer s.retentionMu.Unlock()
+	defer s.invalidateDefinitionCache()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -630,6 +684,7 @@ func (s *Store) UpdateMetricRetention(ctx context.Context, name string, retentio
 
 	s.retentionMu.Lock()
 	defer s.retentionMu.Unlock()
+	defer s.invalidateDefinitionCache()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -676,6 +731,7 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 
 	s.retentionMu.Lock()
 	defer s.retentionMu.Unlock()
+	defer s.invalidateDefinitionCache()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -902,21 +958,27 @@ func (s *Store) WriteBatch(ctx context.Context, points []Point) error {
 // truth for a metric's retention and lifecycle, so accepting an unknown name
 // would create data that compaction and retention cleanup cannot manage.
 func (s *Store) filterDisabledMetricPoints(ctx context.Context, points []Point) ([]Point, error) {
-	defs, err := s.ListMetrics(ctx)
+	retentions, err := s.metricRetentions(ctx, false)
 	if err != nil {
 		return nil, err
 	}
-	definitions := make(map[string]Definition, len(defs))
-	for _, def := range defs {
-		definitions[def.Name] = def
+	// Re-read once before rejecting an unknown name: it may have been defined
+	// through another Store within the cache TTL.
+	for _, point := range points {
+		if _, ok := retentions[point.MetricName]; !ok {
+			if retentions, err = s.metricRetentions(ctx, true); err != nil {
+				return nil, err
+			}
+			break
+		}
 	}
 	filtered := make([]Point, 0, len(points))
 	for _, point := range points {
-		def, ok := definitions[point.MetricName]
+		retentionDays, ok := retentions[point.MetricName]
 		if !ok {
 			return nil, fmt.Errorf("%w: metric %q", ErrNotFound, point.MetricName)
 		}
-		if def.RetentionDays > 0 {
+		if retentionDays > 0 {
 			filtered = append(filtered, point)
 		}
 	}

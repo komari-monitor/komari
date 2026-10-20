@@ -26,18 +26,10 @@ func GetClients(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	// 初始化用户信息
-	var (
-		isLogin    = false
-		hiddenMap  = map[string]bool{}
-		session, _ = c.Cookie("session_token")
-	)
-
-	// 登录状态检查
+	session, _ := c.Cookie("session_token")
 	_, err = accounts.GetUserBySession(session)
-	if err == nil {
-		isLogin = true
-	}
+	isLogin := err == nil
+	hiddenMap := map[string]bool{}
 
 	// 仅在未登录时需要 Hidden 信息做过滤
 	if !isLogin {
@@ -51,13 +43,10 @@ func GetClients(c *gin.Context) {
 
 	// 请求
 	for {
-		var resp struct {
+		resp := struct {
 			Online []string             `json:"online"` // 已建立连接的客户端uuid列表
 			Data   map[string]v2.Report `json:"data"`   // 最后上报的数据
-		}
-
-		resp.Online = []string{}
-		resp.Data = map[string]v2.Report{}
+		}{Online: []string{}, Data: map[string]v2.Report{}}
 
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -102,8 +91,7 @@ func GetClients(c *gin.Context) {
 			resp.Data[key] = *report
 		}
 
-		err = conn.WriteJSON(gin.H{"status": "success", "data": resp})
-		if err != nil {
+		if err := conn.WriteJSON(gin.H{"status": "success", "data": resp}); err != nil {
 			return
 		}
 	}

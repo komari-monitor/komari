@@ -15,9 +15,8 @@ func getClientIPType(ip net.IP) int {
 	}
 	if ip.To4() == nil {
 		return 1
-	} else {
-		return 0
 	}
+	return 0
 }
 
 func saveClientBasicInfo(info map[string]interface{}, uuid string, fallbackIP string) error {

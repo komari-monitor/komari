@@ -17,14 +17,13 @@ func RequireSensitive2FA() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		// 标记本请求已通过敏感操作校验，避免下游（RPC 边界）重复校验。
+		// 标记已通过校验，避免 RPC 边界重复校验
 		c.Set("sensitive_2fa_verified", true)
 		c.Next()
 	}
 }
 
 // VerifySensitive2FACore 传输无关的 2FA 校验核心。
-// 输入原始值:userUUID、2FA code、是否为 API Key。
 // API Key 豁免;未启用 2FA 的用户放行;其余需要有效 code。
 func VerifySensitive2FACore(userUUID, code string, isAPIKey bool) error {
 	if isAPIKey {
@@ -53,7 +52,7 @@ func VerifySensitive2FACore(userUUID, code string, isAPIKey bool) error {
 	return nil
 }
 
-// VerifySensitive2FA gin 适配层:从 gin.Context 提取参数后委托核心校验。
+// VerifySensitive2FA gin 适配层，从 Context 提取参数后委托核心校验。
 func VerifySensitive2FA(c *gin.Context) error {
 	_, isAPIKey := c.Get("api_key")
 	uuidRaw, _ := c.Get("uuid")

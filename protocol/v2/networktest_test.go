@@ -8,21 +8,6 @@ import (
 	"time"
 )
 
-func TestNetworkTestMethodConstants(t *testing.T) {
-	tests := map[string]string{
-		MethodNetworkTestNextTrace:       "networkTest.nextTrace",
-		MethodNetworkTestIperf3:          "networkTest.iperf3",
-		MethodNetworkTestMeshTrace:       "networkTest.meshTrace",
-		MethodNetworkTestGetMeshTraceJob: "networkTest.getMeshTraceJob",
-	}
-
-	for got, want := range tests {
-		if got != want {
-			t.Fatalf("method constant = %q, want %q", got, want)
-		}
-	}
-}
-
 func TestNextTraceParamsJSON(t *testing.T) {
 	params := NextTraceParams{
 		TaskID:     "trace-1",

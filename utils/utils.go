@@ -31,17 +31,10 @@ func DataMasking(str string, private []string) string {
 		uniq[w] = struct{}{}
 		words = append(words, w)
 	}
-	if len(words) == 0 {
-		return str
-	}
-
 	// 逐词进行滑动窗口匹配 + 模糊匹配（Levenshtein 相似度）
 	for _, w := range words {
 		wRunes := []rune(w)
 		wl := len(wRunes)
-		if wl == 0 || wl > n {
-			continue
-		}
 
 		// 滑动窗口大小采用敏感词长度
 		for i := 0; i <= n-wl; i++ {
@@ -102,25 +95,12 @@ func similarity(a, b string) float64 {
 	ar := []rune(a)
 	br := []rune(b)
 	dist := levenshtein(ar, br)
-	maxLen := len(ar)
-	if len(br) > maxLen {
-		maxLen = len(br)
-	}
-	if maxLen == 0 {
-		return 1
-	}
-	return 1 - float64(dist)/float64(maxLen)
+	return 1 - float64(dist)/float64(max(len(ar), len(br)))
 }
 
 // levenshtein 计算两个 rune slice 的编辑距离
 func levenshtein(a, b []rune) int {
 	la, lb := len(a), len(b)
-	if la == 0 {
-		return lb
-	}
-	if lb == 0 {
-		return la
-	}
 	// 使用滚动数组降低空间复杂度
 	prev := make([]int, lb+1)
 	curr := make([]int, lb+1)
@@ -134,22 +114,9 @@ func levenshtein(a, b []rune) int {
 			if a[i-1] != b[j-1] {
 				cost = 1
 			}
-			del := prev[j] + 1
-			ins := curr[j-1] + 1
-			sub := prev[j-1] + cost
-			curr[j] = minInt(del, ins, sub)
+			curr[j] = min(prev[j]+1, curr[j-1]+1, prev[j-1]+cost)
 		}
 		prev, curr = curr, prev
 	}
 	return prev[lb]
-}
-
-func minInt(vals ...int) int {
-	m := vals[0]
-	for _, v := range vals[1:] {
-		if v < m {
-			m = v
-		}
-	}
-	return m
 }

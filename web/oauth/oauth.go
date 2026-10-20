@@ -54,8 +54,7 @@ func LoadProvider(name string, configJson string) error {
 	if err := json.Unmarshal([]byte(configJson), currentProvider.GetConfiguration()); err != nil {
 		return fmt.Errorf("failed to unmarshal config for provider %s: %w", name, err)
 	}
-	err := currentProvider.Init()
-	if err != nil {
+	if err := currentProvider.Init(); err != nil {
 		return fmt.Errorf("failed to initialize provider %s: %w", name, err)
 	}
 	return nil
@@ -96,8 +95,7 @@ func Initialize() error {
 		LoadProvider("github", "{}")
 		return nil
 	}
-	err = LoadProvider(provider.Name, provider.Addition)
-	if err != nil {
+	if err := LoadProvider(provider.Name, provider.Addition); err != nil {
 		logger.Errorf("oauth", "Failed to load OIDC provider %s: %v", provider.Name, err)
 		return err
 	}

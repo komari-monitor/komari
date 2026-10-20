@@ -2,6 +2,7 @@ package metric
 
 import (
 	"context"
+	"math"
 	"sort"
 	"time"
 )
@@ -44,6 +45,7 @@ func (s *Store) writePreparedHotRollups(ctx context.Context, prepared []prepared
 			bucket.tagsHash, bucket.tagsJSON = point.tagsHash, point.tagsJSON
 			bucket.labelsHash, bucket.labelsJSON = point.labelsHash, point.labelsJSON
 			s.hot[key] = bucket
+			s.noteHotBucketLocked(key.bucket)
 		}
 		bucket.addPoint(point.value, point.timestamp)
 	}
@@ -109,6 +111,7 @@ func (s *Store) rebuildHotRollupsLocked(keys map[hotRollupKey]struct{}, compress
 		}
 		s.hot[key] = bucket
 		s.hotReplace[key] = struct{}{}
+		s.noteHotBucketLocked(key.bucket)
 	}
 }
 
@@ -156,16 +159,31 @@ func (s *Store) flushAllHotRollups(ctx context.Context) error {
 func (s *Store) takeClosedHotRollups(currentBucket int64) []hotRollup {
 	s.hotMu.Lock()
 	defer s.hotMu.Unlock()
-	closed := make([]hotRollup, 0)
-	for key, bucket := range s.hot {
-		if key.bucket < currentBucket {
-			_, replace := s.hotReplace[key]
-			closed = append(closed, hotRollup{key: key, bucket: bucket, replace: replace})
-			delete(s.hot, key)
-			delete(s.hotReplace, key)
-		}
+	if s.hotOldest >= currentBucket {
+		return nil
 	}
+	closed := make([]hotRollup, 0)
+	oldest := int64(math.MaxInt64)
+	for key, bucket := range s.hot {
+		if key.bucket >= currentBucket {
+			oldest = min(oldest, key.bucket)
+			continue
+		}
+		_, replace := s.hotReplace[key]
+		closed = append(closed, hotRollup{key: key, bucket: bucket, replace: replace})
+		delete(s.hot, key)
+		delete(s.hotReplace, key)
+	}
+	s.hotOldest = oldest
 	return closed
+}
+
+// noteHotBucketLocked keeps hotOldest a lower bound after inserting a key.
+// The caller must hold hotMu.
+func (s *Store) noteHotBucketLocked(bucket int64) {
+	if bucket < s.hotOldest {
+		s.hotOldest = bucket
+	}
 }
 
 func (s *Store) restoreHotRollups(closed []hotRollup) {
@@ -176,6 +194,7 @@ func (s *Store) restoreHotRollups(closed []hotRollup) {
 		_, currentReplaces := s.hotReplace[item.key]
 		if !exists {
 			s.hot[item.key] = item.bucket
+			s.noteHotBucketLocked(item.key.bucket)
 			if item.replace {
 				s.hotReplace[item.key] = struct{}{}
 			}

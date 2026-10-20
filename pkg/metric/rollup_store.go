@@ -1,10 +1,11 @@
 package metric
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -206,22 +207,141 @@ func (s *Store) mergeRollupBucketsWithDictionaryTx(ctx context.Context, metricNa
 		keys = append(keys, key)
 	}
 	sortRollupKeys(keys)
+	// 批量读现有行并合并
+	existing, err := s.readRollupBucketsBatchTx(ctx, metricName, interval, keys, buckets, cache, tx)
+	if err != nil {
+		return 0, err
+	}
+	rows := make([]normalizedRollupRow, 0, len(keys))
 	for _, key := range keys {
 		bucket := buckets[key]
 		key.bucket = normalizeBucketMillis(key.bucket)
-		existing, err := s.readRollupBucketTx(ctx, metricName, key, interval, tx)
+		if old := existing[key]; old != nil {
+			old.mergeStored(bucket)
+			bucket = old
+		}
+		seriesID, err := cache.seriesID(ctx, s, tx, metricName, key, bucket.tagsJSON)
 		if err != nil {
 			return 0, err
 		}
-		if existing != nil {
-			existing.mergeStored(bucket)
-			bucket = existing
+		labelID, err := cache.labelID(ctx, s, tx, key.labelsHash, bucket.labelsJSON)
+		if err != nil {
+			return 0, err
 		}
-		if err := s.upsertRollupWithDictionaryTx(ctx, metricName, interval, key, bucket, cache, tx); err != nil {
+		resolutionID, err := cache.resolutionID(ctx, s, tx, interval)
+		if err != nil {
+			return 0, err
+		}
+		rows = append(rows, normalizedRollupRow{
+			seriesID: seriesID, resolutionID: resolutionID, labelID: labelID,
+			bucketMilli: key.bucket, count: bucket.count, sum: bucket.sum, sumSq: bucket.sumSq,
+			min: bucket.min, max: bucket.max, firstVal: bucket.firstVal, firstTSMilli: bucket.firstTS,
+			lastVal: bucket.lastVal, lastTSMilli: bucket.lastTS, digest: bucket.encodedDigest(),
+			createdAtMilli: timeMillis(time.Now()),
+		})
+	}
+	for start := 0; start < len(rows); start += coarseRollupWriteBatchSize {
+		end := start + coarseRollupWriteBatchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		if err := s.upsertNormalizedRollupRowsTx(ctx, rows[start:end], tx); err != nil {
 			return 0, err
 		}
 	}
 	return len(keys), nil
+}
+
+// readRollupBucketsBatchTx 批量读出给定 keys 中已存在的行，按 key 返回。
+func (s *Store) readRollupBucketsBatchTx(ctx context.Context, metricName string, interval time.Duration, keys []rollupKey, buckets map[rollupKey]*rollupBucket, cache *rollupDictionaryCache, tx *sql.Tx) (map[rollupKey]*rollupBucket, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	resolutionID, err := cache.resolutionID(ctx, s, tx, interval)
+	if err != nil {
+		return nil, err
+	}
+	// 按 bucket_milli 分组，每组收集 series_id
+	type batchKey struct {
+		bucket int64
+		labels string
+	}
+	groups := make(map[batchKey][]rollupKey)
+	for _, key := range keys {
+		bk := batchKey{bucket: normalizeBucketMillis(key.bucket), labels: key.labelsHash}
+		groups[bk] = append(groups[bk], key)
+	}
+	result := make(map[rollupKey]*rollupBucket)
+	for bk, gkeys := range groups {
+		seriesIDs := make([]int64, 0, len(gkeys))
+		keyBySeries := make(map[int64]rollupKey, len(gkeys))
+		for _, k := range gkeys {
+			sid, err := cache.seriesID(ctx, s, tx, metricName, k, buckets[k].tagsJSON)
+			if err != nil {
+				return nil, err
+			}
+			seriesIDs = append(seriesIDs, sid)
+			keyBySeries[sid] = k
+		}
+		labelID, err := cache.labelID(ctx, s, tx, bk.labels, buckets[gkeys[0]].labelsJSON)
+		if err != nil {
+			return nil, err
+		}
+		// IN 子句：每批最多 500 个 series_id
+		for start := 0; start < len(seriesIDs); start += 500 {
+			end := start + 500
+			if end > len(seriesIDs) {
+				end = len(seriesIDs)
+			}
+			batch := seriesIDs[start:end]
+			placeholders := make([]string, len(batch))
+			args := make([]any, 0, len(batch)+3)
+			for i := range batch {
+				placeholders[i] = s.dialect.placeholder(i + 1)
+				args = append(args, batch[i])
+			}
+			args = append(args, resolutionID, bk.bucket, labelID)
+			sqlText := fmt.Sprintf(`SELECT r.series_id, r.count, r.sum, r.sum_sq, r.min_val, r.max_val, r.first_val, r.first_ts_milli, r.last_val, r.last_ts_milli, r.digest, s.tags, l.labels
+				FROM %s r JOIN %s s ON s.id = r.series_id JOIN %s l ON l.id = r.label_id
+				WHERE r.series_id IN (%s) AND r.resolution_id = %s AND r.bucket_milli = %s AND r.label_id = %s`,
+				s.tables.rollups, s.tables.series, s.tables.labels,
+				joinSQL(placeholders), s.dialect.placeholder(len(batch)+1), s.dialect.placeholder(len(batch)+2), s.dialect.placeholder(len(batch)+3),
+			)
+			rows, err := tx.QueryContext(ctx, sqlText, args...)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				var seriesID, count, firstTS, lastTS int64
+				var sum, sumSq, min, max, firstVal, lastVal float64
+				var digest []byte
+				var tags, labels any
+				if err := rows.Scan(&seriesID, &count, &sum, &sumSq, &min, &max, &firstVal, &firstTS, &lastVal, &lastTS, &digest, &tags, &labels); err != nil {
+					rows.Close()
+					return nil, err
+				}
+				tagsJSON, err := rawJSONToString(tags)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				labelsJSON, err := rawJSONToString(labels)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				d, err := digestFromRollup(count, min, max, digest, s.cfg.RollupPolicy.compression())
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				key := keyBySeries[seriesID]
+				result[key] = &rollupBucket{count: count, sum: sum, sumSq: sumSq, min: min, max: max, firstVal: firstVal, firstTS: firstTS, lastVal: lastVal, lastTS: lastTS, digest: d, tagsHash: key.tagsHash, tagsJSON: tagsJSON, labelsHash: key.labelsHash, labelsJSON: labelsJSON}
+			}
+			rows.Close()
+		}
+	}
+	return result, nil
 }
 
 // writeRollupBucketsTx is retained for package callers and tests. It uses the
@@ -326,17 +446,17 @@ func (s *Store) deleteRollupsForMetricTx(ctx context.Context, metricName string,
 }
 
 func sortRollupKeys(keys []rollupKey) {
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].bucket != keys[j].bucket {
-			return keys[i].bucket < keys[j].bucket
+	slices.SortFunc(keys, func(a, b rollupKey) int {
+		if c := cmp.Compare(a.bucket, b.bucket); c != 0 {
+			return c
 		}
-		if keys[i].entityID != keys[j].entityID {
-			return keys[i].entityID < keys[j].entityID
+		if c := cmp.Compare(a.entityID, b.entityID); c != 0 {
+			return c
 		}
-		if keys[i].tagsHash != keys[j].tagsHash {
-			return keys[i].tagsHash < keys[j].tagsHash
+		if c := cmp.Compare(a.tagsHash, b.tagsHash); c != 0 {
+			return c
 		}
-		return keys[i].labelsHash < keys[j].labelsHash
+		return cmp.Compare(a.labelsHash, b.labelsHash)
 	})
 }
 

@@ -25,7 +25,6 @@ func (q *QQ) GetConfiguration() factory.Configuration {
 func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 	state := utils.GenerateRandomString(16)
 
-	// 构建请求QQ聚合登录平台的URL
 	requestURL := fmt.Sprintf(
 		"%s/connect.php?act=login&appid=%s&appkey=%s&type=%s&redirect_uri=%s",
 		q.Addition.AggregationURL,
@@ -35,21 +34,17 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 		url.QueryEscape(redirectURI),
 	)
 
-	// 向聚合登录平台发送请求
 	resp, err := http.Get(requestURL)
 	if err != nil {
-		// 如果请求失败，返回错误信息
 		return "", state
 	}
 	defer resp.Body.Close()
 
-	// 读取响应内容
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", state
 	}
 
-	// 解析响应JSON
 	var result struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
@@ -60,7 +55,6 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 		return "", state
 	}
 
-	// 检查响应状态
 	if result.Code != 0 {
 		return "", state
 	}
@@ -69,37 +63,25 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 	return result.URL, state
 }
 
-// OnCallback 处理QQ OAuth回调
-// 例如：http://localhost:25774/api/oauth_callback?type=qq&code=XXXXXXXXXXXXXXXX
-// 然后我们使用code参数向聚合登录平台请求用户信息
+// OnCallback 处理 QQ OAuth 回调
 func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string, callbackURI string) (factory.OidcCallback, error) {
-	// 根据文档，回调地址会附带type和code参数
 	code := query["code"]
 	loginType := query["type"]
-
-	// 如果回调中没有type参数，则使用配置中的LoginType
 	if loginType == "" {
 		loginType = q.Addition.LoginType
 	}
 
-	// 验证state防止CSRF攻击
 	if q.stateCache == nil {
 		return factory.OidcCallback{}, fmt.Errorf("state cache not initialized")
 	}
 	if _, ok := q.stateCache.Get(state); !ok {
 		return factory.OidcCallback{}, fmt.Errorf("invalid state")
 	}
-	if state == "" {
-		return factory.OidcCallback{}, fmt.Errorf("invalid state")
-	}
 
-	// 检查是否提供了Authorization Code
 	if code == "" {
 		return factory.OidcCallback{}, fmt.Errorf("no authorization code provided")
 	}
 
-	// 通过Authorization Code获取用户信息
-	// 根据文档，请求URL应为: {AggregationURL}/connect.php?act=callback&appid={appid}&appkey={appkey}&type={登录方式}&code={code}
 	callbackURL := fmt.Sprintf(
 		"%s/connect.php?act=callback&appid=%s&appkey=%s&type=%s&code=%s",
 		q.Addition.AggregationURL,
@@ -115,18 +97,15 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 	}
 	defer resp.Body.Close()
 
-	// 检查HTTP响应状态
 	if resp.StatusCode != http.StatusOK {
 		return factory.OidcCallback{}, fmt.Errorf("HTTP request failed with status code: %d", resp.StatusCode)
 	}
 
-	// 读取响应
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return factory.OidcCallback{}, fmt.Errorf("failed to read response: %v", err)
 	}
 
-	// 解析响应
 	var result struct {
 		Code        int    `json:"code"`
 		Msg         string `json:"msg"`
@@ -144,17 +123,14 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 		return factory.OidcCallback{}, fmt.Errorf("failed to parse callback response: %v, response body: %s", err, string(body))
 	}
 
-	// 检查返回状态码
 	if result.Code != 0 {
 		return factory.OidcCallback{}, fmt.Errorf("QQ login callback failed with code %d: %s", result.Code, result.Msg)
 	}
 
-	// 检查是否返回了用户唯一标识
 	if result.SocialUid == "" {
 		return factory.OidcCallback{}, fmt.Errorf("empty social_uid returned, full response: %s", string(body))
 	}
 
-	// 返回用户唯一标识
 	return factory.OidcCallback{UserId: result.SocialUid}, nil
 }
 

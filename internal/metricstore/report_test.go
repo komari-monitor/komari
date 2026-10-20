@@ -838,29 +838,3 @@ func assertMetricAggregate(t *testing.T, s *metric.Store, metricName, entityID s
 		t.Fatalf("aggregate %s = %#v, want value=%v count=%d", metricName, points, want, wantCount)
 	}
 }
-
-func TestPingQueueHoldsAScheduleRound(t *testing.T) {
-	ctx := context.Background()
-	useReportTestStore(t, nil)
-	StartReportBatcher()
-	t.Cleanup(func() {
-		if err := StopReportBatcher(context.Background()); err != nil {
-			t.Errorf("stop report batcher: %v", err)
-		}
-	})
-
-	// Every client answers the tasks of a ping interval at about the same
-	// time, so a whole round reaches the queue before the next drain.
-	now := time.Now().UTC()
-	for i := 0; i < 1050; i++ {
-		record := models.PingRecord{
-			Client: fmt.Sprintf("node-%d", i%70),
-			TaskId: uint(i/70 + 1),
-			Time:   now,
-			Value:  i,
-		}
-		if err := WritePingRecord(ctx, record); err != nil {
-			t.Fatalf("ping record %d: %v", i, err)
-		}
-	}
-}

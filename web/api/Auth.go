@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,10 +10,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
-	"gorm.io/gorm"
 )
 
 const (
@@ -71,12 +68,8 @@ func RequireRole(allowedRoles ...string) gin.HandlerFunc {
 
 // GetRole 获取当前请求的角色
 func GetRole(c *gin.Context) string {
-	role, exists := c.Get("role")
-	if !exists {
-		return RoleGuest
-	}
-	if s, ok := role.(string); ok {
-		return s
+	if role := c.GetString("role"); role != "" {
+		return role
 	}
 	return RoleGuest
 }
@@ -151,23 +144,16 @@ func hasTempAccess(c *gin.Context) bool {
 	if err != nil {
 		return false
 	}
-	expireAt, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
-	if err != nil {
-		return false
-	}
 	allowKey, err := config.GetAs[string]("tempory_share_token", "")
-	if err != nil {
+	if err != nil || allowKey == "" || tempKey != allowKey {
 		return false
 	}
-	if allowKey == "" || tempKey != allowKey {
-		return false
-	}
-	return expireAt >= time.Now().Unix()
+	expireAt, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
+	return err == nil && expireAt >= time.Now().Unix()
 }
 
 func extractClientToken(c *gin.Context) string {
-	token := c.Query("token")
-	if token != "" {
+	if token := c.Query("token"); token != "" {
 		return token
 	}
 	// rpc2 约定:agent 经 ?Authorization=<token> 传入 client token。
@@ -182,43 +168,19 @@ func extractClientToken(c *gin.Context) string {
 		}
 		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-		var bodyMap map[string]interface{}
-		if len(bodyBytes) > 0 {
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
-				if tokenVal, exists := bodyMap["token"]; exists {
-					if str, ok := tokenVal.(string); ok && str != "" {
-						return str
-					}
-				}
-			}
+		var body struct {
+			Token string `json:"token"`
+		}
+		if json.Unmarshal(bodyBytes, &body) == nil {
+			return body.Token
 		}
 	}
-
 	return ""
-}
-
-func checkTokenAndGetUUID(token string) (string, error) {
-	uuid, err := clients.GetClientUUIDByToken(token)
-
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err == gorm.ErrRecordNotFound {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return uuid, nil
 }
 
 func isApiKeyValid(apiKey string) bool {
 	apiKeyConfig, err := config.GetAs[string](config.ApiKeyKey, "")
-	if err != nil {
-		return false
-	}
-
-	if apiKeyConfig == "" || len(apiKeyConfig) < 12 {
+	if err != nil || len(apiKeyConfig) < 12 {
 		return false
 	}
 	return apiKey == "Bearer "+apiKeyConfig

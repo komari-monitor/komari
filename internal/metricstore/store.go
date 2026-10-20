@@ -53,13 +53,6 @@ func openStoreWithDefaultRetention(ctx context.Context, cfg *MetricStoreConfig, 
 	return s, nil
 }
 
-// OpenStore opens an isolated metric store using the supplied configuration.
-// It is used by the pre-start upgrade flow before the process-wide store is
-// initialized. The caller owns the returned store and must close it.
-// func OpenStore(ctx context.Context, cfg *MetricStoreConfig) (*metric.Store, error) {
-// 	return openStore(ctx, cfg)
-// }
-
 // OpenStoreForMigration opens an isolated target and uses the legacy data span
 // as the initial retention for definitions that do not exist yet. Existing
 // definitions keep their configured retention, including an explicit zero.
@@ -73,17 +66,11 @@ func OpenStoreForMigration(ctx context.Context, cfg *MetricStoreConfig, legacyRe
 // TestConnection 使用给定配置尝试连接 metrics 数据库（不影响当前运行的 store）。
 // 仅打开连接并 Ping，不执行自动建表，连接成功后立即关闭。失败时返回可读错误。
 func TestConnection(ctx context.Context, cfg *MetricStoreConfig) error {
-	metricCfg, err := buildMetricConfig(cfg, false)
-	if err != nil {
-		return err
-	}
-
-	s, err := metric.Open(ctx, metricCfg)
+	s, err := openWithoutMigration(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-
 	return s.Ping(ctx)
 }
 
@@ -116,10 +103,7 @@ func InitializeStore() error {
 		return err
 	}
 
-	storeMu.Lock()
-	store = s
-	storeFingerprint = targetFingerprint(cfg)
-	storeMu.Unlock()
+	activateStore(s, targetFingerprint(cfg), "initialization")
 	clearStoreClosing()
 
 	logger.Infof("metricstore", "Metric store initialized successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
@@ -130,10 +114,6 @@ func InitializeStore() error {
 // from the restricted recovery page. It records that target as the current
 // manual-migration source, but does not copy data from the unavailable store.
 func RecoverStore(ctx context.Context, cfg *MetricStoreConfig) error {
-	if cfg == nil {
-		return fmt.Errorf("metric store recovery config is nil")
-	}
-
 	storeInitMu.Lock()
 	defer storeInitMu.Unlock()
 	if err := storeOperations.Acquire(ctx); err != nil {
@@ -147,18 +127,14 @@ func RecoverStore(ctx context.Context, cfg *MetricStoreConfig) error {
 	recovered := *cfg
 	recovered.DSN = strings.TrimSpace(recovered.DSN)
 	recovered.Driver = string(ResolveDriverFromConfig(recovered.Driver, recovered.DSN))
+	target := targetFingerprint(&recovered)
 	restructureRequired, err := structureUpgradeRequiredForConfig(ctx, &recovered)
 	if err != nil {
 		return err
 	}
 	if restructureRequired {
-		target := targetFingerprint(&recovered)
-		if err := config.SetMany(map[string]any{
-			MetricDBDriverKey:  recovered.Driver,
-			MetricDBDSNKey:     recovered.DSN,
-			MigrationTargetKey: target,
-		}); err != nil {
-			return fmt.Errorf("save recovered metric store config: %w", err)
+		if err := saveRecoveredTarget(&recovered, target); err != nil {
+			return err
 		}
 		logger.Infof("metricstore", "Metric store connection recovered; structure upgrade is required (driver=%s)", recovered.Driver)
 		return nil
@@ -167,31 +143,43 @@ func RecoverStore(ctx context.Context, cfg *MetricStoreConfig) error {
 	if err != nil {
 		return err
 	}
+	if err := saveRecoveredTarget(&recovered, target); err != nil {
+		_ = s.Close()
+		return err
+	}
+	activateStore(s, target, "recovery")
+	clearStoreClosing()
+	logger.Infof("metricstore", "Metric store recovered successfully (driver=%s)", recovered.Driver)
+	return nil
+}
 
-	target := targetFingerprint(&recovered)
+// saveRecoveredTarget persists the recovered connection and records it as the
+// default source for the next manual store migration.
+func saveRecoveredTarget(cfg *MetricStoreConfig, target string) error {
 	if err := config.SetMany(map[string]any{
-		MetricDBDriverKey:  recovered.Driver,
-		MetricDBDSNKey:     recovered.DSN,
+		MetricDBDriverKey:  cfg.Driver,
+		MetricDBDSNKey:     cfg.DSN,
 		MigrationTargetKey: target,
 	}); err != nil {
-		_ = s.Close()
 		return fmt.Errorf("save recovered metric store config: %w", err)
 	}
+	return nil
+}
 
+// activateStore publishes s as the active store, then closes the store it
+// replaced. Callers must hold the exclusive operation gate or storeInitMu.
+func activateStore(s *metric.Store, fingerprint, reason string) {
 	storeMu.Lock()
 	old := store
 	store = s
-	storeFingerprint = target
+	storeFingerprint = fingerprint
 	storeMu.Unlock()
-	clearStoreClosing()
-
-	if old != nil {
-		if closeErr := old.Close(); closeErr != nil {
-			logger.Errorf("metricstore", "Failed to close previous metric store during recovery: %v", closeErr)
-		}
+	if old == nil {
+		return
 	}
-	logger.Infof("metricstore", "Metric store recovered successfully (driver=%s)", recovered.Driver)
-	return nil
+	if err := old.Close(); err != nil {
+		logger.Errorf("metricstore", "Failed to close previous metric store during %s: %v", reason, err)
+	}
 }
 
 // Reload 根据最新配置热重载 metric store，无需重启进程。
@@ -218,16 +206,7 @@ func Reload(ctx context.Context) error {
 	// point-backed schema. That schema must go through the authenticated
 	// structure-upgrade guide first; otherwise index creation can reference
 	// columns such as resolution_id that do not exist yet.
-	checkCfg, err := buildMetricConfig(cfg, false)
-	if err != nil {
-		return err
-	}
-	checkStore, err := metric.Open(ctx, checkCfg)
-	if err != nil {
-		return err
-	}
-	needsRestructure, err := checkStore.NeedsRestructure(ctx)
-	_ = checkStore.Close()
+	needsRestructure, err := structureUpgradeRequiredForConfig(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("inspect metric store structure: %w", err)
 	}
@@ -241,17 +220,7 @@ func Reload(ctx context.Context) error {
 		return err
 	}
 
-	storeMu.Lock()
-	old := store
-	store = s
-	storeFingerprint = targetFingerprint(cfg)
-	storeMu.Unlock()
-	if old != nil {
-		if cerr := old.Close(); cerr != nil {
-			logger.Errorf("metricstore", "Failed to close previous metric store on reload: %v", cerr)
-		}
-	}
-
+	activateStore(s, targetFingerprint(cfg), "reload")
 	logger.Infof("metricstore", "Metric store reloaded successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
 	return nil
 }
@@ -266,7 +235,7 @@ func GetStore() *metric.Store {
 // CloseStoreContext stops the asynchronous store migration before taking the
 // store write lock, so shutdown cannot wait forever on the migration's lease.
 func CloseStoreContext(ctx context.Context) error {
-	if err := stopStoreMigrationForClose(ctx); err != nil {
+	if err := StopStoreMigrationForShutdown(ctx); err != nil {
 		clearStoreClosing()
 		return err
 	}
@@ -278,13 +247,11 @@ func CloseStoreContext(ctx context.Context) error {
 
 	storeMu.Lock()
 	defer storeMu.Unlock()
-
+	var err error
 	if store != nil {
-		err := store.Close()
+		err = store.Close()
 		store = nil
-		storeFingerprint = ""
-		return err
 	}
 	storeFingerprint = ""
-	return nil
+	return err
 }

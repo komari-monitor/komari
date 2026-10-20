@@ -13,10 +13,6 @@ import (
 	"github.com/komari-monitor/komari/utils/renewal"
 )
 
-func CheckExpireScheduledWork() {
-	CheckExpire()
-}
-
 func CheckExpire() {
 	cfg, err := config.GetMany(map[string]any{
 		config.ExpireNotificationEnabledKey:  false,

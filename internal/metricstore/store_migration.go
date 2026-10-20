@@ -224,54 +224,36 @@ func finishStoreMigration(status string, err error) {
 func CancelStoreMigration() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return stopStoreMigration(ctx, true)
-}
-
-func stopStoreMigration(ctx context.Context, requireRunning bool) error {
 	storeMigMu.Lock()
-	cancel := storeMigCancel
-	done := storeMigDone
+	stop, done := storeMigCancel, storeMigDone
 	storeMigMu.Unlock()
-
-	if cancel == nil {
-		if requireRunning {
-			return fmt.Errorf("no store migration is currently running")
-		}
-		return nil
+	if stop == nil {
+		return fmt.Errorf("no store migration is currently running")
 	}
-	cancel()
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("wait for store migration to cancel: %w", ctx.Err())
-	}
-}
-
-func stopStoreMigrationForClose(ctx context.Context) error {
-	storeMigMu.Lock()
-	storeClosing = true
-	cancel := storeMigCancel
-	done := storeMigDone
-	storeMigMu.Unlock()
-
-	if cancel == nil {
-		return nil
-	}
-	cancel()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("wait for store migration to cancel: %w", ctx.Err())
-	}
+	return awaitStoreMigrationStop(ctx, stop, done)
 }
 
 // StopStoreMigrationForShutdown prevents a new store migration and waits for
 // an active one to release its exclusive lease before report batches flush.
 func StopStoreMigrationForShutdown(ctx context.Context) error {
-	return stopStoreMigrationForClose(ctx)
+	storeMigMu.Lock()
+	storeClosing = true
+	stop, done := storeMigCancel, storeMigDone
+	storeMigMu.Unlock()
+	if stop == nil {
+		return nil
+	}
+	return awaitStoreMigrationStop(ctx, stop, done)
+}
+
+func awaitStoreMigrationStop(ctx context.Context, stop context.CancelFunc, done <-chan struct{}) error {
+	stop()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("wait for store migration to cancel: %w", ctx.Err())
+	}
 }
 
 func clearStoreClosing() {
