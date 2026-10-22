@@ -7,9 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/Calcium-Ion/moejs/engine"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 	"github.com/komari-monitor/komari/utils/messageSender"
 )
 
@@ -19,7 +21,7 @@ func (m *Manager) registerNotificationChannel(
 	short string,
 	id string,
 	configuration models.Configuration,
-	handler goja.Callable,
+	handler moejs.Value,
 	host *jsruntime.Host,
 ) error {
 	inst := m.instanceFor(short)
@@ -52,11 +54,11 @@ func (m *Manager) registerNotificationChannel(
 type pluginNotificationChannel struct {
 	short   string
 	host    *jsruntime.Host
-	handler goja.Callable
+	handler moejs.Value
 }
 
 func (c *pluginNotificationChannel) Send(ctx context.Context, notification messageSender.Notification, config map[string]any) error {
-	if c.host == nil || c.handler == nil {
+	if c.host == nil || c.handler.IsUndefined() {
 		return fmt.Errorf("plugin %q notification channel is closed", c.short)
 	}
 	result := make(chan error, 1)
@@ -65,8 +67,8 @@ func (c *pluginNotificationChannel) Send(ctx context.Context, notification messa
 		once.Do(func() { result <- err })
 	}
 
-	queued := c.host.RunOnLoop(func(vm *goja.Runtime) {
-		var value goja.Value
+	queued := c.host.RunOnLoop(func(vm *moejs.Runtime) {
+		var value moejs.Value
 		runErr := c.host.RunJob(vm, "plugin notification "+c.short, func() error {
 			raw, err := json.Marshal(notification)
 			if err != nil {
@@ -77,10 +79,10 @@ func (c *pluginNotificationChannel) Send(ctx context.Context, notification messa
 				return err
 			}
 			var callErr error
-			value, callErr = c.handler(
-				goja.Undefined(),
-				vm.ToValue(notificationValue),
-				vm.ToValue(config),
+			value, callErr = vm.CallFunction(c.handler,
+				moejs.Undefined(),
+				native.From(vm, notificationValue),
+				native.From(vm, config),
 			)
 			return callErr
 		})
@@ -88,27 +90,28 @@ func (c *pluginNotificationChannel) Send(ctx context.Context, notification messa
 			finish(runErr)
 			return
 		}
-		_, ok := value.Export().(*goja.Promise)
+		_, _, ok := moejs.PromiseResult(value)
 		if !ok {
 			finish(nil)
 			return
 		}
-		then, ok := goja.AssertFunction(value.ToObject(vm).Get("then"))
-		if !ok {
+		then := native.Get(vm, native.Object(vm, value), "then")
+		if !engine.IsCallable(then) {
 			finish(fmt.Errorf("plugin %q notification channel returned a Promise without then", c.short))
 			return
 		}
-		onFulfilled := vm.ToValue(func(goja.FunctionCall) goja.Value {
+		onFulfilled := native.Bind(vm, "notificationFulfilled", 0, func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 			finish(nil)
-			return goja.Undefined()
+			return moejs.Undefined(), nil
 		})
-		onRejected := vm.ToValue(func(call goja.FunctionCall) goja.Value {
-			finish(fmt.Errorf("plugin %q notification channel failed: %v", c.short, call.Argument(0)))
-			return goja.Undefined()
+		onRejected := native.Bind(vm, "notificationRejected", 1, func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			finish(fmt.Errorf("plugin %q notification channel failed: %s", c.short, native.String(vm, moejs.Arg(args, 0))))
+			return moejs.Undefined(), nil
 		})
-		if _, err := then(value, onFulfilled, onRejected); err != nil {
+		if _, err := vm.CallFunction(then, value, onFulfilled, onRejected); err != nil {
 			finish(fmt.Errorf("plugin %q notification channel Promise failed: %w", c.short, err))
 		}
+
 	})
 	if !queued {
 		return fmt.Errorf("plugin %q notification runtime is closed", c.short)

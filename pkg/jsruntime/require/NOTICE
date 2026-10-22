@@ -1,0 +1,1 @@
+The require resolver and registry derive from github.com/dop251/goja_nodejs (Dmitry Panov), previously carried in pkg/moenode. Native MoeJS integration and local modifications retain the accompanying MIT license. The sibling buffer, url, util and loop packages also retain a copy of the upstream MIT license for any carried-over implementation material.

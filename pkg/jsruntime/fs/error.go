@@ -2,14 +2,15 @@ package fs
 
 import (
 	"errors"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 	"io/fs"
 	"os"
 	"strings"
-
-	"github.com/dop251/goja"
 )
 
-func nodeErrorObject(vm *goja.Runtime, err error, fallbackSyscall string) *goja.Object {
+func nodeErrorObject(vm *moejs.Runtime, err error, fallbackSyscall string) *engine.Object {
 	operation, path, destination := fallbackSyscall, "", ""
 	underlying := err
 	var linkError *os.LinkError
@@ -41,16 +42,16 @@ func nodeErrorObject(vm *goja.Runtime, err error, fallbackSyscall string) *goja.
 	if errno == 0 {
 		errno = nodeErrnoForCode(code)
 	}
-	object := vm.NewGoError(err)
-	_ = object.Set("name", "Error")
-	_ = object.Set("code", code)
-	_ = object.Set("errno", errno)
-	_ = object.Set("syscall", operation)
+	object := native.Object(vm, native.GoError(vm, err))
+	_ = native.Set(vm, object, "name", "Error")
+	_ = native.Set(vm, object, "code", code)
+	_ = native.Set(vm, object, "errno", errno)
+	_ = native.Set(vm, object, "syscall", operation)
 	if path != "" {
-		_ = object.Set("path", path)
+		_ = native.Set(vm, object, "path", path)
 	}
 	if destination != "" {
-		_ = object.Set("dest", destination)
+		_ = native.Set(vm, object, "dest", destination)
 	}
 	return object
 }

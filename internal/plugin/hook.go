@@ -14,9 +14,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/Calcium-Ion/moejs/engine"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/pkg/jsruntime/httpbody"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 )
 
 // hookKind identifies the HTTP hook phase.
@@ -31,7 +33,7 @@ const (
 type hookEntry struct {
 	short     string
 	kind      hookKind
-	fn        goja.Callable
+	fn        moejs.Value
 	host      *jsruntime.Host
 	matcher   *hookMatcher // nil matches every request
 	bodyLimit int64        // plugin-declared maxHTTPBodyBytes (0 = default)
@@ -211,36 +213,36 @@ func (m *Manager) wrapHandler(next http.Handler) http.Handler {
 func (m *Manager) runRequestHook(r *http.Request, body []byte, h *hookEntry) ([]byte, error) {
 	nextBody := body
 	var hookErr error
-	queued, timedOut := runHookTurn(h.host, "plugin request hook "+h.short, func(vm *goja.Runtime) {
+	queued, timedOut := runHookTurn(h.host, "plugin request hook "+h.short, func(vm *moejs.Runtime) {
 		reqObj := hookRequestObject(vm, r, nextBody)
 		hookErr = h.host.RunJob(vm, "plugin request hook "+h.short, func() error {
-			_, err := h.fn(goja.Undefined(), reqObj)
+			_, err := vm.CallFunction(h.fn, moejs.Undefined(), engine.ObjectValue(reqObj))
 			return err
 		})
 		if hookErr != nil {
 			return
 		}
-		if value := reqObj.Get("method"); value != nil && !goja.IsUndefined(value) {
-			if method := strings.ToUpper(strings.TrimSpace(value.String())); method != "" {
+		if value := native.Get(vm, reqObj, "method"); !value.IsUndefined() {
+			if method := strings.ToUpper(strings.TrimSpace(native.String(vm, value))); method != "" {
 				r.Method = method
 			}
 		}
-		if value := reqObj.Get("url"); value != nil && !goja.IsUndefined(value) {
-			if raw := strings.TrimSpace(value.String()); raw != "" {
+		if value := native.Get(vm, reqObj, "url"); !value.IsUndefined() {
+			if raw := strings.TrimSpace(native.String(vm, value)); raw != "" {
 				if parsed, err := url.Parse(raw); err == nil {
 					r.URL = parsed
 					r.RequestURI = raw
 				}
 			}
 		}
-		if value := reqObj.Get("headers"); value != nil && !goja.IsUndefined(value) {
+		if value := native.Get(vm, reqObj, "headers"); !value.IsUndefined() {
 			var raw map[string]any
-			if err := vm.ExportTo(value, &raw); err == nil {
+			if err := native.ExportTo(vm, value, &raw); err == nil {
 				r.Header = normalizeHeader(raw)
 			}
 		}
-		if value := reqObj.Get("body"); value != nil && !goja.IsUndefined(value) {
-			nextBody = []byte(value.String())
+		if value := native.Get(vm, reqObj, "body"); !value.IsUndefined() {
+			nextBody = []byte(native.String(vm, value))
 		}
 	})
 	if !queued {
@@ -256,29 +258,29 @@ func (m *Manager) runRequestHook(r *http.Request, body []byte, h *hookEntry) ([]
 // the JS-side modifications to the captured response.
 func (m *Manager) runResponseHook(r *http.Request, bw *bufferedResponseWriter, h *hookEntry) error {
 	var hookErr error
-	queued, timedOut := runHookTurn(h.host, "plugin response hook "+h.short, func(vm *goja.Runtime) {
+	queued, timedOut := runHookTurn(h.host, "plugin response hook "+h.short, func(vm *moejs.Runtime) {
 		resObj := hookResponseObject(vm, bw)
 		hookErr = h.host.RunJob(vm, "plugin response hook "+h.short, func() error {
-			_, err := h.fn(goja.Undefined(), hookRequestObject(vm, r, nil), resObj)
+			_, err := vm.CallFunction(h.fn, moejs.Undefined(), engine.ObjectValue(hookRequestObject(vm, r, nil)), engine.ObjectValue(resObj))
 			return err
 		})
 		if hookErr != nil {
 			return
 		}
 		status := bw.status()
-		if value := resObj.Get("statusCode"); value != nil && !goja.IsUndefined(value) {
-			status = int(value.ToInteger())
+		if value := native.Get(vm, resObj, "statusCode"); !value.IsUndefined() {
+			status = int(native.Int(vm, value))
 		}
 		header := bw.Header().Clone()
-		if value := resObj.Get("headers"); value != nil && !goja.IsUndefined(value) {
+		if value := native.Get(vm, resObj, "headers"); !value.IsUndefined() {
 			var raw map[string]any
-			if err := vm.ExportTo(value, &raw); err == nil {
+			if err := native.ExportTo(vm, value, &raw); err == nil {
 				header = normalizeHeader(raw)
 			}
 		}
 		responseBody := bw.bodyBytes()
-		if value := resObj.Get("body"); value != nil && !goja.IsUndefined(value) {
-			responseBody = []byte(value.String())
+		if value := native.Get(vm, resObj, "body"); !value.IsUndefined() {
+			responseBody = []byte(native.String(vm, value))
 		}
 		bw.apply(status, header, responseBody)
 	})
@@ -298,16 +300,16 @@ func (m *Manager) runResponseHook(r *http.Request, bw *bufferedResponseWriter, h
 // runHookTurn queues one hook callback on the plugin event loop and waits
 // for it with the runtime timeout. It reports whether the job was queued and
 // whether it timed out.
-func runHookTurn(host *jsruntime.Host, name string, job func(vm *goja.Runtime)) (queued, timedOut bool) {
+func runHookTurn(host *jsruntime.Host, name string, job func(vm *moejs.Runtime)) (queued, timedOut bool) {
 	return runHookTurnTimeout(host, name, host.Timeout(), job)
 }
 
 // runHookTurnTimeout is runHookTurn with an explicit wait budget. The
 // callback keeps running on the plugin loop after a timeout; the waiter gives
 // up and the caller falls back to passing the message through.
-func runHookTurnTimeout(host *jsruntime.Host, name string, timeout time.Duration, job func(vm *goja.Runtime)) (queued, timedOut bool) {
+func runHookTurnTimeout(host *jsruntime.Host, name string, timeout time.Duration, job func(vm *moejs.Runtime)) (queued, timedOut bool) {
 	done := make(chan struct{})
-	if !host.RunOnLoop(func(vm *goja.Runtime) {
+	if !host.RunOnLoop(func(vm *moejs.Runtime) {
 		defer close(done)
 		job(vm)
 	}) {
@@ -326,29 +328,29 @@ func (m *Manager) logHookError(h *hookEntry, err error) {
 }
 
 // hookRequestObject builds the mutable JS request object.
-func hookRequestObject(vm *goja.Runtime, r *http.Request, body []byte) *goja.Object {
-	req := vm.NewObject()
-	_ = req.Set("method", r.Method)
-	_ = req.Set("url", r.URL.RequestURI())
-	_ = req.Set("headers", headerToMap(r.Header))
+func hookRequestObject(vm *moejs.Runtime, r *http.Request, body []byte) *engine.Object {
+	req := vm.Realm().NewObject()
+	_ = native.Set(vm, req, "method", r.Method)
+	_ = native.Set(vm, req, "url", r.URL.RequestURI())
+	_ = native.Set(vm, req, "headers", headerToMap(r.Header))
 	query := make(map[string]string, len(r.URL.Query()))
 	for name, values := range r.URL.Query() {
 		query[name] = strings.Join(values, ",")
 	}
-	_ = req.Set("query", query)
-	_ = req.Set("body", string(body))
-	_ = req.Set("context", hookRequestContext(vm, r))
+	_ = native.Set(vm, req, "query", query)
+	_ = native.Set(vm, req, "body", string(body))
+	_ = native.Set(vm, req, "context", hookRequestContext(vm, r))
 	return req
 }
 
 // hookResponseObject builds the mutable JS response object from the captured
 // response.
-func hookResponseObject(vm *goja.Runtime, bw *bufferedResponseWriter) *goja.Object {
-	res := vm.NewObject()
-	_ = res.Set("statusCode", bw.status())
-	_ = res.Set("statusMessage", "")
-	_ = res.Set("headers", headerToMap(bw.Header()))
-	_ = res.Set("body", string(bw.bodyBytes()))
+func hookResponseObject(vm *moejs.Runtime, bw *bufferedResponseWriter) *engine.Object {
+	res := vm.Realm().NewObject()
+	_ = native.Set(vm, res, "statusCode", bw.status())
+	_ = native.Set(vm, res, "statusMessage", "")
+	_ = native.Set(vm, res, "headers", headerToMap(bw.Header()))
+	_ = native.Set(vm, res, "body", string(bw.bodyBytes()))
 	return res
 }
 

@@ -8,19 +8,19 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/eventloop"
+	moe "github.com/Calcium-Ion/moejs"
+	"github.com/komari-monitor/komari/pkg/jsruntime/loop"
 )
 
 var ErrExecutionTimeout = errors.New("JavaScript execution timeout")
 
-type TurnRunner func(*goja.Runtime, func() error) error
+type TurnRunner func(*moe.Runtime, func() error) error
 
-type ErrorReporter func(*goja.Runtime, string, error)
+type ErrorReporter func(*moe.Runtime, string, error)
 
 // Runtime is the host-facing service boundary used by JavaScript modules.
 type Runtime struct {
-	loop    *eventloop.EventLoop
+	loop    *loop.EventLoop
 	timeout time.Duration
 
 	callbackMu sync.RWMutex
@@ -33,7 +33,7 @@ type Runtime struct {
 	resourcesClosed bool
 }
 
-func New(loop *eventloop.EventLoop, timeout time.Duration) *Runtime {
+func New(loop *loop.EventLoop, timeout time.Duration) *Runtime {
 	return &Runtime{
 		loop:      loop,
 		timeout:   timeout,
@@ -41,7 +41,7 @@ func New(loop *eventloop.EventLoop, timeout time.Duration) *Runtime {
 	}
 }
 
-func (r *Runtime) Loop() *eventloop.EventLoop { return r.loop }
+func (r *Runtime) Loop() *loop.EventLoop { return r.loop }
 
 func (r *Runtime) Timeout() time.Duration { return r.timeout }
 
@@ -57,11 +57,11 @@ func (r *Runtime) SetErrorReporter(report ErrorReporter) {
 	r.callbackMu.Unlock()
 }
 
-func (r *Runtime) RunOnLoop(job func(*goja.Runtime)) bool {
+func (r *Runtime) RunOnLoop(job func(*moe.Runtime)) bool {
 	return r.loop.RunOnLoop(job)
 }
 
-func (r *Runtime) RunTurn(vm *goja.Runtime, job func() error) error {
+func (r *Runtime) RunTurn(vm *moe.Runtime, job func() error) error {
 	r.callbackMu.RLock()
 	run := r.runTurn
 	r.callbackMu.RUnlock()
@@ -72,7 +72,7 @@ func (r *Runtime) RunTurn(vm *goja.Runtime, job func() error) error {
 }
 
 // RunJob executes one asynchronous host callback as a bounded JavaScript turn.
-func (r *Runtime) RunJob(vm *goja.Runtime, name string, job func() error) error {
+func (r *Runtime) RunJob(vm *moe.Runtime, name string, job func() error) error {
 	if !r.ResourcesOpen() {
 		return nil
 	}
@@ -146,7 +146,7 @@ func (r *Runtime) CloseResources() {
 }
 
 // RunWithDeadline interrupts synchronous JavaScript that exceeds deadline.
-func RunWithDeadline(vm *goja.Runtime, deadline time.Time, fn func() error) error {
+func RunWithDeadline(vm *moe.Runtime, deadline time.Time, fn func() error) error {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		return ErrExecutionTimeout
@@ -164,7 +164,9 @@ func RunWithDeadline(vm *goja.Runtime, deadline time.Time, fn func() error) erro
 		}
 	})
 
-	err := fn()
+	var err error
+	var recovered any
+	func() { defer func() { recovered = recover() }(); err = fn() }()
 	if running.CompareAndSwap(true, false) {
 		if !timer.Stop() {
 			<-timerDone
@@ -175,6 +177,9 @@ func RunWithDeadline(vm *goja.Runtime, deadline time.Time, fn func() error) erro
 	}
 	if timedOut.Load() {
 		return ErrExecutionTimeout
+	}
+	if recovered != nil {
+		panic(recovered)
 	}
 	return err
 }

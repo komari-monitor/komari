@@ -1,9 +1,9 @@
 // Package jsruntime provides the JavaScript runtime used by server-side
 // scripts.
 //
-// JavaScript compatibility: ECMAScript and Promise support provided by goja,
-// CommonJS require and the event loop provided by goja_nodejs, and the host
-// APIs assembled in globals.go. This is not a complete browser environment.
+// JavaScript executes directly on native MoeJS values and explicit host callbacks.
+// CommonJS and Node-style host capabilities are implemented in this package tree;
+// scheduling uses MoeJS eventloop. This is not a complete browser environment.
 package jsruntime
 
 import (
@@ -18,11 +18,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dop251/goja"
-	_ "github.com/dop251/goja_nodejs/buffer"
-	"github.com/dop251/goja_nodejs/eventloop"
-	"github.com/dop251/goja_nodejs/require"
-	_ "github.com/dop251/goja_nodejs/util"
+	moe "github.com/Calcium-Ion/moejs"
+	e "github.com/Calcium-Ion/moejs/engine"
+	_ "github.com/komari-monitor/komari/pkg/jsruntime/buffer"
 	childprocess "github.com/komari-monitor/komari/pkg/jsruntime/child_process"
 	"github.com/komari-monitor/komari/pkg/jsruntime/console"
 	cryptomodule "github.com/komari-monitor/komari/pkg/jsruntime/crypto"
@@ -30,11 +28,15 @@ import (
 	"github.com/komari-monitor/komari/pkg/jsruntime/fs"
 	httpmodule "github.com/komari-monitor/komari/pkg/jsruntime/http"
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	eventloop "github.com/komari-monitor/komari/pkg/jsruntime/loop"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 	netmodule "github.com/komari-monitor/komari/pkg/jsruntime/net"
 	pathmodule "github.com/komari-monitor/komari/pkg/jsruntime/path"
 	processmodule "github.com/komari-monitor/komari/pkg/jsruntime/process"
+	"github.com/komari-monitor/komari/pkg/jsruntime/require"
 	"github.com/komari-monitor/komari/pkg/jsruntime/timers"
 	tlsmodule "github.com/komari-monitor/komari/pkg/jsruntime/tls"
+	_ "github.com/komari-monitor/komari/pkg/jsruntime/util"
 )
 
 const defaultTimeout = 30 * time.Second
@@ -103,12 +105,12 @@ type Options struct {
 
 // Runtime owns one isolated JavaScript VM and its event loop. Public
 // operations are serialized, and all VM access runs on the event-loop
-// goroutine because goja runtimes are not goroutine-safe.
+// goroutine because moejs runtimes are not goroutine-safe.
 type Runtime struct {
 	mu                  sync.Mutex
 	loop                *eventloop.EventLoop
 	host                *bridge.Runtime
-	vm                  *goja.Runtime
+	vm                  *moe.Runtime
 	timeout             time.Duration
 	closed              bool
 	nodeJS              bool
@@ -195,7 +197,6 @@ func New(script string, options Options) (*Runtime, error) {
 	}))
 	registry := require.NewRegistry(registryOptions...)
 	runtimeLoop := eventloop.NewEventLoop(
-		eventloop.EnableConsole(false),
 		eventloop.WithRegistry(registry),
 	)
 	host := bridge.New(runtimeLoop, timeout)
@@ -233,7 +234,7 @@ func New(script string, options Options) (*Runtime, error) {
 	}
 	if options.NodeJS {
 		runtime.pathModule = pathmodule.New(filesystem.Cwd)
-		runtime.processModule = processmodule.New(host, filesystem, options.AllowExec, startedAt, func(vm *goja.Runtime, values []goja.Value) {
+		runtime.processModule = processmodule.New(host, filesystem, options.AllowExec, startedAt, func(vm *moe.Runtime, values []moe.Value) {
 			runtime.consoleMod.WriteError(vm, values, false)
 		})
 		runtime.childProcessModule = childprocess.New(host, filesystem, options.AllowExec, maxChildOutputBytes)
@@ -243,13 +244,13 @@ func New(script string, options Options) (*Runtime, error) {
 		runtime.cryptoModule = cryptomodule.New(host)
 		runtime.registerNodeModules(registry)
 	}
-	host.SetTurnRunner(func(vm *goja.Runtime, job func() error) error {
+	host.SetTurnRunner(func(vm *moe.Runtime, job func() error) error {
 		if runtime.processModule != nil {
 			return runtime.processModule.RunTurn(vm, job)
 		}
 		return job()
 	})
-	host.SetErrorReporter(func(vm *goja.Runtime, name string, reportErr error) {
+	host.SetErrorReporter(func(vm *moe.Runtime, name string, reportErr error) {
 		runtime.consoleMod.Report(vm, name, reportErr)
 	})
 	if options.ConfigureHost != nil {
@@ -280,7 +281,7 @@ func New(script string, options Options) (*Runtime, error) {
 	runtime.loop.Start()
 
 	initialized := make(chan error, 1)
-	if !runtime.loop.RunOnLoop(func(vm *goja.Runtime) {
+	if !runtime.loop.RunOnLoop(func(vm *moe.Runtime) {
 		runtime.vm = vm
 		if err := runtime.injectGlobals(); err != nil {
 			initialized <- err
@@ -291,7 +292,7 @@ func New(script string, options Options) (*Runtime, error) {
 			if baseDir != "" {
 				sourceName = filepath.Join(baseDir, sourceName)
 			}
-			if _, err := vm.RunScript(sourceName, script); err != nil {
+			if _, err := native.RunScript(vm, sourceName, script); err != nil {
 				return fmt.Errorf("failed to load JavaScript script: %v", err)
 			}
 			return nil
@@ -445,20 +446,30 @@ func (r *Runtime) HasFunction(name string) bool {
 	if r.closed {
 		return false
 	}
-
 	result := make(chan bool, 1)
-	if !r.loop.RunOnLoop(func(vm *goja.Runtime) {
-		value := vm.Get(name)
-		if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
-			result <- false
-			return
-		}
-		_, ok := goja.AssertFunction(value)
-		result <- ok
+	deadline := time.Now().Add(r.timeout)
+	if !r.loop.RunOnLoop(func(vm *moe.Runtime) {
+		callable := false
+		err := bridge.RunWithDeadline(vm, deadline, func() error {
+			v, err := vm.Get(e.ObjectValue(vm.Realm().Global), name)
+			if err != nil {
+				return err
+			}
+			callable = e.IsCallable(v)
+			return nil
+		})
+		result <- err == nil && callable
 	}) {
 		return false
 	}
-	return <-result
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case ok := <-result:
+		return ok
+	case <-timer.C:
+		return false
+	}
 }
 
 // Call invokes a named JavaScript function and accepts either a truthy
@@ -490,12 +501,30 @@ func (r *Runtime) call(name string, requireTruthy bool, args ...any) error {
 		}
 	}
 
-	if !r.loop.RunOnLoop(func(vm *goja.Runtime) {
+	if !r.loop.RunOnLoop(func(vm *moe.Runtime) {
 		if time.Now().After(deadline) {
 			finish(bridge.ErrExecutionTimeout)
 			return
 		}
-		r.callOnLoop(vm, name, args, deadline, finish, requireTruthy)
+		err := bridge.RunWithDeadline(vm, deadline, func() (err error) {
+			defer func() {
+				if p := recover(); p != nil {
+					switch x := p.(type) {
+					case error:
+						err = x
+					case moe.Value:
+						err = &moe.Exception{Value: x}
+					default:
+						panic(p)
+					}
+				}
+			}()
+			r.callOnLoop(vm, name, args, deadline, finish, requireTruthy)
+			return nil
+		})
+		if err != nil {
+			finish(err)
+		}
 	}) {
 		return errors.New("JavaScript event loop is not running")
 	}
@@ -511,30 +540,30 @@ func (r *Runtime) call(name string, requireTruthy bool, args ...any) error {
 	}
 }
 
-func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline time.Time, finish func(error), requireTruthy bool) {
-	function := vm.Get(name)
-	if function == nil || goja.IsUndefined(function) {
+func (r *Runtime) callOnLoop(vm *moe.Runtime, name string, args []any, deadline time.Time, finish func(error), requireTruthy bool) {
+	function := native.Global(vm, name)
+	if function.IsUndefined() {
 		finish(fmt.Errorf("%s function not defined in script", name))
 		return
 	}
-	call, ok := goja.AssertFunction(function)
-	if !ok {
+	if !e.IsCallable(function) {
 		finish(fmt.Errorf("%s is not a function", name))
 		return
 	}
-
-	values := make([]goja.Value, len(args))
+	values := make([]moe.Value, len(args))
 	for i, arg := range args {
-		values[i] = vm.ToValue(arg)
+		v, err := vm.FromGo(arg)
+		if err != nil {
+			finish(err)
+			return
+		}
+		values[i] = v
 	}
-
-	var callResult goja.Value
-	err := bridge.RunWithDeadline(vm, deadline, func() error {
-		return r.host.RunTurn(vm, func() error {
-			var err error
-			callResult, err = call(goja.Undefined(), values...)
-			return err
-		})
+	var result moe.Value
+	err := r.host.RunTurn(vm, func() error {
+		var err error
+		result, err = vm.CallFunction(function, moe.Undefined(), values...)
+		return err
 	})
 	if err != nil {
 		if errors.Is(err, bridge.ErrExecutionTimeout) {
@@ -546,54 +575,47 @@ func (r *Runtime) callOnLoop(vm *goja.Runtime, name string, args []any, deadline
 		}
 		return
 	}
-
-	_, ok = callResult.Export().(*goja.Promise)
-	if !ok {
-		finish(okResult(name, requireTruthy, callResult))
+	if !result.IsObject() {
+		finish(okResult(name, requireTruthy, result))
 		return
 	}
-
-	then, ok := goja.AssertFunction(callResult.ToObject(vm).Get("then"))
-	if !ok {
-		finish(errors.New("JavaScript Promise has no callable then method"))
+	_, _, promise := result.AsObject().PromiseResult()
+	if !promise {
+		finish(okResult(name, requireTruthy, result))
 		return
 	}
-	onFulfilled := vm.ToValue(func(call goja.FunctionCall) goja.Value {
-		finish(okResult(name, requireTruthy, call.Argument(0)))
-		return goja.Undefined()
+	then := native.Get(vm, result.AsObject(), "then")
+	fulfilled := native.Bind(vm, "fulfilled", 1, func(_ *moe.Realm, _ moe.Value, args []moe.Value) (moe.Value, error) {
+		finish(okResult(name, requireTruthy, moe.Arg(args, 0)))
+		return moe.Undefined(), nil
 	})
-	onRejected := vm.ToValue(func(call goja.FunctionCall) goja.Value {
-		if code, ok := bridge.ExitCodeFromValue(call.Argument(0)); ok {
+	rejected := native.Bind(vm, "rejected", 1, func(_ *moe.Realm, _ moe.Value, args []moe.Value) (moe.Value, error) {
+		v := moe.Arg(args, 0)
+		if code, ok := bridge.ExitCodeFromValue(v); ok {
 			finish(exitCodeError(code))
-			return goja.Undefined()
+		} else {
+			finish(fmt.Errorf("Promise rejected: %s", native.String(vm, v)))
 		}
-		finish(fmt.Errorf("Promise rejected: %v", call.Argument(0)))
-		return goja.Undefined()
+		return moe.Undefined(), nil
 	})
-	if _, err := then(callResult, onFulfilled, onRejected); err != nil {
-		finish(fmt.Errorf("failed to observe Promise: %v", err))
-		return
+	if _, err := vm.CallFunction(then, result, fulfilled, rejected); err != nil {
+		finish(fmt.Errorf("failed to observe Promise: %w", err))
 	}
 }
-
-// exitCodeError converts a script-requested process exit into a result.
-// Exit code 0 is a normal termination; nonzero codes are failures.
 func exitCodeError(code int64) error {
 	if code == 0 {
 		return nil
 	}
 	return fmt.Errorf("JavaScript process exited with code %d", code)
 }
-
-func okResult(name string, requireTruthy bool, value goja.Value) error {
-	if !requireTruthy {
+func okResult(name string, required bool, v moe.Value) error {
+	if !required {
 		return nil
 	}
-	return truthyResult(name, value)
+	return truthyResult(name, v)
 }
-
-func truthyResult(name string, value goja.Value) error {
-	if value != nil && value.ToBoolean() {
+func truthyResult(name string, v moe.Value) error {
+	if native.Bool(v) {
 		return nil
 	}
 	return fmt.Errorf("%s returned false", name)

@@ -14,13 +14,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/buffer"
-	"github.com/dop251/goja_nodejs/require"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/Calcium-Ion/moejs/engine"
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/pkg/jsruntime/httpbody"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
+	"github.com/komari-monitor/komari/pkg/jsruntime/require"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -71,49 +72,50 @@ import (
 // The host engine keeps a registered route slot after unload; requests then
 // receive 404 until the plugin is loaded again.
 func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.Registry, inst *Instance) {
-	registry.RegisterNativeModule("server", func(vm *goja.Runtime, module *goja.Object) {
-		exports := vm.NewObject()
-		_ = exports.Set("route", func(call goja.FunctionCall) goja.Value {
-			method := strings.ToUpper(strings.TrimSpace(call.Argument(0).String()))
-			path := call.Argument(1).String()
-			handler, ok := goja.AssertFunction(call.Argument(2))
+	registry.RegisterNativeModule("server", func(vm *moejs.Runtime, module *engine.Object) {
+		exports := vm.Realm().NewObject()
+		_ = native.Function(vm, exports, "route", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			method := strings.ToUpper(strings.TrimSpace(native.String(vm, moejs.Arg(args, 0))))
+			path := native.String(vm, moejs.Arg(args, 1))
+			handler := moejs.Arg(args, 2)
+			ok := engine.IsCallable(handler)
 			if method == "" {
-				panic(vm.NewTypeError("server.route requires an HTTP method"))
+				return moejs.Undefined(), native.TypeError(vm, "server.route requires an HTTP method")
 			}
 			if path == "" || !strings.HasPrefix(path, "/") {
-				panic(vm.NewTypeError("server.route requires a path starting with /"))
+				return moejs.Undefined(), native.TypeError(vm, "server.route requires a path starting with /")
 			}
 			if !ok {
-				panic(vm.NewTypeError("server.route requires a function handler"))
+				return moejs.Undefined(), native.TypeError(vm, "server.route requires a function handler")
 			}
 			if !inst.info.Permissions.AllowRoutes {
-				panic(vm.NewTypeError("server.route requires the \"route\" permission (allowRoutes)"))
+				return moejs.Undefined(), native.TypeError(vm, "server.route requires the \"route\" permission (allowRoutes)")
 			}
 			if err := m.registerRoute(inst.info.Short, method, path, handler); err != nil {
-				panic(vm.NewGoError(err))
+				return moejs.Undefined(), err
 			}
-			return goja.Undefined()
+			return moejs.Undefined(), nil
 		})
-		_ = exports.Set("static", func(call goja.FunctionCall) goja.Value {
-			mount := strings.TrimSpace(call.Argument(0).String())
+		_ = native.Function(vm, exports, "static", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			mount := strings.TrimSpace(native.String(vm, moejs.Arg(args, 0)))
 			mount = strings.TrimRight(mount, "/")
-			dir := strings.TrimSpace(call.Argument(1).String())
+			dir := strings.TrimSpace(native.String(vm, moejs.Arg(args, 1)))
 			if mount == "" || mount == "/" || !strings.HasPrefix(mount, "/") {
-				panic(vm.NewTypeError("server.static requires a mount path starting with / (and not \"/\")"))
+				return moejs.Undefined(), native.TypeError(vm, "server.static requires a mount path starting with / (and not \"/\")")
 			}
 			if dir == "" {
-				panic(vm.NewTypeError("server.static requires a folder name"))
+				return moejs.Undefined(), native.TypeError(vm, "server.static requires a folder name")
 			}
 			if !filepath.IsLocal(dir) {
-				panic(vm.NewTypeError("server.static folder must be a relative path inside the plugin directory"))
+				return moejs.Undefined(), native.TypeError(vm, "server.static folder must be a relative path inside the plugin directory")
 			}
 			if !inst.info.Permissions.AllowRoutes {
-				panic(vm.NewTypeError("server.static requires the \"route\" permission (allowRoutes)"))
+				return moejs.Undefined(), native.TypeError(vm, "server.static requires the \"route\" permission (allowRoutes)")
 			}
 			var opts map[string]any
-			if !goja.IsUndefined(call.Argument(2)) && !goja.IsNull(call.Argument(2)) {
-				if err := vm.ExportTo(call.Argument(2), &opts); err != nil {
-					panic(vm.NewTypeError("server.static options must be an object like { spa: true }"))
+			if !moejs.Arg(args, 2).IsUndefined() && !moejs.Arg(args, 2).IsNull() {
+				if err := native.ExportTo(vm, moejs.Arg(args, 2), &opts); err != nil {
+					return moejs.Undefined(), native.TypeError(vm, "server.static options must be an object like { spa: true }")
 				}
 			}
 			spa := false
@@ -121,168 +123,172 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 				spa, _ = v.(bool)
 			}
 			if err := m.registerStatic(inst.info.Short, mount, dir, spa); err != nil {
-				panic(vm.NewGoError(err))
+				return moejs.Undefined(), err
 			}
-			return goja.Undefined()
+			return moejs.Undefined(), nil
 		})
-		_ = exports.Set("call", func(call goja.FunctionCall) goja.Value {
-			method := strings.TrimSpace(call.Argument(0).String())
+		_ = native.Function(vm, exports, "call", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			method := strings.TrimSpace(native.String(vm, moejs.Arg(args, 0)))
 			if method == "" {
-				panic(vm.NewTypeError("server.call requires an RPC method name"))
+				return moejs.Undefined(), native.TypeError(vm, "server.call requires an RPC method name")
 			}
-			params := callParams(call)
+			params := callParams(vm, args)
 			promise, resolve, reject := vm.NewPromise()
 			go func() {
 				if !inst.info.Permissions.AllowSystemRPC {
-					host.RunOnLoop(func(vm *goja.Runtime) {
-						_ = reject(vm.NewGoError(errors.New("server.call requires the \"system RPC\" permission (allowSystemRPC)")))
+					host.RunOnLoop(func(vm *moejs.Runtime) {
+						_ = reject(native.GoError(vm, errors.New("server.call requires the \"system RPC\" permission (allowSystemRPC)")))
 					})
 					return
 				}
 				meta := &rpc.ContextMeta{Permission: rpc.RoleAdmin, Principal: rpc.PrincipalFromRole(rpc.RoleAdmin)}
 				ctx := rpc.NewContextWithMeta(context.Background(), meta)
 				resp := rpc.CallWithContext(ctx, nil, method, params)
-				host.RunOnLoop(func(vm *goja.Runtime) {
+				host.RunOnLoop(func(vm *moejs.Runtime) {
 					if resp.Error != nil {
-						_ = reject(jsRPCError(vm, resp.Error))
+						_ = reject(engine.ObjectValue(jsRPCError(vm, resp.Error)))
 						return
 					}
 					result, err := normalizeRPCValue(resp.Result)
 					if err != nil {
-						_ = reject(vm.NewGoError(err))
+						_ = reject(native.GoError(vm, err))
 						return
 					}
-					_ = resolve(result)
+					_ = resolve(native.From(vm, result))
 				})
 			}()
-			return vm.ToValue(promise)
+			return promise, nil
 		})
-		_ = exports.Set("hook", func(call goja.FunctionCall) goja.Value {
-			kind := strings.ToLower(strings.TrimSpace(call.Argument(0).String()))
+		_ = native.Function(vm, exports, "hook", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			kind := strings.ToLower(strings.TrimSpace(native.String(vm, moejs.Arg(args, 0))))
 			switch kind {
 			case "request", "response", string(hookWSConnect), string(hookWSMessage), string(hookWSSend), string(hookWSClose):
 				if !inst.info.Permissions.AllowHooks {
-					panic(vm.NewTypeError("server.hook requires the \"hook\" permission (allowHooks)"))
+					return moejs.Undefined(), native.TypeError(vm, "server.hook requires the \"hook\" permission (allowHooks)")
 				}
 			default:
-				panic(vm.NewTypeError("server.hook kind must be \"request\", \"response\", \"wsConnect\", \"wsMessage\", \"wsSend\" or \"wsClose\""))
+				return moejs.Undefined(), native.TypeError(vm, "server.hook kind must be \"request\", \"response\", \"wsConnect\", \"wsMessage\", \"wsSend\" or \"wsClose\"")
 			}
 			// server.hook(kind, fn) or server.hook(kind, matcher, fn) where
 			// matcher is "METHOD /path", "/path" or "/path/*". The ws kinds
 			// only accept a path matcher: every upgrade is a GET request.
-			fnValue := call.Argument(1)
+			fnValue := moejs.Arg(args, 1)
 			var matcher *hookMatcher
-			if goja.IsString(fnValue) {
-				parsed, err := parseHookMatcher(fnValue.String())
+			if fnValue.IsString() {
+				parsed, err := parseHookMatcher(native.String(vm, fnValue))
 				if err != nil {
-					panic(vm.NewTypeError(err.Error()))
+					return moejs.Undefined(), native.TypeError(vm, "%s", err.Error())
 				}
 				if isWSHookKind(kind) && parsed.method != "" {
-					panic(vm.NewTypeError("server.hook \"" + kind + "\" only accepts a path matcher like \"/api/*\""))
+					return moejs.Undefined(), native.TypeError(vm, "server.hook %q only accepts a path matcher like /api/*", kind)
 				}
 				matcher = parsed
-				fnValue = call.Argument(2)
+				fnValue = moejs.Arg(args, 2)
 			}
-			fn, ok := goja.AssertFunction(fnValue)
+			fn := fnValue
+			ok := engine.IsCallable(fn)
 			if !ok {
-				panic(vm.NewTypeError("server.hook requires a function handler"))
+				return moejs.Undefined(), native.TypeError(vm, "server.hook requires a function handler")
 			}
 			m.registerHook(inst.info.Short, hookKind(kind), fn, matcher)
-			return goja.Undefined()
+			return moejs.Undefined(), nil
 		})
-		_ = exports.Set("injectHTML", func(call goja.FunctionCall) goja.Value {
+		_ = native.Function(vm, exports, "injectHTML", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 			if !inst.info.Permissions.AllowHTMLInject {
-				panic(vm.NewTypeError("server.injectHTML requires the \"HTML inject\" permission (allowHTMLInject)"))
+				return moejs.Undefined(), native.TypeError(vm, "server.injectHTML requires the \"HTML inject\" permission (allowHTMLInject)")
 			}
-			m.registerInject(inst.info.Short, call.Argument(0).String(), call.Argument(1).String())
-			return goja.Undefined()
+			m.registerInject(inst.info.Short, native.String(vm, moejs.Arg(args, 0)), native.String(vm, moejs.Arg(args, 1)))
+			return moejs.Undefined(), nil
 		})
-		_ = exports.Set("cron", func(call goja.FunctionCall) goja.Value {
-			spec := strings.TrimSpace(call.Argument(0).String())
-			fn, ok := goja.AssertFunction(call.Argument(1))
+		_ = native.Function(vm, exports, "cron", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			spec := strings.TrimSpace(native.String(vm, moejs.Arg(args, 0)))
+			fn := moejs.Arg(args, 1)
+			ok := engine.IsCallable(fn)
 			if spec == "" {
-				panic(vm.NewTypeError("server.cron requires a cron expression"))
+				return moejs.Undefined(), native.TypeError(vm, "server.cron requires a cron expression")
 			}
 			if !ok {
-				panic(vm.NewTypeError("server.cron requires a function handler"))
+				return moejs.Undefined(), native.TypeError(vm, "server.cron requires a function handler")
 			}
 			if err := m.registerCron(inst.info.Short, spec, fn); err != nil {
-				panic(vm.NewGoError(err))
+				return moejs.Undefined(), err
 			}
-			return goja.Undefined()
+			return moejs.Undefined(), nil
 		})
-		_ = exports.Set("registerRPC", func(call goja.FunctionCall) goja.Value {
-			method := strings.TrimSpace(call.Argument(0).String())
-			fn, ok := goja.AssertFunction(call.Argument(1))
+		_ = native.Function(vm, exports, "registerRPC", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			method := strings.TrimSpace(native.String(vm, moejs.Arg(args, 0)))
+			fn := moejs.Arg(args, 1)
+			ok := engine.IsCallable(fn)
 			if method == "" {
-				panic(vm.NewTypeError("server.registerRPC requires an RPC method name"))
+				return moejs.Undefined(), native.TypeError(vm, "server.registerRPC requires an RPC method name")
 			}
 			if !ok {
-				panic(vm.NewTypeError("server.registerRPC requires a function handler"))
+				return moejs.Undefined(), native.TypeError(vm, "server.registerRPC requires a function handler")
 			}
 			if err := m.registerRPC(inst.info.Short, method, fn); err != nil {
-				panic(vm.NewGoError(err))
+				return moejs.Undefined(), err
 			}
-			return goja.Undefined()
+			return moejs.Undefined(), nil
 		})
-		_ = exports.Set("registerNotificationChannel", func(call goja.FunctionCall) goja.Value {
-			id := strings.TrimSpace(call.Argument(0).String())
-			handler, ok := goja.AssertFunction(call.Argument(2))
+		_ = native.Function(vm, exports, "registerNotificationChannel", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			id := strings.TrimSpace(native.String(vm, moejs.Arg(args, 0)))
+			handler := moejs.Arg(args, 2)
+			ok := engine.IsCallable(handler)
 			if id == "" {
-				panic(vm.NewTypeError("server.registerNotificationChannel requires a channel id"))
+				return moejs.Undefined(), native.TypeError(vm, "server.registerNotificationChannel requires a channel id")
 			}
 			if !ok {
-				panic(vm.NewTypeError("server.registerNotificationChannel requires a function handler"))
+				return moejs.Undefined(), native.TypeError(vm, "server.registerNotificationChannel requires a function handler")
 			}
-			rawConfiguration, err := exportJSValue(call.Argument(1))
+			rawConfiguration, err := exportJSValue(vm, moejs.Arg(args, 1))
 			if err != nil {
-				panic(vm.NewTypeError("server.registerNotificationChannel requires a managed configuration object"))
+				return moejs.Undefined(), native.TypeError(vm, "server.registerNotificationChannel requires a managed configuration object")
 			}
 			configurationJSON, err := json.Marshal(rawConfiguration)
 			if err != nil {
-				panic(vm.NewTypeError("server.registerNotificationChannel requires a managed configuration object"))
+				return moejs.Undefined(), native.TypeError(vm, "server.registerNotificationChannel requires a managed configuration object")
 			}
 			var configuration models.Configuration
 			if err := json.Unmarshal(configurationJSON, &configuration); err != nil {
-				panic(vm.NewTypeError("server.registerNotificationChannel requires a managed configuration object"))
+				return moejs.Undefined(), native.TypeError(vm, "server.registerNotificationChannel requires a managed configuration object")
 			}
 			if err := m.registerNotificationChannel(inst.info.Short, id, configuration, handler, host); err != nil {
-				panic(vm.NewGoError(err))
+				return moejs.Undefined(), err
 			}
-			return goja.Undefined()
+			return moejs.Undefined(), nil
 		})
-		_ = exports.Set("getConfig", func(call goja.FunctionCall) goja.Value {
+		_ = native.Function(vm, exports, "getConfig", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 			promise, resolve, reject := vm.NewPromise()
 			go func() {
 				data, err := GetConfiguration(inst.info.Short)
-				host.RunOnLoop(func(vm *goja.Runtime) {
+				host.RunOnLoop(func(vm *moejs.Runtime) {
 					if err != nil {
-						_ = reject(vm.NewGoError(err))
+						_ = reject(native.GoError(vm, err))
 						return
 					}
-					_ = resolve(data)
+					_ = resolve(native.From(vm, data))
 				})
 			}()
-			return vm.ToValue(promise)
+			return promise, nil
 		})
-		_ = module.Set("exports", exports)
+		_ = native.Set(vm, module, "exports", exports)
 	})
 }
 
 // callParams converts JS arguments into JSON-RPC params: no params, a single
 // value, or a positional array. Values that cannot be exported (for example
 // circular objects) are skipped so the call rejects instead of panicking.
-func callParams(call goja.FunctionCall) any {
-	switch n := len(call.Arguments); {
+func callParams(vm *moejs.Runtime, args []moejs.Value) any {
+	switch n := len(args); {
 	case n <= 1:
 		return nil
 	case n == 2:
-		exported, _ := exportJSValue(call.Argument(1))
+		exported, _ := exportJSValue(vm, moejs.Arg(args, 1))
 		return exported
 	default:
 		params := make([]any, 0, n-1)
 		for i := 1; i < n; i++ {
-			exported, err := exportJSValue(call.Argument(i))
+			exported, err := exportJSValue(vm, moejs.Arg(args, i))
 			if err != nil {
 				return nil
 			}
@@ -292,11 +298,11 @@ func callParams(call goja.FunctionCall) any {
 	}
 }
 
-func jsRPCError(vm *goja.Runtime, e *rpc.JsonRpcError) *goja.Object {
-	obj := vm.NewGoError(fmt.Errorf("%s", e.Message))
-	_ = obj.Set("code", e.Code)
+func jsRPCError(vm *moejs.Runtime, e *rpc.JsonRpcError) *engine.Object {
+	obj := native.Object(vm, native.GoError(vm, fmt.Errorf("%s", e.Message)))
+	_ = native.Set(vm, obj, "code", e.Code)
 	if e.Data != nil {
-		_ = obj.Set("data", e.Data)
+		_ = native.Set(vm, obj, "data", e.Data)
 	}
 	return obj
 }
@@ -318,7 +324,7 @@ func normalizeRPCValue(value any) (any, error) {
 // called from the plugin's own event loop during script evaluation and takes
 // the manager lock itself. The critical section is short and never waits on
 // the event loop, so no lock cycle is possible.
-func (m *Manager) registerRoute(short, method, path string, handler goja.Callable) (err error) {
+func (m *Manager) registerRoute(short, method, path string, handler moejs.Value) (err error) {
 	key := method + " " + path
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -334,7 +340,8 @@ func (m *Manager) registerRoute(short, method, path string, handler goja.Callabl
 	}
 	slotExists := m.routes[short][key]
 	inst.mu.Lock()
-	if !slotExists && inst.handlers[key] != nil {
+	// A missing map entry yields a zero moejs.Value, not JavaScript undefined.
+	if _, registered := inst.handlers[key]; !slotExists && registered {
 		inst.mu.Unlock()
 		return nil // already registered in this load
 	}
@@ -373,7 +380,7 @@ func (m *Manager) routeHandler(short string) gin.HandlerFunc {
 		alive := inst.runtime != nil
 		limit := inst.info.Permissions.MaxHTTPBodyBytes
 		inst.mu.RUnlock()
-		if !alive || handler == nil || host == nil {
+		if !alive || handler.IsUndefined() || host == nil {
 			c.Status(http.StatusNotFound)
 			return
 		}
@@ -394,11 +401,11 @@ func (m *Manager) routeHandler(short string) gin.HandlerFunc {
 			chunks:     make(chan []byte, 4),
 			abortCh:    make(chan struct{}),
 		}
-		queued := host.RunOnLoop(func(vm *goja.Runtime) {
+		queued := host.RunOnLoop(func(vm *moejs.Runtime) {
 			req := routeRequest(vm, c, body)
 			res := routeResponseObject(vm, state)
 			runErr := host.RunJob(vm, "plugin route "+short, func() error {
-				_, callErr := handler(goja.Undefined(), req, res)
+				_, callErr := vm.CallFunction(handler, moejs.Undefined(), engine.ObjectValue(req), engine.ObjectValue(res))
 				return callErr
 			})
 			if runErr != nil {
@@ -660,70 +667,78 @@ func (state *routeResponse) finish(status int, body []byte) {
 	close(state.done)
 }
 
-func routeRequest(vm *goja.Runtime, c *gin.Context, body []byte) *goja.Object {
+func routeRequest(vm *moejs.Runtime, c *gin.Context, body []byte) *engine.Object {
 	req := hookRequestObject(vm, c.Request, body)
-	_ = req.Set("context", routeRequestContext(vm, c))
+	_ = native.Set(vm, req, "context", routeRequestContext(vm, c))
 	return req
 }
 
-func routeResponseObject(vm *goja.Runtime, state *routeResponse) *goja.Object {
-	res := vm.NewObject()
-	_ = res.Set("statusCode", http.StatusOK)
-	_ = res.Set("statusMessage", "")
-	_ = res.Set("streaming", false)
-	_ = res.Set("isAborted", func() bool { return state.aborted.Load() })
-	_ = res.Set("setHeader", func(name string, value goja.Value) *goja.Object {
+func routeResponseObject(vm *moejs.Runtime, state *routeResponse) *engine.Object {
+	res := vm.Realm().NewObject()
+	_ = native.Set(vm, res, "statusCode", http.StatusOK)
+	_ = native.Set(vm, res, "statusMessage", "")
+	_ = native.Set(vm, res, "streaming", false)
+	_ = native.Function(vm, res, "isAborted", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, state.aborted.Load()), nil
+	})
+	_ = native.Function(vm, res, "setHeader", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name, value := native.String(vm, moejs.Arg(args, 0)), moejs.Arg(args, 1)
 		state.mu.Lock()
 		defer state.mu.Unlock()
 		var values []string
-		if err := vm.ExportTo(value, &values); err == nil {
+		if err := native.ExportTo(vm, value, &values); err == nil {
 			state.headers[name] = values
 		} else {
-			state.headers.Set(name, value.String())
+			state.headers.Set(name, native.String(vm, value))
 		}
-		return res
+		return engine.ObjectValue(res), nil
 	})
-	_ = res.Set("getHeader", func(name string) goja.Value {
+	_ = native.Function(vm, res, "getHeader", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		state.mu.Lock()
 		defer state.mu.Unlock()
-		values := state.headers.Values(name)
+		values := state.headers.Values(native.String(vm, moejs.Arg(args, 0)))
 		if len(values) == 0 {
-			return goja.Undefined()
+			return moejs.Undefined(), nil
 		}
 		if len(values) == 1 {
-			return vm.ToValue(values[0])
+			return native.From(vm, values[0]), nil
 		}
-		return vm.ToValue(values)
+		return native.From(vm, values), nil
 	})
-	_ = res.Set("removeHeader", func(name string) {
+	_ = native.Function(vm, res, "removeHeader", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		state.mu.Lock()
-		state.headers.Del(name)
+		state.headers.Del(native.String(vm, moejs.Arg(args, 0)))
 		state.mu.Unlock()
+		return moejs.Undefined(), nil
 	})
-	_ = res.Set("write", func(call goja.FunctionCall) goja.Value {
-		data := buffer.Bytes(vm, call.Argument(0))
-		if value := res.Get("streaming"); value != nil && value.ToBoolean() {
+	_ = native.Function(vm, res, "write", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		value := moejs.Arg(args, 0)
+		var data []byte
+		if err := native.ExportTo(vm, value, &data); err != nil {
+			data = []byte(native.String(vm, value))
+		}
+		if native.Bool(native.Get(vm, res, "streaming")) {
 			state.markStreaming()
 			_ = state.pushChunk(data)
-			return vm.ToValue(true)
+			return native.From(vm, true), nil
 		}
 		state.mu.Lock()
 		_, _ = state.body.Write(data)
 		state.mu.Unlock()
-		return vm.ToValue(true)
+		return native.From(vm, true), nil
 	})
-	_ = res.Set("end", func(call goja.FunctionCall) goja.Value {
+	_ = native.Function(vm, res, "end", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		state.mu.Lock()
-		if len(call.Arguments) > 0 && !goja.IsUndefined(call.Argument(0)) && !goja.IsNull(call.Argument(0)) {
-			_, _ = state.body.WriteString(call.Argument(0).String())
+		defer state.mu.Unlock()
+		if len(args) > 0 && !native.IsNil(args[0]) {
+			_, _ = state.body.WriteString(native.String(vm, args[0]))
 		}
-		state.statusCode = int(res.Get("statusCode").ToInteger())
+		state.statusCode = int(native.Int(vm, native.Get(vm, res, "statusCode")))
 		if !state.ended {
 			state.ended = true
 			close(state.done)
 		}
-		state.mu.Unlock()
-		return res
+		return engine.ObjectValue(res), nil
 	})
 	return res
 }

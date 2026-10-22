@@ -3,8 +3,10 @@ package plugin
 import (
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/Calcium-Ion/moejs/engine"
 	"github.com/gorilla/websocket"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 	"github.com/komari-monitor/komari/web/connection"
 )
 
@@ -15,10 +17,10 @@ import (
 // GET. Like the HTTP kinds, the input is lowercased, so any casing works
 // from JS.
 const (
-	hookWSConnect  hookKind = "wsconnect"
-	hookWSMessage  hookKind = "wsmessage"
-	hookWSSend     hookKind = "wssend"
-	hookWSClose    hookKind = "wsclose"
+	hookWSConnect hookKind = "wsconnect"
+	hookWSMessage hookKind = "wsmessage"
+	hookWSSend    hookKind = "wssend"
+	hookWSClose   hookKind = "wsclose"
 )
 
 // wsFrameHookTimeout bounds one frame-level callback. The agent read pumps
@@ -47,21 +49,21 @@ func (m *Manager) OnConnect(info *connection.ConnInfo) (deny bool, reason string
 	for _, h := range m.wsHooksFor(hookWSConnect, info.Path) {
 		var denied bool
 		var why string
-		queued, timedOut := runHookTurn(h.host, "plugin wsConnect hook "+h.short, func(vm *goja.Runtime) {
+		queued, timedOut := runHookTurn(h.host, "plugin wsConnect hook "+h.short, func(vm *moejs.Runtime) {
 			_ = h.host.RunJob(vm, "plugin wsConnect hook "+h.short, func() error {
-				res, err := h.fn(goja.Undefined(), wsHookContext(vm, info))
+				res, err := vm.CallFunction(h.fn, moejs.Undefined(), engine.ObjectValue(wsHookContext(vm, info)))
 				if err != nil {
 					return err
 				}
-				if goja.IsUndefined(res) || goja.IsNull(res) {
+				if res.IsUndefined() || res.IsNull() {
 					return nil
 				}
-				obj := res.ToObject(vm)
-				if v := obj.Get("deny"); v != nil && v.ToBoolean() {
+				obj := native.Object(vm, res)
+				if v := native.Get(vm, obj, "deny"); native.Bool(v) {
 					denied = true
 				}
-				if v := obj.Get("reason"); v != nil && !goja.IsUndefined(v) {
-					why = v.String()
+				if v := native.Get(vm, obj, "reason"); !v.IsUndefined() {
+					why = native.String(vm, v)
 				}
 				return nil
 			})
@@ -103,25 +105,25 @@ func (m *Manager) runFrameHooks(kind hookKind, info *connection.ConnInfo, frameT
 	for _, h := range hooks {
 		var drop bool
 		var hookErr error
-		queued, timedOut := runHookTurnTimeout(h.host, "plugin "+string(kind)+" hook "+h.short, wsFrameHookTimeout, func(vm *goja.Runtime) {
+		queued, timedOut := runHookTurnTimeout(h.host, "plugin "+string(kind)+" hook "+h.short, wsFrameHookTimeout, func(vm *moejs.Runtime) {
 			msg := wsFrameObject(vm, info, frameType, next)
 			hookErr = h.host.RunJob(vm, "plugin "+string(kind)+" hook "+h.short, func() error {
-				res, err := h.fn(goja.Undefined(), wsHookContext(vm, info), msg)
+				res, err := vm.CallFunction(h.fn, moejs.Undefined(), engine.ObjectValue(wsHookContext(vm, info)), engine.ObjectValue(msg))
 				if err != nil {
 					return err
 				}
-				if goja.IsUndefined(res) || goja.IsNull(res) {
+				if res.IsUndefined() || res.IsNull() {
 					return nil
 				}
-				obj := res.ToObject(vm)
-				if v := obj.Get("drop"); v != nil && v.ToBoolean() {
+				obj := native.Object(vm, res)
+				if v := native.Get(vm, obj, "drop"); native.Bool(v) {
 					drop = true
 					return nil
 				}
-				if v := obj.Get("type"); v != nil && !goja.IsUndefined(v) {
-					frameType = int(v.ToInteger())
+				if v := native.Get(vm, obj, "type"); !v.IsUndefined() {
+					frameType = int(native.Int(vm, v))
 				}
-				if v := obj.Get("data"); v != nil && !goja.IsUndefined(v) && !goja.IsNull(v) {
+				if v := native.Get(vm, obj, "data"); !v.IsUndefined() && !v.IsNull() {
 					if data := wsFrameBytes(vm, v); data != nil {
 						next = data
 					}
@@ -151,9 +153,9 @@ func (m *Manager) runFrameHooks(kind hookKind, info *connection.ConnInfo, frameT
 func (m *Manager) OnClose(info *connection.ConnInfo) {
 	for _, h := range m.wsHooksFor(hookWSClose, info.Path) {
 		var hookErr error
-		queued, timedOut := runHookTurn(h.host, "plugin wsClose hook "+h.short, func(vm *goja.Runtime) {
+		queued, timedOut := runHookTurn(h.host, "plugin wsClose hook "+h.short, func(vm *moejs.Runtime) {
 			hookErr = h.host.RunJob(vm, "plugin wsClose hook "+h.short, func() error {
-				_, err := h.fn(goja.Undefined(), wsHookContext(vm, info))
+				_, err := vm.CallFunction(h.fn, moejs.Undefined(), engine.ObjectValue(wsHookContext(vm, info)))
 				return err
 			})
 		})
@@ -184,41 +186,41 @@ func (m *Manager) wsHooksFor(kind hookKind, path string) []*hookEntry {
 }
 
 // wsHookContext builds the immutable per-connection context object.
-func wsHookContext(vm *goja.Runtime, info *connection.ConnInfo) *goja.Object {
-	ctx := vm.NewObject()
-	_ = ctx.Set("path", info.Path)
-	_ = ctx.Set("connId", info.ID)
-	_ = ctx.Set("remoteIp", info.RemoteIP)
-	_ = ctx.Set("userAgent", info.UserAgent)
+func wsHookContext(vm *moejs.Runtime, info *connection.ConnInfo) *engine.Object {
+	ctx := vm.Realm().NewObject()
+	_ = native.Set(vm, ctx, "path", info.Path)
+	_ = native.Set(vm, ctx, "connId", info.ID)
+	_ = native.Set(vm, ctx, "remoteIp", info.RemoteIP)
+	_ = native.Set(vm, ctx, "userAgent", info.UserAgent)
 	if info.ClientUUID != "" {
-		_ = ctx.Set("clientUuid", info.ClientUUID)
+		_ = native.Set(vm, ctx, "clientUuid", info.ClientUUID)
 	}
 	return ctx
 }
 
 // wsFrameObject builds the frame object handed to wsMessage/wsSend hooks.
 // Text frames arrive as strings, binary frames as ArrayBuffers.
-func wsFrameObject(vm *goja.Runtime, info *connection.ConnInfo, frameType int, data []byte) *goja.Object {
-	msg := vm.NewObject()
-	_ = msg.Set("type", frameType)
+func wsFrameObject(vm *moejs.Runtime, info *connection.ConnInfo, frameType int, data []byte) *engine.Object {
+	msg := vm.Realm().NewObject()
+	_ = native.Set(vm, msg, "type", frameType)
 	if frameType == websocket.BinaryMessage {
-		_ = msg.Set("data", vm.NewArrayBuffer(append([]byte(nil), data...)))
+		_ = native.Set(vm, msg, "data", newFrameBuffer(vm, data))
 	} else {
-		_ = msg.Set("data", string(data))
+		_ = native.Set(vm, msg, "data", string(data))
 	}
-	_ = msg.Set("connId", info.ID)
-	_ = msg.Set("path", info.Path)
+	_ = native.Set(vm, msg, "connId", info.ID)
+	_ = native.Set(vm, msg, "path", info.Path)
 	return msg
 }
 
 // wsFrameBytes converts a hook-returned payload (string or ArrayBuffer) back
 // to bytes; anything else reports nil and leaves the frame untouched.
-func wsFrameBytes(vm *goja.Runtime, v goja.Value) []byte {
-	if goja.IsString(v) {
-		return []byte(v.String())
+func wsFrameBytes(vm *moejs.Runtime, v moejs.Value) []byte {
+	if v.IsString() {
+		return []byte(native.String(vm, v))
 	}
 	var data []byte
-	if err := vm.ExportTo(v, &data); err == nil {
+	if err := native.ExportTo(vm, v, &data); err == nil {
 		return data
 	}
 	return nil
@@ -231,3 +233,11 @@ func (m *Manager) logWSHookTimeout(h *hookEntry) {
 
 // The Manager is the process-wide WebSocket frame interceptor.
 var _ connection.FrameInterceptor = (*Manager)(nil)
+
+func newFrameBuffer(vm *moejs.Runtime, data []byte) moejs.Value {
+	obj, err := vm.Realm().NewArrayBuffer(append([]byte(nil), data...))
+	if err != nil {
+		panic(err)
+	}
+	return engine.ObjectValue(obj)
+}

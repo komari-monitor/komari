@@ -2,101 +2,90 @@ package timers
 
 import (
 	"errors"
-	"time"
-
-	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/eventloop"
+	moe "github.com/Calcium-Ion/moejs"
+	e "github.com/Calcium-Ion/moejs/engine"
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	"github.com/komari-monitor/komari/pkg/jsruntime/loop"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
+	"time"
 )
 
 type Module struct {
 	runtime *bridge.Runtime
+	next    int64
+	handles map[int64]any
 }
 
-func New(runtime *bridge.Runtime) *Module {
-	return &Module{runtime: runtime}
-}
-
-func (m *Module) Inject(vm *goja.Runtime) error {
-	if err := vm.Set("setTimeout", func(call goja.FunctionCall) goja.Value {
-		callback, args := timerCallback(vm, call, 2)
-		timer := m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
-			m.runtime.RunJob(vm, "setTimeout", func() error {
-				_, err := callback(goja.Undefined(), args...)
-				return err
-			})
-		}, timerDelay(call.Argument(1)))
-		return vm.ToValue(timer)
-	}); err != nil {
-		return err
-	}
-	if err := vm.Set("setInterval", func(call goja.FunctionCall) goja.Value {
-		callback, args := timerCallback(vm, call, 2)
-		var interval *eventloop.Interval
-		interval = m.runtime.Loop().SetInterval(func(vm *goja.Runtime) {
-			err := m.runtime.RunJob(vm, "setInterval", func() error {
-				_, err := callback(goja.Undefined(), args...)
-				return err
-			})
-			if errors.Is(err, bridge.ErrExecutionTimeout) {
-				m.runtime.Loop().ClearInterval(interval)
+func New(r *bridge.Runtime) *Module { return &Module{runtime: r, handles: make(map[int64]any)} }
+func (m *Module) Inject(vm *moe.Runtime) error {
+	for _, name := range []string{"setTimeout", "setInterval", "setImmediate"} {
+		name := name
+		fn := native.Bind(vm, name, 2, func(_ *moe.Realm, _ moe.Value, args []moe.Value) (moe.Value, error) {
+			callback := moe.Arg(args, 0)
+			if !e.IsCallable(callback) {
+				return moe.Undefined(), native.TypeError(vm, "timer callback must be a function")
 			}
-		}, timerDelay(call.Argument(1)))
-		return vm.ToValue(interval)
-	}); err != nil {
-		return err
+			first := 2
+			delay := time.Duration(0)
+			if name == "setImmediate" {
+				first = 1
+			} else {
+				delay = timerDelay(vm, moe.Arg(args, 1))
+			}
+			var params []moe.Value
+			if len(args) > first {
+				params = append(params, args[first:]...)
+			}
+			m.next++
+			id := m.next
+			job := func(rt *moe.Runtime) {
+				if name != "setInterval" {
+					delete(m.handles, id)
+				}
+				err := m.runtime.RunJob(rt, name, func() error { _, err := rt.CallFunction(callback, moe.Undefined(), params...); return err })
+				if errors.Is(err, bridge.ErrExecutionTimeout) {
+					m.clear(id)
+				}
+			}
+			if name == "setInterval" {
+				m.handles[id] = m.runtime.Loop().SetInterval(job, delay)
+			} else {
+				m.handles[id] = m.runtime.Loop().SetTimeout(job, delay)
+			}
+			return moe.Int(id), nil
+		})
+		if err := vm.SetGlobal(name, fn); err != nil {
+			return err
+		}
 	}
-	if err := vm.Set("setImmediate", func(call goja.FunctionCall) goja.Value {
-		callback, args := timerCallback(vm, call, 1)
-		timer := m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
-			m.runtime.RunJob(vm, "setImmediate", func() error {
-				_, err := callback(goja.Undefined(), args...)
-				return err
-			})
-		}, 0)
-		return vm.ToValue(timer)
-	}); err != nil {
-		return err
+	clear := native.Bind(vm, "clearTimer", 1, func(_ *moe.Realm, _ moe.Value, args []moe.Value) (moe.Value, error) {
+		m.clear(native.Int(vm, moe.Arg(args, 0)))
+		return moe.Undefined(), nil
+	})
+	for _, name := range []string{"clearTimeout", "clearInterval", "clearImmediate"} {
+		if err := vm.SetGlobal(name, clear); err != nil {
+			return err
+		}
 	}
-	clear := func(call goja.FunctionCall) goja.Value { return m.clearTimer(call) }
-	if err := vm.Set("clearTimeout", clear); err != nil {
-		return err
-	}
-	if err := vm.Set("clearInterval", clear); err != nil {
-		return err
-	}
-	return vm.Set("clearImmediate", clear)
+	return nil
 }
-
-func timerCallback(vm *goja.Runtime, call goja.FunctionCall, firstArgument int) (goja.Callable, []goja.Value) {
-	callback, ok := goja.AssertFunction(call.Argument(0))
-	if !ok {
-		panic(vm.NewTypeError("timer callback must be a function"))
-	}
-	if len(call.Arguments) <= firstArgument {
-		return callback, nil
-	}
-	return callback, append([]goja.Value(nil), call.Arguments[firstArgument:]...)
-}
-
-func (m *Module) clearTimer(call goja.FunctionCall) goja.Value {
-	switch timer := call.Argument(0).Export().(type) {
-	case *eventloop.Timer:
+func (m *Module) clear(id int64) {
+	switch timer := m.handles[id].(type) {
+	case *loop.Timer:
 		m.runtime.Loop().ClearTimeout(timer)
-	case *eventloop.Interval:
+	case *loop.Interval:
 		m.runtime.Loop().ClearInterval(timer)
 	}
-	return goja.Undefined()
+	delete(m.handles, id)
 }
-
-func timerDelay(value goja.Value) time.Duration {
-	milliseconds := value.ToInteger()
-	if milliseconds <= 0 {
+func timerDelay(vm *moe.Runtime, v moe.Value) time.Duration {
+	n := native.Int(vm, v)
+	if n <= 0 {
 		return 0
 	}
-	const maxMilliseconds = int64((1<<63 - 1) / int64(time.Millisecond))
-	if milliseconds > maxMilliseconds {
-		milliseconds = maxMilliseconds
+	const max = int64((1<<63 - 1) / int64(time.Millisecond))
+	if n > max {
+		n = max
 	}
-	return time.Duration(milliseconds) * time.Millisecond
+	return time.Duration(n) * time.Millisecond
 }

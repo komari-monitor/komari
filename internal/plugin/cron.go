@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/dop251/goja"
+	"github.com/Calcium-Ion/moejs"
 	"github.com/komari-monitor/komari/internal/scheduler"
+	"github.com/komari-monitor/komari/pkg/jsruntime"
 )
 
 // cronJobSeq gives every registered cron job a process-unique id. Job names
@@ -20,7 +21,7 @@ var cronJobSeq atomic.Uint64
 // evaluation and takes the manager lock itself; the critical section is short
 // and never waits on the event loop, so no lock cycle is possible. The job is
 // removed automatically when the plugin is unloaded or fails to load.
-func (m *Manager) registerCron(short, spec string, fn goja.Callable) error {
+func (m *Manager) registerCron(short, spec string, fn moejs.Value) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	inst, ok := m.instances[short]
@@ -37,7 +38,7 @@ func (m *Manager) registerCron(short, spec string, fn goja.Callable) error {
 
 	name := fmt.Sprintf("plugin:%s:%d", short, cronJobSeq.Add(1))
 	if err := scheduler.AddContextFunc(name, spec, false, func(ctx context.Context) {
-		m.runCronJob(short, name, fn)
+		m.runCronJob(short, name, fn, host)
 	}); err != nil {
 		return err
 	}
@@ -51,7 +52,7 @@ func (m *Manager) registerCron(short, spec string, fn goja.Callable) error {
 // on a scheduler goroutine and drops the fire when the plugin was unloaded
 // (the job is cancelled with the instance, but a fire may already be queued).
 // Errors thrown by the handler are reported to the plugin log by RunJob.
-func (m *Manager) runCronJob(short, name string, fn goja.Callable) {
+func (m *Manager) runCronJob(short, name string, fn moejs.Value, owner *jsruntime.Host) {
 	inst := m.instanceFor(short)
 	if inst == nil {
 		return
@@ -60,12 +61,12 @@ func (m *Manager) runCronJob(short, name string, fn goja.Callable) {
 	host := inst.host
 	alive := inst.runtime != nil
 	inst.mu.RUnlock()
-	if !alive || host == nil {
+	if !alive || host == nil || host != owner {
 		return
 	}
-	host.RunOnLoop(func(vm *goja.Runtime) {
+	host.RunOnLoop(func(vm *moejs.Runtime) {
 		_ = host.RunJob(vm, "plugin cron "+name, func() error {
-			_, err := fn(goja.Undefined())
+			_, err := vm.CallFunction(fn, moejs.Undefined())
 			return err
 		})
 	})

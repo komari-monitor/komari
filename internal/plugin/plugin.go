@@ -29,12 +29,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/require"
+	"github.com/Calcium-Ion/moejs"
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
+	"github.com/komari-monitor/komari/pkg/jsruntime/require"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/connection"
 )
@@ -118,9 +118,9 @@ type Instance struct {
 	dir                  string
 	runtime              *jsruntime.Runtime
 	host                 *jsruntime.Host
-	handlers             map[string]goja.Callable // "METHOD path" -> current route handler
+	handlers             map[string]moejs.Value   // "METHOD path" -> current route handler
 	statics              map[string]*staticConfig // mount path -> static folder config
-	rpcMethods           map[string]goja.Callable // registered RPC method -> JS handler
+	rpcMethods           map[string]moejs.Value   // registered RPC method -> JS handler
 	cronJobs             []string                 // scheduler job names, removed on unload
 	notificationChannels map[string]struct{}
 }
@@ -262,7 +262,7 @@ func (m *Manager) load(short string) error {
 	logs.Reset()
 	_, _ = logs.Write([]byte("[plugin] loading " + short + "\n"))
 
-	inst := &Instance{info: info, dir: dir, handlers: make(map[string]goja.Callable), statics: make(map[string]*staticConfig)}
+	inst := &Instance{info: info, dir: dir, handlers: make(map[string]moejs.Value), statics: make(map[string]*staticConfig)}
 	m.mu.Lock()
 	if _, ok := m.instances[short]; ok {
 		m.mu.Unlock()
@@ -684,7 +684,7 @@ func (m *Manager) hooksOf(kind hookKind) []*hookEntry {
 // during script evaluation; it takes the manager lock itself. matcher is
 // nil for unfiltered hooks; the plugin-declared body limit is captured at
 // registration so unloaded plugins never contribute a stale limit.
-func (m *Manager) registerHook(short string, kind hookKind, fn goja.Callable, matcher *hookMatcher) {
+func (m *Manager) registerHook(short string, kind hookKind, fn moejs.Value, matcher *hookMatcher) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	inst := m.instances[short]

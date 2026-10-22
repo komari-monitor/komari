@@ -36,9 +36,11 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/buffer"
+	moejs "github.com/Calcium-Ion/moejs"
+	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/komari-monitor/komari/pkg/jsruntime/buffer"
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -64,58 +66,102 @@ func New(runtime *bridge.Runtime) *Module {
 }
 
 // Load registers the Node.js-compatible crypto module exports.
-func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
-	exports := vm.NewObject()
+func (m *Module) Load(vm *moejs.Runtime, module *engine.Object) {
+	exports := vm.Realm().NewObject()
 
-	hashCtor := vm.ToValue(func(call goja.ConstructorCall) *goja.Object {
-		state := newDigestState(vm, stringArg(call.Argument(0)), nil, false)
-		m.attachDigestMethods(vm, call.This, state)
-		return nil
+	hashCtor := constructor(vm, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		state := newDigestState(vm, stringArg(vm, moejs.Arg(args, 0)), nil, false)
+		m.attachDigestMethods(vm, this.AsObject(), state)
+		return this, nil
 	})
-	hmacCtor := vm.ToValue(func(call goja.ConstructorCall) *goja.Object {
-		state := newDigestState(vm, stringArg(call.Argument(0)), m.decodeData(vm, call.Argument(1), ""), true)
-		m.attachDigestMethods(vm, call.This, state)
-		return nil
+	hmacCtor := constructor(vm, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		state := newDigestState(vm, stringArg(vm, moejs.Arg(args, 0)), m.decodeData(vm, moejs.Arg(args, 1), ""), true)
+		m.attachDigestMethods(vm, this.AsObject(), state)
+		return this, nil
 	})
 	signCtor := m.makeSignConstructor(vm, true)
 	verifyCtor := m.makeSignConstructor(vm, false)
 	cipherCtor := m.makeCipherConstructor(vm, true)
 	decipherCtor := m.makeCipherConstructor(vm, false)
 
-	_ = exports.Set("Hash", hashCtor)
-	_ = exports.Set("Hmac", hmacCtor)
-	_ = exports.Set("Sign", signCtor)
-	_ = exports.Set("Verify", verifyCtor)
-	_ = exports.Set("Cipher", cipherCtor)
-	_ = exports.Set("Decipher", decipherCtor)
+	_ = native.Set(vm, exports, "Hash", hashCtor)
+	_ = native.Set(vm, exports, "Hmac", hmacCtor)
+	_ = native.Set(vm, exports, "Sign", signCtor)
+	_ = native.Set(vm, exports, "Verify", verifyCtor)
+	_ = native.Set(vm, exports, "Cipher", cipherCtor)
+	_ = native.Set(vm, exports, "Decipher", decipherCtor)
 
-	_ = exports.Set("createHash", func(call goja.FunctionCall) goja.Value { return m.createHash(vm, call, hashCtor) })
-	_ = exports.Set("createHmac", func(call goja.FunctionCall) goja.Value { return m.createHmac(vm, call, hmacCtor) })
-	_ = exports.Set("createCipheriv", func(call goja.FunctionCall) goja.Value { return m.createCipheriv(vm, call, cipherCtor) })
-	_ = exports.Set("createDecipheriv", func(call goja.FunctionCall) goja.Value { return m.createCipheriv(vm, call, decipherCtor) })
-	_ = exports.Set("createSign", func(call goja.FunctionCall) goja.Value { return m.createSign(vm, call, signCtor) })
-	_ = exports.Set("createVerify", func(call goja.FunctionCall) goja.Value { return m.createSign(vm, call, verifyCtor) })
-	_ = exports.Set("sign", func(call goja.FunctionCall) goja.Value { return m.signOneShot(vm, call, true) })
-	_ = exports.Set("verify", func(call goja.FunctionCall) goja.Value { return m.signOneShot(vm, call, false) })
+	_ = native.Function(vm, exports, "createHash", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.createHash(vm, args, hashCtor), nil
+	})
+	_ = native.Function(vm, exports, "createHmac", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.createHmac(vm, args, hmacCtor), nil
+	})
+	_ = native.Function(vm, exports, "createCipheriv", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.createCipheriv(vm, args, cipherCtor), nil
+	})
+	_ = native.Function(vm, exports, "createDecipheriv", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.createCipheriv(vm, args, decipherCtor), nil
+	})
+	_ = native.Function(vm, exports, "createSign", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.createSign(vm, args, signCtor), nil
+	})
+	_ = native.Function(vm, exports, "createVerify", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.createSign(vm, args, verifyCtor), nil
+	})
+	_ = native.Function(vm, exports, "sign", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.signOneShot(vm, args, true), nil
+	})
+	_ = native.Function(vm, exports, "verify", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.signOneShot(vm, args, false), nil
+	})
 
-	_ = exports.Set("randomBytes", func(call goja.FunctionCall) goja.Value { return m.randomBytes(vm, call) })
-	_ = exports.Set("randomFillSync", func(call goja.FunctionCall) goja.Value { return m.randomFill(vm, call, true) })
-	_ = exports.Set("randomFill", func(call goja.FunctionCall) goja.Value { return m.randomFill(vm, call, false) })
-	_ = exports.Set("randomInt", func(call goja.FunctionCall) goja.Value { return m.randomInt(vm, call) })
-	_ = exports.Set("randomUUID", func(call goja.FunctionCall) goja.Value { return m.randomUUID(vm, call) })
-	_ = exports.Set("getRandomValues", func(call goja.FunctionCall) goja.Value { return m.getRandomValues(vm, call) })
+	_ = native.Function(vm, exports, "randomBytes", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.randomBytes(vm, args), nil
+	})
+	_ = native.Function(vm, exports, "randomFillSync", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.randomFill(vm, args, true), nil
+	})
+	_ = native.Function(vm, exports, "randomFill", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.randomFill(vm, args, false), nil
+	})
+	_ = native.Function(vm, exports, "randomInt", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.randomInt(vm, args), nil
+	})
+	_ = native.Function(vm, exports, "randomUUID", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.randomUUID(vm, args), nil
+	})
+	_ = native.Function(vm, exports, "getRandomValues", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.getRandomValues(vm, args), nil
+	})
 
-	_ = exports.Set("timingSafeEqual", func(call goja.FunctionCall) goja.Value { return m.timingSafeEqual(vm, call) })
+	_ = native.Function(vm, exports, "timingSafeEqual", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.timingSafeEqual(vm, args), nil
+	})
 
-	_ = exports.Set("pbkdf2", func(call goja.FunctionCall) goja.Value { return m.pbkdf2(vm, call, false) })
-	_ = exports.Set("pbkdf2Sync", func(call goja.FunctionCall) goja.Value { return m.pbkdf2(vm, call, true) })
-	_ = exports.Set("scrypt", func(call goja.FunctionCall) goja.Value { return m.scrypt(vm, call, false) })
-	_ = exports.Set("scryptSync", func(call goja.FunctionCall) goja.Value { return m.scrypt(vm, call, true) })
+	_ = native.Function(vm, exports, "pbkdf2", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.pbkdf2(vm, args, false), nil
+	})
+	_ = native.Function(vm, exports, "pbkdf2Sync", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.pbkdf2(vm, args, true), nil
+	})
+	_ = native.Function(vm, exports, "scrypt", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.scrypt(vm, args, false), nil
+	})
+	_ = native.Function(vm, exports, "scryptSync", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.scrypt(vm, args, true), nil
+	})
 
-	_ = exports.Set("hash", func(call goja.FunctionCall) goja.Value { return m.hashOneShot(vm, call) })
-	_ = exports.Set("getHashes", func(call goja.FunctionCall) goja.Value { return vm.ToValue(hashNames()) })
-	_ = exports.Set("getCiphers", func(call goja.FunctionCall) goja.Value { return vm.ToValue(cipherNames()) })
-	_ = exports.Set("constants", map[string]int{
+	_ = native.Function(vm, exports, "hash", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return m.hashOneShot(vm, args), nil
+	})
+	_ = native.Function(vm, exports, "getHashes", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, hashNames()), nil
+	})
+	_ = native.Function(vm, exports, "getCiphers", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, cipherNames()), nil
+	})
+	_ = native.Set(vm, exports, "constants", map[string]int{
 		"RSA_PKCS1_PADDING":      1,
 		"RSA_SSLV23_PADDING":     2,
 		"RSA_NO_PADDING":         3,
@@ -124,27 +170,25 @@ func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 		"RSA_PKCS1_PSS_PADDING":  6,
 	})
 
-	_ = module.Set("exports", exports)
+	_ = native.Set(vm, module, "exports", exports)
 }
 
 // ---------------------------------------------------------------------------
 // Small helpers
 
-func argAt(arguments []goja.Value, index int) goja.Value {
+func argAt(arguments []moejs.Value, index int) moejs.Value {
 	if index < 0 || index >= len(arguments) {
-		return goja.Undefined()
+		return moejs.Undefined()
 	}
 	return arguments[index]
 }
 
-func stringArg(value goja.Value) string {
-	if goja.IsUndefined(value) || goja.IsNull(value) {
+func stringArg(vm *moejs.Runtime, value moejs.Value) string {
+	if value.IsUndefined() || value.IsNull() {
 		return ""
 	}
-	return value.String()
+	return native.String(vm, value)
 }
-
-func callArg(call goja.FunctionCall, index int) goja.Value { return argAt(call.Arguments, index) }
 
 // cryptoError is an error with a Node-style error code.
 type cryptoError struct {
@@ -159,26 +203,26 @@ func newCryptoError(code, message string) *cryptoError {
 }
 
 // cryptoThrow panics with a JavaScript Error that carries a Node-style code.
-func cryptoThrow(vm *goja.Runtime, code, message string) {
+func cryptoThrow(vm *moejs.Runtime, code, message string) {
 	panic(cryptoErrorObject(vm, newCryptoError(code, message)))
 }
 
 // cryptoErrorObject converts an error into a JavaScript Error, attaching the
 // Node-style code property when the error carries one.
-func cryptoErrorObject(vm *goja.Runtime, err error) *goja.Object {
-	object := vm.NewGoError(err)
+func cryptoErrorObject(vm *moejs.Runtime, err error) moejs.Value {
+	object := native.GoError(vm, err)
 	var coded *cryptoError
 	if errors.As(err, &coded) && coded.code != "" {
-		_ = object.Set("code", coded.code)
+		_ = native.Set(vm, object.AsObject(), "code", coded.code)
 	}
 	return object
 }
 
-func invalidArgType(vm *goja.Runtime, name, expected string) {
-	panic(vm.NewTypeError(fmt.Sprintf("The %q argument must be %s", name, expected)))
+func invalidArgType(vm *moejs.Runtime, name, expected string) {
+	panic(native.TypeError(vm, "%s", fmt.Sprintf("The %q argument must be %s", name, expected)))
 }
 
-func outOfRange(vm *goja.Runtime, name, message string) {
+func outOfRange(vm *moejs.Runtime, name, message string) {
 	cryptoThrow(vm, "ERR_OUT_OF_RANGE", fmt.Sprintf("The value of %q is out of range. %s", name, message))
 }
 
@@ -188,34 +232,34 @@ func outOfRange(vm *goja.Runtime, name, message string) {
 // decodeData converts a JavaScript value to bytes. Strings are decoded with
 // the optional input encoding (utf8 by default); Buffer, TypedArray, DataView
 // and ArrayBuffer values are taken as raw bytes.
-func (m *Module) decodeData(vm *goja.Runtime, value goja.Value, encoding string) []byte {
-	if goja.IsUndefined(value) || goja.IsNull(value) {
+func (m *Module) decodeData(vm *moejs.Runtime, value moejs.Value, encoding string) []byte {
+	if value.IsUndefined() || value.IsNull() {
 		invalidArgType(vm, "data", "of type string or an instance of Buffer, TypedArray, or DataView")
 	}
-	if text, ok := value.Export().(string); ok {
+	if text, ok := native.Export(vm, value).(string); ok {
 		return decodeString(vm, text, encoding)
 	}
-	if !isArrayBufferView(value) {
+	if !isArrayBufferView(vm, value) {
 		invalidArgType(vm, "data", "of type string or an instance of Buffer, TypedArray, or DataView")
 	}
 	return append([]byte(nil), viewBytes(vm, value)...)
 }
 
-func decodeString(vm *goja.Runtime, text, encoding string) []byte {
+func decodeString(vm *moejs.Runtime, text, encoding string) []byte {
 	switch strings.ToLower(encoding) {
 	case "", "utf8", "utf-8":
 		return []byte(text)
 	case "hex":
 		data, err := hex.DecodeString(text)
 		if err != nil {
-			panic(vm.NewTypeError("Invalid hex string"))
+			panic(native.TypeError(vm, "Invalid hex string"))
 		}
 		return data
 	case "base64":
 		data, err := base64.StdEncoding.DecodeString(text)
 		if err != nil {
 			if data, err = base64.RawStdEncoding.DecodeString(text); err != nil {
-				panic(vm.NewTypeError("Invalid base64 string"))
+				panic(native.TypeError(vm, "Invalid base64 string"))
 			}
 		}
 		return data
@@ -223,7 +267,7 @@ func decodeString(vm *goja.Runtime, text, encoding string) []byte {
 		data, err := base64.RawURLEncoding.DecodeString(text)
 		if err != nil {
 			if data, err = base64.URLEncoding.DecodeString(text); err != nil {
-				panic(vm.NewTypeError("Invalid base64url string"))
+				panic(native.TypeError(vm, "Invalid base64url string"))
 			}
 		}
 		return data
@@ -242,44 +286,44 @@ func decodeString(vm *goja.Runtime, text, encoding string) []byte {
 	case "utf16le", "ucs2", "ucs-2", "utf-16le":
 		out, err := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder().Bytes([]byte(text))
 		if err != nil {
-			panic(vm.NewTypeError("Invalid utf16le string"))
+			panic(native.TypeError(vm, "Invalid utf16le string"))
 		}
 		return out
 	default:
-		panic(vm.NewTypeError(fmt.Sprintf("Unknown encoding: %s", encoding)))
+		panic(native.TypeError(vm, "%s", fmt.Sprintf("Unknown encoding: %s", encoding)))
 	}
 }
 
 // encodeOutput converts bytes to a Buffer (default) or an encoded string.
-func encodeOutput(vm *goja.Runtime, data []byte, encoding string) goja.Value {
+func encodeOutput(vm *moejs.Runtime, data []byte, encoding string) moejs.Value {
 	if encoding == "" {
-		return buffer.WrapBytes(vm, data)
+		return engine.ObjectValue(buffer.WrapBytes(vm, data))
 	}
 	switch strings.ToLower(encoding) {
 	case "hex":
-		return vm.ToValue(hex.EncodeToString(data))
+		return native.From(vm, hex.EncodeToString(data))
 	case "base64":
-		return vm.ToValue(base64.StdEncoding.EncodeToString(data))
+		return native.From(vm, base64.StdEncoding.EncodeToString(data))
 	case "base64url":
-		return vm.ToValue(base64.RawURLEncoding.EncodeToString(data))
+		return native.From(vm, base64.RawURLEncoding.EncodeToString(data))
 	case "utf8", "utf-8":
-		return vm.ToValue(string(data))
+		return native.From(vm, string(data))
 	case "latin1", "binary":
-		return vm.ToValue(latin1String(data))
+		return native.From(vm, latin1String(data))
 	case "ascii":
 		var b strings.Builder
 		for _, c := range data {
 			b.WriteRune(rune(c & 0x7f))
 		}
-		return vm.ToValue(b.String())
+		return native.From(vm, b.String())
 	case "utf16le", "ucs2", "ucs-2", "utf-16le":
 		out, err := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewEncoder().Bytes(data)
 		if err != nil {
-			panic(vm.NewTypeError("Failed to encode utf16le string"))
+			panic(native.TypeError(vm, "Failed to encode utf16le string"))
 		}
-		return vm.ToValue(string(out))
+		return native.From(vm, string(out))
 	default:
-		panic(vm.NewTypeError(fmt.Sprintf("Unknown encoding: %s", encoding)))
+		panic(native.TypeError(vm, "%s", fmt.Sprintf("Unknown encoding: %s", encoding)))
 	}
 }
 
@@ -293,25 +337,26 @@ func latin1String(data []byte) string {
 }
 
 // isArrayBufferView reports whether value is a Buffer, TypedArray or DataView.
-func isArrayBufferView(value goja.Value) bool {
-	object, ok := value.(*goja.Object)
+func isArrayBufferView(vm *moejs.Runtime, value moejs.Value) bool {
+	object := value.AsObject()
+	ok := object != nil
 	if !ok {
 		return false
 	}
-	view := object.Get("buffer")
-	if view == nil || goja.IsUndefined(view) {
+	view := native.Get(vm, object, "buffer")
+	if view.IsUndefined() {
 		return false
 	}
-	_, isAB := view.Export().(goja.ArrayBuffer)
+	isAB := view.IsObject() && (view.AsObject().Class() == engine.ClassArrayBuffer || view.AsObject().Class() == engine.ClassSharedArrayBuffer)
 	return isAB
 }
 
 // viewBytes returns the raw bytes backing a Buffer, TypedArray or DataView.
 // The returned slice shares memory with the JavaScript object, so writes are
 // visible to the script.
-func viewBytes(vm *goja.Runtime, value goja.Value) []byte {
+func viewBytes(vm *moejs.Runtime, value moejs.Value) []byte {
 	var data []byte
-	if err := vm.ExportTo(value, &data); err != nil {
+	if err := native.ExportTo(vm, value, &data); err != nil {
 		invalidArgType(vm, "data", "an instance of Buffer, TypedArray, or DataView")
 	}
 	return data
@@ -325,21 +370,22 @@ type typedArrayInfo struct {
 	kind     reflect.Kind
 }
 
-func typedArrayMeta(vm *goja.Runtime, value goja.Value) (typedArrayInfo, bool) {
-	object, ok := value.(*goja.Object)
-	if !ok || !isArrayBufferView(value) {
+func typedArrayMeta(vm *moejs.Runtime, value moejs.Value) (typedArrayInfo, bool) {
+	object := value.AsObject()
+	ok := object != nil
+	if !ok || !isArrayBufferView(vm, value) {
 		return typedArrayInfo{}, false
 	}
 	raw := viewBytes(vm, value)
 	meta := typedArrayInfo{raw: raw}
-	if length := object.Get("length"); length != nil && !goja.IsUndefined(length) {
-		elemCount := int(length.ToInteger())
+	if length := native.Get(vm, object, "length"); !length.IsUndefined() {
+		elemCount := int(native.Int(vm, length))
 		if elemCount > 0 {
 			meta.elemSize = len(raw) / elemCount
 		} else {
 			meta.elemSize = 1
 		}
-		if exported := object.Export(); exported != nil {
+		if exported, isTypedArray := object.TypedArrayElements(); isTypedArray {
 			typ := reflect.TypeOf(exported)
 			if typ != nil && typ.Kind() == reflect.Slice {
 				meta.kind = typ.Elem().Kind()
@@ -400,7 +446,7 @@ func hashNames() []string {
 // buffered so copy() works for every supported algorithm (including SHA-3
 // variants that do not expose state marshaling).
 type digestState struct {
-	vm        *goja.Runtime
+	vm        *moejs.Runtime
 	factory   hashFactory
 	key       []byte
 	data      []byte
@@ -408,38 +454,38 @@ type digestState struct {
 	finalized bool
 }
 
-func newDigestState(vm *goja.Runtime, algorithm string, key []byte, hmacMode bool) *digestState {
+func newDigestState(vm *moejs.Runtime, algorithm string, key []byte, hmacMode bool) *digestState {
 	factory, ok := hashFactoryFor(algorithm)
 	if !ok {
-		panic(vm.NewTypeError("Digest method not supported"))
+		panic(native.TypeError(vm, "Digest method not supported"))
 	}
 	return &digestState{vm: vm, factory: factory, key: key, hmac: hmacMode}
 }
 
-func (m *Module) attachDigestMethods(vm *goja.Runtime, object *goja.Object, state *digestState) {
-	_ = object.Set("update", func(call goja.FunctionCall) goja.Value {
+func (m *Module) attachDigestMethods(vm *moejs.Runtime, object *engine.Object, state *digestState) {
+	_ = native.Function(vm, object, "update", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		if state.finalized {
 			cryptoThrow(vm, "ERR_CRYPTO_HASH_FINALIZED", "Digest already called")
 		}
-		state.data = append(state.data, m.decodeData(vm, callArg(call, 0), stringArg(callArg(call, 1)))...)
-		return call.This
+		state.data = append(state.data, m.decodeData(vm, moejs.Arg(args, 0), stringArg(vm, moejs.Arg(args, 1)))...)
+		return this, nil
 	})
-	_ = object.Set("digest", func(call goja.FunctionCall) goja.Value {
+	_ = native.Function(vm, object, "digest", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		if state.finalized {
 			cryptoThrow(vm, "ERR_CRYPTO_HASH_FINALIZED", "Digest already called")
 		}
 		state.finalized = true
-		return encodeOutput(vm, state.sum(), stringArg(callArg(call, 0)))
+		return encodeOutput(vm, state.sum(), stringArg(vm, moejs.Arg(args, 0))), nil
 	})
 	if !state.hmac {
-		_ = object.Set("copy", func(call goja.FunctionCall) goja.Value {
+		_ = native.Function(vm, object, "copy", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 			if state.finalized {
 				cryptoThrow(vm, "ERR_CRYPTO_HASH_FINALIZED", "Digest already called")
 			}
 			clone := &digestState{vm: state.vm, factory: state.factory, data: append([]byte(nil), state.data...)}
-			object := vm.NewObject()
+			object := vm.Realm().NewObject()
 			m.attachDigestMethods(vm, object, clone)
-			return object
+			return engine.ObjectValue(object), nil
 		})
 	}
 }
@@ -455,52 +501,52 @@ func (state *digestState) sum() []byte {
 	return digest.Sum(nil)
 }
 
-func (m *Module) createHash(vm *goja.Runtime, call goja.FunctionCall, ctor goja.Value) goja.Value {
-	object, err := vm.New(ctor, call.Arguments...)
+func (m *Module) createHash(vm *moejs.Runtime, args []moejs.Value, ctor moejs.Value) moejs.Value {
+	object, err := native.New(vm, ctor, args...)
 	if err != nil {
 		panic(err)
 	}
-	return object
+	return engine.ObjectValue(object)
 }
 
-func (m *Module) createHmac(vm *goja.Runtime, call goja.FunctionCall, ctor goja.Value) goja.Value {
-	object, err := vm.New(ctor, call.Arguments...)
+func (m *Module) createHmac(vm *moejs.Runtime, args []moejs.Value, ctor moejs.Value) moejs.Value {
+	object, err := native.New(vm, ctor, args...)
 	if err != nil {
 		panic(err)
 	}
-	return object
+	return engine.ObjectValue(object)
 }
 
 // ---------------------------------------------------------------------------
 // Random
 
-func (m *Module) randomBytes(vm *goja.Runtime, call goja.FunctionCall) goja.Value {
-	size := int(callArg(call, 0).ToInteger())
+func (m *Module) randomBytes(vm *moejs.Runtime, args []moejs.Value) moejs.Value {
+	size := int(native.Int(vm, moejs.Arg(args, 0)))
 	if size < 0 || size > 0x7fffffff {
 		outOfRange(vm, "size", fmt.Sprintf("It must be >= 0 && <= 2147483647. Received %d", size))
 	}
-	if callback, ok := goja.AssertFunction(callArg(call, 1)); ok {
+	if callback, ok := callable(moejs.Arg(args, 1)); ok {
 		m.runAsync("randomBytes", func() (any, error) {
 			data := make([]byte, size)
 			_, err := rand.Read(data)
 			return data, err
-		}, func(vm *goja.Runtime, result any) []goja.Value {
-			return []goja.Value{buffer.WrapBytes(vm, result.([]byte))}
+		}, func(vm *moejs.Runtime, result any) []moejs.Value {
+			return []moejs.Value{engine.ObjectValue(buffer.WrapBytes(vm, result.([]byte)))}
 		}, callback)
-		return goja.Undefined()
+		return moejs.Undefined()
 	}
 	data := make([]byte, size)
 	if _, err := rand.Read(data); err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
-	return buffer.WrapBytes(vm, data)
+	return engine.ObjectValue(buffer.WrapBytes(vm, data))
 }
 
-func (m *Module) randomFill(vm *goja.Runtime, call goja.FunctionCall, sync bool) goja.Value {
-	arguments := append([]goja.Value(nil), call.Arguments...)
-	var callback goja.Callable
+func (m *Module) randomFill(vm *moejs.Runtime, args []moejs.Value, sync bool) moejs.Value {
+	arguments := append([]moejs.Value(nil), args...)
+	callback := moejs.Undefined()
 	if !sync && len(arguments) > 0 {
-		if fn, ok := goja.AssertFunction(arguments[len(arguments)-1]); ok {
+		if fn, ok := callable(arguments[len(arguments)-1]); ok {
 			callback = fn
 			arguments = arguments[:len(arguments)-1]
 		}
@@ -510,8 +556,8 @@ func (m *Module) randomFill(vm *goja.Runtime, call goja.FunctionCall, sync bool)
 	if !ok {
 		invalidArgType(vm, "buf", "an instance of ArrayBuffer or ArrayBufferView")
 	}
-	offset := int(argAt(arguments, 1).ToInteger())
-	size := int(argAt(arguments, 2).ToInteger())
+	offset := int(native.Int(vm, argAt(arguments, 1)))
+	size := int(native.Int(vm, argAt(arguments, 2)))
 	length := len(meta.raw) / meta.elemSize
 	if offset < 0 {
 		outOfRange(vm, "offset", fmt.Sprintf("It must be >= 0. Received %d", offset))
@@ -522,31 +568,47 @@ func (m *Module) randomFill(vm *goja.Runtime, call goja.FunctionCall, sync bool)
 	if size == 0 {
 		size = length - offset
 	}
-	if offset < 0 || size < 0 || offset+size > length {
+	if offset > length || size < 0 || size > length-offset {
 		outOfRange(vm, "size + offset", fmt.Sprintf("It must be <= %d. Received %d", length, offset+size))
 	}
 	byteOffset := offset * meta.elemSize
 	byteCount := size * meta.elemSize
 	if sync {
 		if _, err := rand.Read(meta.raw[byteOffset : byteOffset+byteCount]); err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
 		return bufferValue
 	}
-	m.runAsync("randomFill", func() (any, error) {
-		_, err := rand.Read(meta.raw[byteOffset : byteOffset+byteCount])
-		return bufferValue, err
-	}, func(vm *goja.Runtime, result any) []goja.Value {
-		return []goja.Value{result.(goja.Value)}
+	if !engine.IsCallable(callback) {
+		invalidArgType(vm, "callback", "a function")
+	}
+	// BufferData is only valid until JavaScript next runs. The worker must
+	// never retain or touch it: generate independently, then reacquire the
+	// target on the loop after any intervening detach or resize.
+	backing := native.Get(vm, bufferValue.AsObject(), "buffer").AsObject()
+	m.runAsyncResult("randomFill", func() (any, error) {
+		data := make([]byte, byteCount)
+		_, err := rand.Read(data)
+		return data, err
+	}, func(vm *moejs.Runtime, result any) ([]moejs.Value, error) {
+		if backing == nil || backing.IsDetachedBuffer() {
+			return nil, newCryptoError("ERR_INVALID_STATE", "Cannot fill a detached ArrayBuffer")
+		}
+		raw, ok := bufferValue.AsObject().BufferData()
+		if !ok || byteOffset > len(raw) || byteCount > len(raw)-byteOffset {
+			return nil, newCryptoError("ERR_OUT_OF_RANGE", "randomFill target was resized out of bounds")
+		}
+		copy(raw[byteOffset:byteOffset+byteCount], result.([]byte))
+		return []moejs.Value{bufferValue}, nil
 	}, callback)
-	return goja.Undefined()
+	return moejs.Undefined()
 }
 
-func (m *Module) randomInt(vm *goja.Runtime, call goja.FunctionCall) goja.Value {
-	arguments := append([]goja.Value(nil), call.Arguments...)
-	var callback goja.Callable
+func (m *Module) randomInt(vm *moejs.Runtime, args []moejs.Value) moejs.Value {
+	arguments := append([]moejs.Value(nil), args...)
+	callback := moejs.Undefined()
 	if len(arguments) > 0 {
-		if fn, ok := goja.AssertFunction(arguments[len(arguments)-1]); ok {
+		if fn, ok := callable(arguments[len(arguments)-1]); ok {
 			callback = fn
 			arguments = arguments[:len(arguments)-1]
 		}
@@ -574,21 +636,21 @@ func (m *Module) randomInt(vm *goja.Runtime, call goja.FunctionCall) goja.Value 
 		}
 		return n.Int64() + min, nil
 	}
-	if callback != nil {
-		m.runAsync("randomInt", run, func(vm *goja.Runtime, result any) []goja.Value {
-			return []goja.Value{vm.ToValue(result.(int64))}
+	if engine.IsCallable(callback) {
+		m.runAsync("randomInt", run, func(vm *moejs.Runtime, result any) []moejs.Value {
+			return []moejs.Value{native.From(vm, result.(int64))}
 		}, callback)
-		return goja.Undefined()
+		return moejs.Undefined()
 	}
 	result, err := run()
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
-	return vm.ToValue(result.(int64))
+	return native.From(vm, result.(int64))
 }
 
-func safeInt(vm *goja.Runtime, value goja.Value, name string) int64 {
-	exported := value.Export()
+func safeInt(vm *moejs.Runtime, value moejs.Value, name string) int64 {
+	exported := native.Export(vm, value)
 	switch n := exported.(type) {
 	case int64:
 		return n
@@ -597,46 +659,46 @@ func safeInt(vm *goja.Runtime, value goja.Value, name string) int64 {
 			return int64(n)
 		}
 	}
-	panic(vm.NewTypeError(fmt.Sprintf("The %q argument must be a safe integer. Received %s", name, value.String())))
+	panic(native.TypeError(vm, "%s", fmt.Sprintf("The %q argument must be a safe integer. Received %s", name, native.String(vm, value))))
 }
 
-func (m *Module) randomUUID(vm *goja.Runtime, call goja.FunctionCall) goja.Value {
+func (m *Module) randomUUID(vm *moejs.Runtime, args []moejs.Value) moejs.Value {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
 	b[6] = b[6]&0x0f | 0x40
 	b[8] = b[8]&0x3f | 0x80
-	return vm.ToValue(fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]))
+	return native.From(vm, fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]))
 }
 
-func (m *Module) getRandomValues(vm *goja.Runtime, call goja.FunctionCall) goja.Value {
-	value := callArg(call, 0)
+func (m *Module) getRandomValues(vm *moejs.Runtime, args []moejs.Value) moejs.Value {
+	value := moejs.Arg(args, 0)
 	meta, ok := typedArrayMeta(vm, value)
 	if !ok || meta.isView {
-		panic(vm.NewTypeError("The \"typedArray\" argument must be an instance of an integer-typed TypedArray"))
+		panic(native.TypeError(vm, "The \"typedArray\" argument must be an instance of an integer-typed TypedArray"))
 	}
 	switch meta.kind {
 	case reflect.Int8, reflect.Uint8, reflect.Int16, reflect.Uint16, reflect.Int32, reflect.Uint32, reflect.Int64, reflect.Uint64:
 	default:
-		panic(vm.NewTypeError("The \"typedArray\" argument must be an instance of an integer-typed TypedArray"))
+		panic(native.TypeError(vm, "The \"typedArray\" argument must be an instance of an integer-typed TypedArray"))
 	}
 	if len(meta.raw) > 65536 {
-		object := vm.NewGoError(errors.New("getRandomValues() failed, entropy string limit reached"))
-		_ = object.Set("name", "QuotaExceededError")
-		_ = object.Set("code", 22)
+		object := native.GoError(vm, errors.New("getRandomValues() failed, entropy string limit reached"))
+		_ = native.Set(vm, object.AsObject(), "name", "QuotaExceededError")
+		_ = native.Set(vm, object.AsObject(), "code", 22)
 		panic(object)
 	}
 	if _, err := rand.Read(meta.raw); err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
 	return value
 }
 
-func (m *Module) timingSafeEqual(vm *goja.Runtime, call goja.FunctionCall) goja.Value {
-	a := callArg(call, 0)
-	b := callArg(call, 1)
-	if !isArrayBufferView(a) || !isArrayBufferView(b) {
+func (m *Module) timingSafeEqual(vm *moejs.Runtime, args []moejs.Value) moejs.Value {
+	a := moejs.Arg(args, 0)
+	b := moejs.Arg(args, 1)
+	if !isArrayBufferView(vm, a) || !isArrayBufferView(vm, b) {
 		invalidArgType(vm, "buf", "of type Buffer, TypedArray, or DataView")
 	}
 	aBytes := viewBytes(vm, a)
@@ -644,18 +706,18 @@ func (m *Module) timingSafeEqual(vm *goja.Runtime, call goja.FunctionCall) goja.
 	if len(aBytes) != len(bBytes) {
 		cryptoThrow(vm, "ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH", "Input buffers must have the same byte length")
 	}
-	return vm.ToValue(subtle.ConstantTimeCompare(aBytes, bBytes) == 1)
+	return native.From(vm, subtle.ConstantTimeCompare(aBytes, bBytes) == 1)
 }
 
 // ---------------------------------------------------------------------------
 // Key derivation
 
-func (m *Module) pbkdf2(vm *goja.Runtime, call goja.FunctionCall, sync bool) goja.Value {
-	password := m.decodeData(vm, callArg(call, 0), "")
-	salt := m.decodeData(vm, callArg(call, 1), "")
-	iterations := int(callArg(call, 2).ToInteger())
-	keylen := int(callArg(call, 3).ToInteger())
-	digestName := stringArg(callArg(call, 4))
+func (m *Module) pbkdf2(vm *moejs.Runtime, args []moejs.Value, sync bool) moejs.Value {
+	password := m.decodeData(vm, moejs.Arg(args, 0), "")
+	salt := m.decodeData(vm, moejs.Arg(args, 1), "")
+	iterations := int(native.Int(vm, moejs.Arg(args, 2)))
+	keylen := int(native.Int(vm, moejs.Arg(args, 3)))
+	digestName := stringArg(vm, moejs.Arg(args, 4))
 	if iterations < 1 || iterations > 0x7fffffff {
 		outOfRange(vm, "iterations", fmt.Sprintf("It must be >= 1 && <= 2147483647. Received %d", iterations))
 	}
@@ -670,20 +732,20 @@ func (m *Module) pbkdf2(vm *goja.Runtime, call goja.FunctionCall, sync bool) goj
 		return pbkdf2.Key(factory, string(password), salt, iterations, keylen)
 	}
 	if !sync {
-		callback, ok := goja.AssertFunction(callArg(call, 5))
+		callback, ok := callable(moejs.Arg(args, 5))
 		if !ok {
 			invalidArgType(vm, "callback", "a function")
 		}
-		m.runAsync("pbkdf2", run, func(vm *goja.Runtime, result any) []goja.Value {
-			return []goja.Value{buffer.WrapBytes(vm, result.([]byte))}
+		m.runAsync("pbkdf2", run, func(vm *moejs.Runtime, result any) []moejs.Value {
+			return []moejs.Value{engine.ObjectValue(buffer.WrapBytes(vm, result.([]byte)))}
 		}, callback)
-		return goja.Undefined()
+		return moejs.Undefined()
 	}
 	result, err := run()
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
-	return buffer.WrapBytes(vm, result.([]byte))
+	return engine.ObjectValue(buffer.WrapBytes(vm, result.([]byte)))
 }
 
 type scryptOptions struct {
@@ -691,19 +753,19 @@ type scryptOptions struct {
 	maxmem  int
 }
 
-func (m *Module) scrypt(vm *goja.Runtime, call goja.FunctionCall, sync bool) goja.Value {
-	password := m.decodeData(vm, callArg(call, 0), "")
-	salt := m.decodeData(vm, callArg(call, 1), "")
-	keylen := int(callArg(call, 2).ToInteger())
+func (m *Module) scrypt(vm *moejs.Runtime, args []moejs.Value, sync bool) moejs.Value {
+	password := m.decodeData(vm, moejs.Arg(args, 0), "")
+	salt := m.decodeData(vm, moejs.Arg(args, 1), "")
+	keylen := int(native.Int(vm, moejs.Arg(args, 2)))
 	if keylen < 0 || keylen > 0x7fffffff {
 		outOfRange(vm, "keylen", fmt.Sprintf("It must be >= 0 && <= 2147483647. Received %d", keylen))
 	}
 	options := scryptOptions{n: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024}
-	if object, ok := callArg(call, 3).(*goja.Object); ok {
-		options.n = scryptIntOption(object, "N", "cost", options.n)
-		options.r = scryptIntOption(object, "r", "blockSize", options.r)
-		options.p = scryptIntOption(object, "p", "parallelization", options.p)
-		options.maxmem = scryptIntOption(object, "maxmem", "", options.maxmem)
+	if object := moejs.Arg(args, 3).AsObject(); object != nil {
+		options.n = scryptIntOption(vm, object, "N", "cost", options.n)
+		options.r = scryptIntOption(vm, object, "r", "blockSize", options.r)
+		options.p = scryptIntOption(vm, object, "p", "parallelization", options.p)
+		options.maxmem = scryptIntOption(vm, object, "maxmem", "", options.maxmem)
 	}
 	if options.n <= 1 || options.n&(options.n-1) != 0 {
 		cryptoThrow(vm, "ERR_CRYPTO_INVALID_SCRYPT_PARAMS", "Invalid scrypt params")
@@ -722,63 +784,75 @@ func (m *Module) scrypt(vm *goja.Runtime, call goja.FunctionCall, sync bool) goj
 		return key, nil
 	}
 	if !sync {
-		callback, ok := goja.AssertFunction(callArg(call, 4))
+		callback, ok := callable(moejs.Arg(args, 4))
 		if !ok {
-			callback, ok = goja.AssertFunction(callArg(call, 3))
+			callback, ok = callable(moejs.Arg(args, 3))
 		}
 		if !ok {
 			invalidArgType(vm, "callback", "a function")
 		}
-		m.runAsync("scrypt", run, func(vm *goja.Runtime, result any) []goja.Value {
-			return []goja.Value{buffer.WrapBytes(vm, result.([]byte))}
+		m.runAsync("scrypt", run, func(vm *moejs.Runtime, result any) []moejs.Value {
+			return []moejs.Value{engine.ObjectValue(buffer.WrapBytes(vm, result.([]byte)))}
 		}, callback)
-		return goja.Undefined()
+		return moejs.Undefined()
 	}
 	result, err := run()
 	if err != nil {
 		panic(cryptoErrorObject(vm, err))
 	}
-	return buffer.WrapBytes(vm, result.([]byte))
+	return engine.ObjectValue(buffer.WrapBytes(vm, result.([]byte)))
 }
 
-func scryptIntOption(object *goja.Object, name, alias string, fallback int) int {
-	if value := object.Get(name); value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
-		return int(value.ToInteger())
+func scryptIntOption(vm *moejs.Runtime, object *engine.Object, name, alias string, fallback int) int {
+	if value := native.Get(vm, object, name); !value.IsUndefined() && !value.IsNull() {
+		return int(native.Int(vm, value))
 	}
 	if alias != "" {
-		if value := object.Get(alias); value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
-			return int(value.ToInteger())
+		if value := native.Get(vm, object, alias); !value.IsUndefined() && !value.IsNull() {
+			return int(native.Int(vm, value))
 		}
 	}
 	return fallback
 }
 
-func (m *Module) hashOneShot(vm *goja.Runtime, call goja.FunctionCall) goja.Value {
-	factory, ok := hashFactoryFor(stringArg(callArg(call, 0)))
+func (m *Module) hashOneShot(vm *moejs.Runtime, args []moejs.Value) moejs.Value {
+	factory, ok := hashFactoryFor(stringArg(vm, moejs.Arg(args, 0)))
 	if !ok {
-		panic(vm.NewTypeError("Digest method not supported"))
+		panic(native.TypeError(vm, "Digest method not supported"))
 	}
-	data := m.decodeData(vm, callArg(call, 1), "")
+	data := m.decodeData(vm, moejs.Arg(args, 1), "")
 	digest := factory()
 	_, _ = digest.Write(data)
-	return encodeOutput(vm, digest.Sum(nil), stringArg(callArg(call, 2)))
+	return encodeOutput(vm, digest.Sum(nil), stringArg(vm, moejs.Arg(args, 2)))
 }
 
 // ---------------------------------------------------------------------------
 // Async callbacks
 
-func (m *Module) runAsync(name string, run func() (any, error), values func(*goja.Runtime, any) []goja.Value, callback goja.Callable) {
+func (m *Module) runAsync(name string, run func() (any, error), values func(*moejs.Runtime, any) []moejs.Value, callback moejs.Value) {
+	m.runAsyncResult(name, run, func(vm *moejs.Runtime, result any) ([]moejs.Value, error) {
+		return values(vm, result), nil
+	}, callback)
+}
+
+// runAsyncResult permits loop-side validation to fail through the callback,
+// rather than panicking before the callback can be delivered.
+func (m *Module) runAsyncResult(name string, run func() (any, error), values func(*moejs.Runtime, any) ([]moejs.Value, error), callback moejs.Value) {
 	go func() {
 		result, err := run()
-		if !m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+		if !m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 			_ = m.runtime.RunJob(vm, "crypto."+name, func() error {
+				var resultValues []moejs.Value
+				if err == nil {
+					resultValues, err = values(vm, result)
+				}
 				if err != nil {
-					_, callbackErr := callback(goja.Undefined(), cryptoErrorObject(vm, err))
+					_, callbackErr := native.Call(vm, callback, moejs.Undefined(), cryptoErrorObject(vm, err))
 					return callbackErr
 				}
-				callbackArgs := []goja.Value{goja.Null()}
-				callbackArgs = append(callbackArgs, values(vm, result)...)
-				_, callbackErr := callback(goja.Undefined(), callbackArgs...)
+				callbackArgs := []moejs.Value{moejs.Null()}
+				callbackArgs = append(callbackArgs, resultValues...)
+				_, callbackErr := native.Call(vm, callback, moejs.Undefined(), callbackArgs...)
 				return callbackErr
 			})
 		}) {
@@ -860,7 +934,7 @@ func (e *ecbMode) CryptBlocks(dst, src []byte) {
 }
 
 type cipherState struct {
-	vm          *goja.Runtime
+	vm          *moejs.Runtime
 	spec        cipherSpec
 	encrypt     bool
 	block       cipher.Block
@@ -878,16 +952,16 @@ type cipherState struct {
 	finalized   bool
 }
 
-func (m *Module) makeCipherConstructor(vm *goja.Runtime, encrypt bool) goja.Value {
-	return vm.ToValue(func(call goja.ConstructorCall) *goja.Object {
-		state := m.newCipherState(vm, encrypt, call.Arguments)
-		m.attachCipherMethods(vm, call.This, state)
-		return nil
+func (m *Module) makeCipherConstructor(vm *moejs.Runtime, encrypt bool) moejs.Value {
+	return constructor(vm, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		state := m.newCipherState(vm, encrypt, args)
+		m.attachCipherMethods(vm, this.AsObject(), state)
+		return this, nil
 	})
 }
 
-func (m *Module) newCipherState(vm *goja.Runtime, encrypt bool, arguments []goja.Value) *cipherState {
-	spec, ok := parseCipher(stringArg(argAt(arguments, 0)))
+func (m *Module) newCipherState(vm *moejs.Runtime, encrypt bool, arguments []moejs.Value) *cipherState {
+	spec, ok := parseCipher(stringArg(vm, argAt(arguments, 0)))
 	if !ok {
 		cryptoThrow(vm, "ERR_CRYPTO_UNKNOWN_CIPHER", "Unknown cipher")
 	}
@@ -897,7 +971,7 @@ func (m *Module) newCipherState(vm *goja.Runtime, encrypt bool, arguments []goja
 	}
 	ivValue := argAt(arguments, 2)
 	var iv []byte
-	if !goja.IsUndefined(ivValue) && !goja.IsNull(ivValue) {
+	if !ivValue.IsUndefined() && !ivValue.IsNull() {
 		iv = m.decodeData(vm, ivValue, "")
 	}
 	if spec.ivLen == -1 {
@@ -912,9 +986,9 @@ func (m *Module) newCipherState(vm *goja.Runtime, encrypt bool, arguments []goja
 		cryptoThrow(vm, "ERR_CRYPTO_INVALID_IV", "Invalid initialization vector")
 	}
 	tagLen := spec.tagLen
-	if options, ok := argAt(arguments, 3).(*goja.Object); ok {
-		if value := options.Get("authTagLength"); value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
-			tagLen = int(value.ToInteger())
+	if options := argAt(arguments, 3).AsObject(); options != nil {
+		if value := native.Get(vm, options, "authTagLength"); !value.IsUndefined() && !value.IsNull() {
+			tagLen = int(native.Int(vm, value))
 		}
 	}
 	if spec.tagLen > 0 && (tagLen < 12 || tagLen > 16) {
@@ -930,7 +1004,7 @@ func (m *Module) newCipherState(vm *goja.Runtime, encrypt bool, arguments []goja
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
 	state.block = block
 	switch spec.kind {
@@ -948,7 +1022,7 @@ func (m *Module) newCipherState(vm *goja.Runtime, encrypt bool, arguments []goja
 		if len(iv) == 12 {
 			aead, gcmErr := cipher.NewGCMWithTagSize(block, tagLen)
 			if gcmErr != nil {
-				panic(vm.NewGoError(gcmErr))
+				panic(native.GoError(vm, gcmErr))
 			}
 			state.aead = aead
 		} else {
@@ -957,7 +1031,7 @@ func (m *Module) newCipherState(vm *goja.Runtime, encrypt bool, arguments []goja
 			}
 			aead, gcmErr := cipher.NewGCMWithNonceSize(block, len(iv))
 			if gcmErr != nil {
-				panic(vm.NewGoError(gcmErr))
+				panic(native.GoError(vm, gcmErr))
 			}
 			state.aead = aead
 		}
@@ -967,19 +1041,19 @@ func (m *Module) newCipherState(vm *goja.Runtime, encrypt bool, arguments []goja
 		}
 		aead, chachaErr := chacha20poly1305.New(key)
 		if chachaErr != nil {
-			panic(vm.NewGoError(chachaErr))
+			panic(native.GoError(vm, chachaErr))
 		}
 		state.aead = aead
 	}
 	return state
 }
 
-func (m *Module) attachCipherMethods(vm *goja.Runtime, object *goja.Object, state *cipherState) {
-	_ = object.Set("update", func(call goja.FunctionCall) goja.Value {
+func (m *Module) attachCipherMethods(vm *moejs.Runtime, object *engine.Object, state *cipherState) {
+	_ = native.Function(vm, object, "update", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		if state.finalized {
 			cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation update")
 		}
-		data := m.decodeData(vm, callArg(call, 0), stringArg(callArg(call, 1)))
+		data := m.decodeData(vm, moejs.Arg(args, 0), stringArg(vm, moejs.Arg(args, 1)))
 		var out []byte
 		switch state.spec.kind {
 		case cipherCBC, cipherECB:
@@ -1003,9 +1077,9 @@ func (m *Module) attachCipherMethods(vm *goja.Runtime, object *goja.Object, stat
 			// from final(). Buffer.concat([update(), final()]) code still works.
 			state.buffered = append(state.buffered, data...)
 		}
-		return encodeOutput(vm, out, stringArg(callArg(call, 2)))
+		return encodeOutput(vm, out, stringArg(vm, moejs.Arg(args, 2))), nil
 	})
-	_ = object.Set("final", func(call goja.FunctionCall) goja.Value {
+	_ = native.Function(vm, object, "final", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		if state.finalized {
 			cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation final")
 		}
@@ -1053,18 +1127,18 @@ func (m *Module) attachCipherMethods(vm *goja.Runtime, object *goja.Object, stat
 				out = sealed[:len(sealed)-state.tagLen]
 			} else {
 				if !state.authTagSet {
-					panic(vm.NewGoError(errors.New("Unsupported state or unable to authenticate data")))
+					panic(native.GoError(vm, errors.New("Unsupported state or unable to authenticate data")))
 				}
 				plain, err := state.aead.Open(nil, state.nonce, append(state.buffered, state.authTag...), state.aad)
 				if err != nil {
-					panic(vm.NewGoError(errors.New("Unsupported state or unable to authenticate data")))
+					panic(native.GoError(vm, errors.New("Unsupported state or unable to authenticate data")))
 				}
 				out = plain
 			}
 		}
-		return encodeOutput(vm, out, stringArg(callArg(call, 0)))
+		return encodeOutput(vm, out, stringArg(vm, moejs.Arg(args, 0))), nil
 	})
-	_ = object.Set("setAutoPadding", func(call goja.FunctionCall) goja.Value {
+	_ = native.Function(vm, object, "setAutoPadding", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		if state.spec.kind != cipherCBC && state.spec.kind != cipherECB {
 			cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation setAutoPadding")
 		}
@@ -1072,35 +1146,35 @@ func (m *Module) attachCipherMethods(vm *goja.Runtime, object *goja.Object, stat
 			cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation setAutoPadding")
 		}
 		autoPadding := true
-		if value := callArg(call, 0); !goja.IsUndefined(value) {
-			autoPadding = value.ToBoolean()
+		if value := moejs.Arg(args, 0); !value.IsUndefined() {
+			autoPadding = native.Bool(value)
 		}
 		state.autoPadding = autoPadding
-		return call.This
+		return this, nil
 	})
-	_ = object.Set("setAAD", func(call goja.FunctionCall) goja.Value {
+	_ = native.Function(vm, object, "setAAD", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		if state.spec.kind != cipherGCM && state.spec.kind != cipherChaCha {
 			cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation setAAD")
 		}
 		if state.finalized {
 			cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation setAAD")
 		}
-		value := callArg(call, 0)
-		if !isArrayBufferView(value) {
+		value := moejs.Arg(args, 0)
+		if !isArrayBufferView(vm, value) {
 			invalidArgType(vm, "aad", "an instance of Buffer, TypedArray, or DataView")
 		}
 		state.aad = append(state.aad, viewBytes(vm, value)...)
-		return call.This
+		return this, nil
 	})
-	_ = object.Set("setAuthTag", func(call goja.FunctionCall) goja.Value {
+	_ = native.Function(vm, object, "setAuthTag", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		if state.spec.kind != cipherGCM && state.spec.kind != cipherChaCha {
 			cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation setAuthTag")
 		}
 		if state.encrypt || state.finalized {
 			cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation setAuthTag")
 		}
-		value := callArg(call, 0)
-		if !isArrayBufferView(value) {
+		value := moejs.Arg(args, 0)
+		if !isArrayBufferView(vm, value) {
 			invalidArgType(vm, "tag", "an instance of Buffer, TypedArray, or DataView")
 		}
 		tag := viewBytes(vm, value)
@@ -1109,24 +1183,24 @@ func (m *Module) attachCipherMethods(vm *goja.Runtime, object *goja.Object, stat
 		}
 		state.authTag = append([]byte(nil), tag...)
 		state.authTagSet = true
-		return call.This
+		return this, nil
 	})
 	if state.encrypt && (state.spec.kind == cipherGCM || state.spec.kind == cipherChaCha) {
-		_ = object.Set("getAuthTag", func(call goja.FunctionCall) goja.Value {
+		_ = native.Function(vm, object, "getAuthTag", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 			if !state.finalized {
 				cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation getAuthTag")
 			}
-			return buffer.WrapBytes(vm, state.authTag)
+			return engine.ObjectValue(buffer.WrapBytes(vm, state.authTag)), nil
 		})
 	}
 }
 
-func (m *Module) createCipheriv(vm *goja.Runtime, call goja.FunctionCall, ctor goja.Value) goja.Value {
-	object, err := vm.New(ctor, call.Arguments...)
+func (m *Module) createCipheriv(vm *moejs.Runtime, args []moejs.Value, ctor moejs.Value) moejs.Value {
+	object, err := native.New(vm, ctor, args...)
 	if err != nil {
 		panic(err)
 	}
-	return object
+	return engine.ObjectValue(object)
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,37 +1370,37 @@ func verifySignature(algo signAlgo, key any, data, signature []byte) (bool, erro
 }
 
 type signState struct {
-	vm        *goja.Runtime
+	vm        *moejs.Runtime
 	algo      signAlgo
 	data      []byte
 	isSign    bool
 	finalized bool
 }
 
-func (m *Module) makeSignConstructor(vm *goja.Runtime, isSign bool) goja.Value {
-	return vm.ToValue(func(call goja.ConstructorCall) *goja.Object {
-		if goja.IsUndefined(call.Argument(0)) || goja.IsNull(call.Argument(0)) {
+func (m *Module) makeSignConstructor(vm *moejs.Runtime, isSign bool) moejs.Value {
+	return constructor(vm, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		if isUndefined(moejs.Arg(args, 0)) || isNull(moejs.Arg(args, 0)) {
 			invalidArgType(vm, "algorithm", "of type string")
 		}
-		algo, err := parseSignAlgorithm(stringArg(call.Argument(0)))
+		algo, err := parseSignAlgorithm(stringArg(vm, moejs.Arg(args, 0)))
 		if err != nil {
 			panic(cryptoErrorObject(vm, err))
 		}
 		state := &signState{vm: vm, algo: algo, isSign: isSign}
-		_ = call.This.Set("update", func(call goja.FunctionCall) goja.Value {
+		_ = native.Function(vm, this.AsObject(), "update", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 			if state.finalized {
 				cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation update")
 			}
-			state.data = append(state.data, m.decodeData(vm, callArg(call, 0), stringArg(callArg(call, 1)))...)
-			return call.This
+			state.data = append(state.data, m.decodeData(vm, moejs.Arg(args, 0), stringArg(vm, moejs.Arg(args, 1)))...)
+			return this, nil
 		})
 		if isSign {
-			_ = call.This.Set("sign", func(call goja.FunctionCall) goja.Value {
+			_ = native.Function(vm, this.AsObject(), "sign", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 				if state.finalized {
 					cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation sign")
 				}
 				state.finalized = true
-				keyBytes := m.decodeData(vm, callArg(call, 0), "")
+				keyBytes := m.decodeData(vm, moejs.Arg(args, 0), "")
 				privateKey, parseErr := parsePrivateKey(keyBytes)
 				if parseErr != nil {
 					panic(cryptoErrorObject(vm, parseErr))
@@ -1335,16 +1409,16 @@ func (m *Module) makeSignConstructor(vm *goja.Runtime, isSign bool) goja.Value {
 				if signErr != nil {
 					panic(cryptoErrorObject(vm, signErr))
 				}
-				return encodeOutput(vm, signature, stringArg(callArg(call, 1)))
+				return encodeOutput(vm, signature, stringArg(vm, moejs.Arg(args, 1))), nil
 			})
 		} else {
-			_ = call.This.Set("verify", func(call goja.FunctionCall) goja.Value {
+			_ = native.Function(vm, this.AsObject(), "verify", func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 				if state.finalized {
 					cryptoThrow(vm, "ERR_CRYPTO_INVALID_STATE", "Invalid state for operation verify")
 				}
 				state.finalized = true
-				keyBytes := m.decodeData(vm, callArg(call, 0), "")
-				signature := m.decodeData(vm, callArg(call, 1), stringArg(callArg(call, 2)))
+				keyBytes := m.decodeData(vm, moejs.Arg(args, 0), "")
+				signature := m.decodeData(vm, moejs.Arg(args, 1), stringArg(vm, moejs.Arg(args, 2)))
 				publicKey, parseErr := parsePublicKey(keyBytes)
 				if parseErr != nil {
 					panic(cryptoErrorObject(vm, parseErr))
@@ -1353,33 +1427,33 @@ func (m *Module) makeSignConstructor(vm *goja.Runtime, isSign bool) goja.Value {
 				if verifyErr != nil {
 					panic(cryptoErrorObject(vm, verifyErr))
 				}
-				return vm.ToValue(valid)
+				return native.From(vm, valid), nil
 			})
 		}
-		return nil
+		return this, nil
 	})
 }
 
-func (m *Module) createSign(vm *goja.Runtime, call goja.FunctionCall, ctor goja.Value) goja.Value {
-	object, err := vm.New(ctor, call.Arguments...)
+func (m *Module) createSign(vm *moejs.Runtime, args []moejs.Value, ctor moejs.Value) moejs.Value {
+	object, err := native.New(vm, ctor, args...)
 	if err != nil {
 		panic(err)
 	}
-	return object
+	return engine.ObjectValue(object)
 }
 
-func (m *Module) signOneShot(vm *goja.Runtime, call goja.FunctionCall, isSign bool) goja.Value {
-	algorithmValue := callArg(call, 0)
-	algorithmName := stringArg(algorithmValue)
-	if goja.IsNull(algorithmValue) {
+func (m *Module) signOneShot(vm *moejs.Runtime, args []moejs.Value, isSign bool) moejs.Value {
+	algorithmValue := moejs.Arg(args, 0)
+	algorithmName := stringArg(vm, algorithmValue)
+	if algorithmValue.IsNull() {
 		algorithmName = "ed25519"
 	}
 	algo, err := parseSignAlgorithm(algorithmName)
 	if err != nil {
 		panic(cryptoErrorObject(vm, err))
 	}
-	data := m.decodeData(vm, callArg(call, 1), "")
-	keyBytes := m.decodeData(vm, callArg(call, 2), "")
+	data := m.decodeData(vm, moejs.Arg(args, 1), "")
+	keyBytes := m.decodeData(vm, moejs.Arg(args, 2), "")
 	var run func() (any, error)
 	if isSign {
 		run = func() (any, error) {
@@ -1390,7 +1464,7 @@ func (m *Module) signOneShot(vm *goja.Runtime, call goja.FunctionCall, isSign bo
 			return computeSignature(algo, privateKey, data)
 		}
 	} else {
-		signature := m.decodeData(vm, callArg(call, 3), stringArg(callArg(call, 4)))
+		signature := m.decodeData(vm, moejs.Arg(args, 3), stringArg(vm, moejs.Arg(args, 4)))
 		run = func() (any, error) {
 			publicKey, parseErr := parsePublicKey(keyBytes)
 			if parseErr != nil {
@@ -1400,24 +1474,61 @@ func (m *Module) signOneShot(vm *goja.Runtime, call goja.FunctionCall, isSign bo
 		}
 	}
 	if isSign {
-		if callback, ok := goja.AssertFunction(callArg(call, 3)); ok {
-			m.runAsync("sign", run, func(vm *goja.Runtime, result any) []goja.Value {
-				return []goja.Value{buffer.WrapBytes(vm, result.([]byte))}
+		if callback, ok := callable(moejs.Arg(args, 3)); ok {
+			m.runAsync("sign", run, func(vm *moejs.Runtime, result any) []moejs.Value {
+				return []moejs.Value{engine.ObjectValue(buffer.WrapBytes(vm, result.([]byte)))}
 			}, callback)
-			return goja.Undefined()
+			return moejs.Undefined()
 		}
-	} else if callback, ok := goja.AssertFunction(callArg(call, 4)); ok {
-		m.runAsync("verify", run, func(vm *goja.Runtime, result any) []goja.Value {
-			return []goja.Value{vm.ToValue(result.(bool))}
+	} else if callback, ok := callable(moejs.Arg(args, 4)); ok {
+		m.runAsync("verify", run, func(vm *moejs.Runtime, result any) []moejs.Value {
+			return []moejs.Value{native.From(vm, result.(bool))}
 		}, callback)
-		return goja.Undefined()
+		return moejs.Undefined()
 	}
 	result, err := run()
 	if err != nil {
 		panic(cryptoErrorObject(vm, err))
 	}
 	if isSign {
-		return buffer.WrapBytes(vm, result.([]byte))
+		return engine.ObjectValue(buffer.WrapBytes(vm, result.([]byte)))
 	}
-	return vm.ToValue(result.(bool))
+	return native.From(vm, result.(bool))
+}
+
+// callable keeps callbacks as raw MoeJS values.
+func callable(v moejs.Value) (moejs.Value, bool) { return v, engine.IsCallable(v) }
+func isUndefined(v moejs.Value) bool             { return v.IsUndefined() }
+func isNull(v moejs.Value) bool                  { return v.IsNull() }
+
+// constructor uses the engine's explicit construct hook, not reflected binding.
+func constructor(vm *moejs.Runtime, fn moejs.NativeFunc) moejs.Value {
+	call := native.Bind(vm, "", 0, fn)
+	var ctor *engine.Object
+	construct := func(r *moejs.Realm, args []moejs.Value, target *engine.Object) (moejs.Value, error) {
+		object := r.NewObject()
+		if target != nil {
+			p := native.Get(vm, target, "prototype")
+			if p.IsObject() {
+				if !object.SetPrototypeOf(r, p.AsObject()) {
+					return moejs.Undefined(), r.TypeError("invalid constructor prototype")
+				}
+			}
+		}
+		result, err := vm.CallFunction(call, engine.ObjectValue(object), args...)
+		if err != nil {
+			return moejs.Undefined(), err
+		}
+		if result.IsObject() {
+			return result, nil
+		}
+		return engine.ObjectValue(object), nil
+	}
+	ctor = vm.Realm().NewNativeConstructor(engine.FromGoString(""), 0, func(r *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return construct(r, args, ctor)
+	}, construct)
+	prototype := vm.Realm().NewObject()
+	_ = native.Set(vm, prototype, "constructor", engine.ObjectValue(ctor))
+	_ = ctor.DefinePropertyOrThrow(vm.Realm(), vm.Realm().KeyFromGoString("prototype"), engine.DataDescriptor(engine.ObjectValue(prototype), 1))
+	return engine.ObjectValue(ctor)
 }

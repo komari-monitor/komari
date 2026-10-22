@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/dop251/goja"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/Calcium-Ion/moejs/engine"
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -17,41 +19,41 @@ const principalContextKey = "principal"
 // routeRequestContext builds the JS request context with the caller identity
 // resolved by IdentityMiddleware. Raw credentials (session/client tokens) are
 // intentionally not exposed.
-func routeRequestContext(vm *goja.Runtime, c *gin.Context) *goja.Object {
-	ctx := vm.NewObject()
+func routeRequestContext(vm *moejs.Runtime, c *gin.Context) *engine.Object {
+	ctx := vm.Realm().NewObject()
 	principal := rpcPrincipalFromGin(c)
-	p := vm.NewObject()
+	p := vm.Realm().NewObject()
 	if principal != nil {
-		_ = p.Set("type", principalTypeString(principal.Type))
-		_ = p.Set("roles", principal.Roles)
-		_ = p.Set("user_uuid", principal.UserUUID)
-		_ = p.Set("client_uuid", principal.ClientUUID)
-		_ = p.Set("is_api_key", principal.IsAPIKey)
+		_ = native.Set(vm, p, "type", principalTypeString(principal.Type))
+		_ = native.Set(vm, p, "roles", principal.Roles)
+		_ = native.Set(vm, p, "user_uuid", principal.UserUUID)
+		_ = native.Set(vm, p, "client_uuid", principal.ClientUUID)
+		_ = native.Set(vm, p, "is_api_key", principal.IsAPIKey)
 	}
-	_ = ctx.Set("principal", p)
+	_ = native.Set(vm, ctx, "principal", p)
 	if role, ok := c.Get("role"); ok {
 		if s, ok := role.(string); ok {
-			_ = ctx.Set("role", s)
+			_ = native.Set(vm, ctx, "role", s)
 		}
 	}
 	if uuid, ok := c.Get("uuid"); ok {
-		_ = ctx.Set("user_uuid", uuid)
+		_ = native.Set(vm, ctx, "user_uuid", uuid)
 	}
 	if clientUUID, ok := c.Get("client_uuid"); ok {
-		_ = ctx.Set("client_uuid", clientUUID)
+		_ = native.Set(vm, ctx, "client_uuid", clientUUID)
 	}
-	_ = ctx.Set("remote_ip", c.ClientIP())
-	_ = ctx.Set("user_agent", c.GetHeader("User-Agent"))
+	_ = native.Set(vm, ctx, "remote_ip", c.ClientIP())
+	_ = native.Set(vm, ctx, "user_agent", c.GetHeader("User-Agent"))
 	return ctx
 }
 
 // hookRequestContext builds the JS request context at the raw HTTP layer
 // (before the gin identity middleware runs): only network metadata is
 // available there.
-func hookRequestContext(vm *goja.Runtime, r *http.Request) *goja.Object {
-	ctx := vm.NewObject()
-	_ = ctx.Set("remote_ip", remoteIP(r))
-	_ = ctx.Set("user_agent", r.Header.Get("User-Agent"))
+func hookRequestContext(vm *moejs.Runtime, r *http.Request) *engine.Object {
+	ctx := vm.Realm().NewObject()
+	_ = native.Set(vm, ctx, "remote_ip", remoteIP(r))
+	_ = native.Set(vm, ctx, "user_agent", r.Header.Get("User-Agent"))
 	return ctx
 }
 

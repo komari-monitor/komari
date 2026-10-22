@@ -4,30 +4,32 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
-
-	"github.com/dop251/goja"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 )
 
-func (m *Module) initNextTickScheduler(vm *goja.Runtime) error {
-	factoryValue, err := vm.RunString(nextTickSchedulerSource)
+func (m *Module) initNextTickScheduler(vm *moejs.Runtime) error {
+	factoryValue, err := native.Run(vm, nextTickSchedulerSource)
 	if err != nil {
 		return fmt.Errorf("create process.nextTick scheduler: %w", err)
 	}
-	factory, _ := goja.AssertFunction(factoryValue)
-	schedulerValue, err := factory(goja.Undefined(), vm.ToValue(func() { m.drainNextTicks(vm) }))
+	factory, _ := checkedFunction(factoryValue)
+	schedulerValue, err := native.Call(vm, factory, moejs.Undefined(), native.From(vm, native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		m.drainNextTicks(vm)
+		return moejs.Undefined(), nil
+	})))
 	if err != nil {
 		return fmt.Errorf("initialize process.nextTick scheduler: %w", err)
 	}
-	scheduler := schedulerValue.ToObject(vm)
-	m.nextTickTurn, _ = goja.AssertFunction(scheduler.Get("run"))
-	m.nextTickSchedule, _ = goja.AssertFunction(scheduler.Get("schedule"))
-	if m.nextTickTurn == nil || m.nextTickSchedule == nil {
+	scheduler := native.Object(vm, schedulerValue)
+	m.nextTickTurn, _ = checkedFunction(native.Get(vm, scheduler, "run"))
+	m.nextTickSchedule, _ = checkedFunction(native.Get(vm, scheduler, "schedule"))
+	if native.IsNil(m.nextTickTurn) || native.IsNil(m.nextTickSchedule) {
 		return errors.New("process.nextTick scheduler is incomplete")
 	}
 	return nil
 }
-
-func (m *Module) enqueueNextTick(vm *goja.Runtime, tick nodeNextTick) {
+func (m *Module) enqueueNextTick(vm *moejs.Runtime, tick nodeNextTick) {
 	m.nextTickMu.Lock()
 	m.nextTicks = append(m.nextTicks, tick)
 	shouldSchedule := !m.nextTickScheduled && !m.nextTickDraining
@@ -38,15 +40,16 @@ func (m *Module) enqueueNextTick(vm *goja.Runtime, tick nodeNextTick) {
 	if !shouldSchedule {
 		return
 	}
-	if m.nextTickSchedule != nil {
-		if _, err := m.nextTickSchedule(goja.Undefined()); err == nil {
+	if !native.IsNil(m.nextTickSchedule) {
+		if _, err := native.Call(vm, m.nextTickSchedule, moejs.Undefined()); err == nil {
 			return
 		}
 	}
-	m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) { m.drainNextTicks(vm) }, 0)
+	m.runtime.Loop().SetTimeout(func(vm *moejs.Runtime) {
+		m.drainNextTicks(vm)
+	}, 0)
 }
-
-func (m *Module) drainNextTicks(vm *goja.Runtime) {
+func (m *Module) drainNextTicks(vm *moejs.Runtime) {
 	m.nextTickMu.Lock()
 	m.nextTickDraining = true
 	m.nextTickScheduled = false
@@ -62,24 +65,26 @@ func (m *Module) drainNextTicks(vm *goja.Runtime) {
 		m.nextTicks[0] = nodeNextTick{}
 		m.nextTicks = m.nextTicks[1:]
 		m.nextTickMu.Unlock()
-		if _, err := tick.callback(goja.Undefined(), tick.arguments...); err != nil {
+		if _, err := native.Call(vm, tick.callback, moejs.Undefined(), tick.arguments...); err != nil {
 			if m.reportError != nil {
-				m.reportError(vm, []goja.Value{vm.ToValue(fmt.Sprintf("process.nextTick callback failed: %v", err))})
+				m.reportError(vm, []moejs.Value{native.From(vm, fmt.Sprintf("process.nextTick callback failed: %v", err))})
 			}
 		}
 	}
 }
-
-func (m *Module) RunTurn(vm *goja.Runtime, job func() error) error {
-	if m.nextTickTurn == nil {
+func (m *Module) RunTurn(vm *moejs.Runtime, job func() error) error {
+	if native.IsNil(m.nextTickTurn) {
 		return job()
 	}
 	m.nextTickMu.Lock()
 	m.nextTickScheduled = true
 	m.nextTickMu.Unlock()
 	var jobErr error
-	jobValue := vm.ToValue(func() { jobErr = job() })
-	_, turnErr := m.nextTickTurn(goja.Undefined(), jobValue)
+	jobValue := native.From(vm, native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		jobErr = job()
+		return moejs.Undefined(), nil
+	}))
+	_, turnErr := native.Call(vm, m.nextTickTurn, moejs.Undefined(), jobValue)
 	return errors.Join(jobErr, turnErr)
 }
 

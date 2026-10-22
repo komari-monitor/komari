@@ -5,10 +5,10 @@ import (
 	stdos "os"
 	"path/filepath"
 
-	"github.com/dop251/goja_nodejs/buffer"
-	"github.com/dop251/goja_nodejs/require"
+	"github.com/komari-monitor/komari/pkg/jsruntime/buffer"
 	"github.com/komari-monitor/komari/pkg/jsruntime/events"
 	osmodule "github.com/komari-monitor/komari/pkg/jsruntime/os"
+	"github.com/komari-monitor/komari/pkg/jsruntime/require"
 	streammodule "github.com/komari-monitor/komari/pkg/jsruntime/stream"
 )
 
@@ -40,21 +40,21 @@ func (r *Runtime) registerNodeModule(registry *require.Registry, name string, lo
 func (r *Runtime) injectNodeGlobals() error {
 	buffer.Enable(r.vm)
 	processValue := require.Require(r.vm, "process")
-	if err := r.vm.Set("process", processValue); err != nil {
+	if err := r.vm.SetGlobal("process", processValue); err != nil {
 		return fmt.Errorf("inject process: %w", err)
 	}
-	if err := r.vm.Set("global", r.vm.GlobalObject()); err != nil {
+	if err := r.vm.SetGlobal("global", r.vm.Realm().Global); err != nil {
 		return fmt.Errorf("inject global: %w", err)
 	}
 	cwd := r.fsModule.Cwd()
-	if err := r.vm.Set("__dirname", cwd); err != nil {
+	if err := r.vm.SetGlobal("__dirname", cwd); err != nil {
 		return fmt.Errorf("inject __dirname: %w", err)
 	}
-	if err := r.vm.Set("__filename", filepath.Join(cwd, "script.js")); err != nil {
+	if err := r.vm.SetGlobal("__filename", filepath.Join(cwd, "script.js")); err != nil {
 		return fmt.Errorf("inject __filename: %w", err)
 	}
 	if r.storageDir != "" {
-		if err := r.vm.Set("__storageDir__", r.storageDir); err != nil {
+		if err := r.vm.SetGlobal("__storageDir__", r.storageDir); err != nil {
 			return fmt.Errorf("inject __storageDir__: %w", err)
 		}
 	}

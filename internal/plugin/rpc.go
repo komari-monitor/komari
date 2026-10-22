@@ -7,7 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -15,7 +16,7 @@ import (
 // JavaScript function receiving the JSON-RPC params and returning the result
 // (or throwing an Error with optional code/data). Called from the plugin's
 // own event loop during script evaluation; it takes the manager lock itself.
-func (m *Manager) registerRPC(short, method string, handler goja.Callable) error {
+func (m *Manager) registerRPC(short, method string, handler moejs.Value) error {
 	method = strings.TrimSpace(method)
 	if method == "" || strings.HasPrefix(method, "rpc.") {
 		return fmt.Errorf("invalid RPC method name %q", method)
@@ -28,7 +29,7 @@ func (m *Manager) registerRPC(short, method string, handler goja.Callable) error
 	}
 	inst.mu.Lock()
 	if inst.rpcMethods == nil {
-		inst.rpcMethods = make(map[string]goja.Callable)
+		inst.rpcMethods = make(map[string]moejs.Value)
 	}
 	if _, exists := inst.rpcMethods[method]; exists {
 		inst.mu.Unlock()
@@ -57,24 +58,24 @@ func (m *Manager) rpcHandler(short, method string) rpc.Handler {
 		host := inst.host
 		alive := inst.runtime != nil
 		inst.mu.RUnlock()
-		if !alive || handler == nil || host == nil {
+		if !alive || handler.IsUndefined() || host == nil {
 			return nil, &rpc.JsonRpcError{Code: rpc.MethodNotFound, Message: "method not found", Data: method}
 		}
 
 		resultCh := make(chan any, 1)
 		errCh := make(chan *rpc.JsonRpcError, 1)
-		queued := host.RunOnLoop(func(vm *goja.Runtime) {
+		queued := host.RunOnLoop(func(vm *moejs.Runtime) {
 			_ = host.RunJob(vm, "plugin rpc "+method, func() error {
-				params := vm.ToValue(req.Params)
-				if params == nil {
-					params = goja.Null()
+				params := native.From(vm, req.Params)
+				if params.IsUndefined() {
+					params = moejs.Null()
 				}
-				value, callErr := handler(goja.Undefined(), params)
+				value, callErr := vm.CallFunction(handler, moejs.Undefined(), params)
 				if callErr != nil {
 					errCh <- jsErrorToRPCError(vm, callErr)
 					return nil // error is captured, do not double-report
 				}
-				exported, exportErr := exportJSValue(value)
+				exported, exportErr := exportJSValue(vm, value)
 				if exportErr != nil {
 					errCh <- &rpc.JsonRpcError{Code: rpc.InternalError, Message: exportErr.Error()}
 					return nil
@@ -99,38 +100,39 @@ func (m *Manager) rpcHandler(short, method string) rpc.Handler {
 	}
 }
 
-// exportJSValue exports a goja value into a JSON-RPC result. Circular
+// exportJSValue exports a native JavaScript value into a JSON-RPC result. Circular
 // structures and other export failures become an error instead of panicking
 // inside the event loop.
-func exportJSValue(value goja.Value) (result any, err error) {
+func exportJSValue(vm *moejs.Runtime, value moejs.Value) (result any, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			result = nil
 			err = fmt.Errorf("export JavaScript value: %v", recovered)
 		}
 	}()
-	return value.Export(), nil
+	return vm.ToGo(value)
 }
 
 // jsErrorToRPCError converts a thrown JavaScript error into a JSON-RPC error,
 // honoring optional code/data properties.
-func jsErrorToRPCError(vm *goja.Runtime, err error) *rpc.JsonRpcError {
+func jsErrorToRPCError(vm *moejs.Runtime, err error) *rpc.JsonRpcError {
 	code := rpc.InternalError
 	message := err.Error()
 	var data any
-	var exception *goja.Exception
+	var exception *moejs.Exception
 	if errors.As(err, &exception) {
-		if obj, ok := exception.Value().(*goja.Object); ok {
-			if value := obj.Get("code"); value != nil && !goja.IsUndefined(value) {
-				if n := value.ToInteger(); n != 0 {
+		if exception.Value.IsObject() {
+			obj := exception.Value.AsObject()
+			if value := native.Get(vm, obj, "code"); !value.IsUndefined() {
+				if n := native.Int(vm, value); n != 0 {
 					code = int(n)
 				}
 			}
-			if value := obj.Get("message"); value != nil && !goja.IsUndefined(value) && value.String() != "" {
-				message = value.String()
+			if value := native.Get(vm, obj, "message"); !value.IsUndefined() && native.String(vm, value) != "" {
+				message = native.String(vm, value)
 			}
-			if value := obj.Get("data"); value != nil && !goja.IsUndefined(value) {
-				if exported, exportErr := exportJSValue(value); exportErr == nil {
+			if value := native.Get(vm, obj, "data"); !value.IsUndefined() {
+				if exported, exportErr := exportJSValue(vm, value); exportErr == nil {
 					data = exported
 				}
 			}

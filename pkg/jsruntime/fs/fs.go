@@ -4,6 +4,13 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/komari-monitor/komari/pkg/jsruntime/buffer"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/filepathutil"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
+	"github.com/komari-monitor/komari/pkg/jsruntime/require"
 	"io"
 	"io/fs"
 	"os"
@@ -11,23 +18,15 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/buffer"
-	"github.com/dop251/goja_nodejs/require"
-	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
-	"github.com/komari-monitor/komari/pkg/jsruntime/internal/filepathutil"
 )
 
 type nodeFileHandle struct {
 	file       *os.File
 	resourceID uint64
 }
-
 type nodeStat struct {
 	info os.FileInfo
 }
-
 type nodePathMode uint8
 
 const (
@@ -35,13 +34,10 @@ const (
 	nodePathNoFollowFinal
 )
 
-// rootedDir is one confined filesystem root: the resolved absolute path and
-// the os.Root handle used for actual file operations.
 type rootedDir struct {
 	path   string
 	handle *os.Root
 }
-
 type Module struct {
 	runtime            *bridge.Runtime
 	nodeRoot           string
@@ -49,31 +45,19 @@ type Module struct {
 	nodeFSRoot         *os.Root
 	extraRoots         []rootedDir
 	lifecycleMu        sync.RWMutex
-
-	cwdMu   sync.RWMutex
-	nodeCwd string
-
-	fileMu       sync.Mutex
-	fileID       int
-	files        map[int]nodeFileHandle
-	closed       bool
-	onFileOpen   func(int, *os.File, uint64)
-	onFileClose  func(int)
-	externalFile func(int) (*os.File, bool)
+	cwdMu              sync.RWMutex
+	nodeCwd            string
+	fileMu             sync.Mutex
+	fileID             int
+	files              map[int]nodeFileHandle
+	closed             bool
+	onFileOpen         func(int, *os.File, uint64)
+	onFileClose        func(int)
+	externalFile       func(int) (*os.File, bool)
 }
 
-// New creates the filesystem module confined to root (BaseDir) plus any extra
-// roots. When allowAllFileAccess is true every root is opened but ignored so
-// paths resolve against the real filesystem.
 func New(runtime *bridge.Runtime, root, cwd string, extraRoots []string, allowAllFileAccess bool) (*Module, error) {
-	m := &Module{
-		runtime:            runtime,
-		nodeRoot:           root,
-		nodeCwd:            cwd,
-		allowAllFileAccess: allowAllFileAccess,
-		fileID:             2,
-		files:              make(map[int]nodeFileHandle),
-	}
+	m := &Module{runtime: runtime, nodeRoot: root, nodeCwd: cwd, allowAllFileAccess: allowAllFileAccess, fileID: 2, files: make(map[int]nodeFileHandle)}
 	if root != "" && !allowAllFileAccess {
 		rootHandle, err := os.OpenRoot(root)
 		if err != nil {
@@ -96,18 +80,15 @@ func New(runtime *bridge.Runtime, root, cwd string, extraRoots []string, allowAl
 	}
 	return m, nil
 }
-
 func (m *Module) Cwd() string {
 	m.cwdMu.RLock()
 	cwd := m.nodeCwd
 	m.cwdMu.RUnlock()
 	return cwd
 }
-
 func (m *Module) Resolve(name string, allowMissing bool) (string, error) {
 	return m.resolveNodePathAt(name, m.Cwd(), allowMissing, nodePathFollowFinal)
 }
-
 func (m *Module) Chdir(name string) error {
 	resolved, err := m.Resolve(name, false)
 	if err != nil {
@@ -125,7 +106,6 @@ func (m *Module) Chdir(name string) error {
 	m.cwdMu.Unlock()
 	return nil
 }
-
 func (m *Module) Close() {
 	m.lifecycleMu.Lock()
 	if m.closed {
@@ -142,7 +122,6 @@ func (m *Module) Close() {
 		}
 	}
 	m.lifecycleMu.Unlock()
-
 	m.fileMu.Lock()
 	handles := make([]nodeFileHandle, 0, len(m.files))
 	for fd, handle := range m.files {
@@ -155,35 +134,29 @@ func (m *Module) Close() {
 		_ = handle.file.Close()
 	}
 }
-
 func (m *Module) OpenFileCount() int {
 	m.fileMu.Lock()
 	count := len(m.files)
 	m.fileMu.Unlock()
 	return count
 }
-
 func (m *Module) SetFileHooks(onOpen func(int, *os.File, uint64), onClose func(int)) {
 	m.fileMu.Lock()
 	m.onFileOpen = onOpen
 	m.onFileClose = onClose
 	m.fileMu.Unlock()
 }
-
 func (m *Module) SetExternalFileLookup(lookup func(int) (*os.File, bool)) {
 	m.fileMu.Lock()
 	m.externalFile = lookup
 	m.fileMu.Unlock()
 }
-
 func (m *Module) resolveNodePath(name string, allowMissing bool) (string, error) {
 	return m.resolveNodePathAt(name, m.Cwd(), allowMissing, nodePathFollowFinal)
 }
-
 func (m *Module) resolveNodePathNoFollow(name string, allowMissing bool) (string, error) {
 	return m.resolveNodePathAt(name, m.Cwd(), allowMissing, nodePathNoFollowFinal)
 }
-
 func (m *Module) resolveNodePathAt(name, cwd string, allowMissing bool, mode nodePathMode) (string, error) {
 	if name == "" {
 		return "", errors.New("path is empty")
@@ -199,11 +172,6 @@ func (m *Module) resolveNodePathAt(name, cwd string, allowMissing bool, mode nod
 	if !m.withinAnyRoot(resolved) {
 		return "", fmt.Errorf("path escapes BaseDir: %s", name)
 	}
-	// No-follow operations on a confined root itself (for example
-	// fs.mkdirSync(__storageDir__, {recursive:true})) operate through the
-	// root handle with the "." relative path, so they never traverse the
-	// parent directory. The parent-symlink check below would always reject
-	// such paths because the parent lies outside the sandbox by definition.
 	if mode == nodePathNoFollowFinal && m.isConfinedRoot(resolved) {
 		return resolved, nil
 	}
@@ -244,8 +212,6 @@ func (m *Module) resolveNodePathAt(name, cwd string, allowMissing bool, mode nod
 	}
 }
 
-// isConfinedRoot reports whether path is exactly one of the confined roots
-// (BaseDir or an extra root) after cleaning.
 func (m *Module) isConfinedRoot(path string) bool {
 	if m.nodeRoot != "" && filepath.Clean(m.nodeRoot) == path {
 		return true
@@ -258,8 +224,6 @@ func (m *Module) isConfinedRoot(path string) bool {
 	return false
 }
 
-// withinAnyRoot reports whether path stays inside BaseDir or one of the
-// extra confined roots.
 func (m *Module) withinAnyRoot(path string) bool {
 	if filepathutil.WithinBase(m.nodeRoot, path) {
 		return true
@@ -271,86 +235,88 @@ func (m *Module) withinAnyRoot(path string) bool {
 	}
 	return false
 }
-
-func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
-	exports := vm.NewObject()
-	syncMethods := make(map[string]goja.Callable)
-	setSync := func(name string, function any) {
-		value := vm.ToValue(function)
-		_ = exports.Set(name, value)
-		callable, _ := goja.AssertFunction(value)
+func (m *Module) Load(vm *moejs.Runtime, module *engine.Object) {
+	exports := vm.Realm().NewObject()
+	syncMethods := make(map[string]moejs.Value)
+	setSync := func(name string, value moejs.Value) {
+		_ = native.Set(vm, exports, name, value)
+		callable, _ := checkedFunction(value)
 		syncMethods[name] = callable
 	}
-
-	setSync("readFileSync", func(call goja.FunctionCall) goja.Value {
-		path, err := m.resolveNodePath(call.Argument(0).String(), false)
+	setSync("readFileSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		path, err := m.resolveNodePath(native.String(vm, moejs.Arg(args, 0)), false)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
 		data, err := m.nodeReadFile(path)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		return encodeFSData(vm, data, fsEncoding(call.Argument(1)))
-	})
-	setSync("writeFileSync", func(call goja.FunctionCall) goja.Value {
-		path, err := m.resolveNodePathNoFollow(call.Argument(0).String(), true)
+		return native.From(vm, encodeFSData(vm, data, fsEncoding(vm, moejs.Arg(args, 1)))), nil
+	}))
+	setSync("writeFileSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		path, err := m.resolveNodePathNoFollow(native.String(vm, moejs.Arg(args, 0)), true)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		data := buffer.Bytes(vm, call.Argument(1))
-		if err := m.nodeWriteFile(path, data, fsMode(call.Argument(2), 0o666)); err != nil {
-			panic(vm.NewGoError(err))
+		data := buffer.Bytes(vm, moejs.Arg(args, 1))
+		if err := m.nodeWriteFile(path, data, fsMode(vm, moejs.Arg(args, 2), 0o666)); err != nil {
+			panic(native.GoError(vm, err))
 		}
-		return goja.Undefined()
-	})
-	setSync("appendFileSync", func(call goja.FunctionCall) goja.Value {
-		path, err := m.resolveNodePath(call.Argument(0).String(), true)
+		return native.From(vm, moejs.Undefined()), nil
+	}))
+	setSync("appendFileSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		path, err := m.resolveNodePath(native.String(vm, moejs.Arg(args, 0)), true)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		file, err := m.nodeOpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, fsMode(call.Argument(2), 0o666))
+		file, err := m.nodeOpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, fsMode(vm, moejs.Arg(args, 2), 0o666))
 		if err == nil {
-			_, writeErr := file.Write(buffer.Bytes(vm, call.Argument(1)))
+			_, writeErr := file.Write(buffer.Bytes(vm, moejs.Arg(args, 1)))
 			err = errors.Join(writeErr, file.Close())
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		return goja.Undefined()
-	})
-	setSync("existsSync", func(name string) bool {
+		return native.From(vm, moejs.Undefined()), nil
+	}))
+	setSync("existsSync", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name := native.String(vm, moejs.Arg(args, 0))
 		path, err := m.resolveNodePath(name, false)
 		if err != nil {
-			return false
+			return native.From(vm, false), nil
 		}
 		_, err = m.nodeStat(path, true)
-		return err == nil
-	})
-	setSync("accessSync", func(call goja.FunctionCall) goja.Value {
-		name := call.Argument(0).String()
-		mode := fsAccessMode(call.Argument(1))
+		return native.From(vm, err == nil), nil
+	}))
+	setSync("accessSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name := native.String(vm, moejs.Arg(args, 0))
+		mode := fsAccessMode(vm, moejs.Arg(args, 1))
 		path, err := m.resolveNodePath(name, false)
 		if err == nil {
 			err = m.nodeAccess(path, mode)
 		}
 		if err != nil {
-			panic(nodeErrorObject(vm, err, "access"))
+			panic(engine.ObjectValue(nodeErrorObject(vm, err, "access")))
 		}
-		return goja.Undefined()
-	})
-	setSync("statSync", func(call goja.FunctionCall) goja.Value { return m.fsStat(vm, call.Argument(0).String(), true) })
-	setSync("lstatSync", func(call goja.FunctionCall) goja.Value { return m.fsStat(vm, call.Argument(0).String(), false) })
-	setSync("readdirSync", func(call goja.FunctionCall) goja.Value {
-		path, err := m.resolveNodePath(call.Argument(0).String(), false)
+		return native.From(vm, moejs.Undefined()), nil
+	}))
+	setSync("statSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, m.fsStat(vm, native.String(vm, moejs.Arg(args, 0)), true)), nil
+	}))
+	setSync("lstatSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, m.fsStat(vm, native.String(vm, moejs.Arg(args, 0)), false)), nil
+	}))
+	setSync("readdirSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		path, err := m.resolveNodePath(native.String(vm, moejs.Arg(args, 0)), false)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
 		entries, err := m.nodeReadDir(path)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		withTypes := fsWithFileTypes(call.Argument(1))
+		withTypes := fsWithFileTypes(vm, moejs.Arg(args, 1))
 		result := make([]any, 0, len(entries))
 		for _, entry := range entries {
 			if withTypes {
@@ -359,58 +325,64 @@ func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 				result = append(result, entry.Name())
 			}
 		}
-		return vm.ToValue(result)
-	})
-	setSync("mkdirSync", func(call goja.FunctionCall) goja.Value {
-		path, err := m.resolveNodePathNoFollow(call.Argument(0).String(), true)
+		return native.From(vm, result), nil
+	}))
+	setSync("mkdirSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		path, err := m.resolveNodePathNoFollow(native.String(vm, moejs.Arg(args, 0)), true)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		recursive := fsBooleanOption(call.Argument(1), "recursive")
+		recursive := fsBooleanOption(vm, moejs.Arg(args, 1), "recursive")
 		if recursive {
-			err = m.nodeMkdir(path, fsMode(call.Argument(1), 0o777), true)
+			err = m.nodeMkdir(path, fsMode(vm, moejs.Arg(args, 1), 0o777), true)
 		} else {
-			err = m.nodeMkdir(path, fsMode(call.Argument(1), 0o777), false)
+			err = m.nodeMkdir(path, fsMode(vm, moejs.Arg(args, 1), 0o777), false)
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		return goja.Undefined()
-	})
-	setSync("rmSync", func(call goja.FunctionCall) goja.Value {
-		path, err := m.resolveNodePathNoFollow(call.Argument(0).String(), true)
+		return native.From(vm, moejs.Undefined()), nil
+	}))
+	setSync("rmSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		path, err := m.resolveNodePathNoFollow(native.String(vm, moejs.Arg(args, 0)), true)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		if fsBooleanOption(call.Argument(1), "recursive") {
+		if fsBooleanOption(vm, moejs.Arg(args, 1), "recursive") {
 			err = m.nodeRemove(path, true)
 		} else {
 			err = m.nodeRemove(path, false)
 		}
-		if err != nil && !fsBooleanOption(call.Argument(1), "force") {
-			panic(vm.NewGoError(err))
+		if err != nil && !fsBooleanOption(vm, moejs.Arg(args, 1), "force") {
+			panic(native.GoError(vm, err))
 		}
-		return goja.Undefined()
-	})
-	setSync("unlinkSync", func(name string) {
+		return native.From(vm, moejs.Undefined()), nil
+	}))
+	setSync("unlinkSync", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name := native.String(vm, moejs.Arg(args, 0))
 		path, err := m.resolveNodePathNoFollow(name, false)
 		if err == nil {
 			err = m.nodeRemove(path, false)
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-	})
-	setSync("rmdirSync", func(name string) {
+		return moejs.Undefined(), nil
+	}))
+	setSync("rmdirSync", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name := native.String(vm, moejs.Arg(args, 0))
 		path, err := m.resolveNodePathNoFollow(name, false)
 		if err == nil {
 			err = m.nodeRemove(path, false)
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-	})
-	setSync("renameSync", func(oldName, newName string) {
+		return moejs.Undefined(), nil
+	}))
+	setSync("renameSync", native.Bind(vm, "", 2, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		oldName := native.String(vm, moejs.Arg(args, 0))
+		newName := native.String(vm, moejs.Arg(args, 1))
 		oldPath, err := m.resolveNodePathNoFollow(oldName, false)
 		if err == nil {
 			var newPath string
@@ -420,32 +392,40 @@ func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 			}
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-	})
-	setSync("copyFileSync", func(sourceName, targetName string) {
+		return moejs.Undefined(), nil
+	}))
+	setSync("copyFileSync", native.Bind(vm, "", 2, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		sourceName := native.String(vm, moejs.Arg(args, 0))
+		targetName := native.String(vm, moejs.Arg(args, 1))
 		if err := m.copyNodeFile(sourceName, targetName); err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-	})
-	setSync("realpathSync", func(name string) string {
+		return moejs.Undefined(), nil
+	}))
+	setSync("realpathSync", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name := native.String(vm, moejs.Arg(args, 0))
 		path, err := m.resolveNodePath(name, false)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		return path
-	})
-	setSync("readlinkSync", func(name string) string {
+		return native.From(vm, path), nil
+	}))
+	setSync("readlinkSync", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name := native.String(vm, moejs.Arg(args, 0))
 		path, err := m.resolveNodePathNoFollow(name, false)
 		if err == nil {
 			path, err = m.nodeReadlink(path)
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		return path
-	})
-	setSync("symlinkSync", func(targetName, linkName string) {
+		return native.From(vm, path), nil
+	}))
+	setSync("symlinkSync", native.Bind(vm, "", 2, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		targetName := native.String(vm, moejs.Arg(args, 0))
+		linkName := native.String(vm, moejs.Arg(args, 1))
 		target, err := m.resolveNodePath(targetName, true)
 		if err == nil {
 			var link string
@@ -455,278 +435,316 @@ func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
 			}
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-	})
-	setSync("truncateSync", func(name string, size int64) {
+		return moejs.Undefined(), nil
+	}))
+	setSync("truncateSync", native.Bind(vm, "", 2, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name := native.String(vm, moejs.Arg(args, 0))
+		size := int64(native.Int(vm, moejs.Arg(args, 1)))
 		path, err := m.resolveNodePath(name, false)
 		if err == nil {
 			err = m.nodeTruncate(path, size)
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-	})
-	setSync("chmodSync", func(name string, mode uint32) {
+		return moejs.Undefined(), nil
+	}))
+	setSync("chmodSync", native.Bind(vm, "", 2, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name := native.String(vm, moejs.Arg(args, 0))
+		mode := uint32(native.Int(vm, moejs.Arg(args, 1)))
 		path, err := m.resolveNodePath(name, false)
 		if err == nil {
 			err = m.nodeChmod(path, os.FileMode(mode))
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-	})
-	setSync("utimesSync", func(name string, accessTime, modifyTime any) {
+		return moejs.Undefined(), nil
+	}))
+	setSync("utimesSync", native.Bind(vm, "", 3, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name := native.String(vm, moejs.Arg(args, 0))
+		accessTime := native.Export(vm, moejs.Arg(args, 1))
+		modifyTime := native.Export(vm, moejs.Arg(args, 2))
 		path, err := m.resolveNodePath(name, false)
 		if err == nil {
 			err = m.nodeChtimes(path, fsTime(accessTime), fsTime(modifyTime))
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-	})
-	setSync("mkdtempSync", func(prefix string) string {
+		return moejs.Undefined(), nil
+	}))
+	setSync("mkdtempSync", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		prefix := native.String(vm, moejs.Arg(args, 0))
 		path, err := m.resolveNodePathNoFollow(prefix, true)
 		if err == nil {
 			path, err = m.nodeMkdirTemp(path)
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		return path
-	})
-	setSync("openSync", func(call goja.FunctionCall) goja.Value { return vm.ToValue(m.fsOpen(vm, call)) })
-	setSync("closeSync", func(fd int) {
+		return native.From(vm, path), nil
+	}))
+	setSync("openSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, m.fsOpen(vm, args)), nil
+	}))
+	setSync("closeSync", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		fd := int(native.Int(vm, moejs.Arg(args, 0)))
 		if err := m.fsClose(fd); err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-	})
-	setSync("fstatSync", func(fd int) goja.Value {
+		return moejs.Undefined(), nil
+	}))
+	setSync("fstatSync", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		fd := int(native.Int(vm, moejs.Arg(args, 0)))
 		file, err := m.fsFile(fd)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
 		info, err := file.Stat()
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-		return fsStatObject(vm, info)
-	})
-	setSync("fsyncSync", func(fd int) {
+		return native.From(vm, fsStatObject(vm, info)), nil
+	}))
+	setSync("fsyncSync", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		fd := int(native.Int(vm, moejs.Arg(args, 0)))
 		file, err := m.fsFile(fd)
 		if err == nil {
 			err = file.Sync()
 		}
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
-	})
-	setSync("readSync", func(call goja.FunctionCall) goja.Value { return vm.ToValue(m.fsRead(vm, call)) })
-	setSync("writeSync", func(call goja.FunctionCall) goja.Value { return vm.ToValue(m.fsWrite(vm, call)) })
-
-	for _, asyncName := range []string{
-		"readFile", "writeFile", "appendFile", "access", "stat", "lstat", "readdir", "mkdir", "rm",
-		"unlink", "rmdir", "rename", "copyFile", "realpath", "readlink", "symlink", "truncate",
-		"chmod", "utimes", "mkdtemp", "open", "close", "fstat", "fsync", "read", "write",
-	} {
-		_ = exports.Set(asyncName, m.fsAsync(vm, asyncName))
+		return moejs.Undefined(), nil
+	}))
+	setSync("readSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, m.fsRead(vm, args)), nil
+	}))
+	setSync("writeSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, m.fsWrite(vm, args)), nil
+	}))
+	for _, asyncName := range []string{"readFile", "writeFile", "appendFile", "access", "stat", "lstat", "readdir", "mkdir", "rm", "unlink", "rmdir", "rename", "copyFile", "realpath", "readlink", "symlink", "truncate", "chmod", "utimes", "mkdtemp", "open", "close", "fstat", "fsync", "read", "write"} {
+		_ = native.Set(vm, exports, asyncName, m.fsAsync(vm, asyncName))
 	}
-	_ = exports.Set("exists", func(call goja.FunctionCall) goja.Value {
-		callback, ok := goja.AssertFunction(call.Argument(1))
+	_ = native.Set(vm, exports, "exists", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		callback, ok := checkedFunction(moejs.Arg(args, 1))
 		if !ok {
-			panic(vm.NewTypeError("callback must be a function"))
+			panic(native.TypeError(vm, "callback must be a function"))
 		}
-		name := call.Argument(0).String()
+		name := native.String(vm, moejs.Arg(args, 0))
 		go func() {
 			path, err := m.resolveNodePath(name, false)
 			if err == nil {
 				_, err = m.nodeStat(path, true)
 			}
-			m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+			m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 				_ = m.runtime.RunJob(vm, "fs.exists", func() error {
-					_, callbackErr := callback(goja.Undefined(), vm.ToValue(err == nil))
+					_, callbackErr := native.Call(vm, callback, moejs.Undefined(), native.From(vm, err == nil))
 					return callbackErr
 				})
 			})
 		}()
-		return goja.Undefined()
-	})
-	_ = exports.Set("constants", map[string]int{"F_OK": 0, "R_OK": 4, "W_OK": 2, "X_OK": 1, "COPYFILE_EXCL": 1})
+		return native.From(vm, moejs.Undefined()), nil
+	}))
+	_ = native.Set(vm, exports, "constants", map[string]int{"F_OK": 0, "R_OK": 4, "W_OK": 2, "X_OK": 1, "COPYFILE_EXCL": 1})
 	m.attachFSPromises(vm, exports)
 	m.attachFSStreams(vm, exports)
-	_ = module.Set("exports", exports)
+	_ = native.Set(vm, module, "exports", exports)
 }
-
-func (m *Module) fsAsync(vm *goja.Runtime, name string) func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		if len(call.Arguments) == 0 {
-			panic(vm.NewTypeError("callback must be a function"))
+func (m *Module) fsAsync(vm *moejs.Runtime, name string) moejs.Value {
+	return native.Bind(vm, name, 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		if len(args) == 0 {
+			panic(native.TypeError(vm, "callback must be a function"))
 		}
-		callback, ok := goja.AssertFunction(call.Arguments[len(call.Arguments)-1])
+		callback, ok := checkedFunction(args[len(args)-1])
 		if !ok {
-			panic(vm.NewTypeError("callback must be a function"))
+			panic(native.TypeError(vm, "callback must be a function"))
 		}
-		arguments := append([]goja.Value(nil), call.Arguments[:len(call.Arguments)-1]...)
+		arguments := append([]moejs.Value(nil), args[:len(args)-1]...)
 		operation := m.prepareFSAsync(vm, name, arguments)
 		go func() {
 			result, err := operation.run()
-			if !m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+			if !m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 				_ = m.runtime.RunJob(vm, "fs."+name, func() error {
 					if err != nil {
-						_, callbackErr := callback(goja.Undefined(), nodeErrorObject(vm, err, "fs."+name))
+						_, callbackErr := native.Call(vm, callback, moejs.Undefined(), native.From(vm, nodeErrorObject(vm, err, "fs."+name)))
 						return callbackErr
 					}
-					values := append([]goja.Value{goja.Null()}, operation.values(vm, result)...)
-					_, callbackErr := callback(goja.Undefined(), values...)
+					values := append([]moejs.Value{moejs.Null()}, operation.values(vm, result)...)
+					_, callbackErr := native.Call(vm, callback, moejs.Undefined(), values...)
 					return callbackErr
 				})
 			}) {
 				return
 			}
 		}()
-		return goja.Undefined()
-	}
+		return moejs.Undefined(), nil
+	})
 }
-
-func (m *Module) attachFSPromises(vm *goja.Runtime, exports *goja.Object) {
-	factory, err := vm.RunString(fsPromisesSource)
+func (m *Module) attachFSPromises(vm *moejs.Runtime, exports *engine.Object) {
+	factory, err := native.Run(vm, fsPromisesSource)
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
-	call, _ := goja.AssertFunction(factory)
-	promises, err := call(goja.Undefined(), exports)
+	call, _ := checkedFunction(factory)
+	promises, err := native.Call(vm, call, moejs.Undefined(), native.From(vm, exports))
 	if err != nil {
 		panic(err)
 	}
-	_ = exports.Set("promises", promises)
+	_ = native.Set(vm, exports, "promises", promises)
 }
-
-func (m *Module) fsStat(vm *goja.Runtime, name string, follow bool) goja.Value {
+func (m *Module) fsStat(vm *moejs.Runtime, name string, follow bool) moejs.Value {
 	path, err := m.resolveNodePathAt(name, m.Cwd(), false, map[bool]nodePathMode{true: nodePathFollowFinal, false: nodePathNoFollowFinal}[follow])
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
 	var info os.FileInfo
 	info, err = m.nodeStat(path, follow)
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
-	return fsStatObject(vm, info)
+	return native.From(vm, fsStatObject(vm, info))
 }
-
-func fsStatObject(vm *goja.Runtime, info os.FileInfo) *goja.Object {
-	object := vm.NewObject()
+func fsStatObject(vm *moejs.Runtime, info os.FileInfo) *engine.Object {
+	object := vm.Realm().NewObject()
 	mode := info.Mode()
-	_ = object.Set("dev", 0)
-	_ = object.Set("ino", 0)
-	_ = object.Set("mode", uint32(mode))
-	_ = object.Set("nlink", 1)
-	_ = object.Set("uid", 0)
-	_ = object.Set("gid", 0)
-	_ = object.Set("rdev", 0)
-	_ = object.Set("size", info.Size())
-	_ = object.Set("blksize", 4096)
-	_ = object.Set("blocks", (info.Size()+511)/512)
+	_ = native.Set(vm, object, "dev", 0)
+	_ = native.Set(vm, object, "ino", 0)
+	_ = native.Set(vm, object, "mode", uint32(mode))
+	_ = native.Set(vm, object, "nlink", 1)
+	_ = native.Set(vm, object, "uid", 0)
+	_ = native.Set(vm, object, "gid", 0)
+	_ = native.Set(vm, object, "rdev", 0)
+	_ = native.Set(vm, object, "size", info.Size())
+	_ = native.Set(vm, object, "blksize", 4096)
+	_ = native.Set(vm, object, "blocks", (info.Size()+511)/512)
 	modified := info.ModTime()
-	_ = object.Set("atimeMs", float64(modified.UnixMilli()))
-	_ = object.Set("mtimeMs", float64(modified.UnixMilli()))
-	_ = object.Set("ctimeMs", float64(modified.UnixMilli()))
-	_ = object.Set("birthtimeMs", float64(modified.UnixMilli()))
-	_ = object.Set("atime", fsDate(vm, modified))
-	_ = object.Set("mtime", fsDate(vm, modified))
-	_ = object.Set("ctime", fsDate(vm, modified))
-	_ = object.Set("birthtime", fsDate(vm, modified))
-	_ = object.Set("isFile", func() bool { return mode.IsRegular() })
-	_ = object.Set("isDirectory", func() bool { return mode.IsDir() })
-	_ = object.Set("isSymbolicLink", func() bool { return mode&os.ModeSymlink != 0 })
-	_ = object.Set("isBlockDevice", func() bool { return mode&os.ModeDevice != 0 && mode&os.ModeCharDevice == 0 })
-	_ = object.Set("isCharacterDevice", func() bool { return mode&os.ModeCharDevice != 0 })
-	_ = object.Set("isFIFO", func() bool { return mode&os.ModeNamedPipe != 0 })
-	_ = object.Set("isSocket", func() bool { return mode&os.ModeSocket != 0 })
+	_ = native.Set(vm, object, "atimeMs", float64(modified.UnixMilli()))
+	_ = native.Set(vm, object, "mtimeMs", float64(modified.UnixMilli()))
+	_ = native.Set(vm, object, "ctimeMs", float64(modified.UnixMilli()))
+	_ = native.Set(vm, object, "birthtimeMs", float64(modified.UnixMilli()))
+	_ = native.Set(vm, object, "atime", fsDate(vm, modified))
+	_ = native.Set(vm, object, "mtime", fsDate(vm, modified))
+	_ = native.Set(vm, object, "ctime", fsDate(vm, modified))
+	_ = native.Set(vm, object, "birthtime", fsDate(vm, modified))
+	_ = native.Set(vm, object, "isFile", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode.IsRegular()), nil
+	}))
+	_ = native.Set(vm, object, "isDirectory", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode.IsDir()), nil
+	}))
+	_ = native.Set(vm, object, "isSymbolicLink", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode&os.ModeSymlink != 0), nil
+	}))
+	_ = native.Set(vm, object, "isBlockDevice", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode&os.ModeDevice != 0 && mode&os.ModeCharDevice == 0), nil
+	}))
+	_ = native.Set(vm, object, "isCharacterDevice", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode&os.ModeCharDevice != 0), nil
+	}))
+	_ = native.Set(vm, object, "isFIFO", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode&os.ModeNamedPipe != 0), nil
+	}))
+	_ = native.Set(vm, object, "isSocket", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode&os.ModeSocket != 0), nil
+	}))
 	return object
 }
-
-func fsDirent(vm *goja.Runtime, entry fs.DirEntry) *goja.Object {
-	object := vm.NewObject()
+func fsDirent(vm *moejs.Runtime, entry fs.DirEntry) *engine.Object {
+	object := vm.Realm().NewObject()
 	mode := entry.Type()
-	_ = object.Set("name", entry.Name())
-	_ = object.Set("parentPath", "")
-	_ = object.Set("path", "")
-	_ = object.Set("isFile", func() bool { return mode.IsRegular() })
-	_ = object.Set("isDirectory", func() bool { return mode.IsDir() })
-	_ = object.Set("isSymbolicLink", func() bool { return mode&os.ModeSymlink != 0 })
-	_ = object.Set("isBlockDevice", func() bool { return mode&os.ModeDevice != 0 && mode&os.ModeCharDevice == 0 })
-	_ = object.Set("isCharacterDevice", func() bool { return mode&os.ModeCharDevice != 0 })
-	_ = object.Set("isFIFO", func() bool { return mode&os.ModeNamedPipe != 0 })
-	_ = object.Set("isSocket", func() bool { return mode&os.ModeSocket != 0 })
+	_ = native.Set(vm, object, "name", entry.Name())
+	_ = native.Set(vm, object, "parentPath", "")
+	_ = native.Set(vm, object, "path", "")
+	_ = native.Set(vm, object, "isFile", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode.IsRegular()), nil
+	}))
+	_ = native.Set(vm, object, "isDirectory", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode.IsDir()), nil
+	}))
+	_ = native.Set(vm, object, "isSymbolicLink", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode&os.ModeSymlink != 0), nil
+	}))
+	_ = native.Set(vm, object, "isBlockDevice", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode&os.ModeDevice != 0 && mode&os.ModeCharDevice == 0), nil
+	}))
+	_ = native.Set(vm, object, "isCharacterDevice", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode&os.ModeCharDevice != 0), nil
+	}))
+	_ = native.Set(vm, object, "isFIFO", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode&os.ModeNamedPipe != 0), nil
+	}))
+	_ = native.Set(vm, object, "isSocket", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, mode&os.ModeSocket != 0), nil
+	}))
 	return object
 }
-
-func fsDate(vm *goja.Runtime, value time.Time) goja.Value {
-	object, err := vm.New(vm.Get("Date"), vm.ToValue(value.UnixMilli()))
+func fsDate(vm *moejs.Runtime, value time.Time) moejs.Value {
+	object, err := native.New(vm, native.Global(vm, "Date"), native.From(vm, value.UnixMilli()))
 	if err != nil {
-		return vm.ToValue(value.UnixMilli())
+		return native.From(vm, value.UnixMilli())
 	}
-	return object
+	return native.From(vm, object)
 }
-
-func fsEncoding(value goja.Value) string {
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+func fsEncoding(vm *moejs.Runtime, value moejs.Value) string {
+	if native.IsNil(value) || value.IsUndefined() || value.IsNull() {
 		return ""
 	}
-	if object, ok := value.(*goja.Object); ok {
-		encoding := object.Get("encoding")
-		if goja.IsUndefined(encoding) || goja.IsNull(encoding) {
+	if value.IsObject() {
+		object := value.AsObject()
+		encoding := native.Get(vm, object, "encoding")
+		if encoding.IsUndefined() || encoding.IsNull() {
 			return ""
 		}
-		return encoding.String()
+		return native.String(vm, encoding)
 	}
-	return value.String()
+	return native.String(vm, value)
 }
-
-func encodeFSData(vm *goja.Runtime, data []byte, encoding string) goja.Value {
+func encodeFSData(vm *moejs.Runtime, data []byte, encoding string) moejs.Value {
 	if encoding == "" || encoding == "buffer" {
-		return buffer.WrapBytes(vm, data)
+		return native.From(vm, buffer.WrapBytes(vm, data))
 	}
-	return vm.ToValue(buffer.EncodeBytes(vm, data, vm.ToValue(encoding)))
+	return native.From(vm, buffer.EncodeBytes(vm, data, native.From(vm, encoding)))
 }
-
-func fsMode(value goja.Value, fallback os.FileMode) os.FileMode {
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+func fsMode(vm *moejs.Runtime, value moejs.Value, fallback os.FileMode) os.FileMode {
+	if native.IsNil(value) || value.IsUndefined() || value.IsNull() {
 		return fallback
 	}
-	if object, ok := value.(*goja.Object); ok {
-		value = object.Get("mode")
-		if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+	if value.IsObject() {
+		object := value.AsObject()
+		value = native.Get(vm, object, "mode")
+		if native.IsNil(value) || value.IsUndefined() || value.IsNull() {
 			return fallback
 		}
 	}
-	if text, ok := value.Export().(string); ok {
+	if text, ok := native.Export(vm, value).(string); ok {
 		mode, err := strconv.ParseUint(text, 8, 32)
 		if err == nil {
 			return os.FileMode(mode)
 		}
 	}
-	return os.FileMode(value.ToInteger())
+	return os.FileMode(native.Int(vm, value))
 }
-
-func fsAccessMode(value goja.Value) int {
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+func fsAccessMode(vm *moejs.Runtime, value moejs.Value) int {
+	if native.IsNil(value) || value.IsUndefined() || value.IsNull() {
 		return 0
 	}
-	return int(value.ToInteger())
+	return int(native.Int(vm, value))
 }
-
-func fsBooleanOption(value goja.Value, name string) bool {
-	if object, ok := value.(*goja.Object); ok {
-		property := object.Get(name)
-		return property != nil && property.ToBoolean()
+func fsBooleanOption(vm *moejs.Runtime, value moejs.Value, name string) bool {
+	if value.IsObject() {
+		object := value.AsObject()
+		property := native.Get(vm, object, name)
+		return !native.IsNil(property) && native.Bool(property)
 	}
 	return false
 }
-
-func fsWithFileTypes(value goja.Value) bool { return fsBooleanOption(value, "withFileTypes") }
-
+func fsWithFileTypes(vm *moejs.Runtime, value moejs.Value) bool {
+	return fsBooleanOption(vm, value, "withFileTypes")
+}
 func fsTime(value any) time.Time {
 	switch converted := value.(type) {
 	case time.Time:
@@ -742,7 +760,6 @@ func fsTime(value any) time.Time {
 		return time.Now()
 	}
 }
-
 func (m *Module) copyNodeFile(sourceName, targetName string) error {
 	source, err := m.resolveNodePath(sourceName, false)
 	if err != nil {
@@ -765,24 +782,22 @@ func (m *Module) copyNodeFile(sourceName, targetName string) error {
 	closeErr := output.Close()
 	return errors.Join(copyErr, closeErr)
 }
-
-func (m *Module) fsOpen(vm *goja.Runtime, call goja.FunctionCall) int {
-	path, err := m.resolveNodePath(call.Argument(0).String(), true)
+func (m *Module) fsOpen(vm *moejs.Runtime, args []moejs.Value) int {
+	path, err := m.resolveNodePath(native.String(vm, moejs.Arg(args, 0)), true)
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
-	flags := fsOpenFlags(call.Argument(1).String())
-	file, err := m.nodeOpenFile(path, flags, fsMode(call.Argument(2), 0o666))
+	flags := fsOpenFlags(native.String(vm, moejs.Arg(args, 1)))
+	file, err := m.nodeOpenFile(path, flags, fsMode(vm, moejs.Arg(args, 2), 0o666))
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
 	fd, err := m.registerFile(file)
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
 	return fd
 }
-
 func (m *Module) registerFile(file *os.File) (int, error) {
 	if file == nil {
 		return 0, errors.New("file is nil")
@@ -797,7 +812,6 @@ func (m *Module) registerFile(file *os.File) (int, error) {
 	m.fileID++
 	fd := m.fileID
 	m.fileMu.Unlock()
-
 	var resourceID uint64
 	resourceID = m.runtime.AddResource(func() {
 		m.removeFileResource(resourceID)
@@ -807,7 +821,6 @@ func (m *Module) registerFile(file *os.File) (int, error) {
 		m.lifecycleMu.RUnlock()
 		return 0, errors.New("JavaScript runtime is closed")
 	}
-
 	m.fileMu.Lock()
 	m.files[fd] = nodeFileHandle{file: file, resourceID: resourceID}
 	if m.onFileOpen != nil {
@@ -817,7 +830,6 @@ func (m *Module) registerFile(file *os.File) (int, error) {
 	m.lifecycleMu.RUnlock()
 	return fd, nil
 }
-
 func (m *Module) removeFileResource(resourceID uint64) {
 	if resourceID == 0 {
 		return
@@ -831,7 +843,6 @@ func (m *Module) removeFileResource(resourceID uint64) {
 	}
 	m.fileMu.Unlock()
 }
-
 func fsOpenFlags(flags string) int {
 	switch flags {
 	case "r":
@@ -854,7 +865,6 @@ func fsOpenFlags(flags string) int {
 		return os.O_RDONLY
 	}
 }
-
 func (m *Module) fsFile(fd int) (*os.File, error) {
 	m.fileMu.Lock()
 	handle, ok := m.files[fd]
@@ -870,7 +880,6 @@ func (m *Module) fsFile(fd int) (*os.File, error) {
 	}
 	return nil, fmt.Errorf("bad file descriptor: %d", fd)
 }
-
 func (m *Module) fsClose(fd int) error {
 	m.fileMu.Lock()
 	handle, ok := m.files[fd]
@@ -887,55 +896,51 @@ func (m *Module) fsClose(fd int) error {
 	}
 	return handle.file.Close()
 }
-
 func (m *Module) WriteResolved(path string, data []byte, mode os.FileMode) error {
 	return m.nodeWriteFile(path, data, mode)
 }
-
-func (m *Module) fsRead(vm *goja.Runtime, call goja.FunctionCall) int {
-	file, err := m.fsFile(int(call.Argument(0).ToInteger()))
+func (m *Module) fsRead(vm *moejs.Runtime, args []moejs.Value) int {
+	file, err := m.fsFile(int(native.Int(vm, moejs.Arg(args, 0))))
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
-	object := call.Argument(1).ToObject(vm)
-	data := buffer.Bytes(vm, object)
-	offset := int(call.Argument(2).ToInteger())
-	length := int(call.Argument(3).ToInteger())
-	position := call.Argument(4)
+	data := buffer.Bytes(vm, moejs.Arg(args, 1))
+	offset := int(native.Int(vm, moejs.Arg(args, 2)))
+	length := int(native.Int(vm, moejs.Arg(args, 3)))
+	position := moejs.Arg(args, 4)
 	if offset < 0 || length < 0 || offset+length > len(data) {
-		panic(vm.NewTypeError("buffer range is out of bounds"))
+		panic(native.TypeError(vm, "buffer range is out of bounds"))
 	}
-	if !goja.IsNull(position) && !goja.IsUndefined(position) {
-		_, err = file.Seek(position.ToInteger(), io.SeekStart)
+	if !position.IsNull() && !position.IsUndefined() {
+		_, err = file.Seek(native.Int(vm, position), io.SeekStart)
 	}
 	var count int
 	if err == nil {
 		count, err = file.Read(data[offset : offset+length])
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
 	return count
 }
-
-func (m *Module) fsWrite(vm *goja.Runtime, call goja.FunctionCall) int {
-	file, err := m.fsFile(int(call.Argument(0).ToInteger()))
+func (m *Module) fsWrite(vm *moejs.Runtime, args []moejs.Value) int {
+	file, err := m.fsFile(int(native.Int(vm, moejs.Arg(args, 0))))
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
-	data := buffer.Bytes(vm, call.Argument(1))
-	if call.Argument(1).ExportType().Kind() == 0 {
-		data = []byte(call.Argument(1).String())
+	data := buffer.Bytes(vm, moejs.Arg(args, 1))
+	if moejs.Arg(args, 1).IsString() {
+		data = []byte(native.String(vm, moejs.Arg(args, 1)))
 	}
-	if position := call.Argument(4); !goja.IsNull(position) && !goja.IsUndefined(position) {
-		_, err = file.Seek(position.ToInteger(), io.SeekStart)
+	if position := moejs.Arg(args, 4); !position.IsNull() && !position.IsUndefined() {
+		_, err = file.Seek(native.Int(vm, position), io.SeekStart)
 	}
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
 	count, err := file.Write(data)
 	if err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
 	return count
 }
@@ -946,21 +951,19 @@ var fsPromisesSource string
 //go:embed streams.js
 var fsStreamsSource string
 
-// attachFSStreams registers fs.createReadStream and fs.createWriteStream,
-// implemented on top of the jsruntime stream module and the callback-based
-// fs file operations.
-func (m *Module) attachFSStreams(vm *goja.Runtime, exports *goja.Object) {
-	factoryValue, err := vm.RunString(fsStreamsSource)
+func (m *Module) attachFSStreams(vm *moejs.Runtime, exports *engine.Object) {
+	factoryValue, err := native.Run(vm, fsStreamsSource)
 	if err != nil {
-		panic(vm.NewGoError(fmt.Errorf("load fs streams: %w", err)))
+		panic(native.GoError(vm, fmt.Errorf("load fs streams: %w", err)))
 	}
-	factory, _ := goja.AssertFunction(factoryValue)
-	value, err := factory(goja.Undefined(), exports, require.Require(vm, "stream"), require.Require(vm, "buffer"))
+	factory, _ := checkedFunction(factoryValue)
+	value, err := native.Call(vm, factory, moejs.Undefined(), native.From(vm, exports), require.Require(vm, "stream"), require.Require(vm, "buffer"))
 	if err != nil {
 		panic(err)
 	}
-	object := value.ToObject(vm)
+	object := native.Object(vm, value)
 	for _, name := range []string{"createReadStream", "createWriteStream"} {
-		_ = exports.Set(name, object.Get(name))
+		_ = native.Set(vm, exports, name, native.Get(vm, object, name))
 	}
 }
+func checkedFunction(v moejs.Value) (moejs.Value, bool) { return v, engine.IsCallable(v) }

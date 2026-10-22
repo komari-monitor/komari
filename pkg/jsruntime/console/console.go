@@ -1,17 +1,14 @@
 package console
 
-// JavaScript compatibility: console.assert(), debug(), error(), exception(),
-// info(), log(), trace(), and warn(). Supports basic %s/%d/%i/%f/%o/%O/%c/%%
-// substitutions. assert(false, ...) and trace() include a stack trace.
-
 import (
 	"encoding/json"
 	"fmt"
+	moe "github.com/Calcium-Ion/moejs"
+	e "github.com/Calcium-Ion/moejs/engine"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"io"
 	"strings"
-
-	"github.com/dop251/goja"
-	logger "github.com/komari-monitor/komari/utils/log"
 )
 
 type level uint8
@@ -23,81 +20,78 @@ const (
 	errorLevel
 )
 
-type Module struct {
-	output io.Writer
-}
+type Module struct{ output io.Writer }
 
-func New(output io.Writer) *Module {
-	return &Module{output: output}
-}
-
-func (m *Module) Inject(vm *goja.Runtime) error {
-	console := vm.NewObject()
-	console.Set("assert", func(call goja.FunctionCall) goja.Value {
-		if len(call.Arguments) > 0 && call.Argument(0).ToBoolean() {
-			return goja.Undefined()
+func New(w io.Writer) *Module { return &Module{output: w} }
+func (m *Module) Inject(vm *moe.Runtime) error {
+	o := vm.Realm().NewObject()
+	for _, entry := range []struct {
+		name  string
+		level level
+		stack bool
+	}{{"debug", debug, false}, {"info", info, false}, {"log", info, false}, {"warn", warn, false}, {"error", errorLevel, false}, {"exception", errorLevel, false}, {"trace", debug, true}} {
+		entry := entry
+		if err := native.Function(vm, o, entry.name, func(_ *moe.Realm, _ moe.Value, args []moe.Value) (moe.Value, error) {
+			m.write(vm, entry.level, args, entry.stack)
+			return moe.Undefined(), nil
+		}); err != nil {
+			return err
 		}
-		values := call.Arguments
-		if len(values) <= 1 {
-			values = []goja.Value{vm.ToValue("Assertion failed")}
-		} else {
-			values = append([]goja.Value{vm.ToValue("Assertion failed:")}, values[1:]...)
+	}
+	if err := native.Function(vm, o, "assert", func(_ *moe.Realm, _ moe.Value, args []moe.Value) (moe.Value, error) {
+		if len(args) > 0 && native.Bool(args[0]) {
+			return moe.Undefined(), nil
+		}
+		values := []moe.Value{moe.String("Assertion failed:")}
+		if len(args) > 1 {
+			values = append(values, args[1:]...)
 		}
 		m.write(vm, errorLevel, values, true)
-		return goja.Undefined()
-	})
-	console.Set("debug", func(call goja.FunctionCall) goja.Value {
-		m.write(vm, debug, call.Arguments, false)
-		return goja.Undefined()
-	})
-	error := func(call goja.FunctionCall) goja.Value {
-		m.write(vm, errorLevel, call.Arguments, false)
-		return goja.Undefined()
+		return moe.Undefined(), nil
+	}); err != nil {
+		return err
 	}
-	console.Set("error", error)
-	console.Set("exception", error)
-	console.Set("info", func(call goja.FunctionCall) goja.Value {
-		m.write(vm, info, call.Arguments, false)
-		return goja.Undefined()
-	})
-	console.Set("log", func(call goja.FunctionCall) goja.Value {
-		m.write(vm, info, call.Arguments, false)
-		return goja.Undefined()
-	})
-	console.Set("trace", func(call goja.FunctionCall) goja.Value {
-		m.write(vm, debug, call.Arguments, true)
-		return goja.Undefined()
-	})
-	console.Set("warn", func(call goja.FunctionCall) goja.Value {
-		m.write(vm, warn, call.Arguments, false)
-		return goja.Undefined()
-	})
-	return vm.Set("console", console)
+	return vm.SetGlobal("console", e.ObjectValue(o))
 }
-
-func (m *Module) WriteError(vm *goja.Runtime, values []goja.Value, withStack bool) {
-	m.write(vm, errorLevel, values, withStack)
+func (m *Module) WriteError(vm *moe.Runtime, values []moe.Value, stack bool) {
+	m.write(vm, errorLevel, values, stack)
 }
-
-func (m *Module) Report(vm *goja.Runtime, name string, err error) {
-	m.WriteError(vm, []goja.Value{vm.ToValue(fmt.Sprintf("%s callback failed: %v", name, err))}, false)
+func (m *Module) Report(vm *moe.Runtime, name string, err error) {
+	m.WriteError(vm, []moe.Value{moe.String(fmt.Sprintf("%s callback failed: %v", name, err))}, false)
 }
-
-func (m *Module) write(vm *goja.Runtime, messageLevel level, values []goja.Value, withStack bool) {
-	message := formatConsoleValues(values)
-	if withStack {
-		if stack := stackTrace(vm); stack != "" {
-			if message != "" {
-				message += "\n"
+func (m *Module) write(vm *moe.Runtime, l level, values []moe.Value, withStack bool) {
+	args := make([]any, len(values))
+	for i, v := range values {
+		x, err := vm.ToGo(v)
+		if err != nil {
+			x = native.String(vm, v)
+		}
+		args[i] = x
+	}
+	message := ""
+	if len(args) > 0 {
+		if format, ok := args[0].(string); ok && strings.Contains(format, "%") {
+			message = formatConsoleString(format, args[1:])
+		} else {
+			parts := make([]string, len(args))
+			for i, x := range args {
+				parts[i] = formatConsoleValue(x)
 			}
-			message += stack
+			message = strings.Join(parts, " ")
+		}
+	}
+	if withStack {
+		errObj := vm.Realm().NewError(e.KindError, "")
+		stack := vm.Realm().StackTrace(e.ObjectValue(errObj))
+		if stack != "" {
+			message += "\n" + stack
 		}
 	}
 	if m.output != nil {
 		_, _ = fmt.Fprintln(m.output, message)
 		return
 	}
-	switch messageLevel {
+	switch l {
 	case debug:
 		logger.Debug("JavaScript", message)
 	case warn:
@@ -108,25 +102,6 @@ func (m *Module) write(vm *goja.Runtime, messageLevel level, values []goja.Value
 		logger.Info("JavaScript", message)
 	}
 }
-
-func formatConsoleValues(values []goja.Value) string {
-	if len(values) == 0 {
-		return ""
-	}
-	args := make([]any, 0, len(values))
-	for _, value := range values {
-		args = append(args, value.Export())
-	}
-	if format, ok := args[0].(string); ok && strings.Contains(format, "%") {
-		return formatConsoleString(format, args[1:])
-	}
-	parts := make([]string, 0, len(args))
-	for _, arg := range args {
-		parts = append(parts, formatConsoleValue(arg))
-	}
-	return strings.Join(parts, " ")
-}
-
 func formatConsoleValue(value any) string {
 	switch value := value.(type) {
 	case nil:
@@ -221,15 +196,4 @@ func toConsoleFloat(value any) float64 {
 	default:
 		return 0
 	}
-}
-
-func stackTrace(vm *goja.Runtime) string {
-	if vm == nil {
-		return ""
-	}
-	value, err := vm.RunString("new Error().stack")
-	if err != nil {
-		return ""
-	}
-	return value.String()
 }

@@ -1,13 +1,15 @@
 package xhr
 
 import (
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
+)
+import (
 	"fmt"
-
-	"github.com/dop251/goja"
+	"github.com/Calcium-Ion/moejs"
 )
 
-func Inject(vm *goja.Runtime) error {
-	if _, err := vm.RunString(xhrAPISource); err != nil {
+func Inject(vm *moejs.Runtime) error {
+	if _, err := native.Run(vm, xhrAPISource); err != nil {
 		return fmt.Errorf("inject XMLHttpRequest: %w", err)
 	}
 	return nil

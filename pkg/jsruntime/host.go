@@ -9,7 +9,7 @@ package jsruntime
 import (
 	"time"
 
-	"github.com/dop251/goja"
+	moe "github.com/Calcium-Ion/moejs"
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
 )
 
@@ -22,14 +22,14 @@ type Host struct {
 
 // RunOnLoop queues job on the runtime's event loop. It returns false when
 // the loop is no longer running, for example after Runtime.Close.
-func (h *Host) RunOnLoop(job func(*goja.Runtime)) bool {
+func (h *Host) RunOnLoop(job func(*moe.Runtime)) bool {
 	return h.runtime.RunOnLoop(job)
 }
 
 // RunJob runs one asynchronous host callback as a bounded JavaScript turn,
 // reporting errors through the runtime's error reporter (the console by
 // default). Exit code 0 is treated as a normal termination.
-func (h *Host) RunJob(vm *goja.Runtime, name string, job func() error) error {
+func (h *Host) RunJob(vm *moe.Runtime, name string, job func() error) error {
 	return h.runtime.RunJob(vm, name, job)
 }
 

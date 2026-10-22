@@ -1,9 +1,18 @@
 package net
 
 import (
+	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
+)
+import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/komari-monitor/komari/pkg/jsruntime/buffer"
+	"github.com/komari-monitor/komari/pkg/jsruntime/events"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/writequeue"
 	"io"
 	"net"
 	"strconv"
@@ -11,12 +20,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/buffer"
-	"github.com/komari-monitor/komari/pkg/jsruntime/events"
-	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
-	"github.com/komari-monitor/komari/pkg/jsruntime/internal/writequeue"
 )
 
 type Module struct {
@@ -24,47 +27,59 @@ type Module struct {
 	allowListen bool
 	sockets     sync.Map
 }
-
 type socketState struct {
 	connection net.Conn
 	resourceID uint64
-	readerDone chan struct{}
-	detaching  atomic.Bool
-	closed     atomic.Bool
+	readerDone chan struct {
+	}
+	detaching atomic.Bool
+	closed    atomic.Bool
 }
 
 func New(runtime *bridge.Runtime, allowListen bool) *Module {
 	return &Module{runtime: runtime, allowListen: allowListen}
 }
-
-func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
-	exports := vm.NewObject()
-	_ = exports.Set("createServer", func(call goja.FunctionCall) goja.Value {
+func (m *Module) Load(vm *moejs.Runtime, module *engine.Object) {
+	exports := vm.Realm().NewObject()
+	_ = native.Set(vm, exports, "createServer", native.Bind(vm, "createServer", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		server := m.newNetServer(vm)
-		listener := call.Argument(0)
-		if _, ok := goja.AssertFunction(listener); !ok {
-			listener = call.Argument(1)
+		listener := moejs.Arg(args, 0)
+		if _, ok := callable(listener); !ok {
+			listener = moejs.Arg(args, 1)
 		}
-		if _, ok := goja.AssertFunction(listener); ok {
-			on, _ := goja.AssertFunction(server.Get("on"))
-			_, _ = on(server, vm.ToValue("connection"), listener)
+		if _, ok := callable(listener); ok {
+			on, _ := callable(native.Get(vm, server, "on"))
+			_, _ = native.Call(vm, on, native.From(vm, server), native.From(vm, "connection"), native.From(vm, listener))
 		}
-		return server
-	})
-	connect := func(call goja.FunctionCall) goja.Value { return m.netConnect(vm, call) }
-	_ = exports.Set("connect", connect)
-	_ = exports.Set("createConnection", connect)
-	_ = exports.Set("isIP", parseIPVersion)
-	_ = exports.Set("isIPv4", func(value string) bool { ip := net.ParseIP(value); return ip != nil && ip.To4() != nil })
-	_ = exports.Set("isIPv6", func(value string) bool { ip := net.ParseIP(value); return ip != nil && ip.To4() == nil })
-	_ = exports.Set("getDefaultAutoSelectFamily", func() bool { return true })
-	_ = exports.Set("setDefaultAutoSelectFamily", func(bool) {
-		panic(vm.NewGoError(fmt.Errorf("net.setDefaultAutoSelectFamily is not supported by jsruntime; autoSelectFamily is always enabled")))
-	})
-	_ = module.Set("exports", exports)
+		return native.From(vm, server), nil
+	}))
+	connect := func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, m.netConnect(vm, args)), nil
+	}
+	_ = native.Set(vm, exports, "connect", native.Bind(vm, "connect", 0, connect))
+	_ = native.Set(vm, exports, "createConnection", native.Bind(vm, "connect", 0, connect))
+	_ = native.Set(vm, exports, "isIP", native.Bind(vm, "isIP", 1, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, parseIPVersion(native.String(vm, moejs.Arg(args, 0)))), nil
+	}))
+	_ = native.Set(vm, exports, "isIPv4", native.Bind(vm, "isIPv4", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		value := native.String(vm, moejs.Arg(args, 0))
+		ip := net.ParseIP(value)
+		return native.From(vm, ip != nil && ip.To4() != nil), nil
+	}))
+	_ = native.Set(vm, exports, "isIPv6", native.Bind(vm, "isIPv6", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		value := native.String(vm, moejs.Arg(args, 0))
+		ip := net.ParseIP(value)
+		return native.From(vm, ip != nil && ip.To4() == nil), nil
+	}))
+	_ = native.Set(vm, exports, "getDefaultAutoSelectFamily", native.Bind(vm, "getDefaultAutoSelectFamily", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, true), nil
+	}))
+	_ = native.Set(vm, exports, "setDefaultAutoSelectFamily", native.Bind(vm, "setDefaultAutoSelectFamily", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.setDefaultAutoSelectFamily is not supported by jsruntime; autoSelectFamily is always enabled")))
+	}))
+	_ = native.Set(vm, module, "exports", exports)
 }
-
-func (m *Module) newNetServer(vm *goja.Runtime) *goja.Object {
+func (m *Module) newNetServer(vm *moejs.Runtime) *engine.Object {
 	server := events.NewEmitter(vm)
 	var listener net.Listener
 	var resourceID uint64
@@ -72,17 +87,17 @@ func (m *Module) newNetServer(vm *goja.Runtime) *goja.Object {
 	var listenGeneration uint64
 	var listenPending bool
 	var connections atomic.Int64
-	_ = server.Set("listening", false)
-	_ = server.Set("maxConnections", 0)
-	_ = server.Set("listen", func(call goja.FunctionCall) goja.Value {
+	_ = native.Set(vm, server, "listening", false)
+	_ = native.Set(vm, server, "maxConnections", 0)
+	_ = native.Set(vm, server, "listen", native.Bind(vm, "listen", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		if !m.allowListen {
-			panic(vm.NewGoError(fmt.Errorf("server.listen requires AllowListen")))
+			panic(native.GoError(vm, fmt.Errorf("server.listen requires AllowListen")))
 		}
-		address, callback := netListenArguments(vm, call)
+		address, callback := netListenArguments(vm, args)
 		serverMu.Lock()
 		if listenPending || listener != nil {
 			serverMu.Unlock()
-			panic(vm.NewGoError(fmt.Errorf("server is already listening")))
+			panic(native.GoError(vm, fmt.Errorf("server is already listening")))
 		}
 		listenGeneration++
 		generation := listenGeneration
@@ -98,9 +113,9 @@ func (m *Module) newNetServer(vm *goja.Runtime) *goja.Object {
 				}
 				serverMu.Unlock()
 				if active {
-					m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+					m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 						_ = m.runtime.RunJob(vm, "net.Server error", func() error {
-							return events.Emit(vm, server, "error", vm.NewGoError(err))
+							return events.Emit(vm, server, "error", native.GoError(vm, err))
 						})
 					})
 				}
@@ -112,7 +127,9 @@ func (m *Module) newNetServer(vm *goja.Runtime) *goja.Object {
 				_ = created.Close()
 				return
 			}
-			id := m.runtime.AddResource(func() { _ = created.Close() })
+			id := m.runtime.AddResource(func() {
+				_ = created.Close()
+			})
 			if id == 0 {
 				listenPending = false
 				serverMu.Unlock()
@@ -122,19 +139,19 @@ func (m *Module) newNetServer(vm *goja.Runtime) *goja.Object {
 			resourceID = id
 			listenPending = false
 			serverMu.Unlock()
-			m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+			m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 				serverMu.RLock()
 				active := listenGeneration == generation && listener == created
 				serverMu.RUnlock()
 				if !active {
 					return
 				}
-				if callback != nil {
-					once, _ := goja.AssertFunction(server.Get("once"))
-					_, _ = once(server, vm.ToValue("listening"), vm.ToValue(callback))
+				if !native.IsNil(callback) {
+					once, _ := callable(native.Get(vm, server, "once"))
+					_, _ = native.Call(vm, once, native.From(vm, server), native.From(vm, "listening"), native.From(vm, callback))
 				}
 				_ = m.runtime.RunJob(vm, "net.Server listening", func() error {
-					_ = server.Set("listening", true)
+					_ = native.Set(vm, server, "listening", true)
 					return events.Emit(vm, server, "listening")
 				})
 			})
@@ -145,21 +162,25 @@ func (m *Module) newNetServer(vm *goja.Runtime) *goja.Object {
 					active := listenGeneration == generation && listener == created
 					serverMu.RUnlock()
 					if active {
-						m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+						m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 							_ = m.runtime.RunJob(vm, "net.Server error", func() error {
-								return events.Emit(vm, server, "error", vm.NewGoError(acceptErr))
+								return events.Emit(vm, server, "error", native.GoError(vm, acceptErr))
 							})
 						})
 					}
 					return
 				}
 				connections.Add(1)
-				if !m.runtime.RunOnLoop(func(vm *goja.Runtime) {
-					socket := m.newNetSocket(vm, connection, func() { connections.Add(-1) })
-					if socket.Get("destroyed").ToBoolean() {
+				if !m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
+					socket := m.newNetSocket(vm, connection, func() {
+						connections.Add(-1)
+					})
+					if native.Bool(native.Get(vm, socket, "destroyed")) {
 						return
 					}
-					_ = m.runtime.RunJob(vm, "net.Server connection", func() error { return events.Emit(vm, server, "connection", socket) })
+					_ = m.runtime.RunJob(vm, "net.Server connection", func() error {
+						return events.Emit(vm, server, "connection", socket)
+					})
 				}) {
 					connections.Add(-1)
 					_ = connection.Close()
@@ -167,12 +188,12 @@ func (m *Module) newNetServer(vm *goja.Runtime) *goja.Object {
 				}
 			}
 		}()
-		return server
-	})
-	_ = server.Set("close", func(call goja.FunctionCall) goja.Value {
-		if callback, ok := goja.AssertFunction(call.Argument(0)); ok {
-			once, _ := goja.AssertFunction(server.Get("once"))
-			_, _ = once(server, vm.ToValue("close"), vm.ToValue(callback))
+		return native.From(vm, server), nil
+	}))
+	_ = native.Set(vm, server, "close", native.Bind(vm, "close", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		if callback, ok := callable(moejs.Arg(args, 0)); ok {
+			once, _ := callable(native.Get(vm, server, "once"))
+			_, _ = native.Call(vm, once, native.From(vm, server), native.From(vm, "close"), native.From(vm, callback))
 		}
 		serverMu.Lock()
 		wasActive := listenPending || listener != nil
@@ -185,125 +206,135 @@ func (m *Module) newNetServer(vm *goja.Runtime) *goja.Object {
 			_ = currentListener.Close()
 			m.runtime.RemoveResource(currentResourceID)
 		}
-		_ = server.Set("listening", false)
+		_ = native.Set(vm, server, "listening", false)
 		if wasActive {
-			m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
-				_ = m.runtime.RunJob(vm, "net.Server close", func() error { return events.Emit(vm, server, "close") })
+			m.runtime.Loop().SetTimeout(func(vm *moejs.Runtime) {
+				_ = m.runtime.RunJob(vm, "net.Server close", func() error {
+					return events.Emit(vm, server, "close")
+				})
 			}, 0)
 		}
-		return server
-	})
-	_ = server.Set("closeAllConnections", func() {
-		panic(vm.NewGoError(fmt.Errorf("net.Server.closeAllConnections is not supported by jsruntime; connections are not tracked individually")))
-	})
-	_ = server.Set("closeIdleConnections", func() {
-		panic(vm.NewGoError(fmt.Errorf("net.Server.closeIdleConnections is not supported by jsruntime; connections are not tracked individually")))
-	})
-	_ = server.Set("address", func() goja.Value {
+		return native.From(vm, server), nil
+	}))
+	_ = native.Set(vm, server, "closeAllConnections", native.Bind(vm, "closeAllConnections", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Server.closeAllConnections is not supported by jsruntime; connections are not tracked individually")))
+	}))
+	_ = native.Set(vm, server, "closeIdleConnections", native.Bind(vm, "closeIdleConnections", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Server.closeIdleConnections is not supported by jsruntime; connections are not tracked individually")))
+	}))
+	_ = native.Set(vm, server, "address", native.Bind(vm, "address", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		serverMu.RLock()
 		currentListener := listener
 		serverMu.RUnlock()
 		if currentListener == nil {
-			return goja.Null()
+			return native.From(vm, moejs.Null()), nil
 		}
 		host, port, _ := net.SplitHostPort(currentListener.Addr().String())
 		portNumber, _ := strconv.Atoi(port)
-		return vm.ToValue(map[string]any{"address": host, "family": netAddressFamily(host), "port": portNumber})
-	})
-	_ = server.Set("getConnections", func(callback goja.Callable) {
-		m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
+		return native.From(vm, map[string]any{"address": host, "family": netAddressFamily(host), "port": portNumber}), nil
+	}))
+	_ = native.Set(vm, server, "getConnections", native.Bind(vm, "getConnections", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		callback := moejs.Arg(args, 0)
+		m.runtime.Loop().SetTimeout(func(vm *moejs.Runtime) {
 			_ = m.runtime.RunJob(vm, "net.Server.getConnections", func() error {
-				_, err := callback(goja.Undefined(), goja.Null(), vm.ToValue(connections.Load()))
+				_, err := native.Call(vm, callback, native.From(vm, moejs.Undefined()), native.From(vm, moejs.Null()), native.From(vm, connections.Load()))
 				return err
 			})
 		}, 0)
-	})
-	_ = server.Set("ref", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("net.Server.ref is not supported by jsruntime; the event loop is host-driven")))
-	})
-	_ = server.Set("unref", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("net.Server.unref is not supported by jsruntime; the event loop is host-driven")))
-	})
+		return moejs.Undefined(), nil
+	}))
+	_ = native.Set(vm, server, "ref", native.Bind(vm, "ref", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Server.ref is not supported by jsruntime; the event loop is host-driven")))
+	}))
+	_ = native.Set(vm, server, "unref", native.Bind(vm, "unref", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Server.unref is not supported by jsruntime; the event loop is host-driven")))
+	}))
 	return server
 }
-
-func netListenArguments(vm *goja.Runtime, call goja.FunctionCall) (string, goja.Callable) {
+func netListenArguments(vm *moejs.Runtime, args []moejs.Value) (string, moejs.Value) {
 	host := "127.0.0.1"
-	port := int(call.Argument(0).ToInteger())
+	port := int(native.Int(vm, moejs.Arg(args, 0)))
 	callbackIndex := 1
-	if object, ok := call.Argument(0).(*goja.Object); ok {
-		port = int(object.Get("port").ToInteger())
-		if value := object.Get("host"); !goja.IsUndefined(value) {
-			host = value.String()
+	if object, ok := asObject(moejs.Arg(args, 0)); ok {
+		port = int(native.Int(vm, native.Get(vm, object, "port")))
+		if value := native.Get(vm, object, "host"); !value.IsUndefined() {
+			host = native.String(vm, value)
 		}
 		callbackIndex = 1
-	} else if value := call.Argument(1); !goja.IsUndefined(value) {
-		if _, ok := goja.AssertFunction(value); !ok {
-			host = value.String()
+	} else if value := moejs.Arg(args, 1); !value.IsUndefined() {
+		if _, ok := callable(value); !ok {
+			host = native.String(vm, value)
 			callbackIndex = 2
 		}
 	}
-	callback, _ := goja.AssertFunction(call.Argument(callbackIndex))
+	callback, _ := callable(moejs.Arg(args, callbackIndex))
 	return net.JoinHostPort(host, strconv.Itoa(port)), callback
 }
-
-func (m *Module) netConnect(vm *goja.Runtime, call goja.FunctionCall) *goja.Object {
+func (m *Module) netConnect(vm *moejs.Runtime, args []moejs.Value) *engine.Object {
 	host := "127.0.0.1"
-	port := int(call.Argument(0).ToInteger())
+	port := int(native.Int(vm, moejs.Arg(args, 0)))
 	callbackIndex := 1
-	if object, ok := call.Argument(0).(*goja.Object); ok {
-		port = int(object.Get("port").ToInteger())
-		if value := object.Get("host"); !goja.IsUndefined(value) {
-			host = value.String()
+	if object, ok := asObject(moejs.Arg(args, 0)); ok {
+		port = int(native.Int(vm, native.Get(vm, object, "port")))
+		if value := native.Get(vm, object, "host"); !value.IsUndefined() {
+			host = native.String(vm, value)
 		}
-	} else if _, ok := goja.AssertFunction(call.Argument(1)); !ok && !goja.IsUndefined(call.Argument(1)) {
-		host = call.Argument(1).String()
+	} else if _, ok := callable(moejs.Arg(args, 1)); !ok && !moejs.Arg(args, 1).IsUndefined() {
+		host = native.String(vm, moejs.Arg(args, 1))
 		callbackIndex = 2
 	}
 	placeholder := events.NewEmitter(vm)
-	_ = placeholder.Set("connecting", true)
+	_ = native.Set(vm, placeholder, "connecting", true)
 	var pendingEncoding string
-	_ = placeholder.Set("setEncoding", func(value string) *goja.Object { pendingEncoding = value; return placeholder })
-	_ = placeholder.Set("setTimeout", func(milliseconds int64, callback goja.Value) *goja.Object {
-		if function, ok := goja.AssertFunction(callback); ok {
-			once, _ := goja.AssertFunction(placeholder.Get("once"))
-			_, _ = once(placeholder, vm.ToValue("timeout"), vm.ToValue(function))
+	_ = native.Set(vm, placeholder, "setEncoding", native.Bind(vm, "setEncoding", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		value := native.String(vm, moejs.Arg(args, 0))
+		pendingEncoding = value
+		return native.From(vm, placeholder), nil
+	}))
+	_ = native.Set(vm, placeholder, "setTimeout", native.Bind(vm, "setTimeout", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		milliseconds := native.Int(vm, moejs.Arg(args, 0))
+		callback := moejs.Arg(args, 1)
+		if function, ok := callable(callback); ok {
+			once, _ := callable(native.Get(vm, placeholder, "once"))
+			_, _ = native.Call(vm, once, native.From(vm, placeholder), native.From(vm, "timeout"), native.From(vm, function))
 		}
 		if milliseconds > 0 {
-			m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
-				_ = m.runtime.RunJob(vm, "net.Socket timeout", func() error { return events.Emit(vm, placeholder, "timeout") })
+			m.runtime.Loop().SetTimeout(func(vm *moejs.Runtime) {
+				_ = m.runtime.RunJob(vm, "net.Socket timeout", func() error {
+					return events.Emit(vm, placeholder, "timeout")
+				})
 			}, time.Duration(milliseconds)*time.Millisecond)
 		}
-		return placeholder
-	})
-	_ = placeholder.Set("setNoDelay", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("net.Socket.setNoDelay is not supported by jsruntime before the connection is established")))
-	})
-	_ = placeholder.Set("setKeepAlive", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("net.Socket.setKeepAlive is not supported by jsruntime before the connection is established")))
-	})
-	_ = placeholder.Set("ref", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("net.Socket.ref is not supported by jsruntime; the event loop is host-driven")))
-	})
-	_ = placeholder.Set("unref", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("net.Socket.unref is not supported by jsruntime; the event loop is host-driven")))
-	})
-	if callback, ok := goja.AssertFunction(call.Argument(callbackIndex)); ok {
-		once, _ := goja.AssertFunction(placeholder.Get("once"))
-		_, _ = once(placeholder, vm.ToValue("connect"), vm.ToValue(callback))
+		return native.From(vm, placeholder), nil
+	}))
+	_ = native.Set(vm, placeholder, "setNoDelay", native.Bind(vm, "setNoDelay", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Socket.setNoDelay is not supported by jsruntime before the connection is established")))
+	}))
+	_ = native.Set(vm, placeholder, "setKeepAlive", native.Bind(vm, "setKeepAlive", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Socket.setKeepAlive is not supported by jsruntime before the connection is established")))
+	}))
+	_ = native.Set(vm, placeholder, "ref", native.Bind(vm, "ref", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Socket.ref is not supported by jsruntime; the event loop is host-driven")))
+	}))
+	_ = native.Set(vm, placeholder, "unref", native.Bind(vm, "unref", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Socket.unref is not supported by jsruntime; the event loop is host-driven")))
+	}))
+	if callback, ok := callable(moejs.Arg(args, callbackIndex)); ok {
+		once, _ := callable(native.Get(vm, placeholder, "once"))
+		_, _ = native.Call(vm, once, native.From(vm, placeholder), native.From(vm, "connect"), native.From(vm, callback))
 	}
 	dialContext, cancelDial := context.WithCancel(context.Background())
 	pendingResourceID := m.runtime.AddResource(cancelDial)
 	if pendingResourceID == 0 {
-		_ = placeholder.Set("connecting", false)
-		_ = placeholder.Set("destroyed", true)
+		_ = native.Set(vm, placeholder, "connecting", false)
+		_ = native.Set(vm, placeholder, "destroyed", true)
 		return placeholder
 	}
 	go func() {
 		connection, err := (&net.Dialer{Timeout: m.runtime.Timeout()}).DialContext(dialContext, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 		cancelDial()
 		m.runtime.RemoveResource(pendingResourceID)
-		queued := m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+		queued := m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 			attached := false
 			defer func() {
 				if !attached && connection != nil {
@@ -312,19 +343,19 @@ func (m *Module) netConnect(vm *goja.Runtime, call goja.FunctionCall) *goja.Obje
 			}()
 			_ = m.runtime.RunJob(vm, "net.Socket connect", func() error {
 				if err != nil {
-					_ = placeholder.Set("connecting", false)
-					return events.Emit(vm, placeholder, "error", vm.NewGoError(err))
+					_ = native.Set(vm, placeholder, "connecting", false)
+					return events.Emit(vm, placeholder, "error", native.GoError(vm, err))
 				}
 				if !m.configureNetSocket(vm, placeholder, connection, nil) {
 					return nil
 				}
 				attached = true
 				if pendingEncoding != "" {
-					if setEncoding, ok := goja.AssertFunction(placeholder.Get("setEncoding")); ok {
-						_, _ = setEncoding(placeholder, vm.ToValue(pendingEncoding))
+					if setEncoding, ok := callable(native.Get(vm, placeholder, "setEncoding")); ok {
+						_, _ = native.Call(vm, setEncoding, native.From(vm, placeholder), native.From(vm, pendingEncoding))
 					}
 				}
-				_ = placeholder.Set("connecting", false)
+				_ = native.Set(vm, placeholder, "connecting", false)
 				return events.Emit(vm, placeholder, "connect")
 			})
 		})
@@ -334,26 +365,20 @@ func (m *Module) netConnect(vm *goja.Runtime, call goja.FunctionCall) *goja.Obje
 	}()
 	return placeholder
 }
-
-func (m *Module) newNetSocket(vm *goja.Runtime, connection net.Conn, onClose func()) *goja.Object {
+func (m *Module) newNetSocket(vm *moejs.Runtime, connection net.Conn, onClose func()) *engine.Object {
 	socket := events.NewEmitter(vm)
 	if !m.configureNetSocket(vm, socket, connection, onClose) {
-		_ = socket.Set("destroyed", true)
-		_ = socket.Set("readyState", "closed")
+		_ = native.Set(vm, socket, "destroyed", true)
+		_ = native.Set(vm, socket, "readyState", "closed")
 	}
 	return socket
 }
 
-// AttachSocket configures a JavaScript socket around an established
-// connection. It is shared with the TLS module after a handshake completes.
-func (m *Module) AttachSocket(vm *goja.Runtime, socket *goja.Object, connection net.Conn, onClose func()) bool {
+func (m *Module) AttachSocket(vm *moejs.Runtime, socket *engine.Object, connection net.Conn, onClose func()) bool {
 	return m.configureNetSocket(vm, socket, connection, onClose)
 }
 
-// DetachSocket stops a socket's reader and transfers ownership of its
-// connection to the caller. It is used to upgrade an SMTP connection with
-// STARTTLS without closing the underlying TCP stream.
-func (m *Module) DetachSocket(socket *goja.Object) (net.Conn, error) {
+func (m *Module) DetachSocket(socket *engine.Object) (net.Conn, error) {
 	value, ok := m.sockets.Load(socket)
 	if !ok {
 		return nil, errors.New("socket is not connected")
@@ -378,21 +403,22 @@ func (m *Module) DetachSocket(socket *goja.Object) (net.Conn, error) {
 	}
 	return state.connection, nil
 }
-
-func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, connection net.Conn, onClose func()) bool {
+func (m *Module) configureNetSocket(vm *moejs.Runtime, socket *engine.Object, connection net.Conn, onClose func()) bool {
 	localHost, localPort := splitNetAddress(connection.LocalAddr())
 	remoteHost, remotePort := splitNetAddress(connection.RemoteAddr())
-	_ = socket.Set("connecting", false)
-	_ = socket.Set("pending", false)
-	_ = socket.Set("destroyed", false)
-	_ = socket.Set("readyState", "open")
-	_ = socket.Set("remoteAddress", remoteHost)
-	_ = socket.Set("remotePort", remotePort)
-	_ = socket.Set("remoteFamily", netAddressFamily(remoteHost))
-	_ = socket.Set("localAddress", localHost)
-	_ = socket.Set("localPort", localPort)
-	_ = socket.Set("localFamily", netAddressFamily(localHost))
-	resourceID := m.runtime.AddResource(func() { _ = connection.Close() })
+	_ = native.Set(vm, socket, "connecting", false)
+	_ = native.Set(vm, socket, "pending", false)
+	_ = native.Set(vm, socket, "destroyed", false)
+	_ = native.Set(vm, socket, "readyState", "open")
+	_ = native.Set(vm, socket, "remoteAddress", remoteHost)
+	_ = native.Set(vm, socket, "remotePort", remotePort)
+	_ = native.Set(vm, socket, "remoteFamily", netAddressFamily(remoteHost))
+	_ = native.Set(vm, socket, "localAddress", localHost)
+	_ = native.Set(vm, socket, "localPort", localPort)
+	_ = native.Set(vm, socket, "localFamily", netAddressFamily(localHost))
+	resourceID := m.runtime.AddResource(func() {
+		_ = connection.Close()
+	})
 	if resourceID == 0 {
 		_ = connection.Close()
 		if onClose != nil {
@@ -400,11 +426,8 @@ func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, conne
 		}
 		return false
 	}
-	state := &socketState{
-		connection: connection,
-		resourceID: resourceID,
-		readerDone: make(chan struct{}),
-	}
+	state := &socketState{connection: connection, resourceID: resourceID, readerDone: make(chan struct {
+	})}
 	m.sockets.Store(socket, state)
 	var encoding atomic.Value
 	encoding.Store("")
@@ -419,33 +442,33 @@ func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, conne
 			}
 		}
 	}
-	_ = socket.Set("write", func(call goja.FunctionCall) goja.Value {
-		data := append([]byte(nil), buffer.Bytes(vm, call.Argument(0))...)
-		callback := netCallback(call)
+	_ = native.Set(vm, socket, "write", native.Bind(vm, "write", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		data := append([]byte(nil), buffer.Bytes(vm, moejs.Arg(args, 0))...)
+		callback := netCallback(args)
 		writes.Submit(func() {
 			_, err := connection.Write(data)
-			if callback != nil {
-				m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+			if !native.IsNil(callback) {
+				m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 					_ = m.runtime.RunJob(vm, "net.Socket.write", func() error {
 						if err != nil {
-							_, callbackErr := callback(goja.Undefined(), vm.NewGoError(err))
+							_, callbackErr := native.Call(vm, callback, native.From(vm, moejs.Undefined()), native.From(vm, native.GoError(vm, err)))
 							return callbackErr
 						}
-						_, callbackErr := callback(goja.Undefined())
+						_, callbackErr := native.Call(vm, callback, native.From(vm, moejs.Undefined()))
 						return callbackErr
 					})
 				})
 			}
 		})
-		return vm.ToValue(true)
-	})
-	_ = socket.Set("end", func(call goja.FunctionCall) goja.Value {
+		return native.From(vm, true), nil
+	}))
+	_ = native.Set(vm, socket, "end", native.Bind(vm, "end", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		var data []byte
-		_, firstArgumentIsCallback := goja.AssertFunction(call.Argument(0))
-		if len(call.Arguments) > 0 && !firstArgumentIsCallback && !goja.IsUndefined(call.Argument(0)) && !goja.IsNull(call.Argument(0)) {
-			data = append([]byte(nil), buffer.Bytes(vm, call.Argument(0))...)
+		_, firstArgumentIsCallback := callable(moejs.Arg(args, 0))
+		if len(args) > 0 && !firstArgumentIsCallback && !moejs.Arg(args, 0).IsUndefined() && !moejs.Arg(args, 0).IsNull() {
+			data = append([]byte(nil), buffer.Bytes(vm, moejs.Arg(args, 0))...)
 		}
-		callback := netCallback(call)
+		callback := netCallback(args)
 		writes.Submit(func() {
 			var err error
 			if len(data) > 0 {
@@ -461,62 +484,73 @@ func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, conne
 			if err != nil {
 				closeSocket()
 			}
-			if callback != nil {
-				m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+			if !native.IsNil(callback) {
+				m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 					_ = m.runtime.RunJob(vm, "net.Socket.end", func() error {
 						if err != nil {
-							_, callbackErr := callback(goja.Undefined(), vm.NewGoError(err))
+							_, callbackErr := native.Call(vm, callback, native.From(vm, moejs.Undefined()), native.From(vm, native.GoError(vm, err)))
 							return callbackErr
 						}
-						_, callbackErr := callback(goja.Undefined())
+						_, callbackErr := native.Call(vm, callback, native.From(vm, moejs.Undefined()))
 						return callbackErr
 					})
 				})
 			}
 		})
-		return socket
-	})
-	_ = socket.Set("destroy", func() *goja.Object { closeSocket(); return socket })
-	_ = socket.Set("setEncoding", func(value string) *goja.Object { encoding.Store(value); return socket })
-	_ = socket.Set("setTimeout", func(milliseconds int64, callback goja.Value) *goja.Object {
+		return native.From(vm, socket), nil
+	}))
+	_ = native.Set(vm, socket, "destroy", native.Bind(vm, "destroy", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		closeSocket()
+		return native.From(vm, socket), nil
+	}))
+	_ = native.Set(vm, socket, "setEncoding", native.Bind(vm, "setEncoding", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		value := native.String(vm, moejs.Arg(args, 0))
+		encoding.Store(value)
+		return native.From(vm, socket), nil
+	}))
+	_ = native.Set(vm, socket, "setTimeout", native.Bind(vm, "setTimeout", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		milliseconds := native.Int(vm, moejs.Arg(args, 0))
+		callback := moejs.Arg(args, 1)
 		if milliseconds <= 0 {
 			_ = connection.SetDeadline(time.Time{})
 		} else {
 			_ = connection.SetDeadline(time.Now().Add(time.Duration(milliseconds) * time.Millisecond))
 		}
-		if function, ok := goja.AssertFunction(callback); ok {
-			once, _ := goja.AssertFunction(socket.Get("once"))
-			_, _ = once(socket, vm.ToValue("timeout"), vm.ToValue(function))
+		if function, ok := callable(callback); ok {
+			once, _ := callable(native.Get(vm, socket, "once"))
+			_, _ = native.Call(vm, once, native.From(vm, socket), native.From(vm, "timeout"), native.From(vm, function))
 		}
-		return socket
-	})
-	_ = socket.Set("setNoDelay", func(enabled bool) *goja.Object {
+		return native.From(vm, socket), nil
+	}))
+	_ = native.Set(vm, socket, "setNoDelay", native.Bind(vm, "setNoDelay", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		enabled := native.Bool(moejs.Arg(args, 0))
 		if tcp, ok := connection.(*net.TCPConn); ok {
 			_ = tcp.SetNoDelay(enabled)
 		}
-		return socket
-	})
-	_ = socket.Set("setKeepAlive", func(enabled bool) *goja.Object {
+		return native.From(vm, socket), nil
+	}))
+	_ = native.Set(vm, socket, "setKeepAlive", native.Bind(vm, "setKeepAlive", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		enabled := native.Bool(moejs.Arg(args, 0))
 		if tcp, ok := connection.(*net.TCPConn); ok {
 			_ = tcp.SetKeepAlive(enabled)
 		}
-		return socket
-	})
-	_ = socket.Set("address", func() map[string]any {
-		return map[string]any{"address": localHost, "family": netAddressFamily(localHost), "port": localPort}
-	})
-	_ = socket.Set("pause", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("net.Socket.pause is not supported by jsruntime; no backpressure")))
-	})
-	_ = socket.Set("resume", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("net.Socket.resume is not supported by jsruntime; no backpressure")))
-	})
-	_ = socket.Set("ref", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("net.Socket.ref is not supported by jsruntime; the event loop is host-driven")))
-	})
-	_ = socket.Set("unref", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("net.Socket.unref is not supported by jsruntime; the event loop is host-driven")))
-	})
+		return native.From(vm, socket), nil
+	}))
+	_ = native.Set(vm, socket, "address", native.Bind(vm, "address", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		return native.From(vm, map[string]any{"address": localHost, "family": netAddressFamily(localHost), "port": localPort}), nil
+	}))
+	_ = native.Set(vm, socket, "pause", native.Bind(vm, "pause", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Socket.pause is not supported by jsruntime; no backpressure")))
+	}))
+	_ = native.Set(vm, socket, "resume", native.Bind(vm, "resume", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Socket.resume is not supported by jsruntime; no backpressure")))
+	}))
+	_ = native.Set(vm, socket, "ref", native.Bind(vm, "ref", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Socket.ref is not supported by jsruntime; the event loop is host-driven")))
+	}))
+	_ = native.Set(vm, socket, "unref", native.Bind(vm, "unref", 0, func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("net.Socket.unref is not supported by jsruntime; the event loop is host-driven")))
+	}))
 	go func() {
 		defer close(state.readerDone)
 		data := make([]byte, 32*1024)
@@ -524,13 +558,14 @@ func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, conne
 			count, err := connection.Read(data)
 			if count > 0 {
 				chunk := append([]byte(nil), data[:count]...)
-				delivered := make(chan struct{})
-				if !m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+				delivered := make(chan struct {
+				})
+				if !m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 					defer close(delivered)
 					_ = m.runtime.RunJob(vm, "net.Socket data", func() error {
 						var value any = buffer.WrapBytes(vm, chunk)
 						if currentEncoding := encoding.Load().(string); currentEncoding != "" {
-							value = buffer.EncodeBytes(vm, chunk, vm.ToValue(currentEncoding))
+							value = buffer.EncodeBytes(vm, chunk, native.From(vm, currentEncoding))
 						}
 						return events.Emit(vm, socket, "data", value)
 					})
@@ -545,12 +580,12 @@ func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, conne
 					return
 				}
 				closeSocket()
-				m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+				m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 					_ = m.runtime.RunJob(vm, "net.Socket close", func() error {
-						_ = socket.Set("destroyed", true)
-						_ = socket.Set("readyState", "closed")
+						_ = native.Set(vm, socket, "destroyed", true)
+						_ = native.Set(vm, socket, "readyState", "closed")
 						if !errors.Is(err, io.EOF) && !isNetClosed(err) {
-							if emitErr := events.Emit(vm, socket, "error", vm.NewGoError(err)); emitErr != nil {
+							if emitErr := events.Emit(vm, socket, "error", native.GoError(vm, err)); emitErr != nil {
 								return emitErr
 							}
 						}
@@ -566,7 +601,6 @@ func (m *Module) configureNetSocket(vm *goja.Runtime, socket *goja.Object, conne
 	}()
 	return true
 }
-
 func splitNetAddress(address net.Addr) (string, int) {
 	if address == nil {
 		return "", 0
@@ -575,27 +609,23 @@ func splitNetAddress(address net.Addr) (string, int) {
 	portNumber, _ := strconv.Atoi(port)
 	return host, portNumber
 }
-
 func netAddressFamily(host string) string {
 	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
 		return "IPv6"
 	}
 	return "IPv4"
 }
-
 func isNetClosed(err error) bool {
 	return errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "closed network connection")
 }
-
-func netCallback(call goja.FunctionCall) goja.Callable {
-	for index := len(call.Arguments) - 1; index >= 0; index-- {
-		if callback, ok := goja.AssertFunction(call.Arguments[index]); ok {
+func netCallback(args []moejs.Value) moejs.Value {
+	for index := len(args) - 1; index >= 0; index-- {
+		if callback, ok := callable(args[index]); ok {
 			return callback
 		}
 	}
-	return nil
+	return moejs.Undefined()
 }
-
 func parseIPVersion(value string) int {
 	ip := net.ParseIP(value)
 	if ip == nil {
@@ -605,4 +635,11 @@ func parseIPVersion(value string) int {
 		return 4
 	}
 	return 6
+}
+func callable(v moejs.Value) (moejs.Value, bool) { return v, engine.IsCallable(v) }
+func asObject(v moejs.Value) (*engine.Object, bool) {
+	if !v.IsObject() {
+		return nil, false
+	}
+	return v.AsObject(), true
 }

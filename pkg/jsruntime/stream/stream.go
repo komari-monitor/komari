@@ -2,37 +2,36 @@ package stream
 
 import (
 	_ "embed"
-	"fmt"
-
-	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/require"
+	moe "github.com/Calcium-Ion/moejs"
+	e "github.com/Calcium-Ion/moejs/engine"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
+	"github.com/komari-monitor/komari/pkg/jsruntime/require"
 )
 
-// ModuleName is the CommonJS name of the Node.js stream compatibility module.
 const ModuleName = "stream"
-
-// PromisesModuleName is the CommonJS name of the stream/promises module.
 const PromisesModuleName = "stream/promises"
 
 //go:embed stream.js
 var streamSource string
 
-// Load registers the Node.js-compatible stream module (Readable, Writable,
-// Duplex, Transform, PassThrough, pipeline, finished, ...).
-func Load(vm *goja.Runtime, module *goja.Object) {
-	exports, err := vm.RunString(streamSource)
+func Load(vm *moe.Runtime, module *e.Object) {
+	exports, err := native.Run(vm, streamSource)
 	if err != nil {
-		panic(vm.NewGoError(fmt.Errorf("load stream module: %w", err)))
+		panic(err)
 	}
-	_ = module.Set("exports", exports)
+	if err = native.Set(vm, module, "exports", exports); err != nil {
+		panic(err)
+	}
 }
-
-// LoadPromises registers the stream/promises module with Promise-based
-// pipeline and finished helpers.
-func LoadPromises(vm *goja.Runtime, module *goja.Object) {
-	streamModule := require.Require(vm, ModuleName).ToObject(vm)
-	exports := vm.NewObject()
-	_ = exports.Set("pipeline", streamModule.Get("pipeline"))
-	_ = exports.Set("finished", streamModule.Get("finished"))
-	_ = module.Set("exports", exports)
+func LoadPromises(vm *moe.Runtime, module *e.Object) {
+	stream := native.Object(vm, require.Require(vm, ModuleName))
+	exports := vm.Realm().NewObject()
+	for _, key := range []string{"pipeline", "finished"} {
+		if err := native.Set(vm, exports, key, native.Get(vm, stream, key)); err != nil {
+			panic(err)
+		}
+	}
+	if err := native.Set(vm, module, "exports", exports); err != nil {
+		panic(err)
+	}
 }

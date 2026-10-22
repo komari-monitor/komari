@@ -6,6 +6,15 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"github.com/Calcium-Ion/moejs"
+	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/komari-monitor/komari/pkg/jsruntime/buffer"
+	"github.com/komari-monitor/komari/pkg/jsruntime/events"
+	"github.com/komari-monitor/komari/pkg/jsruntime/fs"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
+	"github.com/komari-monitor/komari/pkg/jsruntime/internal/writequeue"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
+	"github.com/komari-monitor/komari/pkg/jsruntime/require"
 	"io"
 	"os"
 	"os/exec"
@@ -13,14 +22,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/buffer"
-	"github.com/dop251/goja_nodejs/require"
-	"github.com/komari-monitor/komari/pkg/jsruntime/events"
-	"github.com/komari-monitor/komari/pkg/jsruntime/fs"
-	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
-	"github.com/komari-monitor/komari/pkg/jsruntime/internal/writequeue"
 )
 
 type childCommandOptions struct {
@@ -31,7 +32,6 @@ type childCommandOptions struct {
 	encoding  string
 	maxBuffer int
 }
-
 type childOutputLimitError struct {
 	stream string
 }
@@ -65,9 +65,12 @@ func (b *childOutputBuffer) Write(data []byte) (int, error) {
 	b.once.Do(b.cancel)
 	return len(data), nil
 }
-
-func (b *childOutputBuffer) Len() int      { return b.buffer.Len() }
-func (b *childOutputBuffer) Bytes() []byte { return b.buffer.Bytes() }
+func (b *childOutputBuffer) Len() int {
+	return b.buffer.Len()
+}
+func (b *childOutputBuffer) Bytes() []byte {
+	return b.buffer.Bytes()
+}
 
 type Module struct {
 	runtime    *bridge.Runtime
@@ -79,134 +82,131 @@ type Module struct {
 func New(runtime *bridge.Runtime, filesystem *fs.Module, allowExec bool, maxOutput int) *Module {
 	return &Module{runtime: runtime, filesystem: filesystem, allowExec: allowExec, maxOutput: maxOutput}
 }
-
-func (m *Module) Load(vm *goja.Runtime, module *goja.Object) {
+func (m *Module) Load(vm *moejs.Runtime, module *engine.Object) {
 	if !m.allowExec {
-		panic(vm.NewGoError(fmt.Errorf("child_process requires AllowExec")))
+		panic(native.GoError(vm, fmt.Errorf("child_process requires AllowExec")))
 	}
-	exports := vm.NewObject()
-	_ = exports.Set("spawn", func(call goja.FunctionCall) goja.Value {
-		command, arguments, options := m.childCommandArguments(vm, call, false)
-		return m.spawnChild(vm, command, arguments, options)
-	})
-	_ = exports.Set("exec", func(call goja.FunctionCall) goja.Value {
-		command := call.Argument(0).String()
-		optionsValue, callbackValue := call.Argument(1), call.Argument(2)
-		if _, ok := goja.AssertFunction(optionsValue); ok {
-			callbackValue, optionsValue = optionsValue, goja.Undefined()
+	exports := vm.Realm().NewObject()
+	_ = native.Set(vm, exports, "spawn", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		command, arguments, options := m.childCommandArguments(vm, args, false)
+		return native.From(vm, m.spawnChild(vm, command, arguments, options)), nil
+	}))
+	_ = native.Set(vm, exports, "exec", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		command := native.String(vm, moejs.Arg(args, 0))
+		optionsValue, callbackValue := moejs.Arg(args, 1), moejs.Arg(args, 2)
+		if _, ok := checkedFunction(optionsValue); ok {
+			callbackValue, optionsValue = optionsValue, moejs.Undefined()
 		}
-		callback, ok := goja.AssertFunction(callbackValue)
+		callback, ok := checkedFunction(callbackValue)
 		if !ok {
-			panic(vm.NewTypeError("callback must be a function"))
+			panic(native.TypeError(vm, "callback must be a function"))
 		}
 		options := m.childOptions(vm, optionsValue)
 		options.shell = true
-		return m.execChild(vm, command, nil, options, callback)
-	})
-	_ = exports.Set("execFile", func(call goja.FunctionCall) goja.Value {
-		command, arguments, options := m.childCommandArguments(vm, call, true)
+		return native.From(vm, m.execChild(vm, command, nil, options, callback)), nil
+	}))
+	_ = native.Set(vm, exports, "execFile", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		command, arguments, options := m.childCommandArguments(vm, args, true)
 		callbackIndex := 1
-		if _, ok := call.Argument(1).Export().([]any); ok {
+		if _, ok := native.Export(vm, moejs.Arg(args, 1)).([]any); ok {
 			callbackIndex = 2
 		}
-		callbackValue := call.Argument(callbackIndex)
-		if _, ok := goja.AssertFunction(callbackValue); !ok {
-			callbackValue = call.Argument(callbackIndex + 1)
+		callbackValue := moejs.Arg(args, callbackIndex)
+		if _, ok := checkedFunction(callbackValue); !ok {
+			callbackValue = moejs.Arg(args, callbackIndex+1)
 		}
-		callback, ok := goja.AssertFunction(callbackValue)
+		callback, ok := checkedFunction(callbackValue)
 		if !ok {
-			panic(vm.NewTypeError("callback must be a function"))
+			panic(native.TypeError(vm, "callback must be a function"))
 		}
-		return m.execChild(vm, command, arguments, options, callback)
-	})
-	_ = exports.Set("spawnSync", func(call goja.FunctionCall) goja.Value {
-		command, arguments, options := m.childCommandArguments(vm, call, false)
-		return m.spawnChildSync(vm, command, arguments, options)
-	})
-	_ = exports.Set("execFileSync", func(call goja.FunctionCall) goja.Value {
-		command, arguments, options := m.childCommandArguments(vm, call, false)
+		return native.From(vm, m.execChild(vm, command, arguments, options, callback)), nil
+	}))
+	_ = native.Set(vm, exports, "spawnSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		command, arguments, options := m.childCommandArguments(vm, args, false)
+		return native.From(vm, m.spawnChildSync(vm, command, arguments, options)), nil
+	}))
+	_ = native.Set(vm, exports, "execFileSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		command, arguments, options := m.childCommandArguments(vm, args, false)
 		result := m.runChildSync(command, arguments, options)
 		if result.err != nil {
-			panic(childProcessError(vm, result.err, result.exitCode, result.stdout, result.stderr))
+			panic(engine.ObjectValue(childProcessError(vm, result.err, result.exitCode, result.stdout, result.stderr)))
 		}
-		return encodeChildOutput(vm, result.stdout, options.encoding)
-	})
-	_ = exports.Set("execSync", func(call goja.FunctionCall) goja.Value {
-		options := m.childOptions(vm, call.Argument(1))
+		return native.From(vm, encodeChildOutput(vm, result.stdout, options.encoding)), nil
+	}))
+	_ = native.Set(vm, exports, "execSync", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		options := m.childOptions(vm, moejs.Arg(args, 1))
 		options.shell = true
-		result := m.runChildSync(call.Argument(0).String(), nil, options)
+		result := m.runChildSync(native.String(vm, moejs.Arg(args, 0)), nil, options)
 		if result.err != nil {
-			panic(childProcessError(vm, result.err, result.exitCode, result.stdout, result.stderr))
+			panic(engine.ObjectValue(childProcessError(vm, result.err, result.exitCode, result.stdout, result.stderr)))
 		}
-		return encodeChildOutput(vm, result.stdout, options.encoding)
-	})
-	_ = exports.Set("fork", func() {
-		panic(vm.NewGoError(fmt.Errorf("child_process.fork is unavailable because this runtime is not a Node executable")))
-	})
-	_ = module.Set("exports", exports)
+		return native.From(vm, encodeChildOutput(vm, result.stdout, options.encoding)), nil
+	}))
+	_ = native.Set(vm, exports, "fork", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("child_process.fork is unavailable because this runtime is not a Node executable")))
+	}))
+	_ = native.Set(vm, module, "exports", exports)
 }
-
-func (m *Module) childCommandArguments(vm *goja.Runtime, call goja.FunctionCall, callbackExpected bool) (string, []string, childCommandOptions) {
-	command := call.Argument(0).String()
+func (m *Module) childCommandArguments(vm *moejs.Runtime, args []moejs.Value, callbackExpected bool) (string, []string, childCommandOptions) {
+	command := native.String(vm, moejs.Arg(args, 0))
 	arguments := []string{}
 	optionsIndex := 1
-	if value := call.Argument(1); !goja.IsUndefined(value) && !goja.IsNull(value) {
+	if value := moejs.Arg(args, 1); !value.IsUndefined() && !value.IsNull() {
 		var exported []string
-		if err := vm.ExportTo(value, &exported); err == nil {
+		if err := native.ExportTo(vm, value, &exported); err == nil {
 			arguments = exported
 			optionsIndex = 2
 		}
 	}
-	options := m.childOptions(vm, call.Argument(optionsIndex))
+	options := m.childOptions(vm, moejs.Arg(args, optionsIndex))
 	_ = callbackExpected
 	return command, arguments, options
 }
-
-func (m *Module) childOptions(vm *goja.Runtime, value goja.Value) childCommandOptions {
+func (m *Module) childOptions(vm *moejs.Runtime, value moejs.Value) childCommandOptions {
 	options := childCommandOptions{cwd: m.filesystem.Cwd(), env: os.Environ(), maxBuffer: m.maxOutput}
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+	if native.IsNil(value) || value.IsUndefined() || value.IsNull() {
 		return options
 	}
-	object := value.ToObject(vm)
-	if cwd := object.Get("cwd"); cwd != nil && !goja.IsUndefined(cwd) && !goja.IsNull(cwd) {
-		resolved, err := m.filesystem.Resolve(cwd.String(), false)
+	object := native.Object(vm, value)
+	if cwd := native.Get(vm, object, "cwd"); !native.IsNil(cwd) && !cwd.IsUndefined() && !cwd.IsNull() {
+		resolved, err := m.filesystem.Resolve(native.String(vm, cwd), false)
 		if err != nil {
-			panic(vm.NewGoError(err))
+			panic(native.GoError(vm, err))
 		}
 		options.cwd = resolved
 	}
-	if environment := object.Get("env"); environment != nil && !goja.IsUndefined(environment) && !goja.IsNull(environment) {
+	if environment := native.Get(vm, object, "env"); !native.IsNil(environment) && !environment.IsUndefined() && !environment.IsNull() {
 		var values map[string]string
-		if err := vm.ExportTo(environment, &values); err != nil {
-			panic(vm.NewTypeError("env must be an object"))
+		if err := native.ExportTo(vm, environment, &values); err != nil {
+			panic(native.TypeError(vm, "env must be an object"))
 		}
 		options.env = make([]string, 0, len(values))
 		for name, value := range values {
 			options.env = append(options.env, name+"="+value)
 		}
 	}
-	if shell := object.Get("shell"); shell != nil {
-		options.shell = shell.ToBoolean()
+	if shell := native.Get(vm, object, "shell"); !native.IsNil(shell) {
+		options.shell = native.Bool(shell)
 	}
-	if timeoutValue := object.Get("timeout"); timeoutValue != nil && timeoutValue.ToInteger() > 0 {
-		timeout := timeoutValue.ToInteger()
+	if timeoutValue := native.Get(vm, object, "timeout"); !native.IsNil(timeoutValue) && native.Int(vm, timeoutValue) > 0 {
+		timeout := native.Int(vm, timeoutValue)
 		options.timeout = time.Duration(timeout) * time.Millisecond
 	}
-	if encoding := object.Get("encoding"); encoding != nil && !goja.IsUndefined(encoding) && !goja.IsNull(encoding) {
-		options.encoding = encoding.String()
+	if encoding := native.Get(vm, object, "encoding"); !native.IsNil(encoding) && !encoding.IsUndefined() && !encoding.IsNull() {
+		options.encoding = native.String(vm, encoding)
 	}
-	if maxBuffer := object.Get("maxBuffer"); maxBuffer != nil {
-		requested := maxBuffer.ToInteger()
+	if maxBuffer := native.Get(vm, object, "maxBuffer"); !native.IsNil(maxBuffer) {
+		requested := native.Int(vm, maxBuffer)
 		if requested > 0 && requested < int64(options.maxBuffer) {
 			options.maxBuffer = int(requested)
 		}
 	}
 	return options
 }
-
 func childExecCommand(command string, arguments []string, options childCommandOptions) (*exec.Cmd, context.CancelFunc) {
 	ctx := context.Background()
-	cancel := func() {}
+	cancel := func() {
+	}
 	if options.timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, options.timeout)
 	}
@@ -222,15 +222,13 @@ func childExecCommand(command string, arguments []string, options childCommandOp
 	}
 	return exec.CommandContext(ctx, command, arguments...), cancel
 }
-
 func (m *Module) childOutputLimit(options childCommandOptions) int {
 	if options.maxBuffer > 0 && options.maxBuffer < m.maxOutput {
 		return options.maxBuffer
 	}
 	return m.maxOutput
 }
-
-func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string, options childCommandOptions) *goja.Object {
+func (m *Module) spawnChild(vm *moejs.Runtime, command string, arguments []string, options childCommandOptions) *engine.Object {
 	child := events.NewEmitter(vm)
 	cmd, cancel := childExecCommand(command, arguments, options)
 	cmd.Dir = options.cwd
@@ -239,40 +237,45 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 	stdoutReader, stdoutErr := cmd.StdoutPipe()
 	stderrReader, stderrErr := cmd.StderrPipe()
 	if err := errors.Join(stdinErr, stdoutErr, stderrErr); err != nil {
-		panic(vm.NewGoError(err))
+		panic(native.GoError(vm, err))
 	}
 	stdinStream, stdout, stderr := m.childStreams(vm, stdin)
-	_ = child.Set("stdout", stdout)
-	_ = child.Set("stderr", stderr)
-	_ = child.Set("stdin", stdinStream)
-	_ = child.Set("stdio", []any{stdinStream, stdout, stderr})
-	_ = child.Set("pid", goja.Undefined())
-	_ = child.Set("exitCode", goja.Null())
-	_ = child.Set("signalCode", goja.Null())
-	_ = child.Set("killed", false)
-	_ = child.Set("connected", false)
-
+	_ = native.Set(vm, child, "stdout", stdout)
+	_ = native.Set(vm, child, "stderr", stderr)
+	_ = native.Set(vm, child, "stdin", stdinStream)
+	_ = native.Set(vm, child, "stdio", []any{stdinStream, stdout, stderr})
+	_ = native.Set(vm, child, "pid", moejs.Undefined())
+	_ = native.Set(vm, child, "exitCode", moejs.Null())
+	_ = native.Set(vm, child, "signalCode", moejs.Null())
+	_ = native.Set(vm, child, "killed", false)
+	_ = native.Set(vm, child, "connected", false)
 	if err := cmd.Start(); err != nil {
 		cancel()
-		m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
+		m.runtime.Loop().SetTimeout(func(vm *moejs.Runtime) {
 			_ = m.runtime.RunJob(vm, "child_process.spawn", func() error {
-				return events.Emit(vm, child, "error", vm.NewGoError(err))
+				return events.Emit(vm, child, "error", native.GoError(vm, err))
 			})
 		}, 0)
 		return child
 	}
-	_ = child.Set("pid", cmd.Process.Pid)
-	resourceID := m.runtime.AddResource(func() { _ = cmd.Process.Kill(); cancel() })
+	_ = native.Set(vm, child, "pid", cmd.Process.Pid)
+	resourceID := m.runtime.AddResource(func() {
+		_ = cmd.Process.Kill()
+		cancel()
+	})
 	if resourceID == 0 {
 		_ = stdin.Close()
 		_ = stdoutReader.Close()
 		_ = stderrReader.Close()
-		go func() { _ = cmd.Wait() }()
+		go func() {
+			_ = cmd.Wait()
+		}()
 		return child
 	}
-	_ = child.Set("kill", func(signal string) bool {
+	_ = native.Set(vm, child, "kill", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		signal := native.String(vm, moejs.Arg(args, 0))
 		if cmd.Process == nil {
-			return false
+			return native.From(vm, false), nil
 		}
 		var err error
 		if signal == "SIGKILL" {
@@ -281,24 +284,26 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 			err = cmd.Process.Signal(os.Interrupt)
 		}
 		if err == nil {
-			_ = child.Set("killed", true)
+			_ = native.Set(vm, child, "killed", true)
 		}
-		return err == nil
-	})
-	_ = child.Set("ref", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("child_process.ChildProcess.ref is not supported by jsruntime; the event loop is host-driven")))
-	})
-	_ = child.Set("unref", func() *goja.Object {
-		panic(vm.NewGoError(fmt.Errorf("child_process.ChildProcess.unref is not supported by jsruntime; the event loop is host-driven")))
-	})
-	_ = child.Set("disconnect", func() { _ = events.Emit(vm, child, "disconnect") })
-	_ = child.Set("send", func(call goja.FunctionCall) goja.Value {
-		if callback, ok := goja.AssertFunction(call.Argument(len(call.Arguments) - 1)); ok {
-			_, _ = callback(goja.Undefined(), vm.NewGoError(fmt.Errorf("IPC is not enabled")))
+		return native.From(vm, err == nil), nil
+	}))
+	_ = native.Set(vm, child, "ref", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("child_process.ChildProcess.ref is not supported by jsruntime; the event loop is host-driven")))
+	}))
+	_ = native.Set(vm, child, "unref", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		panic(native.GoError(vm, fmt.Errorf("child_process.ChildProcess.unref is not supported by jsruntime; the event loop is host-driven")))
+	}))
+	_ = native.Set(vm, child, "disconnect", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		_ = events.Emit(vm, child, "disconnect")
+		return moejs.Undefined(), nil
+	}))
+	_ = native.Set(vm, child, "send", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		if callback, ok := checkedFunction(moejs.Arg(args, len(args)-1)); ok {
+			_, _ = native.Call(vm, callback, moejs.Undefined(), native.GoError(vm, fmt.Errorf("IPC is not enabled")))
 		}
-		return vm.ToValue(false)
-	})
-
+		return native.From(vm, false), nil
+	}))
 	m.pipeChildOutput(vm, stdoutReader, stdout, options.encoding)
 	m.pipeChildOutput(vm, stderrReader, stderr, options.encoding)
 	go func() {
@@ -313,13 +318,13 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 				exitCode = -1
 			}
 		}
-		m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+		m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 			_ = m.runtime.RunJob(vm, "child_process", func() error {
-				_ = child.Set("exitCode", exitCode)
-				if emitErr := events.Emit(vm, child, "exit", exitCode, goja.Null()); emitErr != nil {
+				_ = native.Set(vm, child, "exitCode", exitCode)
+				if emitErr := events.Emit(vm, child, "exit", exitCode, moejs.Null()); emitErr != nil {
 					return emitErr
 				}
-				return events.Emit(vm, child, "close", exitCode, goja.Null())
+				return events.Emit(vm, child, "close", exitCode, moejs.Null())
 			})
 		})
 	}()
@@ -329,96 +334,99 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 //go:embed stdio.js
 var childStdioSource string
 
-// childStreams creates the Writable stdin and Readable stdout/stderr streams
-// for one spawned child process. The Go side owns the underlying pipes and
-// serializes writes through a per-child queue.
-func (m *Module) childStreams(vm *goja.Runtime, stdin io.WriteCloser) (*goja.Object, *goja.Object, *goja.Object) {
-	factoryValue, err := vm.RunString(childStdioSource)
+func (m *Module) childStreams(vm *moejs.Runtime, stdin io.WriteCloser) (*engine.Object, *engine.Object, *engine.Object) {
+	factoryValue, err := native.Run(vm, childStdioSource)
 	if err != nil {
-		panic(vm.NewGoError(fmt.Errorf("load child_process stdio: %w", err)))
+		panic(native.GoError(vm, fmt.Errorf("load child_process stdio: %w", err)))
 	}
-	factory, _ := goja.AssertFunction(factoryValue)
-	hooks := vm.NewObject()
+	factory, _ := checkedFunction(factoryValue)
+	hooks := vm.Realm().NewObject()
 	var writes writequeue.Queue
-	_ = hooks.Set("stdinWrite", func(chunk goja.Value, callback goja.Callable) {
+	_ = native.Set(vm, hooks, "stdinWrite", native.Bind(vm, "", 2, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		chunk := moejs.Arg(args, 0)
+		callback := moejs.Arg(args, 1)
 		data := append([]byte(nil), buffer.Bytes(vm, chunk)...)
 		writes.Submit(func() {
 			_, err := stdin.Write(data)
-			if callback == nil {
+			if native.IsNil(callback) {
 				return
 			}
-			m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+			m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 				_ = m.runtime.RunJob(vm, "child_process.stdin.write", func() error {
 					if err != nil {
-						_, callbackErr := callback(goja.Undefined(), vm.NewGoError(err))
+						_, callbackErr := native.Call(vm, callback, moejs.Undefined(), native.GoError(vm, err))
 						return callbackErr
 					}
-					_, callbackErr := callback(goja.Undefined())
+					_, callbackErr := native.Call(vm, callback, moejs.Undefined())
 					return callbackErr
 				})
 			})
 		})
-	})
-	_ = hooks.Set("stdinEnd", func(callback goja.Callable) {
+		return moejs.Undefined(), nil
+	}))
+	_ = native.Set(vm, hooks, "stdinEnd", native.Bind(vm, "", 1, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		callback := moejs.Arg(args, 0)
 		writes.Submit(func() {
 			err := stdin.Close()
-			m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+			m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 				_ = m.runtime.RunJob(vm, "child_process.stdin.end", func() error {
-					if callback != nil {
+					if !native.IsNil(callback) {
 						if err != nil {
-							_, callbackErr := callback(goja.Undefined(), vm.NewGoError(err))
+							_, callbackErr := native.Call(vm, callback, moejs.Undefined(), native.GoError(vm, err))
 							return callbackErr
 						}
-						_, callbackErr := callback(goja.Undefined())
+						_, callbackErr := native.Call(vm, callback, moejs.Undefined())
 						return callbackErr
 					}
 					return nil
 				})
 			})
 		})
-	})
-	_ = hooks.Set("stdinDestroy", func() {
-		go func() { _ = stdin.Close() }()
-	})
-	streams, err := factory(goja.Undefined(), require.Require(vm, "stream"), hooks)
+		return moejs.Undefined(), nil
+	}))
+	_ = native.Set(vm, hooks, "stdinDestroy", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		go func() {
+			_ = stdin.Close()
+		}()
+		return moejs.Undefined(), nil
+	}))
+	streams, err := native.Call(vm, factory, moejs.Undefined(), require.Require(vm, "stream"), engine.ObjectValue(hooks))
 	if err != nil {
 		panic(err)
 	}
-	streamsObject := streams.ToObject(vm)
-	createStdin, _ := goja.AssertFunction(streamsObject.Get("createStdin"))
-	createOutput, _ := goja.AssertFunction(streamsObject.Get("createOutput"))
-	if createStdin == nil || createOutput == nil {
-		panic(vm.NewGoError(fmt.Errorf("child_process stdio factory is incomplete")))
+	streamsObject := native.Object(vm, streams)
+	createStdin, _ := checkedFunction(native.Get(vm, streamsObject, "createStdin"))
+	createOutput, _ := checkedFunction(native.Get(vm, streamsObject, "createOutput"))
+	if native.IsNil(createStdin) || native.IsNil(createOutput) {
+		panic(native.GoError(vm, fmt.Errorf("child_process stdio factory is incomplete")))
 	}
-	stdinValue, err := createStdin(goja.Undefined())
+	stdinValue, err := native.Call(vm, createStdin, moejs.Undefined())
 	if err != nil {
 		panic(err)
 	}
-	stdoutValue, err := createOutput(goja.Undefined())
+	stdoutValue, err := native.Call(vm, createOutput, moejs.Undefined())
 	if err != nil {
 		panic(err)
 	}
-	stderrValue, err := createOutput(goja.Undefined())
+	stderrValue, err := native.Call(vm, createOutput, moejs.Undefined())
 	if err != nil {
 		panic(err)
 	}
-	return stdinValue.ToObject(vm), stdoutValue.ToObject(vm), stderrValue.ToObject(vm)
+	return native.Object(vm, stdinValue), native.Object(vm, stdoutValue), native.Object(vm, stderrValue)
 }
-
-func childCallback(call goja.FunctionCall) goja.Callable {
-	for index := len(call.Arguments) - 1; index >= 0; index-- {
-		if callback, ok := goja.AssertFunction(call.Arguments[index]); ok {
+func childCallback(args []moejs.Value) moejs.Value {
+	for index := len(args) - 1; index >= 0; index-- {
+		if callback, ok := checkedFunction(args[index]); ok {
 			return callback
 		}
 	}
-	return nil
+	return moejs.Undefined()
 }
-
-func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goja.Object, encoding string) {
-	push, _ := goja.AssertFunction(stream.Get("push"))
-	setEncoding, _ := goja.AssertFunction(stream.Get("setEncoding"))
-	if encoding != "" && setEncoding != nil {
-		_, _ = setEncoding(stream, vm.ToValue(encoding))
+func (m *Module) pipeChildOutput(vm *moejs.Runtime, reader io.Reader, stream *engine.Object, encoding string) {
+	push, _ := checkedFunction(native.Get(vm, stream, "push"))
+	setEncoding, _ := checkedFunction(native.Get(vm, stream, "setEncoding"))
+	if encoding != "" && !native.IsNil(setEncoding) {
+		_, _ = native.Call(vm, setEncoding, engine.ObjectValue(stream), native.From(vm, encoding))
 	}
 	go func() {
 		data := make([]byte, 32*1024)
@@ -426,11 +434,12 @@ func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goj
 			count, err := reader.Read(data)
 			if count > 0 {
 				chunk := append([]byte(nil), data[:count]...)
-				delivered := make(chan struct{})
-				if !m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+				delivered := make(chan struct {
+				})
+				if !m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 					defer close(delivered)
 					_ = m.runtime.RunJob(vm, "child_process stream", func() error {
-						_, pushErr := push(stream, buffer.WrapBytes(vm, chunk))
+						_, pushErr := native.Call(vm, push, engine.ObjectValue(stream), engine.ObjectValue(buffer.WrapBytes(vm, chunk)))
 						return pushErr
 					})
 				}) {
@@ -439,9 +448,9 @@ func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goj
 				<-delivered
 			}
 			if err != nil {
-				m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+				m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 					_ = m.runtime.RunJob(vm, "child_process stream close", func() error {
-						_, pushErr := push(stream, goja.Null())
+						_, pushErr := native.Call(vm, push, engine.ObjectValue(stream), moejs.Null())
 						return pushErr
 					})
 				})
@@ -450,11 +459,10 @@ func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goj
 		}
 	}()
 }
-
-func (m *Module) execChild(vm *goja.Runtime, command string, arguments []string, options childCommandOptions, callback goja.Callable) *goja.Object {
+func (m *Module) execChild(vm *moejs.Runtime, command string, arguments []string, options childCommandOptions, callback moejs.Value) *engine.Object {
 	child := events.NewEmitter(vm)
-	_ = child.Set("pid", goja.Undefined())
-	_ = child.Set("killed", false)
+	_ = native.Set(vm, child, "pid", moejs.Undefined())
+	_ = native.Set(vm, child, "killed", false)
 	cmd, cancel := childExecCommand(command, arguments, options)
 	cmd.Dir, cmd.Env = options.cwd, options.env
 	outputLimit := m.childOutputLimit(options)
@@ -463,29 +471,34 @@ func (m *Module) execChild(vm *goja.Runtime, command string, arguments []string,
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
-		m.runtime.Loop().SetTimeout(func(vm *goja.Runtime) {
+		m.runtime.Loop().SetTimeout(func(vm *moejs.Runtime) {
 			_ = m.runtime.RunJob(vm, "child_process.exec", func() error {
-				if _, callbackErr := callback(goja.Undefined(), childProcessError(vm, err, -1, nil, nil), goja.Undefined(), goja.Undefined()); callbackErr != nil {
+				if _, callbackErr := native.Call(vm, callback, moejs.Undefined(), engine.ObjectValue(childProcessError(vm, err, -1, nil, nil)), moejs.Undefined(), moejs.Undefined()); callbackErr != nil {
 					return callbackErr
 				}
-				return events.Emit(vm, child, "error", vm.NewGoError(err))
+				return events.Emit(vm, child, "error", native.GoError(vm, err))
 			})
 		}, 0)
 		return child
 	}
-	_ = child.Set("pid", cmd.Process.Pid)
-	resourceID := m.runtime.AddResource(func() { _ = cmd.Process.Kill(); cancel() })
+	_ = native.Set(vm, child, "pid", cmd.Process.Pid)
+	resourceID := m.runtime.AddResource(func() {
+		_ = cmd.Process.Kill()
+		cancel()
+	})
 	if resourceID == 0 {
-		go func() { _ = cmd.Wait() }()
+		go func() {
+			_ = cmd.Wait()
+		}()
 		return child
 	}
-	_ = child.Set("kill", func() bool {
+	_ = native.Set(vm, child, "kill", native.Bind(vm, "", 0, func(_ *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		err := cmd.Process.Kill()
 		if err == nil {
-			_ = child.Set("killed", true)
+			_ = native.Set(vm, child, "killed", true)
 		}
-		return err == nil
-	})
+		return native.From(vm, err == nil), nil
+	}))
 	go func() {
 		err := cmd.Wait()
 		err = errors.Join(err, stdout.err, stderr.err)
@@ -498,20 +511,20 @@ func (m *Module) execChild(vm *goja.Runtime, command string, arguments []string,
 		} else if err != nil {
 			exitCode = -1
 		}
-		m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+		m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
 			_ = m.runtime.RunJob(vm, "child_process.exec", func() error {
 				stdoutValue := encodeChildOutput(vm, stdout.Bytes(), options.encoding)
 				stderrValue := encodeChildOutput(vm, stderr.Bytes(), options.encoding)
-				var errorValue goja.Value = goja.Null()
+				var errorValue moejs.Value = moejs.Null()
 				if err != nil {
-					errorValue = childProcessError(vm, err, exitCode, stdout.Bytes(), stderr.Bytes())
+					errorValue = engine.ObjectValue(childProcessError(vm, err, exitCode, stdout.Bytes(), stderr.Bytes()))
 				}
-				if _, callbackErr := callback(goja.Undefined(), errorValue, stdoutValue, stderrValue); callbackErr != nil {
+				if _, callbackErr := native.Call(vm, callback, moejs.Undefined(), errorValue, stdoutValue, stderrValue); callbackErr != nil {
 					return callbackErr
 				}
-				_ = child.Set("exitCode", exitCode)
-				_ = events.Emit(vm, child, "exit", exitCode, goja.Null())
-				return events.Emit(vm, child, "close", exitCode, goja.Null())
+				_ = native.Set(vm, child, "exitCode", exitCode)
+				_ = events.Emit(vm, child, "exit", exitCode, moejs.Null())
+				return events.Emit(vm, child, "close", exitCode, moejs.Null())
 			})
 		})
 	}()
@@ -548,40 +561,38 @@ func (m *Module) runChildSync(command string, arguments []string, options childC
 	}
 	return result
 }
-
-func (m *Module) spawnChildSync(vm *goja.Runtime, command string, arguments []string, options childCommandOptions) *goja.Object {
+func (m *Module) spawnChildSync(vm *moejs.Runtime, command string, arguments []string, options childCommandOptions) *engine.Object {
 	result := m.runChildSync(command, arguments, options)
-	object := vm.NewObject()
-	_ = object.Set("pid", result.pid)
-	_ = object.Set("status", result.exitCode)
-	_ = object.Set("signal", goja.Null())
-	_ = object.Set("stdout", encodeChildOutput(vm, result.stdout, options.encoding))
-	_ = object.Set("stderr", encodeChildOutput(vm, result.stderr, options.encoding))
-	_ = object.Set("output", []any{goja.Null(), encodeChildOutput(vm, result.stdout, options.encoding), encodeChildOutput(vm, result.stderr, options.encoding)})
+	object := vm.Realm().NewObject()
+	_ = native.Set(vm, object, "pid", result.pid)
+	_ = native.Set(vm, object, "status", result.exitCode)
+	_ = native.Set(vm, object, "signal", moejs.Null())
+	_ = native.Set(vm, object, "stdout", encodeChildOutput(vm, result.stdout, options.encoding))
+	_ = native.Set(vm, object, "stderr", encodeChildOutput(vm, result.stderr, options.encoding))
+	_ = native.Set(vm, object, "output", []any{moejs.Null(), encodeChildOutput(vm, result.stdout, options.encoding), encodeChildOutput(vm, result.stderr, options.encoding)})
 	if result.err != nil {
-		_ = object.Set("error", childProcessError(vm, result.err, result.exitCode, result.stdout, result.stderr))
+		_ = native.Set(vm, object, "error", childProcessError(vm, result.err, result.exitCode, result.stdout, result.stderr))
 	}
 	return object
 }
-
-func encodeChildOutput(vm *goja.Runtime, data []byte, encoding string) goja.Value {
+func encodeChildOutput(vm *moejs.Runtime, data []byte, encoding string) moejs.Value {
 	if encoding == "" || encoding == "buffer" {
-		return buffer.WrapBytes(vm, append([]byte(nil), data...))
+		return engine.ObjectValue(buffer.WrapBytes(vm, append([]byte(nil), data...)))
 	}
-	return buffer.EncodeBytes(vm, data, vm.ToValue(encoding))
+	return buffer.EncodeBytes(vm, data, native.From(vm, encoding))
 }
-
-func childProcessError(vm *goja.Runtime, err error, exitCode int, stdout, stderr []byte) *goja.Object {
-	object := vm.NewGoError(err)
+func childProcessError(vm *moejs.Runtime, err error, exitCode int, stdout, stderr []byte) *engine.Object {
+	object := native.Object(vm, native.GoError(vm, err))
 	var limitError *childOutputLimitError
 	if errors.As(err, &limitError) {
-		_ = object.Set("code", "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+		_ = native.Set(vm, object, "code", "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
 	} else {
-		_ = object.Set("code", exitCode)
+		_ = native.Set(vm, object, "code", exitCode)
 	}
-	_ = object.Set("killed", false)
-	_ = object.Set("signal", goja.Null())
-	_ = object.Set("stdout", encodeChildOutput(vm, stdout, ""))
-	_ = object.Set("stderr", encodeChildOutput(vm, stderr, ""))
+	_ = native.Set(vm, object, "killed", false)
+	_ = native.Set(vm, object, "signal", moejs.Null())
+	_ = native.Set(vm, object, "stdout", encodeChildOutput(vm, stdout, ""))
+	_ = native.Set(vm, object, "stderr", encodeChildOutput(vm, stderr, ""))
 	return object
 }
+func checkedFunction(v moejs.Value) (moejs.Value, bool) { return v, engine.IsCallable(v) }
