@@ -26,7 +26,9 @@ func NewEventLoop(opts ...Option) *EventLoop {
 	for _, opt := range opts {
 		opt(l)
 	}
-	vm := moejs.NewRuntime(moejs.Options{})
+	// Plugins may extend builtins (for example reflect-metadata). Keep those
+	// changes private to this runtime instead of using shared frozen intrinsics.
+	vm := moejs.NewRuntime(moejs.Options{MutableIntrinsics: true})
 	var err error
 	l.core, err = upstream.New(vm, upstream.Options{OnError: func(err error) {
 		if l.onError != nil {
