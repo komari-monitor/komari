@@ -92,12 +92,24 @@ func (s *Store) normalizedIndexes() []normalizedIndex {
 func normalizedIndexesFor(prefix string, tables tables) []normalizedIndex {
 	return []normalizedIndex{
 		{name: prefix + "series_metric_entity_idx", table: tables.series, columns: "metric_name, entity_id"},
-		{name: prefix + "rollups_resolution_bucket_idx", table: tables.rollups, columns: "resolution_id, bucket_milli"},
+		// The broad rollup read scans one time range across every series. Including
+		// series_id and label_id keeps the series filter and the (bucket, series,
+		// label) ordering inside the index, so a row is only fetched from the table
+		// when it actually matches. Without them every candidate row costs a
+		// deferred table probe plus an external sort of the whole range.
+		//
+		// 宽范围 rollup 读取按时间窗扫描所有序列。把 series_id、label_id 放进索引，
+		// 序列过滤和 (bucket, series, label) 排序都能在索引内完成，只有真正命中的
+		// 行才回表；否则每个候选行都要回表一次，还要对整段时间做外部排序。
+		{name: prefix + "rollups_resolution_bucket_idx", table: tables.rollups, columns: "resolution_id, bucket_milli, series_id, label_id"},
 		{name: prefix + "rollups_series_resolution_bucket_idx", table: tables.rollups, columns: "series_id, resolution_id, bucket_milli"},
 	}
 }
 
 func (s *Store) createNormalizedIndexes(ctx context.Context) error {
+	if err := s.rebuildStaleIndexes(ctx); err != nil {
+		return err
+	}
 	if s.cfg.Driver == DriverMySQL {
 		for _, index := range s.normalizedIndexes() {
 			exists, err := s.mysqlIndexExists(ctx, index.table, index.name)
@@ -127,19 +139,7 @@ func (s *Store) createPortableNormalizedIndexes(ctx context.Context, exec sqlExe
 
 func (s *Store) dropNormalizedIndexes(ctx context.Context) error {
 	for _, index := range s.normalizedIndexes() {
-		if s.cfg.Driver == DriverMySQL {
-			exists, err := s.mysqlIndexExists(ctx, index.table, index.name)
-			if err != nil {
-				return err
-			}
-			if exists {
-				if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s DROP INDEX %s", index.table, index.name)); err != nil {
-					return err
-				}
-			}
-			continue
-		}
-		if _, err := s.db.ExecContext(ctx, "DROP INDEX IF EXISTS "+index.name); err != nil {
+		if err := s.dropIndex(ctx, index); err != nil {
 			return err
 		}
 	}

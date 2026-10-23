@@ -158,7 +158,13 @@ func DefaultConfig(driver Driver, dsn string) Config {
 		SQLite: SQLiteOptions{
 			PerformanceProfile:    SQLiteProfileBalanced,
 			BusyTimeout:           5 * time.Second,
-			CacheSizeKB:           4 * 1024,
+			// 16 MB per connection: the rollup read plans walk one time range at a
+			// time, and a small page cache turns that walk into repeated pager
+			// fetches. Override with WithSQLiteCacheSizeKB when memory is tighter.
+			//
+			// 每连接 16 MB：rollup 读计划按时间窗连续扫描，页缓存过小会让扫描不断
+			// 重复取页。内存更紧张时可用 WithSQLiteCacheSizeKB 覆盖。
+			CacheSizeKB:           16 * 1024,
 			TempStoreMemory:       false,
 			MMapSizeBytes:         0,
 			WALAutoCheckpoint:     4000,
