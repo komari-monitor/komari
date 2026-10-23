@@ -107,9 +107,13 @@ func normalizedIndexesFor(prefix string, tables tables) []normalizedIndex {
 }
 
 func (s *Store) createNormalizedIndexes(ctx context.Context) error {
-	if err := s.rebuildStaleIndexes(ctx); err != nil {
-		return err
-	}
+	// Index shape only affects read performance, never correctness: a stale or
+	// unreadable definition must not keep the store from opening. Missing indexes
+	// are still created below, and a later start retries the repair.
+	//
+	// 索引形状只影响读取性能，不影响正确性：定义陈旧或探测失败都不应阻止监控库
+	// 打开。缺失的索引仍由下面的创建步骤补上，下次启动会重试修复。
+	_ = s.rebuildStaleIndexes(ctx)
 	if s.cfg.Driver == DriverMySQL {
 		for _, index := range s.normalizedIndexes() {
 			exists, err := s.mysqlIndexExists(ctx, index.table, index.name)

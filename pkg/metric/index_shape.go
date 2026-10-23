@@ -29,11 +29,70 @@ func (s *Store) rebuildStaleIndexes(ctx context.Context) error {
 		if !found || sameIndexColumns(existing, index.columns) {
 			continue
 		}
-		if err := s.dropIndex(ctx, index); err != nil {
+		if err := s.rebuildIndex(ctx, index); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// rebuildIndex replaces one stale definition.
+//
+// MySQL refuses to drop an index that a foreign key still relies on: the rollups
+// table references resolutions and the only index leading with resolution_id is
+// the one being replaced. The replacement is therefore created under a temporary
+// name first, which satisfies the constraint immediately, and only then does the
+// old index go away and the new one take the canonical name.
+//
+// rebuildIndex 替换一个过时的索引定义。MySQL 不允许删除仍被外键依赖的索引，所以
+// 先以临时名建好新索引（立刻满足外键约束），再删旧的，最后把新索引改成正式名。
+func (s *Store) rebuildIndex(ctx context.Context, index normalizedIndex) error {
+	if s.cfg.Driver != DriverMySQL {
+		return s.dropIndex(ctx, index)
+	}
+	staging := index.name + "_rebuild"
+	// Clear a staging index left behind by an interrupted run.
+	if err := s.dropIndex(ctx, normalizedIndex{name: staging, table: index.table}); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("CREATE INDEX %s ON %s (%s)", staging, index.table, index.columns)); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s DROP INDEX %s", index.table, index.name)); err != nil {
+		// The staged index stays behind and the next start retries cleanly.
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME INDEX %s TO %s", index.table, staging, index.name))
+	return err
+}
+
+// indexColumnsQuery returns the introspection statement for one backend. It is
+// separate from execution so the placeholder style of every dialect can be
+// asserted without a server: SQLite and MySQL bind "?" while PostgreSQL binds
+// "$1", and sending "?" to PostgreSQL fails to parse.
+//
+// indexColumnsQuery 返回对应后端的索引列探测语句。与执行分离，便于在没有服务端
+// 的情况下断言占位符风格：SQLite 与 MySQL 用 "?"，PostgreSQL 用 "$1"。
+func (s *Store) indexColumnsQuery(index normalizedIndex) (string, []any) {
+	switch s.cfg.Driver {
+	case DriverMySQL:
+		return "SELECT COLUMN_NAME FROM information_schema.STATISTICS " +
+			"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? " +
+			"ORDER BY SEQ_IN_INDEX", []any{index.table, index.name}
+	case DriverPostgreSQL:
+		// pg_get_indexdef returns the stored DDL, which parses with the same
+		// helper as SQLite and avoids depending on pg_index.indkey ordering and
+		// int2vector casting, both of which vary across server versions.
+		//
+		// pg_get_indexdef 直接返回索引 DDL，可与 SQLite 共用解析器，避免依赖
+		// pg_index.indkey 的排序与 int2vector 转换（这两者在不同版本上行为不同）。
+		return "SELECT pg_get_indexdef(c.oid) FROM pg_class c " +
+			"JOIN pg_namespace n ON n.oid = c.relnamespace " +
+			"WHERE c.relname = " + s.dialect.placeholder(1) + " AND c.relkind = 'i'",
+			[]any{index.name}
+	default:
+		return "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", []any{index.name}
+	}
 }
 
 // indexColumns reads the stored column list for one index. found is false when
@@ -41,36 +100,23 @@ func (s *Store) rebuildStaleIndexes(ctx context.Context) error {
 //
 // indexColumns 读取一个索引当前存储的列顺序；found 为 false 表示索引还不存在。
 func (s *Store) indexColumns(ctx context.Context, index normalizedIndex) ([]string, bool, error) {
-	switch s.cfg.Driver {
-	case DriverMySQL:
-		rows, err := s.db.QueryContext(ctx, "SELECT COLUMN_NAME FROM information_schema.STATISTICS "+
-			"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? ORDER BY SEQ_IN_INDEX",
-			index.table, index.name)
+	query, args := s.indexColumnsQuery(index)
+	if s.cfg.Driver == DriverMySQL {
+		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, false, err
 		}
 		return collectIndexColumns(rows)
-	case DriverPostgreSQL:
-		rows, err := s.db.QueryContext(ctx, "SELECT a.attname FROM pg_index i "+
-			"JOIN pg_class c ON c.oid = i.indexrelid "+
-			"JOIN LATERAL unnest(i.indkey::smallint[]) WITH ORDINALITY AS k(attnum, ord) ON true "+
-			"JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum "+
-			"WHERE c.relname = ? AND k.attnum > 0 ORDER BY k.ord", index.name)
-		if err != nil {
-			return nil, false, err
-		}
-		return collectIndexColumns(rows)
-	default:
-		var statement sql.NullString
-		err := s.db.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", index.name).Scan(&statement)
-		if err == sql.ErrNoRows || !statement.Valid {
-			return nil, false, nil
-		}
-		if err != nil {
-			return nil, false, err
-		}
-		return sqliteIndexColumns(statement.String), true, nil
 	}
+	var statement sql.NullString
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&statement)
+	if err == sql.ErrNoRows || !statement.Valid {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return indexColumnsFromDDL(statement.String), true, nil
 }
 
 func collectIndexColumns(rows *sql.Rows) ([]string, bool, error) {
@@ -92,12 +138,13 @@ func collectIndexColumns(rows *sql.Rows) ([]string, bool, error) {
 	return columns, true, nil
 }
 
-// sqliteIndexColumns extracts the column list from a stored CREATE INDEX
-// statement. Non-simple entries keep their first token, which is enough to
-// detect a stale definition.
+// indexColumnsFromDDL extracts the column list from a CREATE INDEX statement.
+// SQLite and PostgreSQL both expose the stored DDL, so both take this path.
+// Entries keep their first token, enough to detect a stale definition.
 //
-// sqliteIndexColumns 从存储的 CREATE INDEX 语句中提取列定义。
-func sqliteIndexColumns(statement string) []string {
+// indexColumnsFromDDL 从 CREATE INDEX 语句中提取列定义；SQLite 与 PostgreSQL
+// 都直接暴露存储的 DDL，因此共用这条路径。
+func indexColumnsFromDDL(statement string) []string {
 	open := strings.Index(statement, "(")
 	closing := strings.LastIndex(statement, ")")
 	if open < 0 || closing <= open {
@@ -113,11 +160,12 @@ func sqliteIndexColumns(statement string) []string {
 
 func normalizeIndexColumn(column string) string {
 	column = strings.ToLower(strings.TrimSpace(column))
-	column = strings.Trim(column, "\"\x60'[]")
+	// Drop ASC/DESC, COLLATE, and operator-class suffixes before unquoting, so a
+	// quoted name followed by a direction still reduces to the bare column.
 	if fields := strings.Fields(column); len(fields) > 0 {
-		return fields[0]
+		column = fields[0]
 	}
-	return column
+	return strings.Trim(column, "\"\x60'[]")
 }
 
 // sameIndexColumns compares a stored column list with a declared one.
