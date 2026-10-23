@@ -1024,6 +1024,30 @@ func (s *Store) QueryBatch(ctx context.Context, query BatchQuery) (map[string][]
 	return s.queryRawPointsBatch(ctx, query.normalized())
 }
 
+// CountEntities returns the number of distinct entities registered for the
+// selected metrics. It reads the series dictionary, not a time range, so it is
+// a cheap upper bound used to divide an all-client point budget.
+func (s *Store) CountEntities(ctx context.Context, metricNames []string) (int, error) {
+	if err := s.ensureOpen(); err != nil {
+		return 0, err
+	}
+	if len(metricNames) == 0 {
+		return 0, nil
+	}
+	args := make([]any, 0, len(metricNames))
+	placeholders := make([]string, 0, len(metricNames))
+	for _, name := range metricNames {
+		args = append(args, name)
+		placeholders = append(placeholders, s.dialect.placeholder(len(args)))
+	}
+	var count int
+	err := s.reader().QueryRowContext(ctx, fmt.Sprintf(
+		"SELECT COUNT(DISTINCT entity_id) FROM %s WHERE metric_name IN (%s)",
+		s.tables.series, strings.Join(placeholders, ", "),
+	), args...).Scan(&count)
+	return count, err
+}
+
 // EntityIDs returns distinct entity ids that have exact in-memory samples or
 // persisted/hot rollups.
 func (s *Store) EntityIDs(ctx context.Context, query Query) ([]string, error) {

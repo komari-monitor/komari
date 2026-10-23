@@ -10,6 +10,15 @@ type seriesDictionaryPlan struct {
 	MetricNames []string
 	EntityIDs   []string
 	Tags        map[string]string
+	OmitTags    bool
+}
+
+func (p seriesDictionaryPlan) columns() string {
+	columns := "s.id, s.metric_name, s.entity_id, s.tags_hash"
+	if !p.OmitTags {
+		columns += ", s.tags"
+	}
+	return columns
 }
 
 type rollupReadPlan struct {
@@ -18,6 +27,19 @@ type rollupReadPlan struct {
 	StartMilli   int64
 	EndMilli     int64
 	Fields       rollupReadFields
+}
+
+// Small resolved series sets should seek directly into each series, rather than
+// scan every series in the selected time range. Keep the time-first scan for
+// broad batches, where many separate seeks and the final sort cost more. This
+// bounded heuristic needs no extra cardinality query and also covers tag filters.
+const selectiveRollupSeriesLimit = 4
+
+func (p rollupReadPlan) indexName(prefix string) string {
+	if len(p.SeriesIDs) > 0 && len(p.SeriesIDs) <= selectiveRollupSeriesLimit {
+		return prefix + "rollups_series_resolution_bucket_idx"
+	}
+	return prefix + "rollups_resolution_bucket_idx"
 }
 
 type rollupReadFields uint16
@@ -57,7 +79,7 @@ func (d postgresDialect) renderSeriesDictionary(tables tables, _ string, plan se
 		parts = append(parts, d.jsonExtractEquals("s.tags", key, d.placeholder(len(args))))
 	}
 	return renderedSQL{
-		Query: fmt.Sprintf("SELECT s.id, s.metric_name, s.entity_id, s.tags_hash, s.tags FROM %s s WHERE %s ORDER BY s.id ASC", tables.series, strings.Join(parts, " AND ")),
+		Query: fmt.Sprintf("SELECT %s FROM %s s WHERE %s ORDER BY s.id ASC", plan.columns(), tables.series, strings.Join(parts, " AND ")),
 		Args:  args,
 	}
 }
@@ -75,7 +97,7 @@ func renderExpandedSeriesDictionary(d dialect, tables tables, indexHint string, 
 		parts = append(parts, d.jsonExtractEquals("s.tags", key, d.placeholder(len(args))))
 	}
 	return renderedSQL{
-		Query: fmt.Sprintf("SELECT s.id, s.metric_name, s.entity_id, s.tags_hash, s.tags FROM %s s%s WHERE %s ORDER BY s.id ASC", tables.series, indexHint, strings.Join(parts, " AND ")),
+		Query: fmt.Sprintf("SELECT %s FROM %s s%s WHERE %s ORDER BY s.id ASC", plan.columns(), tables.series, indexHint, strings.Join(parts, " AND ")),
 		Args:  args,
 	}
 }

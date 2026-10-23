@@ -11,6 +11,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
@@ -162,7 +163,9 @@ func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid load_type parameter", nil)
 	}
 	now := time.Now().UTC()
-	clientRecords, err := records.GetRecordsByClientAndTime(params.UUID, now.Add(-time.Duration(hoursInt)*time.Hour), now)
+	clientRecords, err := records.QueryRecords(ctx, params.UUID, now.Add(-time.Duration(hoursInt)*time.Hour), now, records.RecordQueryOptions{
+		MetricNames: records.LoadTypeMetricNames(params.LoadType),
+	})
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch records: "+err.Error(), nil)
 	}
@@ -179,8 +182,11 @@ func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 		}
 	}
 	if params.LoadType == "" || params.LoadType == "all" || params.LoadType == "gpu" {
-		gpuRecords, err := records.GetGPURecordsByClientAndTime(params.UUID, now.Add(-time.Duration(hoursInt)*time.Hour), now)
-		if err == nil && len(gpuRecords) > 0 {
+		gpuRecords, err := records.QueryGPURecords(ctx, params.UUID, now.Add(-time.Duration(hoursInt)*time.Hour), now)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch GPU records: "+err.Error(), nil)
+		}
+		if len(gpuRecords) > 0 {
 			gpuDevices := make(map[string]any)
 			for _, record := range gpuRecords {
 				deviceKey := strconv.Itoa(record.DeviceIndex)
@@ -239,44 +245,45 @@ func filterPublicRecordsByLoadType(recs []models.Record, loadType string) []map[
 	out := make([]map[string]any, 0, len(recs))
 	for _, r := range recs {
 		record := map[string]any{"client": r.Client, "time": r.Time}
+		p := records.ProjectLoad(r, loadType)
 		switch loadType {
 		case "cpu":
-			record["cpu"] = r.Cpu
+			record["cpu"] = *p.Cpu
 		case "gpu":
-			record["gpu"] = r.Gpu
+			record["gpu"] = *p.Gpu
 		case "ram":
-			record["ram"] = r.Ram
-			record["ram_total"] = r.RamTotal
-			if r.RamTotal > 0 {
-				record["ram_percent"] = float32(r.Ram) / float32(r.RamTotal) * 100
+			record["ram"] = *p.Ram
+			record["ram_total"] = *p.RamTotal
+			if *p.RamTotal > 0 {
+				record["ram_percent"] = float32(*p.Ram) / float32(*p.RamTotal) * 100
 			}
 		case "swap":
-			record["swap"] = r.Swap
-			record["swap_total"] = r.SwapTotal
-			if r.SwapTotal > 0 {
-				record["swap_percent"] = float32(r.Swap) / float32(r.SwapTotal) * 100
+			record["swap"] = *p.Swap
+			record["swap_total"] = *p.SwapTotal
+			if *p.SwapTotal > 0 {
+				record["swap_percent"] = float32(*p.Swap) / float32(*p.SwapTotal) * 100
 			}
 		case "load":
-			record["load"] = r.Load
+			record["load"] = *p.Load
 		case "temp":
-			record["temp"] = r.Temp
+			record["temp"] = *p.Temp
 		case "disk":
-			record["disk"] = r.Disk
-			record["disk_total"] = r.DiskTotal
-			if r.DiskTotal > 0 {
-				record["disk_percent"] = float32(r.Disk) / float32(r.DiskTotal) * 100
+			record["disk"] = *p.Disk
+			record["disk_total"] = *p.DiskTotal
+			if *p.DiskTotal > 0 {
+				record["disk_percent"] = float32(*p.Disk) / float32(*p.DiskTotal) * 100
 			}
 		case "network":
-			record["net_in"] = r.NetIn
-			record["net_out"] = r.NetOut
-			record["net_total_up"] = r.NetTotalUp
-			record["net_total_down"] = r.NetTotalDown
+			record["net_in"] = *p.NetIn
+			record["net_out"] = *p.NetOut
+			record["net_total_up"] = *p.NetTotalUp
+			record["net_total_down"] = *p.NetTotalDown
 		case "process":
-			record["process"] = r.Process
+			record["process"] = *p.Process
 		case "connections":
-			record["connections"] = r.Connections
-			record["connections_udp"] = r.ConnectionsUdp
-			record["connections_tcp"] = r.Connections - r.ConnectionsUdp
+			record["connections"] = *p.Connections
+			record["connections_udp"] = *p.ConnectionsUdp
+			record["connections_tcp"] = *p.Connections - *p.ConnectionsUdp
 		}
 		out = append(out, record)
 	}
@@ -287,9 +294,10 @@ func filterPublicRecordsByLoadType(recs []models.Record, loadType string) []map[
 
 func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
-		UUID   string `json:"uuid"`
-		TaskID string `json:"task_id"`
-		Hours  string `json:"hours"`
+		UUID     string `json:"uuid"`
+		TaskID   string `json:"task_id"`
+		Hours    string `json:"hours"`
+		MaxCount int    `json:"max_count"`
 	}
 	req.BindParams(&params)
 	if params.UUID == "" && params.TaskID == "" {
@@ -350,46 +358,35 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		}
 	}
 
-	recs, err := tasks.GetPingRecords(params.UUID, taskId, startTime, endTime)
+	recs, err := metricstore.GetPingRecords(ctx, params.UUID, taskId, startTime, endTime)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping records: "+err.Error(), nil)
 	}
 
-	clientStats := make(map[string]struct {
-		total, loss, min, max int
-	})
-	for _, r := range recs {
+	// Filter before sampling and statistics so hidden clients cannot affect
+	// public loss/latency summaries or consume the visible response budget.
+	if !isLogin {
+		recs = visiblePingRecords(recs, hiddenMap)
+	}
+	displayRecs := recs
+	if params.MaxCount > 0 && len(recs) > params.MaxCount {
+		displayRecs = tasks.SamplePingRecordsByTask(recs, params.MaxCount)
+	}
+	for _, r := range displayRecs {
 		if r.Client != "" && !isLogin && hiddenMap[r.Client] {
 			continue
 		}
-		rec := recordsResp{Time: r.Time.UTC(), Value: r.Value, Client: r.Client, TaskId: r.TaskId}
-		stats := clientStats[r.Client]
-		stats.total++
-		if r.Value < 0 {
-			stats.loss++
-		} else {
-			if stats.min == 0 || r.Value < stats.min {
-				stats.min = r.Value
-			}
-			if r.Value > stats.max {
-				stats.max = r.Value
-			}
-		}
-		clientStats[r.Client] = stats
-		response.Records = append(response.Records, rec)
+		response.Records = append(response.Records, recordsResp{Time: r.Time.UTC(), Value: r.Value, Client: r.Client, TaskId: r.TaskId})
 	}
 
-	if len(clientStats) > 0 {
-		response.BasicInfo = make([]clientBasicInfo, 0, len(clientStats))
-		for client, stats := range clientStats {
+	summary := tasks.SummarizePingRecords(recs)
+	if len(summary.Clients) > 0 {
+		response.BasicInfo = make([]clientBasicInfo, 0, len(summary.Clients))
+		for client, stats := range summary.Clients {
 			if client != "" && !isLogin && hiddenMap[client] {
 				continue
 			}
-			loss := float64(0)
-			if stats.total > 0 {
-				loss = float64(stats.loss) / float64(stats.total) * 100
-			}
-			response.BasicInfo = append(response.BasicInfo, clientBasicInfo{Client: client, Loss: loss, Min: stats.min, Max: stats.max})
+			response.BasicInfo = append(response.BasicInfo, clientBasicInfo{Client: client, Loss: stats.LossPercent, Min: stats.Min, Max: stats.Max})
 		}
 	}
 
@@ -406,40 +403,11 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 			if params.UUID != "" && !t.AppliesToClient(params.UUID) {
 				continue
 			}
-			totalCount, lossCount, minLatency, maxLatency, sumLatency, validCount := 0, 0, 0, 0, 0, 0
-			for _, r := range recs {
-				if r.TaskId != t.Id {
-					continue
-				}
-				if params.UUID != "" && r.Client != params.UUID {
-					continue
-				}
-				totalCount++
-				if r.Value < 0 {
-					lossCount++
-				} else {
-					validCount++
-					sumLatency += r.Value
-					if minLatency == 0 || r.Value < minLatency {
-						minLatency = r.Value
-					}
-					if r.Value > maxLatency {
-						maxLatency = r.Value
-					}
-				}
-			}
-			lossRate := float64(0)
-			if totalCount > 0 {
-				lossRate = float64(lossCount) / float64(totalCount) * 100
-			}
-			avgLatency := 0
-			if validCount > 0 {
-				avgLatency = sumLatency / validCount
-			}
+			st := summary.Tasks[t.Id]
 			taskInfo := map[string]any{
 				"id": t.Id, "name": t.Name, "type": t.Type, "interval": t.Interval,
-				"default_on": t.DefaultOn, "loss": lossRate, "min": minLatency,
-				"max": maxLatency, "avg": avgLatency, "total": totalCount,
+				"default_on": t.DefaultOn, "loss": st.LossPercent, "min": st.Min,
+				"max": st.Max, "avg": st.Avg, "total": st.Total,
 			}
 			if params.UUID == "" && taskId != -1 {
 				taskInfo["clients"] = t.Clients

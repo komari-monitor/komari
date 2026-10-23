@@ -49,8 +49,23 @@ func reportMetricPoints(report v2.Report, trafficUp, trafficDown int64) []metric
 	return points
 }
 
+// latestReportPoint preserves independent counter restoration errors: one failed
+// direction must not prevent the other from restoring its baseline.
+func latestReportPoint(ctx context.Context, s *metric.Store, metricName, entityID string, before time.Time) (metric.Point, bool, error) {
+	loaded, err := QueryMetrics(ctx, MetricsQuery{
+		Store: s, Mode: QueryLatestBefore, Source: SourceAuto,
+		Entities: EntityScope{IDs: []string{entityID}},
+		Specs:    []MetricSpec{{Name: metricName}}, End: before, AllowMissing: true,
+	})
+	if err != nil {
+		return metric.Point{}, false, err
+	}
+	point, ok := loaded.Latest[metricName][entityID]
+	return point, ok, nil
+}
+
 func latestReportCounter(ctx context.Context, s *metric.Store, metricName, entityID string, before time.Time) (int64, bool, error) {
-	point, ok, err := s.LatestBefore(ctx, metricName, entityID, before)
+	point, ok, err := latestReportPoint(ctx, s, metricName, entityID, before)
 	if err != nil {
 		return 0, false, err
 	}

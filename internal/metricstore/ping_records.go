@@ -69,33 +69,26 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 		return nil, fmt.Errorf("metric store not enabled")
 	}
 
-	query := metric.Query{
-		MetricName: MetricPingLatency,
-		Start:      start,
-		End:        end,
-		Order:      metric.OrderAsc,
+	query := MetricsQuery{
+		Store: s, Mode: QuerySeries, Source: SourceRollup,
+		CompactDefinitions: true,
+		Entities:           EntityScope{All: clientUUID == ""},
+		Specs:              []MetricSpec{{Name: MetricPingLatency, Aggregations: []metric.Aggregation{metric.AggLast}}},
+		Start:              start, End: end, Order: metric.OrderAsc, Grouping: GroupSeries,
+		Budget: PointBudget{PerSeries: 4000}, Rounding: RoundFloor, AllowMissing: true,
 	}
-
 	if clientUUID != "" {
-		query.EntityID = clientUUID
+		query.Entities.IDs = []string{clientUUID}
 	}
-
 	if taskID >= 0 {
 		query.Tags = map[string]string{"task_id": fmt.Sprintf("%d", taskID)}
 	}
-
-	interval := downsampleInterval(end.Sub(start), 4000)
-	interval = s.CompatibleSeriesInterval(start, time.Now().UTC(), interval)
-	points, err := s.Series(ctx, metric.AggregateQuery{
-		Query:          query,
-		Aggregation:    metric.AggLast,
-		Interval:       interval,
-		PreserveSeries: true,
-	}, time.Now().UTC())
+	loaded, err := QueryMetrics(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
+	points := loaded.Values[MetricPingLatency][metric.AggLast]
 	records := make([]models.PingRecord, 0, len(points))
 	for _, p := range points {
 		taskIDVal := uint(0)

@@ -2,7 +2,6 @@ package jsonrpc
 
 import (
 	"context"
-	"math"
 	"sort"
 	"time"
 
@@ -10,6 +9,8 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	recordsdb "github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/metricstore"
+	"github.com/komari-monitor/komari/internal/sampling"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -81,8 +82,19 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 
 	switch params.Type {
 	case "load":
-		// fetch load records
-		recs, err := getLoadRecordsCombined(params.UUID, startTime, endTime)
+		// resolve maxCount before querying so the store can choose a coarser
+		// interval instead of materializing points that will be sampled away.
+		maxCount := params.MaxCount
+		if maxCount == 0 {
+			maxCount = 4000
+		}
+		// Fetch only the metrics backing load_type. Unknown types keep the
+		// compatible full-query path; the later filter still zeroes other fields.
+		opts := recordsdb.RecordQueryOptions{
+			MetricNames: recordsdb.LoadTypeMetricNames(params.LoadType),
+			MaxPoints:   maxCount,
+		}
+		recs, err := recordsdb.QueryRecords(ctx, params.UUID, startTime, endTime, opts)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch records", err.Error())
 		}
@@ -96,12 +108,6 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 				filtered = append(filtered, r)
 			}
 			recs = filtered
-		}
-
-		// resolve maxCount default for load
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
 		}
 
 		// optional load_type filtering -> group by client
@@ -174,7 +180,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		if taskId == 0 {
 			taskId = -1
 		}
-		recs, err := tasks.GetPingRecords(params.UUID, taskId, startTime, endTime)
+		recs, err := metricstore.GetPingRecords(ctx, params.UUID, taskId, startTime, endTime)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping records", err.Error())
 		}
@@ -213,52 +219,32 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 
 		response := &Resp{Count: 0, Records: []RecordsResp{}, From: startTime.UTC(), To: endTime.UTC()}
 
-		// stats per client
-		clientStats := make(map[string]struct {
-			total int
-			loss  int
-			min   int
-			max   int
-		})
-
-		for _, r := range recs {
-			rr := RecordsResp{
+		maxCount := params.MaxCount
+		if maxCount == 0 {
+			maxCount = 4000
+		}
+		displayRecs := recs
+		if maxCount != -1 && len(recs) > maxCount {
+			displayRecs = tasks.SamplePingRecordsByTask(recs, maxCount)
+		}
+		for _, r := range displayRecs {
+			response.Records = append(response.Records, RecordsResp{
 				TaskId: r.TaskId,
 				Time:   r.Time,
 				Value:  r.Value,
 				Client: r.Client,
-			}
-			st := clientStats[r.Client]
-			st.total++
-			if r.Value < 0 {
-				st.loss++
-			} else {
-				if st.min == 0 || r.Value < st.min {
-					st.min = r.Value
-				}
-				if r.Value > st.max {
-					st.max = r.Value
-				}
-			}
-			clientStats[r.Client] = st
-			response.Records = append(response.Records, rr)
+			})
 		}
 
-		if len(clientStats) > 0 {
-			response.BasicInfo = make([]ClientBasicInfo, 0, len(clientStats))
-			for client, st := range clientStats {
-				if client != "" && !isAdmin && hidden[client] {
-					continue
-				}
-				loss := float64(0)
-				if st.total > 0 {
-					loss = float64(st.loss) / float64(st.total) * 100
-				}
+		summary := tasks.SummarizePingRecords(recs)
+		if len(summary.Clients) > 0 {
+			response.BasicInfo = make([]ClientBasicInfo, 0, len(summary.Clients))
+			for client, st := range summary.Clients {
 				response.BasicInfo = append(response.BasicInfo, ClientBasicInfo{
 					Client: client,
-					Loss:   loss,
-					Min:    st.min,
-					Max:    st.max,
+					Loss:   st.LossPercent,
+					Min:    st.Min,
+					Max:    st.Max,
 				})
 			}
 		}
@@ -278,86 +264,10 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 					continue
 				}
 			}
-			total := 0
-			lossCount := 0
-			minLat := 0
-			maxLat := 0
-			sum := 0
-			valid := 0
-			latestVal := -1
-			var latestTs time.Time
-			// 收集该任务的所有有效(非丢包)延迟值以计算百分位
-			latencies := make([]int, 0, 64)
-			for _, r := range recs {
-				if r.TaskId != t.Id {
-					continue
-				}
-				if params.UUID != "" && r.Client != params.UUID {
-					continue
-				}
-				total++
-				if r.Value < 0 { // 丢包
-					lossCount++
-					continue
-				}
-				valid++
-				sum += r.Value
-				latencies = append(latencies, r.Value)
-				if minLat == 0 || r.Value < minLat {
-					minLat = r.Value
-				}
-				if r.Value > maxLat {
-					maxLat = r.Value
-				}
-				// track latest non-negative value
-				ts := r.Time
-				if latestTs.IsZero() || ts.After(latestTs) {
-					latestTs = ts
-					latestVal = r.Value
-				}
-			}
-
-			// 计算 P50 / P99
-			p50 := 0
-			p99 := 0
-			if len(latencies) > 0 {
-				sort.Ints(latencies)
-				getPercentileInt := func(values []int, percentile float64) int {
-					if len(values) == 0 {
-						return 0
-					}
-					if percentile <= 0 {
-						return values[0]
-					}
-					if percentile >= 1 {
-						return values[len(values)-1]
-					}
-					pos := (float64(len(values) - 1)) * percentile
-					lo := int(math.Floor(pos))
-					hi := int(math.Ceil(pos))
-					if lo == hi {
-						return values[lo]
-					}
-					frac := pos - float64(lo)
-					v := float64(values[lo]) + (float64(values[hi])-float64(values[lo]))*frac
-					return int(math.Round(v))
-				}
-				p50 = getPercentileInt(latencies, 0.50)
-				p99 = getPercentileInt(latencies, 0.99)
-			}
-			ratio := 0.0
-			if p50 > 0 && p99 >= p50 {
-				jitterMs := float64(p99 - p50)
-				adjustedBase := math.Max(math.Min(float64(p50), 50.0), 10.0)
-				ratio = jitterMs / adjustedBase
-			}
-			lossRate := 0.0
-			if total > 0 {
-				lossRate = float64(lossCount) / float64(total) * 100
-			}
-			avg := 0
-			if valid > 0 {
-				avg = sum / valid
+			st := summary.Tasks[t.Id]
+			latest := st.Latest
+			if st.Total == 0 {
+				latest = -1
 			}
 			info := map[string]any{
 				"id":            t.Id,
@@ -365,15 +275,15 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 				"type":          t.Type,
 				"interval":      t.Interval,
 				"default_on":    t.DefaultOn,
-				"loss":          lossRate,
-				"min":           minLat,
-				"max":           maxLat,
-				"avg":           avg,
-				"latest":        latestVal,
-				"total":         total,
-				"p50":           p50,
-				"p99":           p99,
-				"p99_p50_ratio": ratio,
+				"loss":          st.LossPercent,
+				"min":           st.Min,
+				"max":           st.Max,
+				"avg":           st.Avg,
+				"latest":        latest,
+				"total":         st.Total,
+				"p50":           st.P50,
+				"p99":           st.P99,
+				"p99_p50_ratio": st.P99P50Ratio,
 			}
 			if params.UUID == "" && taskId != -1 { // retain existing behavior of exposing clients only when filtering by task
 				info["clients"] = t.Clients
@@ -381,44 +291,6 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			toList = append(toList, info)
 		}
 		response.Tasks = toList
-		// apply maxCount for ping
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
-		}
-		if maxCount != -1 && len(response.Records) > maxCount {
-			// group records by TaskId for proportional downsampling
-			taskGroups := make(map[uint][]RecordsResp)
-			for _, r := range response.Records {
-				taskGroups[r.TaskId] = append(taskGroups[r.TaskId], r)
-			}
-
-			// sort each group by time
-			for taskId := range taskGroups {
-				sort.Slice(taskGroups[taskId], func(i, j int) bool {
-					return taskGroups[taskId][i].Time.Before(taskGroups[taskId][j].Time)
-				})
-			}
-
-			groupsMeta := make([]allocationGroup[uint], 0, len(taskGroups))
-			for taskId, records := range taskGroups {
-				groupsMeta = append(groupsMeta, allocationGroup[uint]{
-					key:    taskId,
-					length: len(records),
-				})
-			}
-			targets := allocateTargets(groupsMeta, maxCount)
-
-			// downsample each task group
-			downsampledRecords := make([]RecordsResp, 0, maxCount)
-			for taskId, records := range taskGroups {
-				targetCount := targets[taskId]
-				sampled := sampleEvenly(records, targetCount)
-				downsampledRecords = append(downsampledRecords, sampled...)
-			}
-
-			response.Records = downsampledRecords
-		}
 		response.Count = len(response.Records)
 		// sort by time asc
 		sort.Slice(response.Records, func(i, j int) bool {
@@ -430,19 +302,6 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	}
 }
 
-// ---------- helpers for load records ----------
-
-// getLoadRecordsCombined fetches records for a client or all clients within a time range,
-// combining recent short-term table and long-term table with 15-min grouping for recent part.
-func getLoadRecordsCombined(uuid string, start, end time.Time) ([]models.Record, error) {
-	// prefer the existing function when uuid provided
-	if uuid != "" {
-		return recordsdb.GetRecordsByClientAndTime(uuid, start, end)
-	}
-	// 所有客户端：统一通过 records 包查询，启用 metric store 时自动走 metric store
-	return recordsdb.GetRecordsByTime(start, end)
-}
-
 // ---------- downsampling helpers ----------
 
 type allocationGroup[K comparable] struct {
@@ -452,213 +311,33 @@ type allocationGroup[K comparable] struct {
 
 // allocateTargets splits maxTotal across groups proportionally to their lengths.
 func allocateTargets[K comparable](groups []allocationGroup[K], maxTotal int) map[K]int {
-	result := make(map[K]int, len(groups))
-	if maxTotal < 0 {
-		for _, g := range groups {
-			result[g.key] = g.length
-		}
-		return result
-	}
-	total := 0
+	converted := make([]sampling.Group[K], 0, len(groups))
 	for _, g := range groups {
-		total += g.length
+		converted = append(converted, sampling.Group[K]{Key: g.key, Length: g.length})
 	}
-	if total <= maxTotal {
-		for _, g := range groups {
-			result[g.key] = g.length
-		}
-		return result
-	}
-	// initial allocation based on proportion
-	type rem struct {
-		idx  int
-		frac float64
-	}
-	remainders := make([]rem, 0, len(groups))
-	sumTargets := 0
-	for i, g := range groups {
-		if g.length <= 0 {
-			result[g.key] = 0
-			continue
-		}
-		raw := float64(g.length) * float64(maxTotal) / float64(total)
-		t := int(math.Floor(raw))
-		if t > g.length {
-			t = g.length
-		}
-		result[groups[i].key] = t
-		sumTargets += t
-		remainders = append(remainders, rem{i, raw - float64(t)})
-	}
-	// distribute remaining by largest fractional parts
-	if sumTargets < maxTotal {
-		need := maxTotal - sumTargets
-		sort.Slice(remainders, func(i, j int) bool { return remainders[i].frac > remainders[j].frac })
-		for _, r := range remainders {
-			if need == 0 {
-				break
-			}
-			g := groups[r.idx]
-			cur := result[g.key]
-			if cur < g.length {
-				result[g.key] = cur + 1
-				need--
-			}
-		}
-		// if still left, second pass round-robin
-		if need > 0 {
-			for need > 0 {
-				for _, g := range groups {
-					if need == 0 {
-						break
-					}
-					if result[g.key] < g.length {
-						result[g.key]++
-						need--
-					}
-				}
-				if need > 0 {
-					break
-				}
-			}
-		}
-	} else if sumTargets > maxTotal {
-		over := sumTargets - maxTotal
-		sort.Slice(remainders, func(i, j int) bool { return remainders[i].frac < remainders[j].frac })
-		for _, r := range remainders {
-			if over == 0 {
-				break
-			}
-			g := groups[r.idx]
-			if result[g.key] > 0 {
-				result[g.key]--
-				over--
-			}
-		}
-		if over > 0 {
-			for over > 0 {
-				for _, g := range groups {
-					if over == 0 {
-						break
-					}
-					if result[g.key] > 0 {
-						result[g.key]--
-						over--
-					}
-				}
-				if over > 0 {
-					break
-				}
-			}
-		}
-	}
-	return result
+	return sampling.AllocateTargets(converted, maxTotal)
 }
 
 func sampleEvenly[T any](in []T, k int) []T {
-	n := len(in)
-	if k <= 0 || n == 0 {
-		return []T{}
-	}
-	if k >= n {
-		return in
-	}
-	out := make([]T, 0, k)
-	if k == 1 {
-		out = append(out, in[n-1])
-		return out
-	}
-	for i := 0; i < k; i++ {
-		idx := int(math.Round(float64(i) * float64(n-1) / float64(k-1)))
-		if idx < 0 {
-			idx = 0
-		} else if idx >= n {
-			idx = n - 1
-		}
-		out = append(out, in[idx])
-	}
-	return out
+	return sampling.SampleEvenly(in, k)
 }
 
-// flatRecord is a projection used when load_type is specified.
+// flatRecord is the legacy load_type response shape. The selected fields come
+// from records.ProjectLoad so public/admin adapters share one switch.
 type flatRecord struct {
-	Client         string    `json:"client"`
-	Time           time.Time `json:"time"`
-	Cpu            *float32  `json:"cpu,omitempty"`
-	Gpu            *float32  `json:"gpu,omitempty"`
-	Ram            *int64    `json:"ram,omitempty"`
-	RamTotal       *int64    `json:"ram_total,omitempty"`
-	Swap           *int64    `json:"swap,omitempty"`
-	SwapTotal      *int64    `json:"swap_total,omitempty"`
-	Load           *float32  `json:"load,omitempty"`
-	Temp           *float32  `json:"temp,omitempty"`
-	Disk           *int64    `json:"disk,omitempty"`
-	DiskTotal      *int64    `json:"disk_total,omitempty"`
-	NetIn          *int64    `json:"net_in,omitempty"`
-	NetOut         *int64    `json:"net_out,omitempty"`
-	NetTotalUp     *int64    `json:"net_total_up,omitempty"`
-	NetTotalDown   *int64    `json:"net_total_down,omitempty"`
-	Process        *int      `json:"process,omitempty"`
-	Connections    *int      `json:"connections,omitempty"`
-	ConnectionsUdp *int      `json:"connections_udp,omitempty"`
-	Uptime         *int64    `json:"uptime,omitempty"`
+	Client string    `json:"client"`
+	Time   time.Time `json:"time"`
+	recordsdb.LoadProjection
 }
 
 func filterRecordsByLoadType(recs []models.Record, loadType string) []flatRecord {
 	out := make([]flatRecord, 0, len(recs))
 	for _, r := range recs {
-		fr := flatRecord{Client: r.Client, Time: r.Time}
-		switch loadType {
-		case "cpu":
-			v := r.Cpu
-			fr.Cpu = &v
-		case "gpu":
-			v := r.Gpu
-			fr.Gpu = &v
-		case "ram":
-			v := r.Ram
-			fr.Ram = &v
-			vt := r.RamTotal
-			fr.RamTotal = &vt
-		case "swap":
-			v := r.Swap
-			fr.Swap = &v
-			vt := r.SwapTotal
-			fr.SwapTotal = &vt
-		case "load":
-			v := r.Load
-			fr.Load = &v
-		case "temp":
-			v := r.Temp
-			fr.Temp = &v
-		case "disk":
-			v := r.Disk
-			fr.Disk = &v
-			vt := r.DiskTotal
-			fr.DiskTotal = &vt
-		case "network":
-			vi := r.NetIn
-			vo := r.NetOut
-			vtu := r.NetTotalUp
-			vtd := r.NetTotalDown
-			fr.NetIn = &vi
-			fr.NetOut = &vo
-			fr.NetTotalUp = &vtu
-			fr.NetTotalDown = &vtd
-		case "process":
-			v := r.Process
-			fr.Process = &v
-		case "connections":
-			v := r.Connections
-			fr.Connections = &v
-			vu := r.ConnectionsUdp
-			fr.ConnectionsUdp = &vu
-		default:
-			// unknown type: fallback to all fields as a full record would be returned elsewhere
-			v := r.Cpu
-			fr.Cpu = &v
-		}
-		out = append(out, fr)
+		out = append(out, flatRecord{
+			Client:         r.Client,
+			Time:           r.Time,
+			LoadProjection: recordsdb.ProjectLoad(r, loadType),
+		})
 	}
 	return out
 }

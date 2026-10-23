@@ -4,7 +4,6 @@ import (
 	"context"
 	"slices"
 	"sort"
-	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -189,8 +188,4 @@ func AddDefaultOnClientUUID(uuid string) error {
 		return ReloadPingSchedule()
 	}
 	return nil
-}
-
-func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
-	return metricstore.GetPingRecords(context.Background(), uuid, taskId, start, end)
 }

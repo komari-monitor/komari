@@ -28,12 +28,13 @@ type seriesIdentity struct {
 }
 
 type seriesReadMeta struct {
-	id         int64
-	metricName string
-	entityID   string
-	tagsHash   string
-	tagsJSON   string
-	tags       map[string]string
+	outputIdentity *SeriesIdentity
+	id             int64
+	metricName     string
+	entityID       string
+	tagsHash       string
+	tagsJSON       string
+	tags           map[string]string
 }
 
 type rollupRateSample struct {
@@ -42,20 +43,23 @@ type rollupRateSample struct {
 }
 
 type rollupAggregateState struct {
-	summary     *queryRollupSummary
-	rateSamples []rollupRateSample
-	tags        map[string]string
+	outputIdentity *SeriesIdentity
+	summary        *queryRollupSummary
+	rateSamples    []rollupRateSample
+	tags           map[string]string
 }
 
 type metricSeriesAccumulator struct {
-	spec        BatchSeriesSpec
-	compression float64
-	needDigest  bool
-	needSummary bool
-	needRate    bool
-	groups      map[rollupKey]*rollupAggregateState
-	rateGroups  map[rollupKey]*rollupAggregateState
-	states      *queryStateArena
+	includeSeriesIdentity bool
+	entityIdentities      map[string]*SeriesIdentity
+	spec                  BatchSeriesSpec
+	compression           float64
+	needDigest            bool
+	needSummary           bool
+	needRate              bool
+	groups                map[rollupKey]*rollupAggregateState
+	rateGroups            map[rollupKey]*rollupAggregateState
+	states                *queryStateArena
 }
 
 // SeriesBatch is the single rollup query implementation. It resolves metric
@@ -82,16 +86,36 @@ func (s *Store) GetMetrics(ctx context.Context, metricNames []string) (map[strin
 	return s.loadBatchDefinitions(ctx, metricNames)
 }
 
+// GetMetricsCompact loads only execution metadata: Name, Type, and RetentionDays.
+// GetMetrics continues to return complete definitions.
+func (s *Store) GetMetricsCompact(ctx context.Context, metricNames []string) (map[string]Definition, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if len(metricNames) == 0 {
+		return map[string]Definition{}, nil
+	}
+	return s.loadBatchDefinitionsProjected(ctx, metricNames, true)
+}
+
 func (s *Store) seriesBatchAt(ctx context.Context, query BatchSeriesQuery, now time.Time, forcedResolutions map[string]time.Duration) (BatchSeriesResult, error) {
 	metricNames := make([]string, 0, len(query.Specs))
 	for _, spec := range query.Specs {
 		metricNames = append(metricNames, spec.MetricName)
 	}
-	definitions, err := s.loadBatchDefinitions(ctx, metricNames)
+	definitions, err := s.loadBatchDefinitionsProjected(ctx, metricNames, query.CompactDefinitions)
 	if err != nil {
 		return BatchSeriesResult{}, err
 	}
 
+	return s.seriesBatchDefined(ctx, query, now, forcedResolutions, definitions)
+}
+
+func (s *Store) seriesBatchDefined(ctx context.Context, query BatchSeriesQuery, now time.Time, forcedResolutions map[string]time.Duration, definitions map[string]Definition) (BatchSeriesResult, error) {
+	metricNames := make([]string, 0, len(query.Specs))
+	for _, spec := range query.Specs {
+		metricNames = append(metricNames, spec.MetricName)
+	}
 	result := BatchSeriesResult{
 		Definitions: definitions,
 		Values:      make(map[string]map[Aggregation][]AggregatePoint, len(query.Specs)),
@@ -104,7 +128,8 @@ func (s *Store) seriesBatchAt(ctx context.Context, query BatchSeriesQuery, now t
 		values := make(map[Aggregation][]AggregatePoint, len(spec.Aggregations))
 		accumulator := &metricSeriesAccumulator{
 			spec: spec, compression: s.cfg.RollupPolicy.compression(), states: &states,
-			groups: make(map[rollupKey]*rollupAggregateState), rateGroups: make(map[rollupKey]*rollupAggregateState),
+			includeSeriesIdentity: query.IncludeSeriesIdentity,
+			groups:                make(map[rollupKey]*rollupAggregateState), rateGroups: make(map[rollupKey]*rollupAggregateState),
 		}
 		for _, aggregation := range spec.Aggregations {
 			values[aggregation] = []AggregatePoint{}
@@ -130,9 +155,9 @@ func (s *Store) seriesBatchAt(ctx context.Context, query BatchSeriesQuery, now t
 		if len(policy.Tiers) == 0 {
 			continue
 		}
-		resolution := seriesResolutionForPolicy(query.Start, spec.Interval, now, policy)
-		if forced, ok := forcedResolutions[spec.MetricName]; ok {
-			resolution = forced
+		resolution, forced := forcedResolutions[spec.MetricName]
+		if !forced {
+			resolution = seriesResolutionForPolicy(query.Start, spec.Interval, now, policy)
 		}
 		key := batchSeriesGroupKey{resolution: resolution, needDigest: accumulator.needDigest}
 		group := groups[key]
@@ -144,11 +169,12 @@ func (s *Store) seriesBatchAt(ctx context.Context, query BatchSeriesQuery, now t
 		group.fields |= rollupFieldsForAggregations(spec.Aggregations)
 	}
 
-	seriesByID, seriesByIdentity, err := s.loadSeriesDictionary(ctx, seriesDictionaryPlan{
-		MetricNames: metricNames,
-		EntityIDs:   query.EntityIDs,
-		Tags:        query.Tags,
-	})
+	// Dictionary IDs can be created by a hot-to-persisted flush. Resolve them
+	// under the same view lock as both scans so no continuously present series
+	// disappears between dictionary lookup and backing-tier selection.
+	s.rollupViewMu.RLock()
+	defer s.rollupViewMu.RUnlock()
+	seriesByID, seriesByIdentity, err := s.loadSeriesDictionary(ctx, seriesDictionaryPlan{MetricNames: metricNames, EntityIDs: query.EntityIDs, Tags: query.Tags, OmitTags: query.OmitTags})
 	if err != nil {
 		return BatchSeriesResult{}, err
 	}
@@ -170,8 +196,6 @@ func (s *Store) seriesBatchAt(ctx context.Context, query BatchSeriesQuery, now t
 		return -1
 	})
 
-	s.rollupViewMu.RLock()
-	defer s.rollupViewMu.RUnlock()
 	for _, group := range orderedGroups {
 		if err := s.scanPersistedRollupGroup(ctx, query, group, seriesByID, accumulators); err != nil {
 			return BatchSeriesResult{}, err
@@ -192,15 +216,23 @@ func (s *Store) seriesBatchAt(ctx context.Context, query BatchSeriesQuery, now t
 }
 
 func (s *Store) loadBatchDefinitions(ctx context.Context, metricNames []string) (map[string]Definition, error) {
+	return s.loadBatchDefinitionsProjected(ctx, metricNames, false)
+}
+
+func (s *Store) loadBatchDefinitionsProjected(ctx context.Context, metricNames []string, compact bool) (map[string]Definition, error) {
 	args := make([]any, 0, len(metricNames))
 	placeholders := make([]string, 0, len(metricNames))
 	for _, metricName := range metricNames {
 		args = append(args, metricName)
 		placeholders = append(placeholders, s.dialect.placeholder(len(args)))
 	}
+	columns := "name, type, unit, description, retention_days, metadata, created_at_milli, updated_at_milli"
+	if compact {
+		columns = "name, type, retention_days"
+	}
 	rows, err := s.reader().QueryContext(ctx, fmt.Sprintf(
-		"SELECT name, type, unit, description, retention_days, metadata, created_at_milli, updated_at_milli FROM %s WHERE name IN (%s) ORDER BY name ASC",
-		s.tables.definitions, strings.Join(placeholders, ", "),
+		"SELECT %s FROM %s WHERE name IN (%s) ORDER BY name ASC",
+		columns, s.tables.definitions, strings.Join(placeholders, ", "),
 	), args...)
 	if err != nil {
 		return nil, err
@@ -208,7 +240,13 @@ func (s *Store) loadBatchDefinitions(ctx context.Context, metricNames []string) 
 	defer rows.Close()
 	definitions := make(map[string]Definition, len(metricNames))
 	for rows.Next() {
-		definition, err := scanDefinition(rows)
+		var definition Definition
+		var err error
+		if compact {
+			err = rows.Scan(&definition.Name, &definition.Type, &definition.RetentionDays)
+		} else {
+			definition, err = scanDefinition(rows)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -229,16 +267,22 @@ func (s *Store) loadSeriesDictionary(ctx context.Context, plan seriesDictionaryP
 	for rows.Next() {
 		var meta seriesReadMeta
 		var rawTags any
-		if err := rows.Scan(&meta.id, &meta.metricName, &meta.entityID, &meta.tagsHash, &rawTags); err != nil {
+		targets := []any{&meta.id, &meta.metricName, &meta.entityID, &meta.tagsHash}
+		if !plan.OmitTags {
+			targets = append(targets, &rawTags)
+		}
+		if err := rows.Scan(targets...); err != nil {
 			return nil, nil, err
 		}
-		meta.tagsJSON, err = rawJSONToString(rawTags)
-		if err != nil {
-			return nil, nil, err
-		}
-		meta.tags, err = rollupTagsFromJSON(meta.tagsJSON)
-		if err != nil {
-			return nil, nil, err
+		if !plan.OmitTags {
+			meta.tagsJSON, err = rawJSONToString(rawTags)
+			if err != nil {
+				return nil, nil, err
+			}
+			meta.tags, err = rollupTagsFromJSON(meta.tagsJSON)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 		byID[meta.id] = &meta
 		byIdentity[seriesIdentity{metricName: meta.metricName, entityID: meta.entityID, tagsHash: meta.tagsHash}] = &meta
@@ -261,13 +305,40 @@ func (s *Store) scanPersistedRollupGroup(ctx context.Context, query BatchSeriesQ
 	if err != nil || !found {
 		return err
 	}
-	rendered := s.dialect.renderRollupRead(s.tables, s.cfg.TablePrefix+"rollups_resolution_bucket_idx", rollupReadPlan{
+	plan := rollupReadPlan{
 		SeriesIDs:    seriesIDs,
 		ResolutionID: resolutionID,
 		StartMilli:   bucketStartMillis(query.Start.UnixMilli(), group.key.resolution.Milliseconds()),
 		EndMilli:     query.End.UnixMilli(),
 		Fields:       group.fields,
+	}
+	indexName := plan.indexName(s.cfg.TablePrefix)
+	return forEachRollupReadPlan(s.cfg.Driver, plan, func(chunk rollupReadPlan) error {
+		return s.scanPersistedRollupPlan(ctx, chunk, indexName, seriesByID, accumulators)
 	})
+}
+
+// MySQL prepared statements allow at most 65535 parameters. Leave headroom for
+// fixed predicates and future fields; other dialects bind the series as one array.
+const mysqlRollupSeriesChunkSize = 60000
+
+func forEachRollupReadPlan(driver Driver, plan rollupReadPlan, consume func(rollupReadPlan) error) error {
+	chunkSize := len(plan.SeriesIDs)
+	if driver == DriverMySQL && chunkSize > mysqlRollupSeriesChunkSize {
+		chunkSize = mysqlRollupSeriesChunkSize
+	}
+	for start := 0; start < len(plan.SeriesIDs); start += chunkSize {
+		chunk := plan
+		chunk.SeriesIDs = plan.SeriesIDs[start:min(start+chunkSize, len(plan.SeriesIDs))]
+		if err := consume(chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) scanPersistedRollupPlan(ctx context.Context, plan rollupReadPlan, indexName string, seriesByID map[int64]*seriesReadMeta, accumulators map[string]*metricSeriesAccumulator) error {
+	rendered := s.dialect.renderRollupRead(s.tables, indexName, plan)
 	rows, err := s.reader().QueryContext(ctx, rendered.Query, rendered.Args...)
 	if err != nil {
 		return err
@@ -277,25 +348,25 @@ func (s *Store) scanPersistedRollupGroup(ctx context.Context, query BatchSeriesQ
 	var sum, sumSq, min, max, firstVal, lastVal float64
 	var digestBlob []byte
 	destinations := []any{&seriesID, &bucket, &count}
-	if group.fields&rollupReadSum != 0 {
+	if plan.Fields&rollupReadSum != 0 {
 		destinations = append(destinations, &sum)
 	}
-	if group.fields&rollupReadSumSq != 0 {
+	if plan.Fields&rollupReadSumSq != 0 {
 		destinations = append(destinations, &sumSq)
 	}
-	if group.fields&rollupReadMin != 0 {
+	if plan.Fields&rollupReadMin != 0 {
 		destinations = append(destinations, &min)
 	}
-	if group.fields&rollupReadMax != 0 {
+	if plan.Fields&rollupReadMax != 0 {
 		destinations = append(destinations, &max)
 	}
-	if group.fields&rollupReadFirst != 0 {
+	if plan.Fields&rollupReadFirst != 0 {
 		destinations = append(destinations, &firstVal, &firstTS)
 	}
-	if group.fields&rollupReadLast != 0 {
+	if plan.Fields&rollupReadLast != 0 {
 		destinations = append(destinations, &lastVal, &lastTS)
 	}
-	if group.fields&rollupReadDigest != 0 {
+	if plan.Fields&rollupReadDigest != 0 {
 		destinations = append(destinations, &digestBlob)
 	}
 	for rows.Next() {
@@ -374,7 +445,7 @@ func (s *Store) scanHotRollupGroup(query BatchSeriesQuery, group *batchSeriesGro
 				continue
 			}
 		}
-		meta, matched, err := memorySeriesMeta(seriesByIdentity, key.metricName, key.entityID, key.tagsHash, bucket.tagsJSON, query.Tags)
+		meta, matched, err := memorySeriesMeta(seriesByIdentity, key.metricName, key.entityID, key.tagsHash, bucket.tagsJSON, query.Tags, query.OmitTags)
 		if err != nil {
 			return err
 		}
@@ -413,7 +484,7 @@ func (s *Store) scanCoarseRollupGroup(query BatchSeriesQuery, group *batchSeries
 		}
 		sortRollupKeys(childKeys)
 		firstChild := parent.children[childKeys[0]]
-		meta, matched, err := memorySeriesMeta(seriesByIdentity, key.metricName, key.entityID, key.tagsHash, firstChild.tagsJSON, query.Tags)
+		meta, matched, err := memorySeriesMeta(seriesByIdentity, key.metricName, key.entityID, key.tagsHash, firstChild.tagsJSON, query.Tags, query.OmitTags)
 		if err != nil {
 			return err
 		}
@@ -430,19 +501,26 @@ func (s *Store) scanCoarseRollupGroup(query BatchSeriesQuery, group *batchSeries
 	return nil
 }
 
-func memorySeriesMeta(seriesByIdentity map[seriesIdentity]*seriesReadMeta, metricName, entityID, tagsHash, tagsJSON string, filter map[string]string) (*seriesReadMeta, bool, error) {
+func memorySeriesMeta(seriesByIdentity map[seriesIdentity]*seriesReadMeta, metricName, entityID, tagsHash, tagsJSON string, filter map[string]string, omitTags bool) (*seriesReadMeta, bool, error) {
 	identity := seriesIdentity{metricName: metricName, entityID: entityID, tagsHash: tagsHash}
 	if meta := seriesByIdentity[identity]; meta != nil {
 		return meta, true, nil
 	}
-	tags, err := rollupTagsFromJSON(tagsJSON)
-	if err != nil {
-		return nil, false, err
+	var tags map[string]string
+	if !omitTags || len(filter) > 0 {
+		var err error
+		tags, err = rollupTagsFromJSON(tagsJSON)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	for key, value := range filter {
 		if tags[key] != value {
 			return nil, false, nil
 		}
+	}
+	if omitTags {
+		tags = nil
 	}
 	meta := &seriesReadMeta{metricName: metricName, entityID: entityID, tagsHash: tagsHash, tagsJSON: tagsJSON, tags: tags}
 	seriesByIdentity[identity] = meta
@@ -459,8 +537,10 @@ func stringSet(values []string) map[string]struct{} {
 
 func (a *metricSeriesAccumulator) consume(meta *seriesReadMeta, sourceBucket, count int64, sum, sumSq, min, max, firstVal float64, firstTS int64, lastVal float64, lastTS int64, digest *TDigest) *rollupAggregateState {
 	key := rollupKey{bucket: bucketStartMillis(sourceBucket, a.spec.Interval.Milliseconds())}
-	if a.spec.PreserveSeries {
+	if a.spec.PreserveSeries || a.spec.GroupByEntity {
 		key.entityID = meta.entityID
+	}
+	if a.spec.PreserveSeries {
 		key.tagsHash = meta.tagsHash
 	}
 	if a.needSummary {
@@ -470,6 +550,7 @@ func (a *metricSeriesAccumulator) consume(meta *seriesReadMeta, sourceBucket, co
 			if a.spec.PreserveSeries {
 				state.tags = meta.tags
 			}
+			state.outputIdentity = a.outputIdentity(meta, key.entityID, a.spec.PreserveSeries)
 			a.groups[key] = state
 		}
 		state.summary.merge(count, sum, sumSq, min, max, firstVal, firstTS, lastVal, lastTS, digest, a.needDigest)
@@ -487,12 +568,36 @@ func (a *metricSeriesAccumulator) consume(meta *seriesReadMeta, sourceBucket, co
 		if state == nil {
 			// Rate-only state is smaller than a summary slot; do not reserve an
 			// unused summary/digest for every rate output bucket.
-			state = &rollupAggregateState{tags: meta.tags}
+			state = &rollupAggregateState{tags: meta.tags, outputIdentity: a.outputIdentity(meta, meta.entityID, true)}
 			a.rateGroups[rateKey] = state
 		}
 		state.rateSamples = append(state.rateSamples, rollupRateSample{timestamp: lastTS, value: lastVal})
 	}
 	return a.groups[key]
+}
+
+// outputIdentity reuses the dictionary series snapshot across all buckets and
+// aggregations. Merged/entity output has nil Tags and is cached separately;
+// using tagsHash here would wrongly split omitted Tags and risk hash collisions.
+func (a *metricSeriesAccumulator) outputIdentity(meta *seriesReadMeta, entity string, preserve bool) *SeriesIdentity {
+	if !a.includeSeriesIdentity {
+		return nil
+	}
+	if preserve {
+		if meta.outputIdentity == nil {
+			meta.outputIdentity = NewSeriesIdentity(entity, meta.tags)
+		}
+		return meta.outputIdentity
+	}
+	if a.entityIdentities == nil {
+		a.entityIdentities = make(map[string]*SeriesIdentity)
+	}
+	identity := a.entityIdentities[entity]
+	if identity == nil {
+		identity = NewSeriesIdentity(entity, nil)
+		a.entityIdentities[entity] = identity
+	}
+	return identity
 }
 
 func mergeEncodedRollupDigest(target *TDigest, count int64, min, max float64, blob []byte) error {
@@ -590,12 +695,13 @@ func (a *metricSeriesAccumulator) points(order Order) (map[Aggregation][]Aggrega
 				count = int(state.summary.count)
 			}
 			points = append(points, AggregatePoint{
-				MetricName: a.spec.MetricName,
-				EntityID:   key.entityID,
-				Bucket:     fromMillis(key.bucket),
-				Value:      value,
-				Count:      count,
-				Tags:       state.tags,
+				SeriesIdentity: state.outputIdentity,
+				MetricName:     a.spec.MetricName,
+				EntityID:       key.entityID,
+				Bucket:         fromMillis(key.bucket),
+				Value:          value,
+				Count:          count,
+				Tags:           state.tags,
 			})
 		}
 		values[aggregation] = points

@@ -341,7 +341,7 @@ func writeReportBatch(ctx context.Context, reports []v2.Report) ([]v2.Report, er
 			state.mu.Unlock()
 		}
 		if !values.initialized {
-			totalUp, hasUp, err := s.LatestBefore(ctx, MetricNetTotalUp, report.UUID, report.UpdatedAt)
+			totalUp, hasUp, err := latestReportPoint(ctx, s, MetricNetTotalUp, report.UUID, report.UpdatedAt)
 			if err != nil {
 				logger.Errorf("metricstore", "failed to restore previous upload counter for %s: %v", report.UUID, err)
 			} else {
@@ -349,7 +349,7 @@ func writeReportBatch(ctx context.Context, reports []v2.Report) ([]v2.Report, er
 				values.totalUpAt = totalUp.Timestamp
 				values.hasUp = hasUp
 			}
-			totalDown, hasDown, err := s.LatestBefore(ctx, MetricNetTotalDown, report.UUID, report.UpdatedAt)
+			totalDown, hasDown, err := latestReportPoint(ctx, s, MetricNetTotalDown, report.UUID, report.UpdatedAt)
 			if err != nil {
 				logger.Errorf("metricstore", "failed to restore previous download counter for %s: %v", report.UUID, err)
 			} else {

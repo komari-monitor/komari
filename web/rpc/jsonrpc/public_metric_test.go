@@ -207,29 +207,6 @@ func TestAdaptiveFillPublicMetricSeriesNeverEndsWithNullAfterData(t *testing.T) 
 	}
 }
 
-func TestPublicPingMetricFillEmptyMapsMinusOneToNull(t *testing.T) {
-	for _, metricName := range []string{metricstore.MetricPingLatency, metricstore.MetricPingLoss} {
-		if value := publicRawMetricValue(metricName, -1, true); value != nil {
-			t.Fatalf("raw %s -1 should become null when fill_empty is enabled, got %v", metricName, *value)
-		}
-	}
-	if value := publicRawMetricValue(metricstore.MetricPingLatency, -1, true); value != nil {
-		t.Fatalf("downsampled ping -1 should become null when fill_empty is enabled, got %v", *value)
-	}
-}
-
-func TestPublicPingMetricMinusOneIsPreservedWithoutFillEmpty(t *testing.T) {
-	value := publicRawMetricValue(metricstore.MetricPingLatency, -1, false)
-	if value == nil || *value != -1 {
-		t.Fatalf("raw ping -1 should be preserved when fill_empty is disabled, got %v", value)
-	}
-
-	nonPing := publicRawMetricValue("temperature", -1, true)
-	if nonPing == nil || *nonPing != -1 {
-		t.Fatalf("negative values from non-ping metrics must be preserved, got %v", nonPing)
-	}
-}
-
 func TestPublicPingStatsFromAggregateGroupsUsesTaskNamesAndLossMetric(t *testing.T) {
 	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
 	taskMap := map[string]models.PingTask{
@@ -310,17 +287,17 @@ func TestPublicPingMetricStatsIncludesZeroVolatility(t *testing.T) {
 }
 
 func TestMetricDownsampleIntervalCeilsToStandardInterval(t *testing.T) {
-	got := metricDownsampleInterval(30*24*time.Hour, 500)
+	got := metricstore.DownsampleInterval(30*24*time.Hour, 500, true)
 	if got != 2*time.Hour {
 		t.Fatalf("30d/500 should ceil to 2h, got %s", got)
 	}
 
-	got = metricDownsampleInterval(time.Hour, 500)
+	got = metricstore.DownsampleInterval(time.Hour, 500, true)
 	if got != 10*time.Second {
 		t.Fatalf("1h/500 should ceil to 10s, got %s", got)
 	}
 
-	got = metricDownsampleInterval(1000*24*time.Hour, 10)
+	got = metricstore.DownsampleInterval(1000*24*time.Hour, 10, true)
 	if got != 100*24*time.Hour {
 		t.Fatalf("ranges beyond the standard table should ceil to whole days, got %s", got)
 	}

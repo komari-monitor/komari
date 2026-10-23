@@ -93,6 +93,7 @@ func normalizedIndexesFor(prefix string, tables tables) []normalizedIndex {
 	return []normalizedIndex{
 		{name: prefix + "series_metric_entity_idx", table: tables.series, columns: "metric_name, entity_id"},
 		{name: prefix + "rollups_resolution_bucket_idx", table: tables.rollups, columns: "resolution_id, bucket_milli"},
+		{name: prefix + "rollups_series_resolution_bucket_idx", table: tables.rollups, columns: "series_id, resolution_id, bucket_milli"},
 	}
 }
 

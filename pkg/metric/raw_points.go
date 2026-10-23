@@ -330,14 +330,29 @@ func (s *Store) queryRawPointsBatch(ctx context.Context, query BatchQuery) (map[
 				continue
 			}
 		}
-		tags, ok, err := matchRawTags(series.tagsJSON, query.Tags)
+		var tags map[string]string
+		ok := true
+		var err error
+		if !query.OmitTags || len(query.Tags) > 0 {
+			tags, ok, err = matchRawTags(series.tagsJSON, query.Tags)
+		}
+		if query.OmitTags {
+			tags = nil
+		}
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
 			continue
 		}
-		labels := make(map[uint32]map[string]string)
+		var identity *SeriesIdentity
+		if query.IncludeSeriesIdentity {
+			identity = NewSeriesIdentity(key.entityID, tags)
+		}
+		var labels map[uint32]map[string]string
+		if !query.OmitLabels {
+			labels = make(map[uint32]map[string]string)
+		}
 		directStart := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp >= start })
 		directEnd := sort.Search(len(series.samples), func(i int) bool { return series.samples[i].timestamp > end })
 		additional := directEnd - directStart
@@ -359,7 +374,7 @@ func (s *Store) queryRawPointsBatch(ctx context.Context, query BatchQuery) (map[
 				if err != nil {
 					return nil, err
 				}
-				appendRawQueryPoint(metricPoints, key, tags, labelMap, sample)
+				appendRawQueryPoint(metricPoints, key, tags, labelMap, sample, identity)
 			}
 		}
 		for _, sample := range series.samples[directStart:directEnd] {
@@ -367,7 +382,7 @@ func (s *Store) queryRawPointsBatch(ctx context.Context, query BatchQuery) (map[
 			if err != nil {
 				return nil, err
 			}
-			appendRawQueryPoint(metricPoints, key, tags, labelMap, sample)
+			appendRawQueryPoint(metricPoints, key, tags, labelMap, sample, identity)
 		}
 	}
 	result := make(map[string][]Point, len(matched))
@@ -379,6 +394,9 @@ func (s *Store) queryRawPointsBatch(ctx context.Context, query BatchQuery) (map[
 }
 
 func rawSampleLabels(series *rawSeries, labels map[uint32]map[string]string, labelID uint32) (map[string]string, error) {
+	if labels == nil {
+		return nil, nil
+	}
 	if labelMap := labels[labelID]; labelMap != nil {
 		return labelMap, nil
 	}
@@ -390,9 +408,10 @@ func rawSampleLabels(series *rawSeries, labels map[uint32]map[string]string, lab
 	return labelMap, nil
 }
 
-func appendRawQueryPoint(points *rawBatchPoints, key rawSeriesKey, tags, labels map[string]string, sample rawSample) {
+func appendRawQueryPoint(points *rawBatchPoints, key rawSeriesKey, tags, labels map[string]string, sample rawSample, identity *SeriesIdentity) {
 	points.points = append(points.points, Point{
-		MetricName: key.metricName, EntityID: key.entityID,
+		SeriesIdentity: identity,
+		MetricName:     key.metricName, EntityID: key.entityID,
 		Timestamp: fromMillis(sample.timestamp), Value: sample.value, Tags: tags, Labels: labels,
 	})
 	points.tagsHashes = append(points.tagsHashes, key.tagsHash)

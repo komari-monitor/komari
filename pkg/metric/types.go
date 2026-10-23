@@ -194,6 +194,10 @@ func (d Definition) Validate() error {
 //
 // Point 表示某个实体在某一时刻的一条指标采样。
 type Point struct {
+	// SeriesIdentity is opt-in query metadata, never part of public JSON.
+	// Clear or rebuild it after changing EntityID or Tags (including map contents);
+	// grouping trusts the immutable snapshot. Compare Key(), not pointer addresses.
+	SeriesIdentity *SeriesIdentity `json:"-"`
 	// MetricName names the metric this sample belongs to.
 	//
 	// MetricName 表示该采样所属的指标名称。
@@ -294,12 +298,19 @@ type Query struct {
 // BatchQuery loads exact raw samples for multiple metrics and entities from one
 // shared time window.
 type BatchQuery struct {
-	MetricNames []string          `json:"metric_names"`
-	EntityIDs   []string          `json:"entity_ids,omitempty"`
-	Start       time.Time         `json:"start"`
-	End         time.Time         `json:"end"`
-	Tags        map[string]string `json:"tags,omitempty"`
-	Order       Order             `json:"order,omitempty"`
+	// IncludeSeriesIdentity snapshots output entity/Tags once per series.
+	// Default false keeps existing Go-value equality and JSON unchanged.
+	IncludeSeriesIdentity bool              `json:"-"`
+	MetricNames           []string          `json:"metric_names"`
+	EntityIDs             []string          `json:"entity_ids,omitempty"`
+	Start                 time.Time         `json:"start"`
+	End                   time.Time         `json:"end"`
+	Tags                  map[string]string `json:"tags,omitempty"`
+	Order                 Order             `json:"order,omitempty"`
+	// OmitTags skips output tag decoding, but does not change tag filters or ordering.
+	OmitTags bool `json:"omit_tags,omitempty"`
+	// OmitLabels skips decoding and returning sample labels.
+	OmitLabels bool `json:"omit_labels,omitempty"`
 }
 
 // BatchSeriesSpec describes the rollup output requested for one metric.
@@ -308,17 +319,29 @@ type BatchSeriesSpec struct {
 	Aggregations   []Aggregation
 	Interval       time.Duration
 	PreserveSeries bool
+	// GroupByEntity keeps entities separate while merging their tag variants.
+	// PreserveSeries takes precedence and additionally preserves tags. Rate
+	// output retains its existing per-series counter semantics.
+	GroupByEntity bool
 }
 
 // BatchSeriesQuery combines per-metric rollup specifications that share the
 // same time, entity, tag, and ordering filters.
 type BatchSeriesQuery struct {
-	Specs     []BatchSeriesSpec
-	EntityIDs []string
-	Start     time.Time
-	End       time.Time
-	Tags      map[string]string
-	Order     Order
+	// IncludeSeriesIdentity snapshots output entity/Tags once per series.
+	// Default false keeps existing Go-value equality and JSON unchanged.
+	IncludeSeriesIdentity bool `json:"-"`
+	Specs                 []BatchSeriesSpec
+	EntityIDs             []string
+	Start                 time.Time
+	End                   time.Time
+	Tags                  map[string]string
+	Order                 Order
+	// OmitTags skips output tags without changing filters or series grouping.
+	OmitTags bool
+	// CompactDefinitions returns only Name, Type, and RetentionDays, avoiding
+	// descriptive metadata loading and decoding. The default returns full definitions.
+	CompactDefinitions bool
 }
 
 // BatchSeriesResult contains definitions and aggregate values keyed by metric
@@ -504,6 +527,10 @@ func (q AggregateQuery) Validate() error {
 //
 // AggregatePoint 表示一个聚合桶的结果。
 type AggregatePoint struct {
+	// SeriesIdentity is opt-in query metadata, never part of public JSON.
+	// Clear or rebuild it after changing EntityID or Tags (including map contents);
+	// grouping trusts the immutable snapshot. Compare Key(), not pointer addresses.
+	SeriesIdentity *SeriesIdentity `json:"-"`
 	// MetricName is the metric represented by the bucket.
 	//
 	// MetricName 是该桶代表的指标名称。
