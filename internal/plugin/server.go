@@ -1,11 +1,13 @@
 package plugin
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,12 +19,14 @@ import (
 	"github.com/Calcium-Ion/moejs"
 	"github.com/Calcium-Ion/moejs/engine"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/pkg/jsruntime/httpbody"
 	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 	"github.com/komari-monitor/komari/pkg/jsruntime/require"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/api"
 )
 
 // registerServerModule registers the "server" native module for one plugin
@@ -30,7 +34,8 @@ import (
 //
 //	server.route(method, path, handler)   register an HTTP route on the host
 //	                                      engine; handler receives (req, res)
-//	                                      and must call res.end() to finish
+//	                                      and finishes via res.end() or an
+//	                                      awaited req.upgradeWebSocket()
 //	server.static(path, dir, opts)        serve a folder from the plugin
 //	                                      directory at a mount path; opts.spa
 //	                                      makes unmatched paths fall back to
@@ -401,9 +406,21 @@ func (m *Manager) routeHandler(short string) gin.HandlerFunc {
 			chunks:     make(chan []byte, 4),
 			abortCh:    make(chan struct{}),
 		}
+		state.upgrades = make(chan *routeUpgrade, 1)
+		defer state.seal()
+		// Gin recycles c when the request returns, including on a timeout while
+		// this turn is still queued. Only the HTTP pump uses the original.
+		snapshot := c.Copy()
+		snapshot.Request = c.Request.Clone(c.Request.Context())
+		if principal := rpcPrincipalFromGin(c); principal != nil {
+			copy := *principal
+			copy.Roles = append([]string(nil), principal.Roles...)
+			snapshot.Set(principalContextKey, &copy)
+		}
 		queued := host.RunOnLoop(func(vm *moejs.Runtime) {
-			req := routeRequest(vm, c, body)
+			req := routeRequest(vm, snapshot, body)
 			res := routeResponseObject(vm, state)
+			bindRouteUpgrade(vm, req, res, state, host, snapshot.Request)
 			runErr := host.RunJob(vm, "plugin route "+short, func() error {
 				_, callErr := vm.CallFunction(handler, moejs.Undefined(), engine.ObjectValue(req), engine.ObjectValue(res))
 				return callErr
@@ -446,6 +463,36 @@ func (m *Manager) routeHandler(short string) gin.HandlerFunc {
 		committed := false
 		for {
 			select {
+			case upgrade := <-state.upgrades:
+				state.mu.Lock()
+				state.sealed = true
+				state.upgradeClaimed = true
+				state.mu.Unlock()
+				idle.Stop()
+				if c.Request.Context().Err() != nil || !host.ResourcesOpen() {
+					upgrade.ws.abort()
+					upgrade.complete(errors.New("WebSocket upgrade canceled"))
+					return
+				}
+				stopCancel := context.AfterFunc(c.Request.Context(), upgrade.ws.abort)
+				original := c.Writer
+				c.Writer = &routeUpgradeWriter{ResponseWriter: original, ws: upgrade.ws}
+				socket, upgradeErr := api.UpgradeSafeConn(c, func(upgrader *websocket.Upgrader) {
+					upgrader.HandshakeTimeout = host.Timeout()
+				})
+				c.Writer = original
+				stopCancel()
+				if upgradeErr != nil {
+					upgrade.ws.abort()
+					upgrade.complete(upgradeErr)
+					return
+				}
+				if !upgrade.ws.attach(socket) {
+					upgrade.complete(errors.New("WebSocket upgrade canceled"))
+					return
+				}
+				upgrade.complete(nil)
+				return
 			case chunk := <-state.chunks:
 				if !committed {
 					state.mu.Lock()
@@ -471,19 +518,18 @@ func (m *Manager) routeHandler(short string) gin.HandlerFunc {
 				}
 				idle.Reset(host.Timeout())
 			case <-state.done:
+				state.seal()
 				if !committed {
 					writeFinal(0, nil)
 				}
 				return
 			case <-c.Request.Context().Done():
-				state.aborted.Store(true)
-				close(state.abortCh)
+				state.seal()
 				return
 			case <-idle.C:
+				state.seal()
 				if state.isStreaming() {
 					// Streaming idle timeout: end the stream and notify JS
-					state.aborted.Store(true)
-					close(state.abortCh)
 					return
 				}
 				writeFinal(http.StatusGatewayTimeout, []byte("plugin route handler timed out"))
@@ -626,12 +672,100 @@ type routeResponse struct {
 	chunks    chan []byte
 	aborted   atomic.Bool
 	abortCh   chan struct{}
+
+	wrote          bool
+	sealed         bool
+	upgradeClaimed bool
+	upgrade        *routeUpgrade
+	upgrades       chan *routeUpgrade
 }
 
-func (state *routeResponse) markStreaming() {
+// routeUpgrade keeps the Promise on its original loop. No network goroutine
+// touches the resolver or socket object directly.
+type routeUpgrade struct {
+	ws       *routeWebSocket
+	complete func(error)
+}
+
+type routeUpgradeWriter struct {
+	gin.ResponseWriter
+	ws *routeWebSocket
+}
+
+func (w *routeUpgradeWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, err := w.ResponseWriter.Hijack()
+	if err == nil {
+		w.ws.captureConn(conn)
+	}
+	return conn, rw, err
+}
+
+func bindRouteUpgrade(vm *moejs.Runtime, req, res *engine.Object, state *routeResponse, host *jsruntime.Host, request *http.Request) {
+	_ = native.Function(vm, req, "upgradeWebSocket", func(_ *moejs.Realm, _ moejs.Value, _ []moejs.Value) (moejs.Value, error) {
+		promise, resolve, reject := vm.NewPromise()
+		fail := func(message string) (moejs.Value, error) {
+			_ = reject(native.GoError(vm, errors.New(message)))
+			return native.From(vm, promise), nil
+		}
+		streaming := native.Bool(native.Get(vm, res, "streaming"))
+		state.mu.Lock()
+		if state.sealed || state.ended || state.upgrade != nil || state.wrote || state.streaming || streaming {
+			state.mu.Unlock()
+			return fail("HTTP response is no longer available for WebSocket upgrade")
+		}
+		if request.Method != http.MethodGet || !websocket.IsWebSocketUpgrade(request) {
+			state.mu.Unlock()
+			return fail("require a GET WebSocket upgrade request")
+		}
+		ws := newRouteWebSocket(host)
+		u := &routeUpgrade{ws: ws}
+		u.complete = func(upgradeErr error) {
+			if !host.RunOnLoop(func(vm *moejs.Runtime) {
+				if !host.ResourcesOpen() {
+					ws.abort()
+					return
+				}
+				err := host.RunJob(vm, "WebSocket upgrade", func() error {
+					if upgradeErr != nil {
+						return reject(native.GoError(vm, upgradeErr))
+					}
+					return resolve(engine.ObjectValue(ws.object(vm)))
+				})
+				if err != nil || upgradeErr != nil {
+					ws.abort()
+					return
+				}
+				// Promise continuations install handlers before a later loop turn
+				// starts delivering messages (including an immediate peer send).
+				if !host.RunOnLoop(func(_ *moejs.Runtime) { ws.start() }) {
+					ws.abort()
+				}
+			}) {
+				ws.abort()
+			}
+		}
+		state.upgrade = u
+		state.mu.Unlock()
+		state.upgrades <- u
+		return native.From(vm, promise), nil
+	})
+}
+
+// seal prevents queued JavaScript from writing or upgrading a returned request.
+func (state *routeResponse) seal() {
 	state.mu.Lock()
-	state.streaming = true
+	wasSealed := state.sealed
+	state.sealed = true
+	pending := state.upgrade
+	claimed := state.upgradeClaimed
 	state.mu.Unlock()
+	if state.aborted.CompareAndSwap(false, true) {
+		close(state.abortCh)
+	}
+	if pending != nil && !claimed && !wasSealed {
+		pending.ws.abort()
+		pending.complete(errors.New("WebSocket upgrade canceled"))
+	}
 }
 
 func (state *routeResponse) isStreaming() bool {
@@ -654,7 +788,7 @@ func (state *routeResponse) pushChunk(p []byte) bool {
 func (state *routeResponse) finish(status int, body []byte) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.ended {
+	if state.ended || state.sealed || state.upgrade != nil {
 		return
 	}
 	if status != 0 {
@@ -683,13 +817,17 @@ func routeResponseObject(vm *moejs.Runtime, state *routeResponse) *engine.Object
 	})
 	_ = native.Function(vm, res, "setHeader", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		name, value := native.String(vm, moejs.Arg(args, 0)), moejs.Arg(args, 1)
+		var values []string
+		if err := native.ExportTo(vm, value, &values); err != nil {
+			values = []string{native.String(vm, value)}
+		}
 		state.mu.Lock()
 		defer state.mu.Unlock()
-		var values []string
-		if err := native.ExportTo(vm, value, &values); err == nil {
-			state.headers[name] = values
-		} else {
-			state.headers.Set(name, native.String(vm, value))
+		if state.upgrade != nil {
+			return moejs.Undefined(), native.TypeError(vm, "HTTP response is unavailable after WebSocket upgrade")
+		}
+		if !state.sealed {
+			state.headers[http.CanonicalHeaderKey(name)] = values
 		}
 		return engine.ObjectValue(res), nil
 	})
@@ -706,9 +844,15 @@ func routeResponseObject(vm *moejs.Runtime, state *routeResponse) *engine.Object
 		return native.From(vm, values), nil
 	})
 	_ = native.Function(vm, res, "removeHeader", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		name := native.String(vm, moejs.Arg(args, 0))
 		state.mu.Lock()
-		state.headers.Del(native.String(vm, moejs.Arg(args, 0)))
-		state.mu.Unlock()
+		defer state.mu.Unlock()
+		if state.upgrade != nil {
+			return moejs.Undefined(), native.TypeError(vm, "HTTP response is unavailable after WebSocket upgrade")
+		}
+		if !state.sealed {
+			state.headers.Del(name)
+		}
 		return moejs.Undefined(), nil
 	})
 	_ = native.Function(vm, res, "write", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
@@ -717,23 +861,42 @@ func routeResponseObject(vm *moejs.Runtime, state *routeResponse) *engine.Object
 		if err := native.ExportTo(vm, value, &data); err != nil {
 			data = []byte(native.String(vm, value))
 		}
-		if native.Bool(native.Get(vm, res, "streaming")) {
-			state.markStreaming()
-			_ = state.pushChunk(data)
-			return native.From(vm, true), nil
-		}
+		streaming := native.Bool(native.Get(vm, res, "streaming"))
 		state.mu.Lock()
+		if state.upgrade != nil {
+			state.mu.Unlock()
+			return moejs.Undefined(), native.TypeError(vm, "HTTP response is unavailable after WebSocket upgrade")
+		}
+		if state.sealed || state.ended {
+			state.mu.Unlock()
+			return native.From(vm, false), nil
+		}
+		state.wrote = true
+		if streaming {
+			state.streaming = true
+			state.mu.Unlock()
+			return native.From(vm, state.pushChunk(data)), nil
+		}
 		_, _ = state.body.Write(data)
 		state.mu.Unlock()
 		return native.From(vm, true), nil
 	})
 	_ = native.Function(vm, res, "end", func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		var tail string
+		if len(args) > 0 && !native.IsNil(args[0]) {
+			tail = native.String(vm, args[0])
+		}
+		status := int(native.Int(vm, native.Get(vm, res, "statusCode")))
 		state.mu.Lock()
 		defer state.mu.Unlock()
-		if len(args) > 0 && !native.IsNil(args[0]) {
-			_, _ = state.body.WriteString(native.String(vm, args[0]))
+		if state.upgrade != nil {
+			return moejs.Undefined(), native.TypeError(vm, "HTTP response is unavailable after WebSocket upgrade")
 		}
-		state.statusCode = int(native.Int(vm, native.Get(vm, res, "statusCode")))
+		if state.sealed || state.ended {
+			return engine.ObjectValue(res), nil
+		}
+		_, _ = state.body.WriteString(tail)
+		state.statusCode = status
 		if !state.ended {
 			state.ended = true
 			close(state.done)
