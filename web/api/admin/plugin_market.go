@@ -36,6 +36,7 @@ type PluginMarketPlugin struct {
 	Name        any    `json:"name"`
 	Short       string `json:"short"`
 	Description any    `json:"description"`
+	Category    string `json:"category,omitempty"`
 	Version     string `json:"version"`
 	Author      any    `json:"author"`
 	URL         string `json:"url"`
