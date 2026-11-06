@@ -661,7 +661,12 @@ func TestChildProcessPermissionAndExecution(t *testing.T) {
 				child.on("error", () => resolve(false));
 			});
 		}
-	`, Options{NodeJS: true, AllowExec: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
+	`, Options{
+		// Spawning a shell is slow under -race and -coverpkg instrumentation,
+		// so this budget is deliberately generous to avoid flakes.
+		NodeJS: true, AllowExec: true, BaseDir: t.TempDir(), Console: io.Discard,
+		Timeout: 30 * time.Second,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

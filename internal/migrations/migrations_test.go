@@ -2,6 +2,7 @@ package migrations
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 func openTestDB(t *testing.T, name string) *gorm.DB {
 	t.Helper()
 
-	dsn := "file:" + strings.ReplaceAll(name, " ", "_") + "?mode=memory&cache=shared"
+	dsn := fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", strings.ReplaceAll(name, " ", "_"), time.Now().UnixNano())
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite test db: %v", err)

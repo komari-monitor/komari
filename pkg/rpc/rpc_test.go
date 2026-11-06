@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +15,7 @@ func getHandler(name string) Handler {
 
 // 重复注册
 func TestRegisterDuplicateAndReserved(t *testing.T) {
+	resetRegistry(t)
 	name := "sample.method"
 	// first register should succeed
 	if err := Register(name, func(ctx context.Context, req *JsonRpcRequest) (any, *JsonRpcError) { return "ok", nil }); err != nil {
@@ -30,6 +32,7 @@ func TestRegisterDuplicateAndReserved(t *testing.T) {
 }
 
 func TestRegisterWithoutMetadataIsDiscoverable(t *testing.T) {
+	resetRegistry(t)
 	method := "sample.noMeta"
 	if err := Register(method, func(context.Context, *JsonRpcRequest) (any, *JsonRpcError) {
 		return map[string]any{"ok": true}, nil
@@ -48,6 +51,7 @@ func TestRegisterWithoutMetadataIsDiscoverable(t *testing.T) {
 
 // 内部函数
 func TestInternalMethods(t *testing.T) {
+	resetRegistry(t)
 	res, err := Invoke("rpc.ping", nil)
 	if err != nil {
 		t.Fatalf("rpc.ping returned error: %+v", err)
@@ -67,6 +71,7 @@ func TestInternalMethods(t *testing.T) {
 
 // Test rpc.help functionality
 func TestRpcHelp(t *testing.T) {
+	resetRegistry(t)
 	// Register a method with metadata
 	method := "demo.echo"
 	RegisterWithMeta(method, func(ctx context.Context, req *JsonRpcRequest) (any, *JsonRpcError) {
@@ -92,6 +97,7 @@ func TestRpcHelp(t *testing.T) {
 
 // Test BindParams positional array -> struct mapping
 func TestBindParamsPositionalStruct(t *testing.T) {
+	resetRegistry(t)
 	type Pair struct {
 		First  int
 		Second int
@@ -122,4 +128,35 @@ func TestBindParamsPositionalStruct(t *testing.T) {
 	if p.First != 9 || p.Second != 8 {
 		t.Fatalf("expected (9,8) got %+v", p)
 	}
+}
+
+// resetRegistry drops handlers registered by tests while keeping the built-in
+// rpc.* methods created by init(). Without this, repeated runs (-count=N) fail
+// on "method already registered".
+func resetRegistry(t *testing.T) {
+
+	t.Helper()
+
+	clear := func() {
+
+		muHandlers.Lock()
+
+		for method := range handlers {
+
+			if !strings.HasPrefix(method, "rpc.") {
+
+				delete(handlers, method)
+
+			}
+
+		}
+
+		muHandlers.Unlock()
+
+	}
+
+	clear()
+
+	t.Cleanup(clear)
+
 }

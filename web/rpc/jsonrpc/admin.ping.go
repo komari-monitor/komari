@@ -52,9 +52,6 @@ func adminAddPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Jso
 	if params.Name == "" || params.Target == "" || params.TaskType == "" || params.Interval == 0 {
 		return nil, rpc.MakeError(rpc.InvalidParams, "name, target, type and interval are required", nil)
 	}
-	if !params.DefaultOn && len(params.Clients) == 0 {
-		return nil, rpc.MakeError(rpc.InvalidParams, "clients is required when default_on is false", nil)
-	}
 	taskID, err := tasks.AddPingTask(params.Clients, params.DefaultOn, params.Name, params.Target, params.TaskType, params.Interval)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)

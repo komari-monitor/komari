@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -10,8 +11,7 @@ import (
 )
 
 func TestClearTaskResultsByTimeBeforeUsesUTCTimeValue(t *testing.T) {
-	flags.DatabaseType = flags.DatabaseTypeSQLite
-	flags.DatabaseFile = "file:task_cleanup_time?mode=memory&cache=shared"
+	resetTaskTables(t)
 	db := dbcore.GetDBInstance()
 
 	taskID := "task-cleanup-time"
@@ -42,8 +42,7 @@ func TestClearTaskResultsByTimeBeforeUsesUTCTimeValue(t *testing.T) {
 }
 
 func TestGetAllPingTasksOrdersByWeightThenID(t *testing.T) {
-	flags.DatabaseType = flags.DatabaseTypeSQLite
-	flags.DatabaseFile = "file:ping_task_order?mode=memory&cache=shared"
+	resetTaskTables(t)
 	db := dbcore.GetDBInstance()
 
 	tasks := []models.PingTask{
@@ -68,8 +67,7 @@ func TestGetAllPingTasksOrdersByWeightThenID(t *testing.T) {
 }
 
 func TestUpdatePingTaskOrderAllowsUnchangedWeights(t *testing.T) {
-	flags.DatabaseType = flags.DatabaseTypeSQLite
-	flags.DatabaseFile = "file:ping_task_update_order?mode=memory&cache=shared"
+	resetTaskTables(t)
 	db := dbcore.GetDBInstance()
 
 	items := []models.PingTask{
@@ -100,8 +98,7 @@ func TestUpdatePingTaskOrderAllowsUnchangedWeights(t *testing.T) {
 }
 
 func TestGetPingTasksByClientOrdersByWeightThenID(t *testing.T) {
-	flags.DatabaseType = flags.DatabaseTypeSQLite
-	flags.DatabaseFile = "file:ping_task_client_order?mode=memory&cache=shared"
+	resetTaskTables(t)
 	db := dbcore.GetDBInstance()
 
 	items := []models.PingTask{
@@ -117,4 +114,57 @@ func TestGetPingTasksByClientOrdersByWeightThenID(t *testing.T) {
 	if len(ordered) != 2 || ordered[0].Id != items[1].Id || ordered[1].Id != items[0].Id {
 		t.Fatalf("ping task order = %#v, want ids [%d %d]", ordered, items[1].Id, items[0].Id)
 	}
+}
+
+// TestMain pins a single shared in-memory database. dbcore.Initialize runs
+// once per process, so per-test DSN assignment would be ignored and leave the
+// tests fighting over whichever DSN happened to win.
+func TestMain(m *testing.M) {
+
+	flags.DatabaseType = flags.DatabaseTypeSQLite
+
+	flags.DatabaseFile = "file:komari_tasks_test?mode=memory&cache=shared"
+
+	db := dbcore.GetDBInstance()
+
+	if sqlDB, err := db.DB(); err == nil {
+
+		sqlDB.SetMaxOpenConns(1)
+
+	}
+
+	os.Exit(m.Run())
+
+}
+
+// resetTaskTables clears the shared in-memory tables so repeated runs and
+// shuffled execution start from a clean slate.
+func resetTaskTables(t *testing.T) {
+
+	t.Helper()
+
+	db := dbcore.GetDBInstance()
+
+	for _, model := range []any{&models.Task{}, &models.TaskResult{}, &models.PingTask{}} {
+
+		if err := db.Where("1 = 1").Delete(model).Error; err != nil {
+
+			t.Fatalf("reset %T: %v", model, err)
+
+		}
+
+	}
+
+	t.Cleanup(func() {
+
+		db := dbcore.GetDBInstance()
+
+		for _, model := range []any{&models.Task{}, &models.TaskResult{}, &models.PingTask{}} {
+
+			_ = db.Where("1 = 1").Delete(model).Error
+
+		}
+
+	})
+
 }

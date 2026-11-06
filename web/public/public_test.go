@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -76,15 +77,41 @@ func TestReplaceHTMLLanguage(t *testing.T) {
 	}
 }
 
+// sharedDistDir extracts the embedded dist archive once per test binary.
+// Extraction dominates these tests' runtime, so both dist-related tests reuse
+// a single copy instead of unpacking the archive twice.
+var (
+	sharedDistOnce sync.Once
+	sharedDistPath string
+	sharedDistErr  error
+)
+
+func extractSharedDist(t *testing.T) string {
+	t.Helper()
+	sharedDistOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "komari-public-dist-*")
+		if err != nil {
+			sharedDistErr = err
+			return
+		}
+		if err := extractDistArchive(embeddedDistArchive, dir); err != nil {
+			sharedDistErr = err
+			_ = os.RemoveAll(dir)
+			return
+		}
+		sharedDistPath = dir
+	})
+	if sharedDistErr != nil {
+		t.Fatalf("extract embedded dist: %v", sharedDistErr)
+	}
+	return sharedDistPath
+}
+
 func TestEmbeddedDistDoesNotEmbedRawFiles(t *testing.T) {
 	if _, err := PublicFS.ReadFile("defaultTheme/dist/index.html"); err == nil {
 		t.Fatal("PublicFS still embeds the raw frontend files")
 	}
-	targetDir := filepath.Join(t.TempDir(), "dist")
-	if err := extractDistArchive(embeddedDistArchive, targetDir); err != nil {
-		t.Fatalf("extract embedded dist: %v", err)
-	}
-	content, err := os.ReadFile(filepath.Join(targetDir, IndexFile))
+	content, err := os.ReadFile(filepath.Join(extractSharedDist(t), IndexFile))
 	if err != nil || len(content) == 0 {
 		t.Fatalf("embedded dist does not contain a non-empty %q", IndexFile)
 	}
@@ -93,10 +120,7 @@ func TestEmbeddedDistDoesNotEmbedRawFiles(t *testing.T) {
 func TestStaticRestrictedDoesNotServeCustomAssetOverride(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	oldDefaultDistCacheDir := defaultDistCacheDir
-	defaultDistCacheDir = filepath.Join(t.TempDir(), "dist")
-	if err := extractDistArchive(embeddedDistArchive, defaultDistCacheDir); err != nil {
-		t.Fatalf("extract embedded dist: %v", err)
-	}
+	defaultDistCacheDir = extractSharedDist(t)
 	t.Cleanup(func() {
 		defaultDistCacheDir = oldDefaultDistCacheDir
 	})

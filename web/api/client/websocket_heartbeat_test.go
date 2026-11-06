@@ -61,10 +61,13 @@ func dialHeartbeatTestServer(t *testing.T, server *httptest.Server) *websocket.C
 }
 
 func TestWebSocketHeartbeatRefreshesDeadlineOnPing(t *testing.T) {
+	// The absolute values are irrelevant to the behaviour under test; what
+	// matters is that the client pings well inside the read window. Keeping the
+	// window short bounds the "idle connection survives" wait below.
 	const (
-		pingPeriod = 40 * time.Millisecond
-		readWait   = 300 * time.Millisecond
-		writeWait  = 100 * time.Millisecond
+		pingPeriod = 10 * time.Millisecond
+		readWait   = 60 * time.Millisecond
+		writeWait  = 40 * time.Millisecond
 	)
 
 	ready := make(chan struct{})
@@ -127,7 +130,7 @@ func TestWebSocketHeartbeatRefreshesDeadlineOnPing(t *testing.T) {
 	select {
 	case err := <-serverDone:
 		t.Fatalf("server closed a responsive idle connection: %v", err)
-	case <-time.After(4 * readWait):
+	case <-time.After(3 * readWait):
 	}
 
 	close(stopPings)
@@ -143,8 +146,8 @@ func TestWebSocketHeartbeatRefreshesDeadlineOnPing(t *testing.T) {
 
 func TestWebSocketHeartbeatTimesOutWithoutPing(t *testing.T) {
 	const (
-		readWait  = 300 * time.Millisecond
-		writeWait = 100 * time.Millisecond
+		readWait  = 60 * time.Millisecond
+		writeWait = 40 * time.Millisecond
 	)
 
 	server, serverDone := newHeartbeatTestServer(t, readWait, writeWait, nil)

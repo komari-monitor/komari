@@ -1,0 +1,57 @@
+name: Test
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      # NOTE: the repository stores Go sources with CRLF line endings, which
+      # gofmt normalises to LF, so "gofmt -l" currently lists ~327 files. Until
+      # that is normalised repo-wide this step is advisory only; flip it to a
+      # hard failure once the tree is clean.
+      - name: Formatting report (advisory)
+        run: |
+          count=$(gofmt -l . | grep -v '^web/node_modules' | wc -l)
+          echo "gofmt reports $count file(s) needing formatting."
+          gofmt -l . | grep -v '^web/node_modules' | head -20 || true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1 -timeout 10m
+
+      - name: Test (repeat for isolation)
+        run: go test ./... -count=2 -shuffle=on -timeout 15m
+
+      - name: Race detector
+        run: go test -race ./pkg/metric/ ./internal/metricstore/ ./internal/plugin/ ./web/connection/ ./web/api/terminal/ -count=1 -timeout 15m
+
+      - name: Coverage
+        run: |
+          go test ./... -count=1 -coverpkg=./... -coverprofile=coverage.out -timeout 15m
+          go tool cover -func=coverage.out | tail -1

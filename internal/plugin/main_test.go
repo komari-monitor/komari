@@ -8,6 +8,7 @@ import (
 
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/models"
 )
 
 func TestMain(m *testing.M) {
@@ -20,8 +21,9 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// withTempDataDir redirects DataDir and StorageDir and resets the global
-// manager for the duration of a test.
+// withTempDataDir redirects DataDir and StorageDir, resets the global
+// manager, and clears the plugin configuration rows shared through the
+// process-wide test database, so each test starts from a clean slate.
 func withTempDataDir(t *testing.T) {
 	t.Helper()
 	oldDir := DataDir
@@ -29,6 +31,11 @@ func withTempDataDir(t *testing.T) {
 	oldGlobal := global
 	DataDir = t.TempDir()
 	StorageDir = t.TempDir()
+	// SaveConfiguration writes to the shared in-memory database created by
+	// TestMain, so leftover rows would leak into later tests (and repeated
+	// runs). Clear them before and after each test.
+	clearPluginConfigurations(t)
+	t.Cleanup(func() { clearPluginConfigurations(t) })
 	mgr := &Manager{
 		instances: make(map[string]*Instance),
 		routes:    make(map[string]map[string]bool),
@@ -41,6 +48,16 @@ func withTempDataDir(t *testing.T) {
 		StorageDir = oldStorage
 		global = oldGlobal
 	})
+}
+
+// clearPluginConfigurations removes every stored plugin configuration row.
+func clearPluginConfigurations(t *testing.T) {
+	t.Helper()
+	if err := dbcore.GetDBInstance().
+		Where("1 = 1").
+		Delete(&models.PluginConfiguration{}).Error; err != nil {
+		t.Fatalf("clear plugin configurations: %v", err)
+	}
 }
 
 // writePluginZip creates a plugin ZIP from a name -> content map.

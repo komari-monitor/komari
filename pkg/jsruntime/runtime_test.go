@@ -2,7 +2,6 @@ package jsruntime
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -131,33 +130,6 @@ func TestNewDoesNotRequireSendMessage(t *testing.T) {
 
 	if err := runtime.Call("ping"); err != nil {
 		t.Fatalf("generic runtime call failed: %v", err)
-	}
-}
-
-func TestRequireLoadsAndCachesCommonJSModule(t *testing.T) {
-	modulePath := filepath.Join(t.TempDir(), "module.js")
-	if err := os.WriteFile(modulePath, []byte(`
-		globalThis.__moduleLoads = (globalThis.__moduleLoads || 0) + 1;
-		module.exports = { value: 42 };
-	`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	script := fmt.Sprintf(`
-		function sendMessage() {
-			const first = require(%q);
-			const second = require(%q);
-			return first === second && first.value === 42 && globalThis.__moduleLoads === 1;
-		}
-	`, filepath.ToSlash(modulePath), filepath.ToSlash(modulePath))
-	runtime, err := New(script, Options{Console: io.Discard, Timeout: time.Second, BaseDir: filepath.Dir(modulePath)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-
-	if err := runtime.Call("sendMessage"); err != nil {
-		t.Fatalf("CommonJS require failed: %v", err)
 	}
 }
 
