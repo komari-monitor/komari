@@ -48,19 +48,19 @@ func CheckAndAutoRenewal(client models.Client) {
 
 			switch {
 			case billingCycle >= 27 && billingCycle <= 32:
-				newExpireTime = baseTime.AddDate(0, 1, 0)
+				newExpireTime = addMonths(baseTime, 1)
 			case billingCycle >= 87 && billingCycle <= 95:
-				newExpireTime = baseTime.AddDate(0, 3, 0)
+				newExpireTime = addMonths(baseTime, 3)
 			case billingCycle >= 175 && billingCycle <= 185:
-				newExpireTime = baseTime.AddDate(0, 6, 0)
+				newExpireTime = addMonths(baseTime, 6)
 			case billingCycle >= 360 && billingCycle <= 370:
-				newExpireTime = baseTime.AddDate(1, 0, 0)
+				newExpireTime = addMonths(baseTime, 12)
 			case billingCycle >= 720 && billingCycle <= 750:
-				newExpireTime = baseTime.AddDate(2, 0, 0)
+				newExpireTime = addMonths(baseTime, 24)
 			case billingCycle >= 1080 && billingCycle <= 1150:
-				newExpireTime = baseTime.AddDate(3, 0, 0)
+				newExpireTime = addMonths(baseTime, 36)
 			case billingCycle >= 1800 && billingCycle <= 1850:
-				newExpireTime = baseTime.AddDate(5, 0, 0)
+				newExpireTime = addMonths(baseTime, 60)
 			default:
 				newExpireTime = baseTime.AddDate(0, 0, billingCycle)
 			}
@@ -87,4 +87,13 @@ func CheckAndAutoRenewal(client models.Client) {
 			})
 		}
 	}
+}
+
+// addMonths adds n months and keeps the day within the target month, so a
+// renewal due on Oct 31 moves to Nov 30, not Dec 1. time.AddDate would carry
+// the overflow into the next month and shift every later renewal.
+func addMonths(t time.Time, n int) time.Time {
+	first := time.Date(t.Year(), t.Month(), 1, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location()).AddDate(0, n, 0)
+	lastDay := first.AddDate(0, 1, -1).Day()
+	return first.AddDate(0, 0, min(t.Day(), lastDay)-1)
 }
