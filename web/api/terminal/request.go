@@ -8,7 +8,6 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils"
-	logger "github.com/komari-monitor/komari/utils/log"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
 )
@@ -22,8 +21,7 @@ func RequestTerminal(c *gin.Context) {
 	userUUID, _ := c.Get("uuid")
 	userID, _ := userUUID.(string)
 	_, isAPIKey := c.Get("api_key")
-	_, err := clients.GetClientByUUID(uuid)
-	if err != nil {
+	if _, err := clients.GetClientByUUID(uuid); err != nil {
 		c.JSON(400, gin.H{
 			"status":  "error",
 			"message": "Client not found",
@@ -31,7 +29,8 @@ func RequestTerminal(c *gin.Context) {
 		return
 	}
 	id := strings.TrimSpace(c.Query("request_id"))
-	if id == "" {
+	reattach := id != ""
+	if !reattach {
 		// Only a new terminal request is a sensitive operation. Reattaching an
 		// existing session is authorized by its owner below and must not require
 		// a fresh (and potentially expired) TOTP code.
@@ -45,6 +44,14 @@ func RequestTerminal(c *gin.Context) {
 		allowed := session != nil && session.UUID == uuid && (isAPIKey || session.UserUUID == userID)
 		TerminalSessionsMutex.Unlock()
 		if !allowed {
+			// 会话已过期也走 terminate，浏览器据此明确不再重连。
+			if api.IsWebSocketUpgrade(c) {
+				if conn, err := api.UpgradeSafeConn(c, api.EnableWebSocketCompression); err == nil {
+					notifyTerminate(conn)
+					_ = conn.Close()
+					return
+				}
+			}
 			c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Terminal session not found"})
 			return
 		}
@@ -60,26 +67,17 @@ func RequestTerminal(c *gin.Context) {
 		return
 	}
 
-	if id != "" {
-		session, ok := attachBrowser(id, userID, isAPIKey, conn)
-		if !ok || session.UUID != uuid {
-			conn.WriteMessage(1, []byte("Terminal session expired\n终端会话已过期\n"))
-			conn.Close()
+	if reattach {
+		session, ok := attachBrowser(id, uuid, userID, isAPIKey, conn)
+		if !ok {
+			notifyTerminate(conn)
+			_ = conn.Close()
 			return
 		}
-		conn.SetCloseHandler(func(code int, text string) error {
-			logger.InfoArgs("terminal", "Terminal browser connection closed:", code, text)
-			suspendSession(id, conn, nil)
-			return nil
-		})
-		conn.WriteJSON(gin.H{"request_id": id})
-		if !dispatchTerminalRequest(uuid, id) {
-			conn.WriteMessage(1, []byte("Client offline!\n被控端离线!\n"))
+		notifyAssigned(conn, id)
+		if session.Agent == nil && !dispatchTerminalRequest(uuid, id) {
 			closeSession(id)
 			return
-		}
-		if session.Agent == nil {
-			conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent...\n"))
 		}
 		maybeStartForwarding(id)
 		return
@@ -97,18 +95,15 @@ func RequestTerminal(c *gin.Context) {
 
 	TerminalSessionsMutex.Lock()
 	TerminalSessions[id] = session
+	session.browserPump = conn
 	scheduleCleanup(id, session)
 	TerminalSessionsMutex.Unlock()
-	conn.SetCloseHandler(func(code int, text string) error {
-		logger.InfoArgs("terminal", "Terminal browser connection closed:", code, text)
-		suspendSession(id, conn, nil)
-		return nil
-	})
-	conn.WriteJSON(gin.H{"request_id": id})
+	go pumpBrowserFrames(id, conn)
+	// assigned 让浏览器先拿到 request_id，此后任何一侧掉线都能用它重连。
+	notifyAssigned(conn, id)
 	if !dispatchTerminalRequest(uuid, id) {
-		conn.Close()
 		closeSession(id)
 		return
 	}
-	conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent...\n"))
+	// 终端随后开启：被控端附着时 attachAgent 会发 ready，转发随即开始。
 }

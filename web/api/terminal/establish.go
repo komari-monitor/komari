@@ -8,13 +8,13 @@ import (
 )
 
 func EstablishConnection(c *gin.Context) {
-	session_id := c.Query("id")
+	sessionID := c.Query("id")
 	TerminalSessionsMutex.Lock()
-	session, exists := TerminalSessions[session_id]
+	session, exists := TerminalSessions[sessionID]
 	TerminalSessionsMutex.Unlock()
 	authenticatedUUID, _ := c.Get("client_uuid")
 	authenticatedString, hasAuthenticatedUUID := authenticatedUUID.(string)
-	if !exists || session == nil || session.Browser == nil ||
+	if !exists || session == nil ||
 		(hasAuthenticatedUUID && authenticatedString != "" && authenticatedString != session.UUID) {
 		c.JSON(404, gin.H{"status": "error", "error": "Session not found"})
 		return
@@ -26,17 +26,14 @@ func EstablishConnection(c *gin.Context) {
 	}
 	conn, err := api.UpgradeSafeConn(c, api.EnableWebSocketCompression)
 	if err != nil {
-		closeSession(session_id)
 		return
 	}
-	_, ok := attachAgent(session_id, conn)
+	_, ok := attachAgent(sessionID, conn)
 	if !ok {
-		conn.Close()
+		// 会话已经不在了：明确告知终态，被控端不必重连。
+		notifyTerminate(conn)
+		_ = conn.Close()
 		return
 	}
-	conn.SetCloseHandler(func(code int, text string) error {
-		suspendSession(session_id, nil, conn)
-		return nil
-	})
-	maybeStartForwarding(session_id)
+	maybeStartForwarding(sessionID)
 }

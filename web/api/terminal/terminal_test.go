@@ -4,8 +4,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/komari-monitor/komari/web/connection"
+	"github.com/komari-monitor/komari/cmd/flags"
 )
+
+func TestMain(m *testing.M) {
+	flags.DatabaseType = flags.DatabaseTypeSQLite
+	flags.DatabaseFile = "file:komari_terminal_test_mem?mode=memory&cache=shared"
+	m.Run()
+}
 
 // resetTerminalSessions clears the global session map so each test is
 // independent and no cleanup timer leaks into the next test.
@@ -52,16 +58,19 @@ func TestAttachBrowserEnforcesOwnership(t *testing.T) {
 	resetTerminalSessions(t)
 	newSession(t, "session-1", "owner-uuid", "client-a")
 
-	if _, ok := attachBrowser("session-1", "attacker-uuid", false, nil); ok {
+	if _, ok := attachBrowser("session-1", "client-a", "attacker-uuid", false, nil); ok {
 		t.Fatal("a different user attached to another user's terminal session")
 	}
-	if _, ok := attachBrowser("session-1", "owner-uuid", false, nil); !ok {
+	if _, ok := attachBrowser("session-1", "client-b", "owner-uuid", false, nil); ok {
+		t.Fatal("attached to a session for a different client UUID")
+	}
+	if _, ok := attachBrowser("session-1", "client-a", "owner-uuid", false, nil); !ok {
 		t.Fatal("the owner was refused their own terminal session")
 	}
-	if _, ok := attachBrowser("session-1", "attacker-uuid", true, nil); !ok {
+	if _, ok := attachBrowser("session-1", "client-a", "attacker-uuid", true, nil); !ok {
 		t.Fatal("an API key was refused the terminal session")
 	}
-	if _, ok := attachBrowser("missing-session", "owner-uuid", true, nil); ok {
+	if _, ok := attachBrowser("missing-session", "client-a", "owner-uuid", true, nil); ok {
 		t.Fatal("attaching to a missing session succeeded")
 	}
 }
@@ -74,7 +83,7 @@ func TestAttachBrowserRefusesNilSession(t *testing.T) {
 	TerminalSessions["nil-session"] = nil
 	TerminalSessionsMutex.Unlock()
 
-	if _, ok := attachBrowser("nil-session", "any", true, nil); ok {
+	if _, ok := attachBrowser("nil-session", "client-a", "any", true, nil); ok {
 		t.Fatal("attached to a nil session")
 	}
 }
@@ -112,23 +121,29 @@ func TestCloseSessionRemovesEntryAndIsIdempotent(t *testing.T) {
 	closeSession("never-existed")
 }
 
-// TestSuspendSessionIgnoresStaleConnection guards against a late close from a
-// previous browser tearing down a session that has already been reattached.
-func TestSuspendSessionIgnoresStaleConnection(t *testing.T) {
+// TestSuspendIgnoresStaleConnection guards against a late close from a previous
+// browser tearing down a session that has already been reattached.
+func TestSuspendIgnoresStaleConnection(t *testing.T) {
 	resetTerminalSessions(t)
 	session := newSession(t, "session-4", "owner-uuid", "client-a")
 
-	// Simulate a stale connection that is not the session's current browser.
-	stale := (*connection.SafeConn)(nil)
-	suspendSession("session-4", stale, nil)
+	// A stale connection that is not the session's current browser must not be
+	// able to suspend the live session.
+	live, _ := newControlPair(t)
+	stale, _ := newControlPair(t)
+	session.Browser = live
+	suspendBrowser("session-4", nil)
+	suspendBrowser("session-4", stale)
 
 	TerminalSessionsMutex.Lock()
-	_, present := TerminalSessions["session-4"]
+	current := TerminalSessions["session-4"]
 	TerminalSessionsMutex.Unlock()
-	if !present {
+	if current == nil {
 		t.Fatal("a stale connection removed the live session")
 	}
-	_ = session
+	if current.Browser != live {
+		t.Fatal("a stale connection cleared the live browser socket")
+	}
 }
 
 // TestScheduleCleanupRemovesSession verifies the retention timer eventually
