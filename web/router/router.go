@@ -201,7 +201,7 @@ func registerAdminRoutes(r *gin.Engine) {
 		session.POST("/remove/all", jsonRpc.Bind("admin:deleteAllSessions"))
 	}
 
-	g.GET("/logs", jsonRpc.Bind("admin:getLogs", jsonRpc.WithQuery("limit", "page")))
+	g.GET("/logs", jsonRpc.Bind("admin:getLogs", jsonRpc.WithQuery("limit", "page", "msg_type", "q")))
 
 	// plugins: 安装流程通过统一的分片上传接口，启停/列表/日志走 RPC2，市场对齐主题市场。
 	pluginGroup := g.Group("/plugin")

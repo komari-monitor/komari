@@ -35,6 +35,7 @@ func init() {
 			{Name: "limit", Type: "string", Description: "Page size (default 100)"},
 			{Name: "page", Type: "string", Description: "One-based page number (default 1)"},
 			{Name: "msg_type", Type: "string", Description: "Optional exact message type filter"},
+			{Name: "q", Type: "string", Description: "Optional message, IP, or UUID search"},
 		},
 		Returns: "{ logs: Log[], total: number }",
 	})
@@ -51,6 +52,7 @@ func adminGetLogs(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		Limit   string `json:"limit"`
 		Page    string `json:"page"`
 		MsgType string `json:"msg_type"`
+		Query   string `json:"q"`
 	}
 	req.BindParams(&params)
 	if params.Limit == "" {
@@ -68,19 +70,19 @@ func adminGetLogs(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid page: "+params.Page, nil)
 	}
 	db := dbcore.GetDBInstance()
-	logs, total, err := queryAdminLogs(db, limitInt, pageInt, params.MsgType)
+	logs, total, err := queryAdminLogs(db, limitInt, pageInt, params.MsgType, params.Query)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to retrieve logs: "+err.Error(), nil)
 	}
 	return map[string]any{"logs": logs, "total": total}, nil
 }
 
-func queryAdminLogs(db *gorm.DB, limit, page int, msgType string) ([]models.Log, int64, error) {
+func queryAdminLogs(db *gorm.DB, limit, page int, msgType, search string) ([]models.Log, int64, error) {
 	var logs []models.Log
 	var total int64
 	offset := (page - 1) * limit
-	countQuery := filterAdminLogsByMessageType(db.Model(&models.Log{}), msgType)
-	logsQuery := filterAdminLogsByMessageType(db.Model(&models.Log{}), msgType)
+	countQuery := filterAdminLogs(db.Model(&models.Log{}), msgType, search)
+	logsQuery := filterAdminLogs(db.Model(&models.Log{}), msgType, search)
 	if err := countQuery.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
@@ -90,9 +92,27 @@ func queryAdminLogs(db *gorm.DB, limit, page int, msgType string) ([]models.Log,
 	return logs, total, nil
 }
 
+func filterAdminLogs(query *gorm.DB, msgType, search string) *gorm.DB {
+	query = filterAdminLogsByMessageType(query, msgType)
+	return filterAdminLogsBySearch(query, search)
+}
+
 func filterAdminLogsByMessageType(query *gorm.DB, msgType string) *gorm.DB {
 	if msgType = strings.TrimSpace(msgType); msgType != "" {
 		return query.Where("msg_type = ?", msgType)
+	}
+	return query
+}
+
+func filterAdminLogsBySearch(query *gorm.DB, search string) *gorm.DB {
+	if search = strings.TrimSpace(search); search != "" {
+		pattern := "%" + search + "%"
+		return query.Where(
+			"message LIKE ? OR ip LIKE ? OR uuid LIKE ?",
+			pattern,
+			pattern,
+			pattern,
+		)
 	}
 	return query
 }

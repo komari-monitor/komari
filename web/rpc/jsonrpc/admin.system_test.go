@@ -51,3 +51,28 @@ func TestFilterAdminLogsByMessageType(t *testing.T) {
 		t.Fatalf("unexpected filter variables: %#v", statement.Vars)
 	}
 }
+
+func TestFilterAdminLogsBySearch(t *testing.T) {
+	db, err := gorm.Open(gormtests.DummyDialector{}, &gorm.Config{
+		DryRun:               true,
+		DisableAutomaticPing: true,
+		Logger:               logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open dry-run database: %v", err)
+	}
+
+	var logs []models.Log
+	statement := filterAdminLogsBySearch(db.Model(&models.Log{}), " visitor ").Find(&logs).Statement
+	if sql := statement.SQL.String(); !strings.Contains(sql, "message LIKE ? OR ip LIKE ? OR uuid LIKE ?") {
+		t.Fatalf("filtered SQL missing search predicates: %s", sql)
+	}
+	if len(statement.Vars) != 3 {
+		t.Fatalf("unexpected search variables: %#v", statement.Vars)
+	}
+	for _, variable := range statement.Vars {
+		if variable != "%visitor%" {
+			t.Fatalf("unexpected search variable: %#v", variable)
+		}
+	}
+}
