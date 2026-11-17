@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/connection"
 )
 
@@ -161,13 +163,16 @@ func TestSuspendBrowserAbortsAgent(t *testing.T) {
 }
 
 // TestSuspendAgentAbortsBrowser is the mirror case: the agent dropping must
-// abort the browser so it reconnects, keeping the session alive.
+// abort the browser and re-dispatch the terminal request so the agent reconnects.
 func TestSuspendAgentAbortsBrowser(t *testing.T) {
 	resetTerminalSessions(t)
 
 	browserSafeConn, browserClient := newControlPair(t)
 	agentSafeConn, agentClient := newControlPair(t)
 	t.Cleanup(func() { _ = agentClient.Close() })
+
+	agent_runtime.MarkV2Client("client-a")
+	_ = agent_runtime.TakeV2Events("client-a", nil, 0)
 
 	session := newSession(t, "session-abort2", "owner-uuid", "client-a")
 	session.Browser = browserSafeConn
@@ -177,6 +182,11 @@ func TestSuspendAgentAbortsBrowser(t *testing.T) {
 
 	if frame := readControlFrame(t, browserClient); frame.Type != controlTypeAbort {
 		t.Fatalf("browser frame = %q, want %q", frame.Type, controlTypeAbort)
+	}
+
+	events := agent_runtime.TakeV2Events("client-a", nil, 0)
+	if len(events) == 0 || events[len(events)-1].Method != v2.MethodAgentTerminal {
+		t.Fatalf("expected agent.terminal.request event after suspendAgent, got %+v", events)
 	}
 
 	TerminalSessionsMutex.Lock()

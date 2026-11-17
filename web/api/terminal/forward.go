@@ -89,9 +89,6 @@ func pumpBrowserFrames(id string, browser *connection.SafeConn) {
 		if messageType == websocket.TextMessage {
 			if control, ok := parseControl(data); ok {
 				switch control.Type {
-				case controlTypeHeartbeat:
-					// 纯前端心跳，服务端消费掉，不转给被控端。
-					continue
 				case controlTypeTerminate, "close":
 					// 浏览器主动结束：closeSession 会把 terminate 转给被控端。
 					closeSession(id)
@@ -104,7 +101,7 @@ func pumpBrowserFrames(id string, browser *connection.SafeConn) {
 				if agent == nil {
 					continue
 				}
-				// resize 等其余控制帧保持文本帧原样透传（含旧版兼容）。
+				// heartbeat / resize 等控制帧保持文本帧原样透传（保活并支持端到端 RTT，含旧版兼容）。
 				if err = agent.WriteMessage(websocket.TextMessage, data); err != nil {
 					suspendAgent(id, agent)
 				}
@@ -133,10 +130,22 @@ func pumpAgentFrames(id string, agent *connection.SafeConn) {
 		}
 		if messageType == websocket.TextMessage {
 			if control, ok := parseControl(data); ok {
-				if control.Type == controlTypeTerminate {
+				switch control.Type {
+				case controlTypeTerminate:
 					// 被控端结束（shell 退出等）：closeSession 会转给浏览器。
 					closeSession(id)
 					return
+				case controlTypeHeartbeat:
+					browser, active := currentBrowserForAgent(id, agent)
+					if !active {
+						return
+					}
+					if browser != nil {
+						if err = browser.WriteMessage(websocket.TextMessage, data); err != nil {
+							suspendBrowser(id, browser)
+						}
+					}
+					continue
 				}
 				// 未知控制消息：忽略，前向兼容。
 				continue

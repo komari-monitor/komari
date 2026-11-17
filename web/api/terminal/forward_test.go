@@ -169,6 +169,48 @@ func TestForwardTerminalRelaysOutput(t *testing.T) {
 	}
 }
 
+// TestForwardTerminalRelaysHeartbeat verifies that heartbeat frames carrying an
+// id traverse browser -> server -> agent -> server -> browser for keepalive and RTT.
+func TestForwardTerminalRelaysHeartbeat(t *testing.T) {
+	resetTerminalSessions(t)
+
+	browserSafeConn, browserClient := newControlPair(t)
+	agentSafeConn, agentClient := newControlPair(t)
+	t.Cleanup(func() { _ = browserClient.Close() })
+	t.Cleanup(func() { _ = agentClient.Close() })
+
+	session := newSession(t, "session-heartbeat", "owner-uuid", "client-a")
+	session.Browser = browserSafeConn
+	session.Agent = agentSafeConn
+	session.RequesterIp = "127.0.0.1"
+
+	go ForwardTerminal("session-heartbeat", browserSafeConn, agentSafeConn)
+	time.Sleep(50 * time.Millisecond)
+
+	const hb = `{"type":"heartbeat","id":"42"}`
+	writeFrame(t, browserClient, hb)
+
+	_ = agentClient.SetReadDeadline(time.Now().Add(2 * time.Second))
+	msgType, data, err := agentClient.ReadMessage()
+	if err != nil {
+		t.Fatalf("agent read heartbeat failed: %v", err)
+	}
+	if msgType != websocket.TextMessage || string(data) != hb {
+		t.Fatalf("agent got (%d, %q), want text %q", msgType, string(data), hb)
+	}
+
+	writeFrame(t, agentClient, hb)
+
+	_ = browserClient.SetReadDeadline(time.Now().Add(2 * time.Second))
+	msgType, data, err = browserClient.ReadMessage()
+	if err != nil {
+		t.Fatalf("browser read heartbeat echo failed: %v", err)
+	}
+	if msgType != websocket.TextMessage || string(data) != hb {
+		t.Fatalf("browser got (%d, %q), want text %q", msgType, string(data), hb)
+	}
+}
+
 // TestLegacyAgentSurvivesBrowserReattach verifies that an old agent that
 // ignores abort and keeps its socket open can still be read cleanly by a second
 // ForwardTerminal after a browser reconnects.

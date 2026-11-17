@@ -78,12 +78,16 @@ func suspendSide(id string, conn *connection.SafeConn, matchBrowser bool) {
 		return
 	}
 	var survivor *connection.SafeConn
+	clientUUID := ""
 	if matchBrowser {
 		session.Browser = nil
 		survivor = session.Agent
 	} else {
 		session.Agent = nil
 		survivor = session.Browser
+		if survivor != nil {
+			clientUUID = session.UUID
+		}
 	}
 	session.Forwarding = false
 	stopForwardWaitLocked(session)
@@ -94,6 +98,10 @@ func suspendSide(id string, conn *connection.SafeConn, matchBrowser bool) {
 	// 持锁期间不写 socket：写入可能阻塞，会拖住整个会话表。
 	if survivor != nil {
 		notifyAbort(survivor)
+	}
+	// 浏览器仍在线而被控端掉线时，主动重发终端请求唤醒被控端（兼容不自动重连的旧版 Agent）。
+	if clientUUID != "" {
+		dispatchTerminalRequest(clientUUID, id)
 	}
 }
 
