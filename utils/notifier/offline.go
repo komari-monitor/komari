@@ -154,7 +154,7 @@ func updateOnlineState(clientID string, connectionID int64) bool {
 	// 规则3: 没断开后重连, 不通知
 	// 为了解决OfflineNotify中不是全程加锁
 	if state.isConnExist {
-		logger.Infof("notifier", "%s has connection exist: %d", clientID, connectionID)
+		logger.Debugf("notifier", "%s has connection exist: %d", clientID, connectionID)
 		return false
 	} else {
 		state.isConnExist = true

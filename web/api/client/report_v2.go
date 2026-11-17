@@ -44,7 +44,10 @@ func bindV2Params[T any](raw any, target *T) error {
 	return json.Unmarshal(b, target)
 }
 
-func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
+// handleV2RPC dispatches one v2 JSON-RPC request. markPresence mirrors the
+// transport: HTTP POST bodies refresh the POST presence session, while frames
+// arriving over WebSocket must leave presence to the connection lifecycle.
+func handleV2RPC(uuid string, req v2.Request, allowWait, markPresence bool) v2.Response {
 	if req.JSONRPC != v2.Version {
 		return v2.Error(req.ID, -32600, "invalid jsonrpc version", nil)
 	}
@@ -54,7 +57,7 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		if err := bindV2Params(req.Params, &params); err != nil {
 			return v2.Error(req.ID, -32602, "invalid report params", err.Error())
 		}
-		if err := ingestReport(uuid, params.Report, true); err != nil {
+		if err := ingestReport(uuid, params.Report, markPresence); err != nil {
 			return v2.Error(req.ID, -32000, "failed to save report", err.Error())
 		}
 		return v2.Success(req.ID, gin.H{
@@ -97,7 +100,9 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		if err := bindV2Params(req.Params, &params); err != nil {
 			return v2.Error(req.ID, -32602, "invalid pull params", err.Error())
 		}
-		refreshPostPresence(uuid)
+		if markPresence {
+			refreshPostPresence(uuid)
+		}
 		agent_runtime.MarkV2Client(uuid)
 		timeout := 0 * time.Second
 		if allowWait {
@@ -146,7 +151,7 @@ func UploadV2RPC(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, v2.Error(req.ID, -32001, "invalid token", nil))
 		return
 	}
-	resp := handleV2RPC(uuid, req, true)
+	resp := handleV2RPC(uuid, req, true, true)
 	status := http.StatusOK
 	if resp.Error != nil {
 		status = http.StatusBadRequest
@@ -203,7 +208,7 @@ func WebSocketV2RPC(c *gin.Context) {
 			conn.WriteJSON(v2.Error(nil, -32700, "parse error", err.Error()))
 			continue
 		}
-		resp := handleV2RPC(uuid, req, false)
+		resp := handleV2RPC(uuid, req, false, false)
 		if req.ID != nil {
 			if err := conn.WriteJSON(resp); err != nil {
 				logger.Errorf("client-api", "failed to write v2 rpc response: %v", err)
