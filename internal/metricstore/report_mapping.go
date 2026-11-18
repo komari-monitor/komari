@@ -43,7 +43,7 @@ func reportMetricPoints(report v2.Report, trafficUp, trafficDown int64) []metric
 			metric.Point{MetricName: MetricGPUMem, EntityID: entityID, Timestamp: ts, Value: float64(gpu.MemoryUsed), Tags: tags},
 			metric.Point{MetricName: MetricGPUMemTotal, EntityID: entityID, Timestamp: ts, Value: float64(gpu.MemoryTotal), Tags: tags},
 			metric.Point{MetricName: MetricGPUDeviceUsage, EntityID: entityID, Timestamp: ts, Value: gpu.Utilization, Tags: tags},
-			metric.Point{MetricName: MetricGPUTemp, EntityID: entityID, Timestamp: ts, Value: float64(gpu.Temperature), Tags: tags},
+			metric.Point{MetricName: MetricGPUTemp, EntityID: entityID, Timestamp: ts, Value: gpu.Temperature, Tags: tags},
 		)
 	}
 	return points
