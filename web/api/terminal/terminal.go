@@ -8,12 +8,14 @@ import (
 )
 
 type TerminalSession struct {
-	UUID        string
-	UserUUID    string
-	Browser     *connection.SafeConn
-	Agent       *connection.SafeConn
-	RequesterIp string
-	Forwarding  bool
+	UUID            string
+	UserUUID        string
+	Browser         *connection.SafeConn
+	BrowserClientID string
+	Agent           *connection.SafeConn
+	RequesterIp     string
+	CreatedAt       time.Time
+	Forwarding      bool
 	// browserPump / agentPump 确保同一条 SafeConn 至多只启动一个读循环协程；
 	// forwardStop 在单边断线或正常结束时关闭，唤醒当前活跃的 ForwardTerminal。
 	browserPump *connection.SafeConn
@@ -81,6 +83,7 @@ func suspendSide(id string, conn *connection.SafeConn, matchBrowser bool) {
 	clientUUID := ""
 	if matchBrowser {
 		session.Browser = nil
+		session.BrowserClientID = ""
 		survivor = session.Agent
 	} else {
 		session.Agent = nil
@@ -118,6 +121,9 @@ func closeSession(id string) {
 		stopCleanup(session)
 		stopForwardWaitLocked(session)
 		browser, agent = session.Browser, session.Agent
+		if agent == nil && session.UUID != "" {
+			recordTerminatedSessionLocked(id, session.UUID)
+		}
 		delete(TerminalSessions, id)
 	}
 	TerminalSessionsMutex.Unlock()
@@ -132,20 +138,39 @@ func closeSession(id string) {
 	}
 }
 
+func canAttachBrowserLocked(session *TerminalSession, clientUUID, userUUID string, apiKey bool, clientID string) (allowed bool, alreadyAttached bool) {
+	if session == nil || session.UUID != clientUUID || (!apiKey && session.UserUUID != userUUID) {
+		return false, false
+	}
+	if session.Browser != nil && (clientID == "" || session.BrowserClientID != clientID) {
+		return false, true
+	}
+	return true, false
+}
+
+func hasAttachedAgent(id string) bool {
+	TerminalSessionsMutex.Lock()
+	defer TerminalSessionsMutex.Unlock()
+	session := TerminalSessions[id]
+	return session != nil && session.Agent != nil
+}
+
 func attachBrowser(id, clientUUID, userUUID string, apiKey bool, conn *connection.SafeConn) (*TerminalSession, bool) {
+	session, _, ok := attachBrowserWithClientID(id, clientUUID, userUUID, apiKey, conn, "")
+	return session, ok
+}
+
+func attachBrowserWithClientID(id, clientUUID, userUUID string, apiKey bool, conn *connection.SafeConn, clientID string) (*TerminalSession, bool, bool) {
 	TerminalSessionsMutex.Lock()
 	session, ok := TerminalSessions[id]
-	if !ok || session == nil {
+	if allowed, _ := canAttachBrowserLocked(session, clientUUID, userUUID, apiKey, clientID); !ok || !allowed {
 		TerminalSessionsMutex.Unlock()
-		return nil, false
-	}
-	if session.UUID != clientUUID || (!apiKey && session.UserUUID != userUUID) {
-		TerminalSessionsMutex.Unlock()
-		return nil, false
+		return nil, false, false
 	}
 	oldBrowser := session.Browser
 	oldAgent := session.Agent
 	session.Browser = conn
+	session.BrowserClientID = clientID
 	session.Forwarding = false
 	startPump := conn != nil && session.browserPump != conn
 	if startPump {
@@ -169,7 +194,7 @@ func attachBrowser(id, clientUUID, userUUID string, apiKey bool, conn *connectio
 	if oldAgent != nil {
 		notifyReady(conn)
 	}
-	return session, true
+	return session, oldAgent != nil, true
 }
 
 func attachAgent(id string, conn *connection.SafeConn) (*TerminalSession, bool) {

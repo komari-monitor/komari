@@ -3,6 +3,7 @@ package terminal
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/clients"
@@ -29,6 +30,7 @@ func RequestTerminal(c *gin.Context) {
 		return
 	}
 	id := strings.TrimSpace(c.Query("request_id"))
+	clientID := strings.TrimSpace(c.Query("client_id"))
 	reattach := id != ""
 	if !reattach {
 		// Only a new terminal request is a sensitive operation. Reattaching an
@@ -41,16 +43,20 @@ func RequestTerminal(c *gin.Context) {
 	} else {
 		TerminalSessionsMutex.Lock()
 		session := TerminalSessions[id]
-		allowed := session != nil && session.UUID == uuid && (isAPIKey || session.UserUUID == userID)
+		allowed, alreadyAttached := canAttachBrowserLocked(session, uuid, userID, isAPIKey, clientID)
 		TerminalSessionsMutex.Unlock()
 		if !allowed {
-			// 会话已过期也走 terminate，浏览器据此明确不再重连。
+			// 会话已过期或已被其他浏览器占用时也走 terminate，浏览器据此明确不再重连。
 			if api.IsWebSocketUpgrade(c) {
 				if conn, err := api.UpgradeSafeConn(c, api.EnableWebSocketCompression); err == nil {
 					notifyTerminate(conn)
 					_ = conn.Close()
 					return
 				}
+			}
+			if alreadyAttached {
+				c.JSON(http.StatusConflict, gin.H{"status": "error", "message": "Terminal session is already attached"})
+				return
 			}
 			c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Terminal session not found"})
 			return
@@ -68,14 +74,14 @@ func RequestTerminal(c *gin.Context) {
 	}
 
 	if reattach {
-		session, ok := attachBrowser(id, uuid, userID, isAPIKey, conn)
+		_, hasAgent, ok := attachBrowserWithClientID(id, uuid, userID, isAPIKey, conn, clientID)
 		if !ok {
 			notifyTerminate(conn)
 			_ = conn.Close()
 			return
 		}
 		notifyAssigned(conn, id)
-		if session.Agent == nil && !dispatchTerminalRequest(uuid, id) {
+		if !hasAgent && !hasAttachedAgent(id) && !dispatchTerminalRequest(uuid, id) {
 			closeSession(id)
 			return
 		}
@@ -86,14 +92,18 @@ func RequestTerminal(c *gin.Context) {
 	// 新建一个终端连接
 	id = utils.GenerateRandomString(32)
 	session := &TerminalSession{
-		UserUUID:    userID,
-		UUID:        uuid,
-		Browser:     conn,
-		Agent:       nil,
-		RequesterIp: c.ClientIP(),
+		UserUUID:        userID,
+		UUID:            uuid,
+		Browser:         conn,
+		BrowserClientID: clientID,
+		Agent:           nil,
+		RequesterIp:     c.ClientIP(),
+		CreatedAt:       time.Now(),
 	}
 
 	TerminalSessionsMutex.Lock()
+	pruneTerminatedSessionsLocked(session.CreatedAt)
+	delete(terminatedSessions, id)
 	TerminalSessions[id] = session
 	session.browserPump = conn
 	scheduleCleanup(id, session)
