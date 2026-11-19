@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
@@ -50,7 +51,7 @@ func adminListPlugins(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonR
 // declared permissions differ from the approved hash, enabling it returns
 // { requires_approval: true } instead of an error; the caller then shows a
 // permission dialog and retries with approved=true.
-func adminSetPluginEnabled(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminSetPluginEnabled(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	short, ok := rpc.GetParamAs[string](req, "short")
 	if !ok || strings.TrimSpace(short) == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "short is required", nil)
@@ -63,6 +64,16 @@ func adminSetPluginEnabled(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 		}
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	actor, ip := auditActor(ctx)
+	action := "Disable plugin"
+	if enabled {
+		action = "Enable plugin"
+	}
+	msg := action + ": " + short
+	if enabled && approved {
+		msg += " (permissions approved)"
+	}
+	auditlog.Log(ip, actor, msg, "warn")
 	return nil, nil
 }
 
@@ -74,7 +85,7 @@ func adminGetPluginLogs(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.J
 	return map[string]any{"logs": plugin.GetLogs(short)}, nil
 }
 
-func adminDeletePlugin(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminDeletePlugin(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	short, ok := rpc.GetParamAs[string](req, "short")
 	if !ok || strings.TrimSpace(short) == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "short is required", nil)
@@ -85,6 +96,8 @@ func adminDeletePlugin(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Js
 		}
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, "Delete plugin: "+short, "warn")
 	return nil, nil
 }
 
@@ -104,7 +117,7 @@ func adminGetPluginConfiguration(_ context.Context, req *rpc.JsonRpcRequest) (an
 	return map[string]any{"configuration": info.Configuration, "data": values}, nil
 }
 
-func adminSetPluginConfiguration(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminSetPluginConfiguration(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	short, ok := rpc.GetParamAs[string](req, "short")
 	if !ok || strings.TrimSpace(short) == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "short is required", nil)
@@ -113,8 +126,17 @@ func adminSetPluginConfiguration(_ context.Context, req *rpc.JsonRpcRequest) (an
 	if err := plugin.SaveConfiguration(short, data); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	actor, ip := auditActor(ctx)
 	if err := plugin.Reload(short); err != nil {
+		auditlog.Log(ip, actor, auditlog.JoinLines(
+			"Update plugin configuration (reload failed): plugin="+short,
+			append(auditlog.FormatMap(data), "Reload error: "+err.Error())...,
+		), "error")
 		return nil, rpc.MakeError(rpc.InternalError, "plugin configuration saved but reload failed: "+err.Error(), nil)
 	}
+	auditlog.Log(ip, actor, auditlog.JoinLines(
+		"Update plugin configuration: plugin="+short,
+		auditlog.FormatMap(data)...,
+	), "info")
 	return nil, nil
 }

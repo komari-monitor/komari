@@ -1,8 +1,11 @@
 package admin
 
 import (
+	"fmt"
+
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/web/api"
 )
 
@@ -32,5 +35,10 @@ func UnbindExternalAccount(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to unbind external account: "+err.Error())
 		return
 	}
+	msg := fmt.Sprintf("Unbound external account (OAuth): user=%s", auditlog.FormatUser(user.Username, user.UUID))
+	if user.SSOID != "" {
+		msg += ", previous_sso_id=" + user.SSOID
+	}
+	auditlog.Log(c.ClientIP(), user.UUID, msg, "warn")
 	api.RespondSuccess(c, nil)
 }

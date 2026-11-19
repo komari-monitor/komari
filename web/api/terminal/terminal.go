@@ -1,9 +1,12 @@
 package terminal
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/web/connection"
 )
 
@@ -23,6 +26,94 @@ type TerminalSession struct {
 	forwardStop chan struct{}
 	// CleanupTimer bounds how long a suspended session waits for a reconnect.
 	CleanupTimer *time.Timer
+
+	// 审计日志单条聚合状态：同一终端会话只写入一条日志，在重连/挂起/结束时原地更新。
+	// 锁顺序固定为 session.auditMu -> TerminalSessionsMutex，严禁反向加锁。
+	auditMu          sync.Mutex
+	auditLogID       uint
+	auditClient      string
+	auditDuration    time.Duration
+	auditConnects    int
+	auditStartedAt   time.Time
+	auditEndReason   string
+	activeForwarders int
+}
+
+type terminalAuditSnapshot struct {
+	logID       uint
+	clientLabel string
+	terminalID  string
+	status      string
+	duration    time.Duration
+	connects    int
+	startedAt   time.Time
+	endedAt     time.Time
+}
+
+func formatTerminalAuditMessage(s terminalAuditSnapshot) string {
+	parts := make([]string, 0, 5)
+	if s.clientLabel != "" {
+		parts = append(parts, "client="+s.clientLabel)
+	}
+	parts = append(parts, "terminal_id="+s.terminalID)
+	if s.status != "" {
+		parts = append(parts, "status="+s.status)
+	}
+	if s.status != "active" || s.duration > 0 {
+		parts = append(parts, "duration="+s.duration.Round(time.Millisecond).String())
+	}
+	if s.connects > 1 {
+		parts = append(parts, fmt.Sprintf("reconnects=%d", s.connects-1))
+	}
+	summary := "Terminal session: " + strings.Join(parts, ", ")
+	if !s.startedAt.IsZero() {
+		timeParts := []string{"Started: " + s.startedAt.In(time.Local).Format("2006-01-02 15:04:05")}
+		if !s.endedAt.IsZero() {
+			timeParts = append(timeParts, "Ended: "+s.endedAt.In(time.Local).Format("2006-01-02 15:04:05"))
+		}
+		return auditlog.JoinLines(summary, strings.Join(timeParts, ", "))
+	}
+	return summary
+}
+
+// finalizeSessionAudit updates the session's single audit log row when the
+// session ends while idle/suspended (no ForwardTerminal goroutine running).
+// Must be called WITHOUT holding TerminalSessionsMutex.
+func finalizeSessionAudit(id string, session *TerminalSession) {
+	if session == nil {
+		return
+	}
+	session.auditMu.Lock()
+	defer session.auditMu.Unlock()
+
+	if session.auditLogID == 0 {
+		return
+	}
+
+	TerminalSessionsMutex.Lock()
+	active := session.activeForwarders
+	duration := session.auditDuration
+	connects := session.auditConnects
+	startedAt := session.auditStartedAt
+	reason := session.auditEndReason
+	TerminalSessionsMutex.Unlock()
+
+	if active > 0 {
+		return
+	}
+	if reason == "" {
+		reason = "closed"
+	}
+	auditlog.UpdateMessage(session.auditLogID, formatTerminalAuditMessage(terminalAuditSnapshot{
+		logID:       session.auditLogID,
+		clientLabel: session.auditClient,
+		terminalID:  id,
+		status:      reason,
+		duration:    duration,
+		connects:    connects,
+		startedAt:   startedAt,
+		endedAt:     time.Now().UTC(),
+	}))
 }
 
 var TerminalSessionsMutex = &sync.Mutex{}
@@ -45,8 +136,13 @@ func scheduleCleanup(id string, session *TerminalSession) {
 			return
 		}
 		browser, agent = session.Browser, session.Agent
+		if session.auditEndReason == "" {
+			session.auditEndReason = "expired"
+		}
 		delete(TerminalSessions, id)
 		TerminalSessionsMutex.Unlock()
+
+		finalizeSessionAudit(id, session)
 
 		// 等不到重连：告诉仍在线的对端这是终态，别再等了。
 		if browser != nil {
@@ -115,18 +211,25 @@ func suspendAgent(id string, conn *connection.SafeConn)   { suspendSide(id, conn
 // 收到的一方不会再重连，所以这里可以直接关闭连接。
 func closeSession(id string) {
 	var browser, agent *connection.SafeConn
+	var closedSession *TerminalSession
 
 	TerminalSessionsMutex.Lock()
 	if session, ok := TerminalSessions[id]; ok && session != nil {
 		stopCleanup(session)
+		if session.auditEndReason == "" {
+			session.auditEndReason = "closed"
+		}
 		stopForwardWaitLocked(session)
 		browser, agent = session.Browser, session.Agent
+		closedSession = session
 		if agent == nil && session.UUID != "" {
 			recordTerminatedSessionLocked(id, session.UUID)
 		}
 		delete(TerminalSessions, id)
 	}
 	TerminalSessionsMutex.Unlock()
+
+	finalizeSessionAudit(id, closedSession)
 
 	if browser != nil {
 		notifyTerminate(browser)

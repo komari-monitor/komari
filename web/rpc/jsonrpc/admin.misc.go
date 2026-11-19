@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -92,20 +93,39 @@ func adminDeleteSession(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	if params.Session == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "session is required", nil)
 	}
+	var existing models.Session
+	found := dbcore.GetDBInstance().Where("session = ?", params.Session).Limit(1).Find(&existing).RowsAffected > 0
 	if err := accounts.DeleteSession(params.Session); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to delete session: "+err.Error(), nil)
 	}
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "delete session", "info")
+	parts := []string{"Delete session: session=" + auditlog.MaskToken(params.Session)}
+	if found {
+		if userLabel := auditlog.FormatUserUUID(existing.UUID); userLabel != "" {
+			parts = append(parts, "user="+userLabel)
+		}
+		if existing.LoginMethod != "" {
+			parts = append(parts, "method="+existing.LoginMethod)
+		}
+		if existing.Ip != "" {
+			parts = append(parts, "session_ip="+existing.Ip)
+		}
+		if existing.UserAgent != "" {
+			parts = append(parts, "ua="+auditlog.Truncate(existing.UserAgent, 120))
+		}
+	}
+	auditlog.Log(ip, actor, strings.Join(parts, ", "), "info")
 	return nil, nil
 }
 
 func adminDeleteAllSessions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var count int64
+	_ = dbcore.GetDBInstance().Model(&models.Session{}).Count(&count).Error
 	if err := accounts.DeleteAllSessions(); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to delete all sessions: "+err.Error(), nil)
 	}
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "delete all sessions", "warn")
+	auditlog.Log(ip, actor, fmt.Sprintf("Delete all sessions: count=%d", count), "warn")
 	return nil, nil
 }
 
@@ -186,6 +206,7 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 		cancel()
 	}
 
+	beforeCfg, _ := config.GetAll()
 	if err := config.SetMany(cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to update settings: "+err.Error(), nil)
 	}
@@ -197,7 +218,7 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 		if err := metricstore.Reload(reloadCtx); err != nil {
 			cancel()
 			if errors.Is(err, metricstore.ErrStructureUpgradeRequired) {
-				auditSettingsUpdate(ctx, cfg)
+				auditSettingsUpdate(ctx, beforeCfg, cfg)
 				lifecycle.RequestRestart(lifecycle.RestartForMetricStoreStructureUpgrade)
 				return map[string]any{
 					"restart_required": true,
@@ -210,17 +231,27 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 		cancel()
 	}
 
-	auditSettingsUpdate(ctx, cfg)
+	auditSettingsUpdate(ctx, beforeCfg, cfg)
 	return nil, nil
 }
 
-func auditSettingsUpdate(ctx context.Context, cfg map[string]interface{}) {
-	message := "update settings: "
-	for key := range cfg {
-		message += key + ", "
-	}
-	if len(message) > 2 {
-		message = message[:len(message)-2]
+func auditSettingsUpdate(ctx context.Context, beforeCfg, cfg map[string]interface{}) {
+	changedKeys, diffLines := auditlog.FormatDiff(beforeCfg, cfg)
+	var message string
+	if len(changedKeys) > 0 {
+		summary := "Update settings: " + strings.Join(changedKeys, ", ")
+		message = auditlog.JoinLines(summary, diffLines...)
+	} else {
+		keys := make([]string, 0, len(cfg))
+		for k := range cfg {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if len(keys) > 0 {
+			message = "Update settings (no effective changes): " + strings.Join(keys, ", ")
+		} else {
+			message = "Update settings (empty)"
+		}
 	}
 	actor, ip := auditActor(ctx)
 	auditlog.Log(ip, actor, message, "info")
@@ -366,7 +397,7 @@ func adminClearAllRecords(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc
 	records.DeleteAll()
 	tasks.DeleteAllPingRecords()
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "clear all records", "info")
+	auditlog.Log(ip, actor, "Clear all load and ping records (all clients)", "warn")
 	return nil, nil
 }
 
@@ -381,7 +412,38 @@ func adminOrderClients(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to update client weight: "+err.Error(), nil)
 		}
 	}
+	type orderItem struct {
+		uuid   string
+		weight int
+	}
+	items := make([]orderItem, 0, len(order))
+	for uuid, weight := range order {
+		if strings.TrimSpace(uuid) == "" {
+			continue
+		}
+		items = append(items, orderItem{uuid: strings.TrimSpace(uuid), weight: weight})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].weight != items[j].weight {
+			return items[i].weight < items[j].weight
+		}
+		return items[i].uuid < items[j].uuid
+	})
+	uuids := make([]string, len(items))
+	for i, item := range items {
+		uuids[i] = item.uuid
+	}
+	labels := auditlog.FormatClientUUIDs(uuids)
+	entries := make([]string, 0, len(items))
+	for i, item := range items {
+		label := item.uuid
+		if i < len(labels) && labels[i] != "" {
+			label = labels[i]
+		}
+		entries = append(entries, fmt.Sprintf("%s=%d", label, item.weight))
+	}
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "order clients", "info")
+	summary := fmt.Sprintf("Order clients: updated %d client(s)", len(items))
+	auditlog.Log(ip, actor, auditlog.JoinLines(summary, strings.Join(entries, ", ")), "info")
 	return nil, nil
 }

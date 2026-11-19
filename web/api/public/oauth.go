@@ -3,6 +3,7 @@ package public
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
@@ -73,7 +74,12 @@ func OAuthCallback(c *gin.Context) {
 			c.JSON(500, gin.H{"status": "error", "message": "Binding failed"})
 			return
 		}
-		auditlog.Log(c.ClientIP(), user.UUID, "bound external account (OAuth)"+fmt.Sprintf(",sso_id: %s", sso_id), "login")
+		auditlog.Log(
+			c.ClientIP(),
+			user.UUID,
+			fmt.Sprintf("Bound external account (OAuth): user=%s, provider=%s, sso_id=%s", auditlog.FormatUser(user.Username, user.UUID), providerName, sso_id),
+			"login",
+		)
 		c.Redirect(302, "/admin/dashboard")
 		return
 	}
@@ -81,6 +87,12 @@ func OAuthCallback(c *gin.Context) {
 	// 尝试获取用户
 	user, err := accounts.GetUserBySSO(sso_id)
 	if err != nil {
+		auditlog.Log(
+			c.ClientIP(),
+			"",
+			fmt.Sprintf("OAuth login failed: provider=%s, sso_id=%s, reason=account not bound", providerName, sso_id),
+			"warn",
+		)
 		c.JSON(401, gin.H{
 			"status":  "error",
 			"message": "please log in and bind your external account first.",
@@ -97,6 +109,11 @@ func OAuthCallback(c *gin.Context) {
 
 	// 设置cookie并返回
 	setSessionCookie(c, session, sessionCookieMaxAge)
-	auditlog.Log(c.ClientIP(), user.UUID, "logged in (OAuth)", "login")
+	ua := auditlog.Truncate(strings.TrimSpace(c.Request.UserAgent()), 160)
+	msg := fmt.Sprintf("Logged in (OAuth): user=%s, provider=%s, sso_id=%s", auditlog.FormatUser(user.Username, user.UUID), providerName, sso_id)
+	if ua != "" {
+		msg += ", ua=" + ua
+	}
+	auditlog.Log(c.ClientIP(), user.UUID, msg, "login")
 	c.Redirect(302, "/admin/dashboard")
 }

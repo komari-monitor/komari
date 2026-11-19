@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/config"
@@ -101,6 +102,7 @@ func DeleteTheme(c *gin.Context) {
 		return
 	}
 
+	auditlog.Log(c.ClientIP(), c.GetString("uuid"), "Delete theme: short="+req.Short, "warn")
 	api.RespondSuccessMessage(c, "主题删除成功", nil)
 }
 
@@ -133,6 +135,7 @@ func SetTheme(c *gin.Context) {
 		return
 	}
 
+	auditlog.Log(c.ClientIP(), c.GetString("uuid"), "Set active theme: theme="+themeName, "info")
 	api.RespondSuccessMessage(c, "主题设置成功", gin.H{"theme": themeName})
 }
 
@@ -594,6 +597,12 @@ func UpdateTheme(c *gin.Context) {
 	// 	}
 	// }
 
+	auditlog.Log(
+		c.ClientIP(),
+		c.GetString("uuid"),
+		fmt.Sprintf("Update theme: short=%s, version=%s", updatedThemeInfo.Short, updatedThemeInfo.Version),
+		"info",
+	)
 	api.RespondSuccessMessage(c, "主题更新成功", updatedThemeInfo)
 }
 
@@ -739,6 +748,13 @@ func ImportTheme(c *gin.Context) {
 		msg = "主题导入成功（已覆盖同名主题）"
 	}
 
+	auditlog.Log(
+		c.ClientIP(),
+		c.GetString("uuid"),
+		fmt.Sprintf("Import theme: short=%s, version=%s, overwritten=%t, url=%s",
+			installedTheme.Short, installedTheme.Version, overwritten, auditlog.RedactURL(req.URL)),
+		"info",
+	)
 	api.RespondSuccessMessage(c, msg, installedTheme)
 }
 
@@ -767,5 +783,11 @@ func UpdateThemeSettings(c *gin.Context) {
 	db.Where("short = ?", theme).
 		Assign(models.ThemeConfiguration{Short: theme, Data: string(data)}).
 		FirstOrCreate(&themeCfg)
+	auditlog.Log(
+		c.ClientIP(),
+		c.GetString("uuid"),
+		auditlog.JoinLines("Update theme settings: theme="+theme, auditlog.FormatMap(req)...),
+		"info",
+	)
 	api.RespondSuccess(c, nil)
 }

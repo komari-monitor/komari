@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -48,12 +49,41 @@ func UpdateUser(c *gin.Context) {
 			return
 		}
 	}
+	targetBefore, beforeErr := accounts.GetUserByUUID(req.Uuid)
 	if err := accounts.UpdateUser(req.Uuid, req.Name, req.Password, req.SsoType); err != nil {
 		api.RespondError(c, 500, "Failed to update user: "+err.Error())
 		return
 	}
-	uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), uuid.(string), "User updated", "warn")
+	targetName := ""
+	if req.Name != nil && strings.TrimSpace(*req.Name) != "" {
+		targetName = *req.Name
+	} else if beforeErr == nil {
+		targetName = targetBefore.Username
+	}
+	changes := make([]string, 0, 3)
+	if req.Name != nil {
+		if beforeErr == nil {
+			changes = append(changes, fmt.Sprintf("username: %q -> %q", targetBefore.Username, *req.Name))
+		} else {
+			changes = append(changes, fmt.Sprintf("username: %q", *req.Name))
+		}
+	}
+	if req.Password != nil {
+		changes = append(changes, "password: [REDACTED] (changed, all sessions revoked)")
+	}
+	if req.SsoType != nil {
+		if beforeErr == nil {
+			changes = append(changes, fmt.Sprintf("sso_type: %q -> %q", targetBefore.SSOType, *req.SsoType))
+		} else {
+			changes = append(changes, fmt.Sprintf("sso_type: %q", *req.SsoType))
+		}
+	}
+	auditlog.Log(
+		c.ClientIP(),
+		c.GetString("uuid"),
+		auditlog.JoinLines("Update user: target="+auditlog.FormatUser(targetName, req.Uuid), changes...),
+		"warn",
+	)
 	api.RespondSuccess(c, gin.H{"uuid": req.Uuid})
 }
 
@@ -62,8 +92,11 @@ func UpdateMmdbGeoIP(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to update GeoIP database "+err.Error())
 		return
 	}
-	uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), uuid.(string), "GeoIP database updated", "info")
+	msg := "GeoIP database updated: file=" + geoip.GeoIpFilePath
+	if info, err := os.Stat(geoip.GeoIpFilePath); err == nil {
+		msg += ", size=" + auditlog.FormatBytes(info.Size())
+	}
+	auditlog.Log(c.ClientIP(), c.GetString("uuid"), msg, "info")
 	api.RespondSuccess(c, nil)
 }
 
@@ -82,8 +115,7 @@ func UploadFavicon(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save favicon: "+err.Error())
 		return
 	}
-	uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), uuid.(string), "Favicon uploaded", "info")
+	auditlog.Log(c.ClientIP(), c.GetString("uuid"), fmt.Sprintf("Favicon uploaded: size=%s", auditlog.FormatBytes(int64(len(data)))), "info")
 	api.RespondSuccess(c, nil)
 }
 
@@ -96,7 +128,6 @@ func DeleteFavicon(c *gin.Context) {
 		}
 		return
 	}
-	uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), uuid.(string), "Favicon deleted", "info")
+	auditlog.Log(c.ClientIP(), c.GetString("uuid"), "Favicon deleted", "info")
 	api.RespondSuccess(c, nil)
 }

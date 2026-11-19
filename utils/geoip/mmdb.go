@@ -41,19 +41,19 @@ func NewMaxMindGeoIPService() (*MaxMindGeoIPService, error) {
 	}
 
 	if err := os.MkdirAll(filepath.Dir(dbFilePath), os.ModePerm); err != nil {
-		auditlog.Log("", "", "Failed to create data directory for MaxMind database: "+err.Error(), "error")
+		auditlog.Log("", "", fmt.Sprintf("Failed to create data directory for MaxMind database: path=%s, error=%v", dbFilePath, err), "error")
 		return nil, fmt.Errorf("failed to create data directory for MaxMind database: %w", err)
 	}
 
 	if _, err := os.Stat(dbFilePath); os.IsNotExist(err) {
 		if err := service.UpdateDatabase(); err != nil {
-			auditlog.Log("", "", "Failed to download initial MaxMind database: "+err.Error(), "error")
+			auditlog.Log("", "", fmt.Sprintf("Failed to download initial MaxMind database: url=%s, path=%s, error=%v", GeoIpUrl, dbFilePath, err), "error")
 			return nil, fmt.Errorf("failed to download initial MaxMind database: %w", err)
 		}
 	}
 
 	if err := service.initialize(); err != nil {
-		auditlog.Log("", "", "Failed to initialize MaxMind database: "+err.Error(), "error")
+		auditlog.Log("", "", fmt.Sprintf("Failed to initialize MaxMind database: path=%s, error=%v", dbFilePath, err), "error")
 		return nil, fmt.Errorf("failed to initialize MaxMind database: %w", err)
 	}
 	return service, nil

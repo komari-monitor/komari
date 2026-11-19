@@ -2,11 +2,14 @@ package jsonrpc
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/internal/metricstore"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/records"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
@@ -95,10 +98,12 @@ func adminAddClient(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Jso
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
-	if params.Name != "" {
-		actor, ip := auditActor(ctx)
-		auditlog.Log(ip, actor, "create client:"+uuid, "info")
+	clientName := strings.TrimSpace(params.Name)
+	if clientName == "" && len(uuid) >= 8 {
+		clientName = "client_" + uuid[:8]
 	}
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, "Create client: "+auditlog.FormatClient(clientName, uuid), "info")
 	return map[string]any{"uuid": uuid, "token": token}, nil
 }
 
@@ -111,12 +116,78 @@ func adminEditClient(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Js
 	if uuid == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing UUID", nil)
 	}
+	submitted := make(map[string]any, len(update))
+	for k, v := range update {
+		submitted[k] = v
+	}
+	beforeClient, errBefore := clients.GetClientByUUID(uuid)
 	if err := clients.SaveClient(update); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	afterClient, errAfter := clients.GetClientByUUID(uuid)
+
+	clientName := ""
+	switch {
+	case errAfter == nil && strings.TrimSpace(afterClient.Name) != "":
+		clientName = afterClient.Name
+	case errBefore == nil && strings.TrimSpace(beforeClient.Name) != "":
+		clientName = beforeClient.Name
+	default:
+		if n, ok := submitted["name"].(string); ok {
+			clientName = n
+		}
+	}
+	clientLabel := auditlog.FormatClient(clientName, uuid)
+
+	var beforeMap map[string]any
+	if errBefore == nil {
+		beforeMap = clientAuditSnapshot(beforeClient)
+	}
+	changedKeys, diffLines := auditlog.FormatDiff(beforeMap, submitted, "uuid", "updated_at")
+	summary := fmt.Sprintf("Edit client: %s", clientLabel)
+	if len(changedKeys) > 0 {
+		summary = fmt.Sprintf("Edit client: %s (%s)", clientLabel, strings.Join(changedKeys, ", "))
+	} else {
+		summary = fmt.Sprintf("Edit client: %s (no effective changes)", clientLabel)
+	}
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "edit client:"+uuid, "info")
+	auditlog.Log(ip, actor, auditlog.JoinLines(summary, diffLines...), "info")
 	return nil, nil
+}
+
+func clientAuditSnapshot(c models.Client) map[string]any {
+	return map[string]any{
+		"token":              c.Token,
+		"name":               c.Name,
+		"cpu_name":           c.CpuName,
+		"virtualization":     c.Virtualization,
+		"arch":               c.Arch,
+		"cpu_cores":          c.CpuCores,
+		"cpu_physical_cores": c.CpuPhysicalCores,
+		"os":                 c.OS,
+		"kernel_version":     c.KernelVersion,
+		"gpu_name":           c.GpuName,
+		"ipv4":               c.IPv4,
+		"ipv6":               c.IPv6,
+		"region":             c.Region,
+		"remark":             c.Remark,
+		"public_remark":      c.PublicRemark,
+		"mem_total":          c.MemTotal,
+		"swap_total":         c.SwapTotal,
+		"disk_total":         c.DiskTotal,
+		"version":            c.Version,
+		"weight":             c.Weight,
+		"price":              c.Price,
+		"billing_cycle":      c.BillingCycle,
+		"auto_renewal":       c.AutoRenewal,
+		"currency":           c.Currency,
+		"expired_at":         c.ExpiredAt,
+		"group":              c.Group,
+		"tags":               c.Tags,
+		"hidden":             c.Hidden,
+		"traffic_limit":      c.TrafficLimit,
+		"traffic_limit_type": c.TrafficLimitType,
+	}
 }
 
 func adminRemoveClient(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -127,12 +198,31 @@ func adminRemoveClient(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if params.UUID == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing UUID", nil)
 	}
+	existing, existingErr := clients.GetClientByUUID(params.UUID)
 	if err := clients.DeleteClient(params.UUID); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to delete client"+err.Error(), nil)
 	}
 	metricstore.DeleteEntityAsync(params.UUID)
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "delete client:"+params.UUID, "warn")
+	clientLabel := params.UUID
+	meta := make([]string, 0, 3)
+	if existingErr == nil {
+		clientLabel = auditlog.FormatClient(existing.Name, params.UUID)
+		if strings.TrimSpace(existing.Group) != "" {
+			meta = append(meta, "group="+existing.Group)
+		}
+		if strings.TrimSpace(existing.Region) != "" {
+			meta = append(meta, "region="+existing.Region)
+		}
+		if strings.TrimSpace(existing.IPv4) != "" {
+			meta = append(meta, "ipv4="+existing.IPv4)
+		}
+	}
+	msg := "Delete client: " + clientLabel
+	if len(meta) > 0 {
+		msg += " (" + strings.Join(meta, ", ") + ")"
+	}
+	auditlog.Log(ip, actor, msg, "warn")
 	agent_runtime.DeleteConnectedClients(params.UUID)
 	agent_runtime.DeleteLatestReport(params.UUID)
 	return nil, nil
@@ -181,6 +271,6 @@ func adminClearRecords(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.Js
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to delete Record"+err.Error(), nil)
 	}
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "clear records", "warn")
+	auditlog.Log(ip, actor, "Clear load records (all clients)", "warn")
 	return nil, nil
 }

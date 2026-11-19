@@ -21,16 +21,30 @@ func ForwardTerminal(id string, browser, agent *connection.SafeConn) {
 	if browser == nil || agent == nil {
 		return
 	}
+	establishedTime := time.Now().UTC()
 	TerminalSessionsMutex.Lock()
 	session := TerminalSessions[id]
-	requesterIp, userUUID := "", ""
-	var stop chan struct{}
+	requesterIp, userUUID, clientUUID := "", "", ""
+	var (
+		stop         chan struct{}
+		prevDuration time.Duration
+		connects     int
+		startedAt    time.Time
+	)
 	startBrowser, startAgent := false, false
 	if session != nil && session.Browser == browser && session.Agent == agent {
-		requesterIp, userUUID = session.RequesterIp, session.UserUUID
+		requesterIp, userUUID, clientUUID = session.RequesterIp, session.UserUUID, session.UUID
 		stopForwardWaitLocked(session)
 		stop = make(chan struct{})
 		session.forwardStop = stop
+		session.activeForwarders++
+		session.auditConnects++
+		if session.auditStartedAt.IsZero() {
+			session.auditStartedAt = establishedTime
+		}
+		prevDuration = session.auditDuration
+		connects = session.auditConnects
+		startedAt = session.auditStartedAt
 		if session.browserPump != browser {
 			session.browserPump = browser
 			startBrowser = true
@@ -45,8 +59,24 @@ func ForwardTerminal(id string, browser, agent *connection.SafeConn) {
 		return
 	}
 
-	auditlog.Log(requesterIp, userUUID, "established, terminal id:"+id, "terminal")
-	establishedTime := time.Now()
+	session.auditMu.Lock()
+	if session.auditClient == "" && clientUUID != "" {
+		session.auditClient = auditlog.FormatClientUUID(clientUUID)
+	}
+	activeMsg := formatTerminalAuditMessage(terminalAuditSnapshot{
+		clientLabel: session.auditClient,
+		terminalID:  id,
+		status:      "active",
+		duration:    prevDuration,
+		connects:    connects,
+		startedAt:   startedAt,
+	})
+	if session.auditLogID == 0 {
+		session.auditLogID = auditlog.LogWithID(requesterIp, userUUID, activeMsg, "terminal")
+	} else {
+		auditlog.UpdateMessage(session.auditLogID, activeMsg)
+	}
+	session.auditMu.Unlock()
 
 	if startBrowser {
 		go pumpBrowserFrames(id, browser)
@@ -56,7 +86,45 @@ func ForwardTerminal(id string, browser, agent *connection.SafeConn) {
 	}
 
 	<-stop
-	auditlog.Log(requesterIp, userUUID, "disconnected, terminal id:"+id+", duration:"+time.Since(establishedTime).String(), "terminal")
+	segmentDuration := time.Since(establishedTime)
+
+	session.auditMu.Lock()
+	TerminalSessionsMutex.Lock()
+	session.auditDuration += segmentDuration
+	if session.activeForwarders > 0 {
+		session.activeForwarders--
+	}
+	remainingForwarders := session.activeForwarders
+	totalDuration := session.auditDuration
+	finalConnects := session.auditConnects
+	finalStarted := session.auditStartedAt
+	stillRetained := TerminalSessions[id] == session
+	endReason := session.auditEndReason
+	TerminalSessionsMutex.Unlock()
+
+	// Only write a suspended/final update if no newer ForwardTerminal took over.
+	if session.auditLogID != 0 && remainingForwarders == 0 {
+		status := "suspended"
+		var endedAt time.Time
+		if !stillRetained {
+			status = endReason
+			if status == "" {
+				status = "closed"
+			}
+			endedAt = time.Now().UTC()
+		}
+		auditlog.UpdateMessage(session.auditLogID, formatTerminalAuditMessage(terminalAuditSnapshot{
+			logID:       session.auditLogID,
+			clientLabel: session.auditClient,
+			terminalID:  id,
+			status:      status,
+			duration:    totalDuration,
+			connects:    finalConnects,
+			startedAt:   finalStarted,
+			endedAt:     endedAt,
+		}))
+	}
+	session.auditMu.Unlock()
 }
 
 func currentAgentForBrowser(id string, browser *connection.SafeConn) (*connection.SafeConn, bool) {

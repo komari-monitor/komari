@@ -70,13 +70,14 @@ func CheckAndAutoRenewal(client models.Client) {
 				"expired_at": newExpireTime.UTC(),
 			}
 
+			clientLabel := auditlog.FormatClient(client.Name, client.UUID)
 			if err := clients.SaveClient(updates); err != nil {
-				auditlog.EventLog("renewal", fmt.Sprintf("Failed to renew client %s (%s): %v", client.Name, client.UUID, err))
+				auditlog.EventLog("renewal", fmt.Sprintf("Failed to auto-renew client: client=%s, cycle=%dd, error=%v", clientLabel, billingCycle, err))
 				return
 			}
 
-			auditlog.EventLog("renewal", fmt.Sprintf("Auto-renewed client: %s until %s",
-				client.Name, timeutil.FormatSystemDate(newExpireTime)))
+			auditlog.EventLog("renewal", fmt.Sprintf("Auto-renewed client: client=%s, expired_at=%s -> %s, cycle=%dd",
+				clientLabel, timeutil.FormatSystemDate(clientExpireTime), timeutil.FormatSystemDate(newExpireTime), billingCycle))
 
 			_ = messageSender.SendNotification(models.EventMessage{
 				Event:   messageevent.Renew,

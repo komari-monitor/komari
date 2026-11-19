@@ -16,6 +16,11 @@ import (
 // SendNotification 是通知发送的统一实现：解析事件中的客户端 UUID（外部传入可只含
 // UUID 字段）后委托 SendEvent。内部调用与 admin:sendNotification RPC 共用此实现。
 func SendNotification(event models.EventMessage) error {
+	return SendNotificationWithActor("", "", event)
+}
+
+// SendNotificationWithActor 与 SendNotification 相同，但会在审计日志中记录触发该通知的操作者 IP 与 UUID。
+func SendNotificationWithActor(ip, actor string, event models.EventMessage) error {
 	if len(event.Clients) > 0 {
 		eventClients := make([]models.Client, 0, len(event.Clients))
 		for _, c := range event.Clients {
@@ -31,10 +36,14 @@ func SendNotification(event models.EventMessage) error {
 		}
 		event.Clients = eventClients
 	}
-	return SendEvent(event)
+	return SendEventWithActor(ip, actor, event)
 }
 
 func SendEvent(event models.EventMessage) error {
+	return SendEventWithActor("", "", event)
+}
+
+func SendEventWithActor(ip, actor string, event models.EventMessage) error {
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
 	} else {
@@ -68,11 +77,40 @@ func SendEvent(event models.EventMessage) error {
 		Message: messageTemplate,
 	})
 	if err == nil {
-		auditlog.Log("", "", "Event message sent: "+fmt.Sprint(event.Event), "info")
+		auditlog.Log(ip, actor, formatNotificationAudit("Notification sent", method, event, messageTemplate, nil), "info")
 		return nil
 	}
-	auditlog.Log("", "", "Failed to send event message: "+err.Error()+","+fmt.Sprint(event.Event), "error")
+	auditlog.Log(ip, actor, formatNotificationAudit("Failed to send notification", method, event, messageTemplate, err), "error")
 	return err
+}
+
+func formatNotificationAudit(action, channel string, event models.EventMessage, rendered string, sendErr error) string {
+	eventName := ""
+	if event.Event != nil {
+		eventName = strings.TrimSpace(fmt.Sprint(event.Event))
+	}
+	if eventName == "" {
+		eventName = "(empty)"
+	}
+	header := fmt.Sprintf("%s: event=%s, channel=%s", action, eventName, channel)
+	if len(event.Clients) > 0 {
+		if clientList := auditlog.JoinLabels(auditlog.FormatClients(event.Clients)); clientList != "" {
+			header += ", clients=" + clientList
+		}
+	}
+
+	details := make([]string, 0, 2)
+	if sendErr != nil {
+		details = append(details, "Error: "+sendErr.Error())
+	}
+	body := strings.TrimSpace(rendered)
+	if body == "" && event.Message != nil {
+		body = strings.TrimSpace(fmt.Sprint(event.Message))
+	}
+	if body != "" {
+		details = append(details, "Content:\n"+auditlog.Truncate(body, 2000))
+	}
+	return auditlog.JoinLines(header, details...)
 }
 
 // parseTemplate 通过反射解析 event 持有的结构体的所有字段，将模板中的 {{fieldName}}

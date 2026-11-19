@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -102,6 +103,16 @@ func adminUpdateMetricDefinition(ctx context.Context, req *rpc.JsonRpcRequest) (
 	if store == nil {
 		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
 	}
+	var prevRetention *int
+	if defs, listErr := store.ListMetrics(ctx); listErr == nil {
+		for _, item := range defs {
+			if item.Name == params.Name {
+				v := item.RetentionDays
+				prevRetention = &v
+				break
+			}
+		}
+	}
 	def, err := store.UpdateMetricRetention(ctx, params.Name, params.RetentionDays)
 	if errors.Is(err, metric.ErrNotFound) {
 		return nil, rpc.MakeError(rpc.InvalidParams, "metric not found: "+params.Name, nil)
@@ -114,7 +125,17 @@ func adminUpdateMetricDefinition(ctx context.Context, req *rpc.JsonRpcRequest) (
 	}
 
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "update metric definition: "+params.Name, "info")
+	retentionDesc := fmt.Sprintf("retention_days=%d", params.RetentionDays)
+	if prevRetention != nil {
+		retentionDesc = fmt.Sprintf("retention_days=%d -> %d", *prevRetention, params.RetentionDays)
+	}
+	level := "info"
+	note := ""
+	if params.RetentionDays == 0 {
+		level = "warn"
+		note = " (purging historical data)"
+	}
+	auditlog.Log(ip, actor, fmt.Sprintf("Update metric definition: name=%s, %s%s", params.Name, retentionDesc, note), level)
 
 	return metricDefinitionResponse{
 		Name:          def.Name,
@@ -185,7 +206,11 @@ func adminStartMetricMigration(ctx context.Context, req *rpc.JsonRpcRequest) (an
 	}
 
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "start metrics store migration", "info")
+	p := metricstore.GetStoreMigrationProgress()
+	auditlog.Log(ip, actor, fmt.Sprintf(
+		"Start metrics store migration: source=%s(%s) -> target=%s(%s)",
+		p.SourceDriver, p.SourceDSN, p.TargetDriver, p.TargetDSN,
+	), "info")
 
 	return map[string]any{
 		"status":  "started",
@@ -196,12 +221,16 @@ func adminStartMetricMigration(ctx context.Context, req *rpc.JsonRpcRequest) (an
 // adminCancelMetricMigration 取消正在运行的 store-to-store 迁移。
 // 因写入是幂等 upsert，取消后可安全重新发起，不会产生重复数据。
 func adminCancelMetricMigration(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	before := metricstore.GetStoreMigrationProgress()
 	if err := metricstore.CancelStoreMigration(); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidRequest, err.Error(), nil)
 	}
 
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "cancel metrics store migration", "warn")
+	auditlog.Log(ip, actor, fmt.Sprintf(
+		"Cancel metrics store migration: source=%s -> target=%s, metrics=%d/%d, migrated_points=%d",
+		before.SourceDriver, before.TargetDriver, before.MetricsDone, before.TotalMetrics, before.MigratedPoints,
+	), "warn")
 
 	return map[string]any{
 		"status":  "canceled",

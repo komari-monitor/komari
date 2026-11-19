@@ -1,10 +1,13 @@
 package terminal
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/models"
 )
 
 // TestLegacyAgentIgnoresUnknownMessages documents why the protocol needs no
@@ -264,5 +267,102 @@ func TestLegacyAgentSurvivesBrowserReattach(t *testing.T) {
 	}
 	if msgType != websocket.BinaryMessage || string(payload) != "still-alive" {
 		t.Fatalf("browser2 got (%d, %q), want binary %q", msgType, string(payload), "still-alive")
+	}
+}
+
+// TestTerminalSessionProducesSingleAuditLogEntry verifies that a terminal
+// session — including a suspend + reconnect + explicit terminate lifecycle —
+// produces exactly one audit log row updated in place, with "Name(uuid)".
+func TestTerminalSessionProducesSingleAuditLogEntry(t *testing.T) {
+	resetTerminalSessions(t)
+	db := dbcore.GetDBInstance()
+	const (
+		clientUUID = "term-audit-node-1"
+		sessionID  = "session-single-audit"
+	)
+	t.Cleanup(func() {
+		db.Where("uuid = ?", clientUUID).Delete(&models.Client{})
+		db.Where("message LIKE ?", "%"+sessionID+"%").Delete(&models.Log{})
+	})
+	db.Where("uuid = ?", clientUUID).Delete(&models.Client{})
+	db.Where("message LIKE ?", "%"+sessionID+"%").Delete(&models.Log{})
+	if err := db.Create(&models.Client{
+		UUID:  clientUUID,
+		Token: "tok-" + clientUUID,
+		Name:  "HK-Terminal-01",
+	}).Error; err != nil {
+		t.Fatalf("seed client: %v", err)
+	}
+
+	browser1Safe, browser1Client := newControlPair(t)
+	agentSafeConn, agentClient := newControlPair(t)
+	t.Cleanup(func() { _ = browser1Client.Close() })
+	t.Cleanup(func() { _ = agentClient.Close() })
+
+	session := newSession(t, sessionID, "owner-uuid", clientUUID)
+	session.RequesterIp = "198.51.100.7"
+	session.Browser = browser1Safe
+	session.Agent = agentSafeConn
+	session.Forwarding = true
+
+	doneFirst := make(chan struct{})
+	go func() {
+		ForwardTerminal(sessionID, browser1Safe, agentSafeConn)
+		close(doneFirst)
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// Unexpected drop suspends the session; still only 1 log entry.
+	_ = browser1Client.Close()
+	if frame := readControlFrame(t, agentClient); frame.Type != controlTypeAbort {
+		t.Fatalf("agent frame = %q, want %q", frame.Type, controlTypeAbort)
+	}
+	<-doneFirst
+
+	// Browser 2 reattaches, then explicitly terminates.
+	browser2Safe, browser2Client := newControlPair(t)
+	t.Cleanup(func() { _ = browser2Client.Close() })
+	if _, ok := attachBrowser(sessionID, clientUUID, "owner-uuid", false, browser2Safe); !ok {
+		t.Fatal("reattach browser failed")
+	}
+	if frame := readControlFrame(t, browser2Client); frame.Type != controlTypeReady {
+		t.Fatalf("browser2 frame = %q, want %q", frame.Type, controlTypeReady)
+	}
+	doneSecond := make(chan struct{})
+	go func() {
+		ForwardTerminal(sessionID, browser2Safe, agentSafeConn)
+		close(doneSecond)
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	writeFrame(t, browser2Client, `{"type":"terminate"}`)
+	if frame := readControlFrame(t, agentClient); frame.Type != controlTypeTerminate {
+		t.Fatalf("agent frame = %q, want %q", frame.Type, controlTypeTerminate)
+	}
+	<-doneSecond
+
+	var logs []models.Log
+	if err := db.Where("message LIKE ?", "%"+sessionID+"%").Find(&logs).Error; err != nil {
+		t.Fatalf("query audit logs: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected exactly 1 terminal audit log entry, got %d: %+v", len(logs), logs)
+	}
+	got := logs[0]
+	if got.MsgType != "terminal" || got.IP != "198.51.100.7" || got.UUID != "owner-uuid" {
+		t.Fatalf("unexpected log metadata: %+v", got)
+	}
+	for _, want := range []string{
+		"client=HK-Terminal-01(" + clientUUID + ")",
+		"terminal_id=" + sessionID,
+		"status=closed",
+		"duration=",
+		"reconnects=1",
+		"Started:",
+		"Ended:",
+	} {
+		if !strings.Contains(got.Message, want) {
+			t.Fatalf("terminal audit log missing %q:\n%s", want, got.Message)
+		}
 	}
 }

@@ -2,7 +2,12 @@ package jsonrpc
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
 
+	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -39,7 +44,7 @@ func init() {
 	})
 }
 
-func adminAddPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminAddPingTask(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		Clients   []string `json:"clients"`
 		DefaultOn bool     `json:"default_on"`
@@ -56,10 +61,20 @@ func adminAddPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Jso
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	actor, ip := auditActor(ctx)
+	summary := fmt.Sprintf(
+		"Create ping task: #%d %s (type=%s, target=%s, interval=%ds, default_on=%t)",
+		taskID, params.Name, params.TaskType, params.Target, params.Interval, params.DefaultOn,
+	)
+	var detail string
+	if len(params.Clients) > 0 {
+		detail = "Clients: " + auditlog.JoinLabels(auditlog.FormatClientUUIDs(params.Clients))
+	}
+	auditlog.Log(ip, actor, auditlog.JoinLines(summary, detail), "info")
 	return map[string]any{"task_id": taskID}, nil
 }
 
-func adminDeletePingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminDeletePingTask(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		ID []uint `json:"id"`
 	}
@@ -67,13 +82,29 @@ func adminDeletePingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if len(params.ID) == 0 {
 		return nil, rpc.MakeError(rpc.InvalidParams, "id is required", nil)
 	}
+	var existing []models.PingTask
+	_ = dbcore.GetDBInstance().Where("id IN ?", params.ID).Find(&existing).Error
+	byID := make(map[uint]models.PingTask, len(existing))
+	for _, task := range existing {
+		byID[task.Id] = task
+	}
 	if err := tasks.DeletePingTask(params.ID); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	labels := make([]string, 0, len(params.ID))
+	for _, id := range params.ID {
+		if task, ok := byID[id]; ok && strings.TrimSpace(task.Name) != "" {
+			labels = append(labels, fmt.Sprintf("%s(#%d, target=%s)", task.Name, id, task.Target))
+		} else {
+			labels = append(labels, fmt.Sprintf("#%d", id))
+		}
+	}
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, "Delete ping tasks: "+strings.Join(labels, ", "), "warn")
 	return nil, nil
 }
 
-func adminEditPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminEditPingTask(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		Tasks []*models.PingTask `json:"tasks"`
 	}
@@ -89,6 +120,53 @@ func adminEditPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Js
 	if err := tasks.EditPingTask(params.Tasks); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	allClientUUIDs := make([]string, 0)
+	for _, task := range params.Tasks {
+		allClientUUIDs = append(allClientUUIDs, task.Clients...)
+	}
+	formattedAll := auditlog.FormatClientUUIDs(allClientUUIDs)
+	clientLabels := make(map[string]string, len(allClientUUIDs))
+	idx := 0
+	for _, rawUUID := range allClientUUIDs {
+		trimmed := strings.TrimSpace(rawUUID)
+		if trimmed == "" {
+			continue
+		}
+		if idx < len(formattedAll) {
+			clientLabels[trimmed] = formattedAll[idx]
+			idx++
+		}
+	}
+	details := make([]string, 0, len(params.Tasks))
+	for _, task := range params.Tasks {
+		line := fmt.Sprintf(
+			"#%d %s (type=%s, target=%s, interval=%ds, default_on=%t)",
+			task.Id, task.Name, task.Type, task.Target, task.Interval, task.DefaultOn,
+		)
+		if len(task.Clients) > 0 {
+			taskLabels := make([]string, 0, len(task.Clients))
+			for _, rawUUID := range task.Clients {
+				trimmed := strings.TrimSpace(rawUUID)
+				if trimmed == "" {
+					continue
+				}
+				if label := clientLabels[trimmed]; label != "" {
+					taskLabels = append(taskLabels, label)
+				} else {
+					taskLabels = append(taskLabels, trimmed)
+				}
+			}
+			if joined := auditlog.JoinLabels(taskLabels); joined != "" {
+				line += " clients=[" + joined + "]"
+			}
+		}
+		details = append(details, line)
+	}
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, auditlog.JoinLines(
+		fmt.Sprintf("Edit ping tasks: count=%d", len(params.Tasks)),
+		details...,
+	), "info")
 	return nil, nil
 }
 
@@ -100,7 +178,7 @@ func adminGetAllPingTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.J
 	return list, nil
 }
 
-func adminOrderPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminOrderPingTask(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	// 参数为 { idStr: weight } 映射。
 	order := map[uint]int{}
 	var raw map[string]int
@@ -117,5 +195,25 @@ func adminOrderPingTask(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.J
 	if err := tasks.UpdatePingTaskOrder(order); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	type item struct {
+		id     uint
+		weight int
+	}
+	items := make([]item, 0, len(order))
+	for id, weight := range order {
+		items = append(items, item{id: id, weight: weight})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].weight != items[j].weight {
+			return items[i].weight < items[j].weight
+		}
+		return items[i].id < items[j].id
+	})
+	parts := make([]string, 0, len(items))
+	for _, it := range items {
+		parts = append(parts, fmt.Sprintf("#%d=%d", it.id, it.weight))
+	}
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, fmt.Sprintf("Order ping tasks: count=%d (%s)", len(items), strings.Join(parts, ", ")), "info")
 	return nil, nil
 }

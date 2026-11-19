@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/komari-monitor/komari/database"
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -53,7 +56,7 @@ func adminGetNotificationChannelConfiguration(_ context.Context, req *rpc.JsonRp
 	}, nil
 }
 
-func adminSetNotificationChannelConfiguration(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminSetNotificationChannelConfiguration(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		ID   string         `json:"id"`
 		Data map[string]any `json:"data"`
@@ -77,12 +80,42 @@ func adminSetNotificationChannelConfiguration(_ context.Context, req *rpc.JsonRp
 	}); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to save notification channel configuration: "+err.Error(), nil)
 	}
+	actor, ip := auditActor(ctx)
+	sanitized := sanitizeNotificationChannelAuditMap(params.Data)
+	auditlog.Log(ip, actor, auditlog.JoinLines(
+		"Update notification channel config: channel="+params.ID,
+		auditlog.FormatMap(sanitized)...,
+	), "info")
 	return nil, nil
+}
+
+func sanitizeNotificationChannelAuditMap(data map[string]any) map[string]any {
+	out := make(map[string]any, len(data))
+	for k, v := range data {
+		lower := strings.ToLower(strings.TrimSpace(k))
+		switch lower {
+		case "headers":
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				out[k] = "[REDACTED]"
+			} else {
+				out[k] = v
+			}
+		case "script":
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				out[k] = fmt.Sprintf("[SCRIPT, %d chars]", utf8.RuneCountInString(s))
+			} else {
+				out[k] = v
+			}
+		default:
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // adminSendNotification 发送一条通知。仅供外部（插件/脚本）通过 RPC 调用，
 // 内部通知逻辑（notifier/renewal/session 等）直接调用 messageSender.SendNotification。
-func adminSendNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminSendNotification(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		Event models.EventMessage `json:"event"`
 	}
@@ -92,7 +125,8 @@ func adminSendNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	if fmt.Sprint(params.Event.Event) == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "event is required", nil)
 	}
-	if err := messageSender.SendNotification(params.Event); err != nil {
+	actor, ip := auditActor(ctx)
+	if err := messageSender.SendNotificationWithActor(ip, actor, params.Event); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to send notification: "+err.Error(), nil)
 	}
 	return nil, nil
@@ -111,7 +145,7 @@ func adminListOfflineNotifications(_ context.Context, _ *rpc.JsonRpcRequest) (an
 	return notifications, nil
 }
 
-func adminEditOfflineNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminEditOfflineNotification(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var notifications []models.OfflineNotification
 	if err := req.BindParams(&notifications); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
@@ -136,11 +170,29 @@ func adminEditOfflineNotification(_ context.Context, req *rpc.JsonRpcRequest) (a
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to edit offline notifications: "+err.Error(), nil)
 	}
+	uuids := make([]string, len(notifications))
+	for i, noti := range notifications {
+		uuids[i] = noti.Client
+	}
+	labels := auditlog.FormatClientUUIDs(uuids)
+	details := make([]string, 0, len(notifications))
+	for i, noti := range notifications {
+		label := noti.Client
+		if i < len(labels) && labels[i] != "" {
+			label = labels[i]
+		}
+		details = append(details, fmt.Sprintf("%s (enabled=%t, grace=%ds)", label, noti.Enable, noti.GracePeriod))
+	}
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, auditlog.JoinLines(
+		fmt.Sprintf("Update offline notifications: count=%d", len(notifications)),
+		details...,
+	), "info")
 	return nil, nil
 }
 
 // setOfflineNotificationEnable 是 enable/disable 的共享实现。
-func setOfflineNotificationEnable(req *rpc.JsonRpcRequest, enable bool) *rpc.JsonRpcError {
+func setOfflineNotificationEnable(ctx context.Context, req *rpc.JsonRpcRequest, enable bool) *rpc.JsonRpcError {
 	var uuids []string
 	if err := req.BindParams(&uuids); err != nil {
 		return rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
@@ -158,18 +210,24 @@ func setOfflineNotificationEnable(req *rpc.JsonRpcRequest, enable bool) *rpc.Jso
 	if err != nil {
 		return rpc.MakeError(rpc.InternalError, "Failed to update offline notifications: "+err.Error(), nil)
 	}
+	actor, ip := auditActor(ctx)
+	action := "Disable offline notifications"
+	if enable {
+		action = "Enable offline notifications"
+	}
+	auditlog.Log(ip, actor, fmt.Sprintf("%s: %s", action, auditlog.JoinLabels(auditlog.FormatClientUUIDs(uuids))), "info")
 	return nil
 }
 
-func adminEnableOfflineNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	if e := setOfflineNotificationEnable(req, true); e != nil {
+func adminEnableOfflineNotification(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if e := setOfflineNotificationEnable(ctx, req, true); e != nil {
 		return nil, e
 	}
 	return nil, nil
 }
 
-func adminDisableOfflineNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	if e := setOfflineNotificationEnable(req, false); e != nil {
+func adminDisableOfflineNotification(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if e := setOfflineNotificationEnable(ctx, req, false); e != nil {
 		return nil, e
 	}
 	return nil, nil

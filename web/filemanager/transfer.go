@@ -189,7 +189,7 @@ func initRemoteUpload(c *gin.Context, clientUUID string) {
 			respondTransferError(c, err)
 			return
 		}
-		auditFileTransfer(c, "upload", clientUUID, request.Path)
+		auditFileTransfer(c, "upload", clientUUID, request.Path, 0)
 		api.RespondSuccess(c, gin.H{"complete": true, "chunk_size": chunkSize})
 		return
 	}
@@ -413,7 +413,7 @@ func mergeRemoteUpload(c *gin.Context, clientUUID string) {
 	}, CallOptions{Timeout: 90 * time.Second})
 	if err == nil {
 		finishUploadSession(session)
-		auditFileTransfer(c, "upload", clientUUID, session.Path)
+		auditFileTransfer(c, "upload", clientUUID, session.Path, session.Size)
 	} else if strings.Contains(err.Error(), "unknown upload session") {
 		// A previous merge request may have timed out after the agent renamed the part file.
 		raw, statErr := Call(c.Request.Context(), clientUUID, "stat", map[string]any{
@@ -425,7 +425,7 @@ func mergeRemoteUpload(c *gin.Context, clientUUID string) {
 			}
 			if json.Unmarshal(raw, &info) == nil && info.Size == session.Size {
 				finishUploadSession(session)
-				auditFileTransfer(c, "upload", clientUUID, session.Path)
+				auditFileTransfer(c, "upload", clientUUID, session.Path, session.Size)
 				api.RespondSuccess(c, gin.H{"complete": true})
 				return
 			}
@@ -583,7 +583,14 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 	if c.Request.Method == http.MethodHead || contentLength == 0 {
 		setHeaders()
 		rememberDownloadChunkSize(clientUUID, transferChunkSize)
-		auditFileTransfer(c, "download", clientUUID, path)
+		var extra []string
+		if c.Request.Method == http.MethodHead {
+			extra = append(extra, "method=HEAD")
+		}
+		if partial {
+			extra = append(extra, fmt.Sprintf("range=%d-%d", start, end))
+		}
+		auditFileTransfer(c, "download", clientUUID, path, contentLength, extra...)
 		return
 	}
 
@@ -607,7 +614,11 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 		}
 		return
 	}
-	auditFileTransfer(c, "download", clientUUID, path)
+	var extra []string
+	if partial {
+		extra = append(extra, fmt.Sprintf("range=%d-%d", start, end))
+	}
+	auditFileTransfer(c, "download", clientUUID, path, contentLength, extra...)
 }
 
 func ifRangeAllowsRange(value, etag string, modifiedAt time.Time) bool {
@@ -685,6 +696,13 @@ func CreatePreviewToken(c *gin.Context) {
 		ExpiresAt:  now.Add(previewTokenTTL),
 	}
 	previewTokenMu.Unlock()
+
+	auditlog.Log(
+		c.ClientIP(),
+		c.GetString("uuid"),
+		fmt.Sprintf("File preview token created: client=%s, path=%s, ttl=%s", auditlog.FormatClientUUID(clientUUID), path, previewTokenTTL),
+		"info",
+	)
 
 	api.RespondSuccess(c, gin.H{
 		"token":      token,
@@ -1051,7 +1069,13 @@ func isUnsupportedAgentFileOperation(err error) bool {
 		strings.Contains(message, "web control is disabled")
 }
 
-func auditFileTransfer(c *gin.Context, action, clientUUID, path string) {
+func auditFileTransfer(c *gin.Context, action, clientUUID, path string, size int64, extra ...string) {
 	actor := c.GetString("uuid")
-	auditlog.Log(c.ClientIP(), actor, fmt.Sprintf("file %s: %s:%s", action, clientUUID, path), "info")
+	parts := []string{
+		fmt.Sprintf("File %s: client=%s", action, auditlog.FormatClientUUID(clientUUID)),
+		"path=" + path,
+		"size=" + auditlog.FormatBytes(size),
+	}
+	parts = append(parts, extra...)
+	auditlog.Log(c.ClientIP(), actor, strings.Join(parts, ", "), "info")
 }

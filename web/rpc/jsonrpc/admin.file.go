@@ -201,7 +201,8 @@ func callAgentFileWithOptions(ctx context.Context, uuid, operation string, args 
 	if strings.TrimSpace(uuid) == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "uuid is required", nil)
 	}
-	if _, err := clients.GetClientByUUID(uuid); err != nil {
+	client, err := clients.GetClientByUUID(uuid)
+	if err != nil {
 		return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
 	}
 	raw, err := filemanager.Call(ctx, uuid, operation, args, options)
@@ -216,7 +217,29 @@ func callAgentFileWithOptions(ctx context.Context, uuid, operation string, args 
 	}
 	if mutating {
 		actor, ip := auditActor(ctx)
-		auditlog.Log(ip, actor, fmt.Sprintf("file %s: %s:%s", operation, uuid, auditPath), "warn")
+		clientLabel := auditlog.FormatClient(client.Name, uuid)
+		parts := []string{
+			fmt.Sprintf("File %s: client=%s", operation, clientLabel),
+		}
+		if auditPath != "" {
+			parts = append(parts, "path="+auditPath)
+		}
+		if mode, ok := args["mode"].(string); ok && strings.TrimSpace(mode) != "" {
+			parts = append(parts, "mode="+strings.TrimSpace(mode))
+		}
+		if owner, ok := args["owner"].(string); ok && strings.TrimSpace(owner) != "" {
+			parts = append(parts, "owner="+strings.TrimSpace(owner))
+		}
+		if group, ok := args["group"].(string); ok && strings.TrimSpace(group) != "" {
+			parts = append(parts, "group="+strings.TrimSpace(group))
+		}
+		if uid, ok := args["uid"]; ok {
+			parts = append(parts, fmt.Sprintf("uid=%v", uid))
+		}
+		if gid, ok := args["gid"]; ok {
+			parts = append(parts, fmt.Sprintf("gid=%v", gid))
+		}
+		auditlog.Log(ip, actor, strings.Join(parts, ", "), "warn")
 	}
 	return result, nil
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/web/api"
@@ -338,6 +339,12 @@ func InstallPluginFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "Plugin manifest does not match the market catalog")
 		return
 	}
+	auditlog.Log(
+		c.ClientIP(),
+		c.GetString("uuid"),
+		fmt.Sprintf("Install plugin from market: short=%s, version=%s, source=%s(%s)", installed.Short, installed.Version, source.Name, source.ID),
+		"warn",
+	)
 	api.RespondSuccessMessage(c, "Plugin installed from market", installed)
 }
 

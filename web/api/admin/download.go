@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/web/api"
 )
@@ -243,6 +244,17 @@ func DownloadBackup(c *gin.Context) {
 		return
 	}
 	defer zipReader.Close()
+
+	sizeStr := "unknown"
+	if stat, statErr := zipReader.Stat(); statErr == nil {
+		sizeStr = auditlog.FormatBytes(stat.Size())
+	}
+	auditlog.Log(
+		c.ClientIP(),
+		c.GetString("uuid"),
+		fmt.Sprintf("Download backup archive: file=%s, size=%s", archiveName, sizeStr),
+		"warn",
+	)
 
 	http.ServeContent(c.Writer, c.Request, archiveName, time.Now(), zipReader)
 }

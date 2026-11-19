@@ -125,9 +125,14 @@ func TerminateRecoverableSessions(userUUID string, isAPIKey bool, requestIDs []s
 		return []string{}
 	}
 
+	type terminatedAuditTarget struct {
+		id      string
+		session *TerminalSession
+	}
 	seen := make(map[string]struct{}, len(requestIDs))
 	terminated := make([]string, 0, len(requestIDs))
 	agents := make([]*connection.SafeConn, 0, len(requestIDs))
+	auditTargets := make([]terminatedAuditTarget, 0, len(requestIDs))
 
 	TerminalSessionsMutex.Lock()
 	for _, rawID := range requestIDs {
@@ -149,6 +154,9 @@ func TerminateRecoverableSessions(userUUID string, isAPIKey bool, requestIDs []s
 		}
 
 		stopCleanup(session)
+		if session.auditEndReason == "" {
+			session.auditEndReason = "terminated"
+		}
 		stopForwardWaitLocked(session)
 		if session.Agent != nil {
 			agents = append(agents, session.Agent)
@@ -157,8 +165,13 @@ func TerminateRecoverableSessions(userUUID string, isAPIKey bool, requestIDs []s
 		}
 		delete(TerminalSessions, id)
 		terminated = append(terminated, id)
+		auditTargets = append(auditTargets, terminatedAuditTarget{id: id, session: session})
 	}
 	TerminalSessionsMutex.Unlock()
+
+	for _, target := range auditTargets {
+		finalizeSessionAudit(target.id, target.session)
+	}
 
 	for _, agent := range agents {
 		notifyTerminate(agent)

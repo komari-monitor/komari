@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/komari-monitor/komari/cmd/flags"
@@ -92,14 +93,52 @@ func adminVacuumDatabase(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.
 
 	actor, ip := auditActor(ctx)
 	level := "warn"
-	message := "reclaimed database space"
+	summary := "Database space reclaim"
 	if !response.AllSucceeded {
-		message = "database space reclaim completed with errors"
+		summary = "Database space reclaim completed with errors"
 		level = "error"
 	}
-	auditlog.Log(ip, actor, message, level)
+	auditlog.Log(ip, actor, auditlog.JoinLines(
+		summary,
+		formatDatabaseMaintenanceAuditLine("Main", main),
+		formatDatabaseMaintenanceAuditLine("Monitoring", monitoring),
+	), level)
 
 	return response, nil
+}
+
+func formatDatabaseMaintenanceAuditLine(label string, res databaseMaintenanceResult) string {
+	driverAction := res.Driver
+	if res.Action != "" {
+		if driverAction != "" {
+			driverAction += "/" + res.Action
+		} else {
+			driverAction = res.Action
+		}
+	}
+	prefix := label
+	if driverAction != "" {
+		prefix = fmt.Sprintf("%s (%s)", label, driverAction)
+	}
+	if !res.Success {
+		detail := res.Error
+		if detail == "" {
+			detail = "failed"
+		}
+		return fmt.Sprintf("%s: error=%s", prefix, detail)
+	}
+	switch {
+	case res.Before != nil && res.After != nil:
+		delta := *res.Before - *res.After
+		if delta >= 0 {
+			return fmt.Sprintf("%s: %s -> %s (reclaimed %s)", prefix, auditlog.FormatBytes(*res.Before), auditlog.FormatBytes(*res.After), auditlog.FormatBytes(delta))
+		}
+		return fmt.Sprintf("%s: %s -> %s", prefix, auditlog.FormatBytes(*res.Before), auditlog.FormatBytes(*res.After))
+	case res.After != nil:
+		return fmt.Sprintf("%s: after=%s", prefix, auditlog.FormatBytes(*res.After))
+	default:
+		return fmt.Sprintf("%s: ok", prefix)
+	}
 }
 
 func newDatabaseMaintenanceResponse(main, monitoring databaseMaintenanceResult) databaseMaintenanceResponse {

@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -164,7 +165,22 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 		agent_runtime.DispatchV2Event(uuid, v2.MethodAgentExec, v2.ExecParams{TaskID: taskId, Command: params.Command})
 	}
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, "REC, task id: "+taskId, "warn")
+	dispatched := append(append([]string{}, onlineClients...), queuedClients...)
+	dispatchedFormatted := auditlog.FormatClientUUIDs(dispatched)
+	offlineFormatted := auditlog.FormatClientUUIDs(offlineClients)
+	execSummary := fmt.Sprintf(
+		"Remote exec: task_id=%s, targets=%d (online=%d, queued=%d, offline=%d)",
+		taskId, len(taskClients), len(onlineClients), len(queuedClients), len(offlineClients),
+	)
+	execDetails := make([]string, 0, 3)
+	if clientsLine := auditlog.JoinLabels(dispatchedFormatted); clientsLine != "" {
+		execDetails = append(execDetails, "Clients: "+clientsLine)
+	}
+	if offlineLine := auditlog.JoinLabels(offlineFormatted); offlineLine != "" {
+		execDetails = append(execDetails, "Offline: "+offlineLine)
+	}
+	execDetails = append(execDetails, "Command: "+auditlog.Truncate(strings.TrimSpace(params.Command), 2000))
+	auditlog.Log(ip, actor, auditlog.JoinLines(execSummary, execDetails...), "warn")
 	if len(offlineClients) > 0 {
 		for _, uuid := range offlineClients {
 			tasks.SaveTaskResult(taskId, uuid, "Client offline!", -1, time.Now().UTC())
@@ -177,8 +193,9 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 	}, nil
 }
 
-func adminTestSendMessage(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	if err := messageSender.SendNotification(models.EventMessage{
+func adminTestSendMessage(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	actor, ip := auditActor(ctx)
+	if err := messageSender.SendNotificationWithActor(ip, actor, models.EventMessage{
 		Event:   "Test",
 		Time:    time.Now().UTC(),
 		Message: "This is a test message from Komari.",

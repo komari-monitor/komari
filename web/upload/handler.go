@@ -22,6 +22,7 @@ type Finalizer func(Session) (Result, error)
 type Handler struct {
 	Store      *Store
 	Finalizers map[Purpose]Finalizer
+	OnMerged   func(c *gin.Context, session Session, result Result)
 }
 
 func NewHandler(store *Store, finalizers map[Purpose]Finalizer) *Handler {
@@ -99,6 +100,9 @@ func (h *Handler) Merge(c *gin.Context) {
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
+	}
+	if h.OnMerged != nil {
+		h.OnMerged(c, session, result)
 	}
 	api.RespondSuccessMessage(c, result.Message, result.Data)
 }

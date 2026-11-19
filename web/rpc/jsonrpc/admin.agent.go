@@ -3,8 +3,10 @@ package jsonrpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
@@ -41,6 +43,8 @@ func adminGetAgentStartupConfig(ctx context.Context, req *rpc.JsonRpcRequest) (a
 	result, err := agent_runtime.GetStartupConfig(ctx, params.UUID)
 	switch {
 	case err == nil:
+		actor, ip := auditActor(ctx)
+		auditlog.Log(ip, actor, "Read agent startup config: client="+auditlog.FormatClientUUID(params.UUID), "warn")
 		return result, nil
 	case errors.Is(err, agent_runtime.ErrStartupConfigOffline):
 		return nil, rpc.MakeError(rpc.Unavailable, err.Error(), nil)
@@ -53,7 +57,7 @@ func adminGetAgentStartupConfig(ctx context.Context, req *rpc.JsonRpcRequest) (a
 	}
 }
 
-func adminSwitchAgentVersion(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminSwitchAgentVersion(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		UUID    string `json:"uuid"`
 		Version string `json:"version"`
@@ -76,5 +80,10 @@ func adminSwitchAgentVersion(_ context.Context, req *rpc.JsonRpcRequest) (any, *
 			return nil, rpc.MakeError(rpc.InternalError, "failed to dispatch agent version switch", nil)
 		}
 	}
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, fmt.Sprintf(
+		"Switch agent version: client=%s, version=%s",
+		auditlog.FormatClientUUID(params.UUID), strings.TrimSpace(params.Version),
+	), "warn")
 	return map[string]any{"queued": true}, nil
 }

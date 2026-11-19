@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/web/api"
@@ -352,6 +353,12 @@ func InstallThemeFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	auditlog.Log(
+		c.ClientIP(),
+		c.GetString("uuid"),
+		fmt.Sprintf("Install theme from market: short=%s, version=%s, source=%s(%s)", installed.Short, installed.Version, source.Name, source.ID),
+		"info",
+	)
 	api.RespondSuccessMessage(c, "Theme installed from market", installed)
 }
 

@@ -65,7 +65,7 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 			}
 			logger.Infof("server", "Using %s as OIDC provider", oidcProvider.Name)
 			if err := oauth.LoadProvider(oidcProvider.Name, oidcProvider.Addition); err != nil {
-				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
+				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: provider=%s, error=%v", oidcProvider.Name, err))
 			}
 		}
 	})
@@ -127,19 +127,27 @@ func (a *App) Run() error {
 		return fmt.Errorf("listen: %w", err)
 	case reason := <-lifecycle.RestartRequests():
 		logger.Infof("server", "Restarting service for %s", reason)
-		if err := a.Shutdown(); err != nil {
+		if err := a.shutdownWithReason("restart: " + string(reason)); err != nil {
 			logger.Errorf("server", "Cleanup before restart failed: %v", err)
 		}
 		return fmt.Errorf("%w: %s", ErrRestartRequested, reason)
 	case <-quit:
-		return a.Shutdown()
+		return a.shutdownWithReason("signal")
 	}
 }
 
 // Shutdown stops HTTP first, then releases registered resources in LIFO order.
 func (a *App) Shutdown() error {
+	return a.shutdownWithReason("")
+}
+
+func (a *App) shutdownWithReason(reason string) error {
 	if a.dbReady {
-		auditlog.Log("", "", "server is shutting down", "info")
+		msg := fmt.Sprintf("Server shutting down: addr=%s", a.listenAddr)
+		if reason != "" {
+			msg += ", reason=" + reason
+		}
+		auditlog.Log("", "", msg, "info")
 	}
 	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	defer cancelHTTP()
@@ -156,7 +164,7 @@ func (a *App) Shutdown() error {
 
 func (a *App) onFatal(err error) {
 	if a.dbReady {
-		auditlog.Log("", "", "server encountered a fatal error: "+err.Error(), "error")
+		auditlog.Log("", "", fmt.Sprintf("Server encountered a fatal error: addr=%s, error=%v", a.listenAddr, err), "error")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), resourceCleanupTimeout)
 	defer cancel()
