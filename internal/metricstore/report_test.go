@@ -261,7 +261,7 @@ func TestWriteReportStoresMinuteMetricsAndResetAwareTraffic(t *testing.T) {
 		GPU: &v2.GPUDetailReport{
 			AverageUsage: 25,
 			DetailedInfo: []v2.GPUDeviceInfo{{
-				Name: "GPU 0", MemoryUsed: 400, MemoryTotal: 800, Utilization: 30, Temperature: 55,
+				Name: "GPU 0", MemoryUsed: 400, MemoryTotal: 800, Utilization: 30, Temperature: 55.25,
 			}},
 		},
 	}
@@ -288,6 +288,14 @@ func TestWriteReportStoresMinuteMetricsAndResetAwareTraffic(t *testing.T) {
 	assertMetricValues(t, s, MetricNetTotalUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), []float64{100, 150, 20})
 	assertMetricAggregate(t, s, MetricTrafficUp, report.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggSum, 70, 3)
 	assertMetricAggregate(t, s, MetricTrafficDown, report.UUID, base.Add(-time.Second), base.Add(time.Minute), metric.AggSum, 90, 3)
+
+	gpuRecords, err := GetGPURecordsByClientAndTime(ctx, report.UUID, base.Add(-time.Second), base.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("query GPU records: %v", err)
+	}
+	if len(gpuRecords) != 3 || gpuRecords[2].Temperature != 55.25 {
+		t.Fatalf("unexpected GPU temperature records: %#v", gpuRecords)
+	}
 
 	gpuPoints, err := s.Query(ctx, metric.Query{
 		MetricName: MetricGPUDeviceUsage,

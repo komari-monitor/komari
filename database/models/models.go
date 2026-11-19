@@ -106,7 +106,7 @@ type GPURecord struct {
 	MemTotal    int64     `json:"mem_total" gorm:"type:bigint"`         // 显存总量(字节)
 	MemUsed     int64     `json:"mem_used" gorm:"type:bigint"`          // 显存使用(字节)
 	Utilization float32   `json:"utilization" gorm:"type:decimal(5,2)"` // GPU使用率(%)
-	Temperature int       `json:"temperature"`                          // GPU温度(°C)
+	Temperature float64   `json:"temperature"`                          // GPU温度(°C)
 }
 
 // StringArray represents a slice of strings stored as JSON in the database
