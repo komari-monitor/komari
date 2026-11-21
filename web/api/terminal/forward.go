@@ -1,12 +1,66 @@
 package terminal
 
 import (
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/web/connection"
 )
+
+var (
+	terminalPingInterval = 30 * time.Second
+	terminalReadWait     = 75 * time.Second
+	terminalWriteWait    = 10 * time.Second
+)
+
+// startTerminalKeepalive configures WebSocket Ping/Pong keepalive and read
+// deadlines so reverse proxies do not drop idle waiting connections and
+// half-open sockets (e.g. sleeping browser) are detected promptly.
+func startTerminalKeepalive(conn *connection.SafeConn) (stop func(), refreshReadDeadline func()) {
+	if conn == nil {
+		return func() {}, func() {}
+	}
+	readWait := terminalReadWait
+	writeWait := terminalWriteWait
+	pingInterval := terminalPingInterval
+
+	refresh := func() {
+		_ = conn.SetReadDeadline(time.Now().Add(readWait))
+	}
+	refresh()
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(readWait))
+	})
+	conn.SetPingHandler(func(data string) error {
+		if err := conn.SetReadDeadline(time.Now().Add(readWait)); err != nil {
+			return err
+		}
+		return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(writeWait))
+	})
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(done) })
+	}, refresh
+}
 
 // ForwardTerminal pumps frames between the browser and the agent until one of
 // them ends the session. An unexpected break suspends only the broken side and
@@ -148,18 +202,24 @@ func currentBrowserForAgent(id string, agent *connection.SafeConn) (*connection.
 }
 
 func pumpBrowserFrames(id string, browser *connection.SafeConn) {
+	stopKeepalive, refreshReadDeadline := startTerminalKeepalive(browser)
+	defer stopKeepalive()
+
 	for {
 		messageType, data, err := browser.ReadMessage()
 		if err != nil {
 			suspendBrowser(id, browser)
 			return
 		}
+		refreshReadDeadline()
 		if messageType == websocket.TextMessage {
 			if control, ok := parseControl(data); ok {
 				switch control.Type {
 				case controlTypeTerminate, "close":
 					// 浏览器主动结束：closeSession 会把 terminate 转给被控端。
-					closeSession(id)
+					if _, active := currentAgentForBrowser(id, browser); active {
+						closeSession(id)
+					}
 					return
 				}
 				agent, active := currentAgentForBrowser(id, browser)
@@ -190,18 +250,24 @@ func pumpBrowserFrames(id string, browser *connection.SafeConn) {
 }
 
 func pumpAgentFrames(id string, agent *connection.SafeConn) {
+	stopKeepalive, refreshReadDeadline := startTerminalKeepalive(agent)
+	defer stopKeepalive()
+
 	for {
 		messageType, data, err := agent.ReadMessage()
 		if err != nil {
 			suspendAgent(id, agent)
 			return
 		}
+		refreshReadDeadline()
 		if messageType == websocket.TextMessage {
 			if control, ok := parseControl(data); ok {
 				switch control.Type {
 				case controlTypeTerminate:
 					// 被控端结束（shell 退出等）：closeSession 会转给浏览器。
-					closeSession(id)
+					if _, active := currentBrowserForAgent(id, agent); active {
+						closeSession(id)
+					}
 					return
 				case controlTypeHeartbeat:
 					browser, active := currentBrowserForAgent(id, agent)

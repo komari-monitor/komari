@@ -25,6 +25,7 @@ func init() {
 		Params: []rpc.ParamMeta{
 			{Name: "request_ids", Type: "string[]", Required: false, Description: "Terminal request IDs to terminate"},
 			{Name: "request_id", Type: "string", Required: false, Description: "Single terminal request ID to terminate"},
+			{Name: "client_id", Type: "string", Required: false, Description: "Optional browser client ID allowing termination of a session still attached to the same tab"},
 		},
 		Returns: "{ terminated: string[] }",
 	})
@@ -63,6 +64,7 @@ func adminTerminateTerminalSessions(ctx context.Context, req *rpc.JsonRpcRequest
 	var params struct {
 		RequestIDs []string `json:"request_ids"`
 		RequestID  string   `json:"request_id"`
+		ClientID   string   `json:"client_id"`
 	}
 	if req == nil || req.BindParams(&params) != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "request_ids or request_id is required", nil)
@@ -80,6 +82,6 @@ func adminTerminateTerminalSessions(ctx context.Context, req *rpc.JsonRpcRequest
 		return nil, rpc.MakeError(rpc.InvalidParams, "request_ids or request_id is required", nil)
 	}
 	userUUID, isAPIKey := callerTerminalIdentity(ctx)
-	terminated := terminal.TerminateRecoverableSessions(userUUID, isAPIKey, ids)
+	terminated := terminal.TerminateRecoverableSessionsWithClientID(userUUID, isAPIKey, ids, params.ClientID)
 	return map[string]any{"terminated": terminated}, nil
 }

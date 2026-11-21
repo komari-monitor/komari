@@ -183,6 +183,10 @@ func (sc *SafeConn) SetPingHandler(h func(string) error) {
 	sc.conn.SetPingHandler(h)
 }
 
+func (sc *SafeConn) SetPongHandler(h func(string) error) {
+	sc.conn.SetPongHandler(h)
+}
+
 func (sc *SafeConn) GetConn() *websocket.Conn {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()

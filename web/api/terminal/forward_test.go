@@ -254,6 +254,9 @@ func TestLegacyAgentSurvivesBrowserReattach(t *testing.T) {
 	if frame := readControlFrame(t, browser2Client); frame.Type != controlTypeReady {
 		t.Fatalf("browser2 frame = %q, want %q", frame.Type, controlTypeReady)
 	}
+	if frame := readControlFrame(t, agentClient); frame.Type != controlTypeReady {
+		t.Fatalf("agent frame = %q, want %q", frame.Type, controlTypeReady)
+	}
 	maybeStartForwarding("session-legacy-reattach")
 	time.Sleep(50 * time.Millisecond)
 
@@ -327,6 +330,9 @@ func TestTerminalSessionProducesSingleAuditLogEntry(t *testing.T) {
 	}
 	if frame := readControlFrame(t, browser2Client); frame.Type != controlTypeReady {
 		t.Fatalf("browser2 frame = %q, want %q", frame.Type, controlTypeReady)
+	}
+	if frame := readControlFrame(t, agentClient); frame.Type != controlTypeReady {
+		t.Fatalf("agent frame = %q, want %q", frame.Type, controlTypeReady)
 	}
 	doneSecond := make(chan struct{})
 	go func() {

@@ -25,7 +25,11 @@ type TerminalSession struct {
 	agentPump   *connection.SafeConn
 	forwardStop chan struct{}
 	// CleanupTimer bounds how long a suspended session waits for a reconnect.
-	CleanupTimer *time.Timer
+	// cleanupGen 与 cleanupDeadline 保证每次挂起只使用一个固定截止时间，
+	// 不会因对端在反代/网络空闲断开后反复重连而无限续期，也避免旧定时器回调误杀新恢复的会话。
+	CleanupTimer    *time.Timer
+	cleanupGen      uint64
+	cleanupDeadline time.Time
 
 	// 审计日志单条聚合状态：同一终端会话只写入一条日志，在重连/挂起/结束时原地更新。
 	// 锁顺序固定为 session.auditMu -> TerminalSessionsMutex，严禁反向加锁。
@@ -120,24 +124,45 @@ var TerminalSessionsMutex = &sync.Mutex{}
 var TerminalSessions = make(map[string]*TerminalSession)
 
 // 与 v2 事件队列 TTL 对齐：意外断开后，会话在这段时间内可被重连复用。
-const terminalSessionRetention = 5 * time.Minute
+var terminalSessionRetention = 5 * time.Minute
 
-// scheduleCleanup 在会话下次被回收时清理。重连成功会取消它。
+// scheduleCleanup 在会话首次进入挂起态时安排回收定时器。
+// 已处于挂起倒计时中时不再重置截止时间，避免对端反复断线重连导致会话无限续期；
+// 只有双方重新全部就位调用 stopCleanup 后，下一次挂起才会获得新的保留窗口。
 func scheduleCleanup(id string, session *TerminalSession) {
+	if session == nil {
+		return
+	}
+	if session.CleanupTimer != nil && !session.cleanupDeadline.IsZero() {
+		return
+	}
 	if session.CleanupTimer != nil {
 		session.CleanupTimer.Stop()
 	}
-	session.CleanupTimer = time.AfterFunc(terminalSessionRetention, func() {
+	retention := terminalSessionRetention
+	session.cleanupGen++
+	gen := session.cleanupGen
+	session.cleanupDeadline = time.Now().Add(retention)
+	session.CleanupTimer = time.AfterFunc(retention, func() {
 		var browser, agent *connection.SafeConn
 
 		TerminalSessionsMutex.Lock()
-		if current, ok := TerminalSessions[id]; !ok || current != session {
+		if current, ok := TerminalSessions[id]; !ok || current != session || session.cleanupGen != gen {
 			TerminalSessionsMutex.Unlock()
 			return
 		}
+		if session.Browser != nil && session.Agent != nil {
+			TerminalSessionsMutex.Unlock()
+			return
+		}
+		session.CleanupTimer = nil
+		session.cleanupDeadline = time.Time{}
 		browser, agent = session.Browser, session.Agent
 		if session.auditEndReason == "" {
 			session.auditEndReason = "expired"
+		}
+		if session.UUID != "" {
+			recordTerminatedSessionLocked(id, session.UUID)
 		}
 		delete(TerminalSessions, id)
 		TerminalSessionsMutex.Unlock()
@@ -157,6 +182,11 @@ func scheduleCleanup(id string, session *TerminalSession) {
 }
 
 func stopCleanup(session *TerminalSession) {
+	if session == nil {
+		return
+	}
+	session.cleanupGen++
+	session.cleanupDeadline = time.Time{}
 	if session.CleanupTimer != nil {
 		session.CleanupTimer.Stop()
 		session.CleanupTimer = nil
@@ -222,7 +252,7 @@ func closeSession(id string) {
 		stopForwardWaitLocked(session)
 		browser, agent = session.Browser, session.Agent
 		closedSession = session
-		if agent == nil && session.UUID != "" {
+		if session.UUID != "" {
 			recordTerminatedSessionLocked(id, session.UUID)
 		}
 		delete(TerminalSessions, id)
@@ -293,9 +323,11 @@ func attachBrowserWithClientID(id, clientUUID, userUUID string, apiKey bool, con
 	if startPump {
 		go pumpBrowserFrames(id, conn)
 	}
-	// 重连的浏览器要立刻知道自己回到了哪一步：被控端已在位就算就绪。
+	// 重连的浏览器要立刻知道自己回到了哪一步：被控端已在位就算就绪；
+	// 同时通知被控端浏览器已恢复，便于被控端立即取消本地挂起倒计时（旧版被控端会前向兼容忽略 ready）。
 	if oldAgent != nil {
 		notifyReady(conn)
+		notifyReady(oldAgent)
 	}
 	return session, oldAgent != nil, true
 }

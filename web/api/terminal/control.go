@@ -38,7 +38,7 @@ import (
 //	浏览器 → 服务端        heartbeat / resize / terminate
 //	被控端 → 服务端        heartbeat / terminate
 //	服务端 → 浏览器        assigned(request_id) / ready / heartbeat / abort / terminate
-//	服务端 → 被控端        heartbeat / resize / abort / terminate
+//	服务端 → 被控端        heartbeat / resize / ready / abort / terminate
 //
 // abort 和 terminate 不带参数：协议里只有两方，收到 abort 的一方自然就是
 // 掉线方向的反面，无需再用 reason 说明是谁断了。terminate 同理——它只表达

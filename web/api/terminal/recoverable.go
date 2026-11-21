@@ -79,11 +79,15 @@ func ListRecoverableSessions(userUUID string, isAPIKey bool, clientUUID string) 
 	}
 
 	clientUUID = strings.TrimSpace(clientUUID)
+	now := time.Now()
 
 	TerminalSessionsMutex.Lock()
 	items := make([]sortableSession, 0)
 	for id, session := range TerminalSessions {
 		if session == nil || session.Browser != nil {
+			continue
+		}
+		if !session.cleanupDeadline.IsZero() && !session.cleanupDeadline.After(now) {
 			continue
 		}
 		if !isAPIKey && session.UserUUID != userUUID {
@@ -121,9 +125,18 @@ func ListRecoverableSessions(userUUID string, isAPIKey bool, clientUUID string) 
 // owned by the caller and sends terminate to attached agents. Sessions that
 // already have an active browser attached are left untouched.
 func TerminateRecoverableSessions(userUUID string, isAPIKey bool, requestIDs []string) []string {
+	return TerminateRecoverableSessionsWithClientID(userUUID, isAPIKey, requestIDs, "")
+}
+
+// TerminateRecoverableSessionsWithClientID closes recoverable sessions owned by
+// the caller. When clientID is non-empty, a session still attached to that same
+// browser clientID (e.g. half-open socket when closing a tab) is also closed,
+// while sessions attached to any other browser tab remain protected.
+func TerminateRecoverableSessionsWithClientID(userUUID string, isAPIKey bool, requestIDs []string, clientID string) []string {
 	if len(requestIDs) == 0 {
 		return []string{}
 	}
+	clientID = strings.TrimSpace(clientID)
 
 	type terminatedAuditTarget struct {
 		id      string
@@ -131,6 +144,7 @@ func TerminateRecoverableSessions(userUUID string, isAPIKey bool, requestIDs []s
 	}
 	seen := make(map[string]struct{}, len(requestIDs))
 	terminated := make([]string, 0, len(requestIDs))
+	browsers := make([]*connection.SafeConn, 0, len(requestIDs))
 	agents := make([]*connection.SafeConn, 0, len(requestIDs))
 	auditTargets := make([]terminatedAuditTarget, 0, len(requestIDs))
 
@@ -146,7 +160,10 @@ func TerminateRecoverableSessions(userUUID string, isAPIKey bool, requestIDs []s
 		seen[id] = struct{}{}
 
 		session := TerminalSessions[id]
-		if session == nil || session.Browser != nil {
+		if session == nil {
+			continue
+		}
+		if session.Browser != nil && (clientID == "" || session.BrowserClientID != clientID) {
 			continue
 		}
 		if !isAPIKey && session.UserUUID != userUUID {
@@ -158,9 +175,13 @@ func TerminateRecoverableSessions(userUUID string, isAPIKey bool, requestIDs []s
 			session.auditEndReason = "terminated"
 		}
 		stopForwardWaitLocked(session)
+		if session.Browser != nil {
+			browsers = append(browsers, session.Browser)
+		}
 		if session.Agent != nil {
 			agents = append(agents, session.Agent)
-		} else if session.UUID != "" {
+		}
+		if session.UUID != "" {
 			recordTerminatedSessionLocked(id, session.UUID)
 		}
 		delete(TerminalSessions, id)
@@ -173,6 +194,10 @@ func TerminateRecoverableSessions(userUUID string, isAPIKey bool, requestIDs []s
 		finalizeSessionAudit(target.id, target.session)
 	}
 
+	for _, browser := range browsers {
+		notifyTerminate(browser)
+		_ = browser.Close()
+	}
 	for _, agent := range agents {
 		notifyTerminate(agent)
 		_ = agent.Close()
