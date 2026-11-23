@@ -460,6 +460,7 @@ func doInitialize() error {
 	err = instance.AutoMigrate(
 		&models.User{},
 		&models.Client{},
+		&models.ClientTrafficLedger{},
 		&models.Log{},
 		&models.OfflineNotification{},
 		&models.PingTask{},

@@ -8,7 +8,9 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/metricstore"
+	"github.com/komari-monitor/komari/internal/trafficledger"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
+	logger "github.com/komari-monitor/komari/utils/log"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
@@ -27,6 +29,9 @@ func ingestReport(uuid string, report v2.Report, markPresence bool) error {
 	savedReport, err := metricstore.WriteReport(context.Background(), report)
 	if err != nil {
 		return err
+	}
+	if err := trafficledger.ObserveReport(savedReport); err != nil {
+		logger.Errorf("client-api", "failed to update traffic ledger for client %s: %v", uuid, err)
 	}
 	agent_runtime.RecordReport(savedReport)
 	agent_runtime.MarkV2Client(uuid)

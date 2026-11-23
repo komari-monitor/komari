@@ -20,6 +20,7 @@ import (
 	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/internal/scheduler"
+	"github.com/komari-monitor/komari/internal/trafficledger"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/notifier"
@@ -72,6 +73,13 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 	a.reload.Register("geoip-provider", func(event config.ConfigEvent) {
 		if event.IsChanged(config.GeoIpProviderKey) {
 			go geoip.InitGeoIp()
+		}
+	})
+	a.reload.Register("traffic-default-timezone", func(event config.ConfigEvent) {
+		if changed, timezone := config.IsChangedT[string](event, config.TrafficDefaultTimezoneKey); changed {
+			if err := trafficledger.SetDefaultTimezone(timezone); err != nil {
+				logger.Errorf("server", "Failed to refresh traffic ledger timezone: %v", err)
+			}
 		}
 	})
 	a.reload.Register("cors", func(event config.ConfigEvent) { cors.Update(event) })
@@ -200,6 +208,13 @@ func registerScheduledWork() {
 	}
 	if err := scheduler.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
 		logger.ErrorArgs("server", "Failed to add traffic notification task:", err)
+	}
+	if err := scheduler.AddContextFunc("traffic:flush", "@every 1m", true, func(ctx context.Context) {
+		if err := trafficledger.FlushDirty(ctx); err != nil {
+			logger.Errorf("server", "Failed to flush traffic ledger: %v", err)
+		}
+	}); err != nil {
+		logger.ErrorArgs("server", "Failed to add traffic ledger task:", err)
 	}
 	if err := scheduler.AddFunc("notifier:expire", "0 0 9 * * *", notifier.CheckExpire); err != nil {
 		logger.ErrorArgs("server", "Failed to add expire notification task:", err)

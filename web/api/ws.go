@@ -8,6 +8,7 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/trafficledger"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
@@ -85,6 +86,9 @@ func GetClients(c *gin.Context) {
 			}
 
 			report.UUID = "" // 不暴露 uuid
+			traffic := trafficledger.ResolveDisplay(key, report.Network.TotalUp, report.Network.TotalDown)
+			report.Network.TotalUp = traffic.Up
+			report.Network.TotalDown = traffic.Down
 			if report.CPU.Usage == 0 {
 				report.CPU.Usage = 0.01
 			}

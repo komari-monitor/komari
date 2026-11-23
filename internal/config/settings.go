@@ -38,6 +38,7 @@ type Settings struct {
 	ExpireNotificationLeadDays int     `json:"expire_notification_lead_days" default:"7"`  // 过期前多少天通知，默认7天
 	LoginNotification          bool    `json:"login_notification" default:"true"`          // 登录通知
 	TrafficLimitPercentage     float64 `json:"traffic_limit_percentage" default:"80.00"`   // 流量限制百分比，默认80.00%
+	TrafficDefaultTimezone     string  `json:"traffic_default_timezone" default:""`
 	UpdatedAt                  time.Time
 }
 
@@ -72,6 +73,7 @@ const (
 	ExpireNotificationLeadDaysKey = "expire_notification_lead_days"
 	LoginNotificationKey          = "login_notification"
 	TrafficLimitPercentageKey     = "traffic_limit_percentage"
+	TrafficDefaultTimezoneKey     = "traffic_default_timezone"
 	UpdatedAtKey                  = "updated_at"
 	ThemeMarketSourcesKey         = "theme_market_sources"
 	PluginMarketSourcesKey        = "plugin_market_sources"

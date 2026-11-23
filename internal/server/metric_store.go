@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/internal/config"
+	"github.com/komari-monitor/komari/internal/metricstore"
+	"github.com/komari-monitor/komari/internal/trafficledger"
 	logger "github.com/komari-monitor/komari/utils/log"
 )
 
@@ -77,6 +79,10 @@ func retryMetricStoreConnection(attempts int, interval time.Duration, connect fu
 // InitStores opens the metric store and starts its report batcher. Historical
 // data migrations are started only through an explicit administrator action.
 func (a *App) InitStores() error {
+	if err := trafficledger.Initialize(context.Background()); err != nil {
+		return fmt.Errorf("failed to initialize traffic ledger: %w", err)
+	}
+	a.addCleanup("traffic-ledger", trafficledger.Shutdown)
 	if err := a.ConnectMetricStore(); err != nil {
 		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize metric store: %v", err))
 		return err
