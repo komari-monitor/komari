@@ -526,3 +526,59 @@ func TestRestartReplaysTrafficSinceLastPersistedBaseline(t *testing.T) {
 		t.Fatalf("persisted recovered state = %+v", persisted)
 	}
 }
+
+func TestPreserveCurrentUsageOnSwitchFromAgentMode(t *testing.T) {
+	manager, _ := newTestManager(t)
+	ctx := context.Background()
+	at := time.Now().UTC()
+
+	// Offline switch with PreserveCurrentUsage must not seed baseline or fake offsets.
+	if err := manager.UpdateConfig(ctx, "node-1", UpdateConfigRequest{
+		CycleConfig:          monthlyConfig(),
+		PreserveCurrentUsage: true,
+	}, nil); err != nil {
+		t.Fatalf("offline switch with preserve: %v", err)
+	}
+	snap, _ := manager.Get("node-1")
+	if snap.HasBaseline || snap.OffsetUp != 0 || snap.OffsetDown != 0 || snap.CalibratedAt != nil {
+		t.Fatalf("offline preserve should leave baseline/offsets empty: %+v", snap)
+	}
+
+	// Switch back to agent, then switch to monthly while online with PreserveCurrentUsage.
+	if err := manager.UpdateConfig(ctx, "node-1", UpdateConfigRequest{CycleConfig: DefaultCycleConfig()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.UpdateConfig(ctx, "node-1", UpdateConfigRequest{
+		CycleConfig:          CycleConfig{Mode: ModeMonthly, ResetDay: 15, IntervalDays: 30, Timezone: "UTC"},
+		PreserveCurrentUsage: true,
+	}, reportPtr("node-1", at, 1200, 3400, 500)); err != nil {
+		t.Fatalf("online switch with preserve: %v", err)
+	}
+	snap, _ = manager.Get("node-1")
+	if !snap.HasBaseline || snap.AccumulatedUp != 0 || snap.AccumulatedDown != 0 ||
+		snap.OffsetUp != 1200 || snap.OffsetDown != 3400 || snap.CalibratedAt == nil ||
+		snap.EffectiveUp != 1200 || snap.EffectiveDown != 3400 {
+		t.Fatalf("preserved initial usage = %+v", snap)
+	}
+
+	// Subsequent report adds only the real delta without double counting.
+	if err := manager.ObserveReport(reportAt("node-1", at.Add(time.Minute), 1250, 3550, 560)); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ = manager.Get("node-1")
+	if snap.AccumulatedUp != 50 || snap.AccumulatedDown != 150 || snap.EffectiveUp != 1250 || snap.EffectiveDown != 3550 {
+		t.Fatalf("post-preserve delta = %+v, want effective 1250/3550", snap)
+	}
+
+	// Staying in server mode ignores PreserveCurrentUsage and keeps current accumulated + offsets.
+	if err := manager.UpdateConfig(ctx, "node-1", UpdateConfigRequest{
+		CycleConfig:          CycleConfig{Mode: ModeManual, ResetDay: 15, IntervalDays: 30, Timezone: "UTC"},
+		PreserveCurrentUsage: true,
+	}, reportPtr("node-1", at.Add(2*time.Minute), 9999, 9999, 620)); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ = manager.Get("node-1")
+	if snap.OffsetUp != 1200 || snap.OffsetDown != 3400 || snap.AccumulatedUp != 50 || snap.AccumulatedDown != 150 {
+		t.Fatalf("in-place update unexpectedly overwrote offsets: %+v", snap)
+	}
+}

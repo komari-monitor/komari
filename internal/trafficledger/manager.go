@@ -399,6 +399,15 @@ func (m *Manager) UpdateConfig(ctx context.Context, uuid string, req UpdateConfi
 				return err
 			}
 			seedBaseline(&row, latestRaw, now)
+			if req.PreserveCurrentUsage && latestRaw != nil {
+				up := max(latestRaw.Network.TotalUp, 0)
+				down := max(latestRaw.Network.TotalDown, 0)
+				if up > 0 || down > 0 {
+					row.OffsetUp = up
+					row.OffsetDown = down
+					row.CalibratedAt = timePointer(now)
+				}
+			}
 
 		default:
 			// Stay in server mode: preserve accumulated usage and offsets,

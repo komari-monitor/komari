@@ -67,6 +67,7 @@ type clientTrafficResponse struct {
 	TrafficLimit           int64      `json:"traffic_limit"`
 	TrafficLimitType       string     `json:"traffic_limit_type"`
 	AgentMonthRotate       *bool      `json:"agent_month_rotate,omitempty"`
+	AgentMonthRotateDay    int        `json:"agent_month_rotate_day,omitempty"`
 	AgentConfigCheckFailed bool       `json:"agent_config_check_failed,omitempty"`
 }
 
@@ -136,10 +137,13 @@ func adminGetClientTraffic(ctx context.Context, req *rpc.JsonRpcRequest) (any, *
 			return nil, rpc.MakeError(rpc.InvalidParams, "check_agent_config must be a boolean", nil)
 		}
 		if check {
-			startup, startupErr := agent_runtime.GetStartupConfig(ctx, params.UUID)
+			checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			startup, startupErr := agent_runtime.GetStartupConfig(checkCtx, params.UUID)
+			cancel()
 			if startupErr == nil {
-				enabled := monthRotateEnabled(startup["month_rotate"])
+				enabled, day := parseMonthRotate(startup["month_rotate"])
 				resp.AgentMonthRotate = &enabled
+				resp.AgentMonthRotateDay = day
 			} else {
 				disabled := false
 				resp.AgentMonthRotate = &disabled
@@ -150,36 +154,51 @@ func adminGetClientTraffic(ctx context.Context, req *rpc.JsonRpcRequest) (any, *
 	return resp, nil
 }
 
-func monthRotateEnabled(value any) bool {
+func parseMonthRotate(value any) (bool, int) {
+	var n int64
 	switch v := value.(type) {
 	case float64:
-		return v > 0
+		n = int64(v)
 	case int:
-		return v > 0
+		n = int64(v)
 	case int64:
-		return v > 0
+		n = v
 	case json.Number:
-		n, err := v.Int64()
-		return err == nil && n > 0
+		parsed, err := v.Int64()
+		if err != nil {
+			return false, 0
+		}
+		n = parsed
 	case string:
-		n, err := strconv.Atoi(v)
-		return err == nil && n > 0
+		parsed, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return false, 0
+		}
+		n = int64(parsed)
 	default:
-		return false
+		return false, 0
 	}
+	if n <= 0 {
+		return false, 0
+	}
+	if n <= 31 {
+		return true, int(n)
+	}
+	return true, 0
 }
 
 func adminUpdateClientTrafficConfig(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
-		UUID             string     `json:"uuid"`
-		Mode             string     `json:"mode"`
-		ResetDay         int        `json:"reset_day"`
-		IntervalDays     int        `json:"interval_days"`
-		AnchorAt         *time.Time `json:"anchor_at"`
-		AnchorDate       string     `json:"anchor_date"`
-		Timezone         string     `json:"timezone"`
-		TrafficLimit     *int64     `json:"traffic_limit"`
-		TrafficLimitType *string    `json:"traffic_limit_type"`
+		UUID                 string     `json:"uuid"`
+		Mode                 string     `json:"mode"`
+		ResetDay             int        `json:"reset_day"`
+		IntervalDays         int        `json:"interval_days"`
+		AnchorAt             *time.Time `json:"anchor_at"`
+		AnchorDate           string     `json:"anchor_date"`
+		Timezone             string     `json:"timezone"`
+		TrafficLimit         *int64     `json:"traffic_limit"`
+		TrafficLimitType     *string    `json:"traffic_limit_type"`
+		PreserveCurrentUsage bool       `json:"preserve_current_usage"`
 	}
 	if err := req.BindParams(&params); err != nil || strings.TrimSpace(params.UUID) == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "uuid and traffic cycle configuration are required", nil)
@@ -207,6 +226,10 @@ func adminUpdateClientTrafficConfig(ctx context.Context, req *rpc.JsonRpcRequest
 	}
 
 	before, _ := trafficledger.Get(params.UUID)
+	beforeMode := before.Mode
+	if beforeMode == "" {
+		beforeMode = trafficledger.ModeAgent
+	}
 	update := trafficledger.UpdateConfigRequest{
 		CycleConfig: trafficledger.CycleConfig{
 			Mode:         params.Mode,
@@ -215,15 +238,20 @@ func adminUpdateClientTrafficConfig(ctx context.Context, req *rpc.JsonRpcRequest
 			AnchorAt:     anchorAt,
 			Timezone:     params.Timezone,
 		},
-		TrafficLimit:     params.TrafficLimit,
-		TrafficLimitType: params.TrafficLimitType,
+		TrafficLimit:         params.TrafficLimit,
+		TrafficLimitType:     params.TrafficLimitType,
+		PreserveCurrentUsage: params.PreserveCurrentUsage,
 	}
 	if err := trafficledger.UpdateConfig(ctx, params.UUID, update, latestReportPtr(params.UUID)); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
 
-	if before.Mode != params.Mode {
+	switchedFromAgent := beforeMode == trafficledger.ModeAgent && params.Mode != trafficledger.ModeAgent
+	if beforeMode != params.Mode {
 		notifier.ResetTrafficAlertState(params.UUID)
+		if params.PreserveCurrentUsage && switchedFromAgent {
+			notifier.SyncTrafficAlertForClient(client, trafficledger.ResolveDisplay(params.UUID, 0, 0))
+		}
 	}
 
 	actor, ip := auditActor(ctx)
@@ -241,6 +269,12 @@ func adminUpdateClientTrafficConfig(ctx context.Context, req *rpc.JsonRpcRequest
 	}
 	if params.TrafficLimitType != nil {
 		details = append(details, "type="+strings.ToLower(strings.TrimSpace(*params.TrafficLimitType)))
+	}
+	if params.PreserveCurrentUsage && switchedFromAgent {
+		if after, ok := trafficledger.Get(params.UUID); ok && (after.OffsetUp != 0 || after.OffsetDown != 0) {
+			details = append(details, fmt.Sprintf("initial_offset=%s/%s",
+				formatTrafficBytes(after.OffsetUp), formatTrafficBytes(after.OffsetDown)))
+		}
 	}
 	auditlog.Log(ip, actor, fmt.Sprintf("Update client traffic config: %s (%s)",
 		auditlog.FormatClient(client.Name, params.UUID), strings.Join(details, ", ")), "info")

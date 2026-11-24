@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -262,5 +263,73 @@ func TestTrafficLedgerModelPersistsUTCInstants(t *testing.T) {
 	}
 	if loaded.CycleStartAt == nil || !loaded.CycleStartAt.Equal(stamp) {
 		t.Fatalf("cycle start = %v, want %v", loaded.CycleStartAt, stamp)
+	}
+}
+
+func TestParseMonthRotate(t *testing.T) {
+	cases := []struct {
+		input   any
+		enabled bool
+		day     int
+	}{
+		{0, false, 0},
+		{float64(15), true, 15},
+		{31, true, 31},
+		{32, true, 0},
+		{" 7 ", true, 7},
+		{json.Number("20"), true, 20},
+		{-1, false, 0},
+		{"bad", false, 0},
+		{nil, false, 0},
+	}
+	for _, tc := range cases {
+		enabled, day := parseMonthRotate(tc.input)
+		if enabled != tc.enabled || day != tc.day {
+			t.Fatalf("parseMonthRotate(%#v) = (%v, %d), want (%v, %d)", tc.input, enabled, day, tc.enabled, tc.day)
+		}
+	}
+}
+
+func TestTrafficAdminRPCPreserveCurrentUsage(t *testing.T) {
+	ctx := testAuditContext("192.0.2.50", "traffic-admin")
+	if err := trafficledger.Initialize(context.Background()); err != nil {
+		t.Fatalf("initialize traffic ledger: %v", err)
+	}
+	uuid, _, err := clients.CreateClientWithName("Traffic Preserve Node")
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	t.Cleanup(func() {
+		agent_runtime.DeleteLatestReport(uuid)
+		_ = trafficledger.DeleteClient(uuid)
+		_ = clients.DeleteClient(uuid)
+	})
+	agent_runtime.RecordReport(v2.Report{
+		UUID:      uuid,
+		UpdatedAt: time.Now().UTC(),
+		Uptime:    3600,
+		Network:   v2.NetworkReport{TotalUp: 2 << 30, TotalDown: 5 << 30},
+	})
+
+	if _, rpcErr := adminUpdateClientTrafficConfig(ctx, &rpc.JsonRpcRequest{
+		Version: rpc.RPC_VERSION,
+		Method:  "admin:updateClientTrafficConfig",
+		Params: map[string]any{
+			"uuid":                   uuid,
+			"mode":                   "monthly",
+			"reset_day":              15,
+			"interval_days":          30,
+			"preserve_current_usage": true,
+		},
+	}); rpcErr != nil {
+		t.Fatalf("update with preserve_current_usage: %v", rpcErr)
+	}
+
+	snap, ok := trafficledger.Get(uuid)
+	if !ok || snap.OffsetUp != 2<<30 || snap.OffsetDown != 5<<30 || snap.EffectiveUp != 2<<30 || snap.EffectiveDown != 5<<30 {
+		t.Fatalf("preserved ledger state = %+v", snap)
+	}
+	if entry := latestAuditLog(t); !strings.Contains(entry.Message, "initial_offset=") {
+		t.Fatalf("audit log missing initial_offset: %#v", entry)
 	}
 }

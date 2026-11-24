@@ -69,8 +69,9 @@ type CycleCloseHook func(tx *gorm.DB, snapshots []ClosedCycleSnapshot) error
 // UpdateConfigRequest combines cycle policy with optional quota updates.
 type UpdateConfigRequest struct {
 	CycleConfig
-	TrafficLimit     *int64  `json:"traffic_limit,omitempty"`
-	TrafficLimitType *string `json:"traffic_limit_type,omitempty"`
+	TrafficLimit         *int64  `json:"traffic_limit,omitempty"`
+	TrafficLimitType     *string `json:"traffic_limit_type,omitempty"`
+	PreserveCurrentUsage bool    `json:"preserve_current_usage,omitempty"`
 }
 
 // CalibrateRequest adjusts effective values without altering raw counters.
