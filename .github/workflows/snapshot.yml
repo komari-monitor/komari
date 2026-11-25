@@ -131,7 +131,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version-file: go.mod
 
       - name: Install Zig cross-compiler toolchain
         uses: ./.github/actions/setup-zig
@@ -142,6 +142,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
           CC: zig cc -target ${{ matrix.zig_target_triple }}
+          CGO_CFLAGS: -Os -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables
           GIN_MODE: release
         run: |
           BINARY_NAME=komari-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -150,11 +151,8 @@ jobs:
           fi
           VERSION="${{ needs.prepare.outputs.version }}"
           VERSION_HASH="${{ github.sha }}" # Use commit SHA for hash
-          LDFLAGS="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}"
-          if [ "${{ matrix.goos }}" = "linux" ]; then
-            LDFLAGS="$LDFLAGS -extldflags=-Wl,--strip-all"
-          fi
-          go build -trimpath -ldflags="$LDFLAGS" -o "$BINARY_NAME"
+          LDFLAGS="-s -w -buildid= -extldflags=-Wl,--gc-sections,--strip-all -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}"
+          go build -trimpath -tags "nomsgpack sqlite_omit_load_extension" -ldflags="$LDFLAGS" -o "$BINARY_NAME"
 
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v4

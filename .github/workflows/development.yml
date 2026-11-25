@@ -20,15 +20,18 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version-file: go.mod
 
       - name: Build application
         env:
           GOOS: linux
           GOARCH: amd64
+          CGO_ENABLED: 1
+          CGO_CFLAGS: -Os -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables
+          GIN_MODE: release
         run: |
           VERSION_SHA="${{ github.sha }}"
-          go build -ldflags "-s -w -extldflags=-Wl,--strip-all -X github.com/komari-monitor/komari/utils.CurrentVersion=dev -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_SHA}" -o komari .
+          go build -trimpath -tags "nomsgpack sqlite_omit_load_extension" -ldflags "-s -w -buildid= -extldflags=-Wl,--gc-sections,--strip-all -X github.com/komari-monitor/komari/utils.CurrentVersion=dev -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_SHA}" -o komari .
 
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v4
