@@ -94,12 +94,6 @@ func sanitizeNotificationChannelAuditMap(data map[string]any) map[string]any {
 	for k, v := range data {
 		lower := strings.ToLower(strings.TrimSpace(k))
 		switch lower {
-		case "headers":
-			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-				out[k] = "[REDACTED]"
-			} else {
-				out[k] = v
-			}
 		case "script":
 			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
 				out[k] = fmt.Sprintf("[SCRIPT, %d chars]", utf8.RuneCountInString(s))

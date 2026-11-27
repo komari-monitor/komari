@@ -133,6 +133,40 @@ func TestRedactionAndFormattingHelpers(t *testing.T) {
 	}
 }
 
+func TestWebhookBodyAndHeadersAreRedactedAcrossTypes(t *testing.T) {
+	if got := FormatValue("body", "secret-body"); got != "[BODY, 11 chars]" {
+		t.Fatalf("string body formatting = %q, want length-only redaction", got)
+	}
+	if got := FormatValue("headers", "Bearer secret-token"); got != "[BODY, 19 chars]" {
+		t.Fatalf("string headers formatting = %q, want length-only redaction", got)
+	}
+	for key, value := range map[string]any{
+		"body":    map[string]any{"token": "object-secret"},
+		"headers": map[string]any{"Authorization": "Bearer header-secret"},
+	} {
+		got := FormatValue(key, value)
+		if got != redactedPlaceholder {
+			t.Fatalf("%s object formatting = %q, want %s", key, got, redactedPlaceholder)
+		}
+		if strings.Contains(got, "secret") {
+			t.Fatalf("%s object formatting leaked secret: %q", key, got)
+		}
+	}
+
+	// A non-string script payload is a free-form secret carrier as well:
+	// serializing the object would disclose embedded tokens.
+	got := FormatValue("script", map[string]any{"token": "script-object-secret"})
+	if got != redactedPlaceholder {
+		t.Fatalf("script object formatting = %q, want %s", got, redactedPlaceholder)
+	}
+	if strings.Contains(got, "script-object-secret") {
+		t.Fatalf("script object formatting leaked secret: %q", got)
+	}
+	if got := FormatValue("script", "echo hello"); got != `"echo hello"` {
+		t.Fatalf("script string formatting = %q, want plain quoted string", got)
+	}
+}
+
 func TestLogWithIDAndUpdateMessage(t *testing.T) {
 	db := dbcore.GetDBInstance()
 	t.Cleanup(func() {
