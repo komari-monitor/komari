@@ -350,6 +350,31 @@ func FormatValue(key string, value any) string {
 		return redactedPlaceholder
 	}
 	lowerKey := strings.ToLower(strings.TrimSpace(key))
+	if lowerKey == "script" {
+		// Notification scripts are free-form code payloads: non-string JSON
+		// values would be serialized verbatim and could embed tokens, so they
+		// fail closed. Plain strings are already length-bounded rendering of
+		// administrator-supplied configuration and keep the existing format.
+		if isEmptyValue(value) {
+			return "(empty)"
+		}
+		if _, ok := value.(string); !ok {
+			return redactedPlaceholder
+		}
+	}
+	if lowerKey == "body" || lowerKey == "headers" {
+		// Webhook/notification bodies and header payloads are free-form secrets
+		// carriers regardless of their JSON type. Strings are summarized by
+		// length; objects, arrays, numbers, and other non-string values are
+		// fully redacted because serializing them could disclose tokens.
+		if isEmptyValue(value) {
+			return "(empty)"
+		}
+		if s, ok := value.(string); ok {
+			return fmt.Sprintf("[BODY, %d chars]", utf8.RuneCountInString(strings.TrimSpace(s)))
+		}
+		return redactedPlaceholder
+	}
 	if value == nil {
 		return "null"
 	}
