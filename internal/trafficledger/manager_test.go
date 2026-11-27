@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -273,6 +274,26 @@ func TestManagerObserveUsesUptimeForRebootAndJitter(t *testing.T) {
 	}
 }
 
+func TestManagerObserveMonotonicCounterAcrossAgentRestart(t *testing.T) {
+	manager, _ := newTestManager(t)
+	ctx := context.Background()
+	const oneGiB = int64(1 << 30)
+	at := time.Now().UTC()
+	if err := manager.UpdateConfig(ctx, "node-1", UpdateConfigRequest{CycleConfig: monthlyConfig()}, reportPtr("node-1", at, 200*oneGiB, 150*oneGiB, 864000)); err != nil {
+		t.Fatal(err)
+	}
+	// Agent restarts (uptime collapses) but persists its cumulative counter and
+	// resumes adding on top of it: only the true delta may be counted, never the
+	// full historical counter.
+	if err := manager.ObserveReport(reportAt("node-1", at.Add(time.Minute), 200*oneGiB+5<<20, 150*oneGiB+3<<20, 15)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := manager.Get("node-1")
+	if got.AccumulatedUp != 5<<20 || got.AccumulatedDown != 3<<20 {
+		t.Fatalf("cross-restart monotonic delta = %d/%d, want 5MiB/3MiB", got.AccumulatedUp, got.AccumulatedDown)
+	}
+}
+
 func TestFlushDirtyRollsOfflineCyclesAndClearsBaseline(t *testing.T) {
 	manager, db := newTestManager(t)
 	ctx := context.Background()
@@ -467,6 +488,532 @@ func TestFailedFlushRetainsDirtyStateAndCycleClose(t *testing.T) {
 	}
 	if entry.dirty || len(manager.closures) != 0 {
 		t.Fatal("successful retry did not clear dirty state")
+	}
+}
+
+// shutdownMutationProbe captures the outcome of the mutations attempted while
+// the final-flush transaction of Shutdown is still pending. The full display
+// is stored so the test can verify the read-only projection semantics of a
+// cross-cycle ResolveDisplay on a stopped (or stopping) manager.
+type shutdownMutationProbe struct {
+	display         DisplayTraffic
+	observeAccepted bool
+	tzAccepted      bool
+}
+
+// runShutdownMutationsDuringHold fires one cross-cycle ResolveDisplay, one
+// ObserveReport and one SetDefaultTimezone concurrently while the shutdown
+// transaction is held open. It uses only the public manager surface plus the
+// same-package entry access every trafficledger test already relies on.
+func runShutdownMutationsDuringHold(manager *Manager, node string, probe *shutdownMutationProbe) {
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		probe.display = manager.ResolveDisplay(node, 0, 0)
+	}()
+	go func() {
+		defer wg.Done()
+		probe.observeAccepted = manager.ObserveReport(reportAt(node, time.Now().UTC(), 999, 999, 9999)) == nil
+	}()
+	go func() {
+		defer wg.Done()
+		probe.tzAccepted = manager.SetDefaultTimezone("Asia/Tokyo") == nil
+	}()
+	wg.Wait()
+}
+
+// readLedgerState captures one entry's dirty flag, the queued closure count
+// and a deep-copy snapshot under the manager lock.
+func readLedgerState(manager *Manager, node string) (dirty bool, closures int, snap LedgerSnapshot) {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	entry := manager.entries[node]
+	return entry.dirty, len(manager.closures), snapshotFromModel(entry.row)
+}
+
+// rewindEntryCycleEnd moves one entry's in-memory cycle end back into the past
+// without touching its version, dirty flag, counters or the closure queue, so
+// a later cross-cycle ResolveDisplay is forced down the mutation (lazy
+// rollover) path deterministically instead of hitting the read fast path.
+func rewindEntryCycleEnd(manager *Manager, node string, end *time.Time) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if entry := manager.entries[node]; entry != nil {
+		entry.row.CycleEndAt = end
+	}
+}
+
+// runShutdownFirstWave performs the first Shutdown, whose injected hook
+// failure must roll the final-flush transaction back while keeping every dirty
+// row and queued closure for the retry.
+func runShutdownFirstWave(t *testing.T, manager *Manager, probe *shutdownMutationProbe, expiredEnd, febStart time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	if err := manager.Shutdown(ctx); err == nil || !strings.Contains(err.Error(), "injected shutdown flush failure") {
+		t.Fatalf("first shutdown error = %v, want injected failure", err)
+	}
+	if probe.observeAccepted {
+		t.Error("ObserveReport was accepted while the final flush was pending; nothing can ever persist that increment")
+	}
+	if probe.tzAccepted {
+		t.Error("SetDefaultTimezone was accepted while the final flush was pending; timezone refresh dirtied rows past the snapshot")
+	}
+	dirtyAfterFail, closuresAfterFail, mem := readLedgerState(manager, "node-1")
+	if !dirtyAfterFail {
+		t.Error("failed shutdown dropped dirty state instead of keeping it for retry")
+	}
+	// The failed flush must keep exactly the one closure queued by the
+	// pre-shutdown boundary crossing. A lazy ResolveDisplay rollover leaking
+	// past the stop fence would append a second closure here.
+	if closuresAfterFail != 1 {
+		t.Errorf("failed shutdown kept %d closures, want exactly 1: a cross-cycle ResolveDisplay rolled the entry past the stop fence", closuresAfterFail)
+	}
+	// The read-only projection must leave the unrolled memory byte-identical:
+	// counters still carry the real deltas and the rewound end stays expired.
+	if mem.AccumulatedUp != 50 || mem.AccumulatedDown != 60 {
+		t.Errorf("after failed shutdown memory accumulated %d/%d, want the unrolled 50/60: ResolveDisplay mutated live state", mem.AccumulatedUp, mem.AccumulatedDown)
+	}
+	if mem.CycleEndAt == nil || !mem.CycleEndAt.Equal(expiredEnd) {
+		t.Errorf("after failed shutdown memory cycle end = %v, want the rewound expired end %v", mem.CycleEndAt, expiredEnd)
+	}
+	// The display may project the rolled cycle, but only as a projection: the
+	// projected start must land strictly after the expired 2024-01 window.
+	if probe.display.Up != 0 || probe.display.Down != 0 {
+		t.Errorf("held-transaction display = %d/%d, want the projected fresh cycle 0/0", probe.display.Up, probe.display.Down)
+	}
+	if probe.display.CycleStartAt == nil || probe.display.CycleStartAt.Before(febStart) {
+		t.Errorf("held-transaction display cycle start = %v, want a new cycle at or after %v", probe.display.CycleStartAt, febStart)
+	}
+}
+
+// assertWaveTwoCommittedLedger verifies the retry flush committed the
+// untampered rollover of node-1: zero dirty rows, zero leftover closures,
+// memory byte-consistent with the database and no wave mutation visible.
+func assertWaveTwoCommittedLedger(t *testing.T, manager *Manager, db *gorm.DB) {
+	t.Helper()
+	finalDirty, finalClosures, mem := readLedgerState(manager, "node-1")
+	if finalDirty {
+		t.Error("successful retry left the entry dirty: accepted state is unpersisted")
+	}
+	if finalClosures != 0 {
+		t.Errorf("successful retry left %d unflushed closures", finalClosures)
+	}
+	persisted := loadPersistedLedger(t, db, "node-1")
+	if !ledgerRowMatches(persisted, mem) {
+		t.Errorf("memory diverged from retry flush:\npersisted accumulated=%d/%d window=%v..%v\nmemory    accumulated=%d/%d window=%v..%v",
+			persisted.AccumulatedUp, persisted.AccumulatedDown, persisted.CycleStartAt, persisted.CycleEndAt,
+			mem.AccumulatedUp, mem.AccumulatedDown, mem.CycleStartAt, mem.CycleEndAt)
+	}
+	// The retry's own legitimate rollover closes the 50/60 cycle and starts a
+	// fresh zeroed one. Any mutation admitted in either wave would leave
+	// visible tampering: the accepted ObserveReport counters (999-150/999-260
+	// = 849/739), or the Asia/Tokyo boundary shift (start at 09:00 instead of
+	// midnight UTC). Wave-2 mutations land strictly after the retry snapshot,
+	// so they can never be persisted again — memory and database would diverge.
+	if persisted.AccumulatedUp != 0 || persisted.AccumulatedDown != 0 {
+		t.Errorf("retry persisted accumulated %d/%d, want the untampered fresh cycle 0/0: a post-stop mutation leaked into the retry", persisted.AccumulatedUp, persisted.AccumulatedDown)
+	}
+	if persisted.CycleStartAt == nil {
+		t.Fatal("retry persisted ledger has no cycle start")
+	}
+	// The legitimate cycle boundary is midnight in the inherited effective
+	// location (empty node timezone + empty default => time.Local). A leaked
+	// Asia/Tokyo mutation shifts the boundary one hour off local midnight.
+	loc, err := ResolveLocation("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startLocal := persisted.CycleStartAt.In(loc)
+	if startLocal.Hour() != 0 || startLocal.Minute() != 0 || startLocal.Second() != 0 {
+		t.Errorf("retry persisted cycle start %v is not midnight-aligned in the inherited location: the timezone mutation leaked into the retry", startLocal)
+	}
+	if persisted.Timezone != "" {
+		t.Errorf("persisted timezone = %q, want inherited empty", persisted.Timezone)
+	}
+}
+
+// ledgerRowMatches reports whether the persisted row carries the same
+// accounting cycle and counters as the in-memory snapshot.
+func ledgerRowMatches(row models.ClientTrafficLedger, snap LedgerSnapshot) bool {
+	if row.AccumulatedUp != snap.AccumulatedUp || row.AccumulatedDown != snap.AccumulatedDown {
+		return false
+	}
+	if row.OffsetUp != snap.OffsetUp || row.OffsetDown != snap.OffsetDown {
+		return false
+	}
+	if (row.CycleStartAt == nil) != (snap.CycleStartAt == nil) || (row.CycleStartAt != nil && !row.CycleStartAt.Equal(*snap.CycleStartAt)) {
+		return false
+	}
+	if (row.CycleEndAt == nil) != (snap.CycleEndAt == nil) || (row.CycleEndAt != nil && !row.CycleEndAt.Equal(*snap.CycleEndAt)) {
+		return false
+	}
+	return true
+}
+
+func loadPersistedLedger(t *testing.T, db *gorm.DB, uuid string) models.ClientTrafficLedger {
+	t.Helper()
+	var row models.ClientTrafficLedger
+	if err := db.First(&row, "uuid = ?", uuid).Error; err != nil {
+		t.Fatalf("load persisted ledger %s: %v", uuid, err)
+	}
+	return row
+}
+
+// TestShutdownRejectsPostStopMutationsAndRetriesFinalFlush is the concurrency
+// regression guard for the stop-fence: the final flush transaction is held
+// open via the cycle-close hook while concurrent cross-cycle ResolveDisplay,
+// ObserveReport and SetDefaultTimezone are forced into the exact window in
+// which a mutation accepted after the snapshot would never be persisted
+// again. After a successful stop the ledger must contain zero dirty rows and
+// zero unflushed closures, memory must equal the database, and mutations must
+// be rejected; after an injected flush failure, retrying Shutdown must
+// re-persist the same untampered state exactly once.
+func TestShutdownRejectsPostStopMutationsAndRetriesFinalFlush(t *testing.T) {
+	manager, db := newTestManager(t)
+	ctx := context.Background()
+	// Inheriting timezone ("") so a wrongly admitted SetDefaultTimezone would
+	// refresh the cycle window in place, dirty the row, and shift the UTC
+	// midnight-aligned boundary: all externally observable tampering.
+	cfg := CycleConfig{Mode: ModeMonthly, ResetDay: 1, IntervalDays: 30}
+	at := time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC)
+	if err := manager.UpdateConfig(ctx, "node-1", UpdateConfigRequest{CycleConfig: cfg}, reportPtr("node-1", at, 100, 200, 1000)); err != nil {
+		t.Fatal(err)
+	}
+
+	janStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	febEnd := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	crossAt := at.Add(35 * 24 * time.Hour)
+	farEnd := time.Now().UTC().Add(time.Hour)
+
+	// A second configured node whose end stays valid during the retry
+	// snapshot, so it is persisted with its real 70/80 counters exactly once.
+	// Only the retry wave rewinds its end, inside the committing transaction:
+	// that is the precise window in which a cross-cycle ResolveDisplay lazy
+	// rollover would increment the version past the snapshot, queue an orphan
+	// closure, and leave memory diverged from the database after settle. It
+	// must be seeded BEFORE node-1 crosses its boundary: UpdateConfig commits
+	// any queued closures in its own transaction, so seeding afterwards would
+	// silently persist closure #1 ahead of the wave-1 rollback window.
+	if err := db.Create(&models.Client{UUID: "node-2", Token: "tsxga-rhle-5"}).Error; err != nil {
+		t.Fatalf("create second test client: %v", err)
+	}
+	if err := manager.UpdateConfig(ctx, "node-2", UpdateConfigRequest{CycleConfig: cfg}, reportPtr("node-2", at, 1000, 2000, 1000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ObserveReport(reportAt("node-2", at.Add(time.Minute), 1070, 2080, 1060)); err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	manager.entries["node-2"].row.CycleStartAt = timePointer(janStart)
+	manager.entries["node-2"].row.CycleEndAt = timePointer(farEnd)
+	manager.mu.Unlock()
+
+	// Seed the expired-cycle state directly (the test already lives in the
+	// same package): the state predates any stop, so the final flush must
+	// carry it. RawLastAt is nudged to just before the crossing report so the
+	// rollover keeps its baseline and the real delta 150-100 / 260-200 lands.
+	manager.mu.Lock()
+	entry1 := manager.entries["node-1"]
+	entry1.row.CycleStartAt, entry1.row.CycleEndAt = &janStart, &febEnd
+	entry1.row.RawLastAt = timePointer(crossAt.Add(-time.Minute))
+	manager.mu.Unlock()
+
+	// Crossing the boundary queues closure #1 and dirties the row with the
+	// real deltas 50/60 in the fresh cycle.
+	if err := manager.ObserveReport(reportAt("node-1", crossAt, 150, 260, 1060)); err != nil {
+		t.Fatal(err)
+	}
+	// Deterministic expiry control: a lazy ResolveDisplay rollover only fires
+	// for an expired in-memory end. The hook barrier rewinds the end into the
+	// past atomically inside the held transaction, so no wall-clock race
+	// decides whether the original interleaving happens.
+	manager.mu.Lock()
+	entry1.row.CycleEndAt = &farEnd
+	manager.mu.Unlock()
+
+	var (
+		mu         sync.Mutex
+		probePhase int
+		probes     = map[int]*shutdownMutationProbe{1: {}, 2: {}}
+		hookCalls  atomic.Int32
+		failFirst  atomic.Bool
+	)
+	failFirst.Store(true)
+	expiredEnd := time.Now().UTC().Add(-time.Minute)
+	expiredEndPtr := timePointer(expiredEnd)
+	manager.SetCycleCloseHook(func(tx *gorm.DB, snapshots []ClosedCycleSnapshot) error {
+		hookCalls.Add(1)
+		mu.Lock()
+		phase := probePhase
+		probe := probes[phase]
+		mu.Unlock()
+		if probe != nil {
+			// The transaction is open and rows were already upserted: this is
+			// the exact window of the original race. Each wave rewinds the
+			// in-memory cycle end of its target node into the past atomically
+			// inside the held transaction so the cross-cycle display rollover is
+			// deterministic rather than wall-clock racy; then fires the three
+			// concurrent mutation entries before the transaction may commit or
+			// roll back. The rewind only touches CycleEndAt — never version,
+			// dirty or the closure queue — so a correctly fenced manager keeps
+			// the retry byte-consistent, while an unfenced ResolveDisplay leaves
+			// observable tampering.
+			mutNode := "node-1"
+			if phase == 2 {
+				mutNode = "node-2"
+			}
+			rewindEntryCycleEnd(manager, mutNode, expiredEndPtr)
+			runShutdownMutationsDuringHold(manager, mutNode, probe)
+		}
+		if failFirst.Load() {
+			failFirst.Store(false)
+			return errors.New("injected shutdown flush failure")
+		}
+		return nil
+	})
+
+	// --- wave 1: the first final flush fails inside the hook ---
+	mu.Lock()
+	probePhase = 1
+	mu.Unlock()
+	runShutdownFirstWave(t, manager, probes[1], expiredEnd, febEnd)
+
+	// --- wave 2: retry Shutdown; mutations must still be fenced ---
+	mu.Lock()
+	probePhase = 2
+	mu.Unlock()
+	if err := manager.Shutdown(ctx); err != nil {
+		t.Fatalf("retry shutdown = %v, want nil", err)
+	}
+	p2 := probes[2]
+	if p2.observeAccepted {
+		t.Error("ObserveReport was accepted while the retry flush was pending")
+	}
+	if p2.tzAccepted {
+		t.Error("SetDefaultTimezone was accepted while the retry flush was pending")
+	}
+
+	// Zero unpersisted accepted state: no dirty rows, no leftover closures,
+	// and memory byte-consistent with what the retry committed.
+	assertWaveTwoCommittedLedger(t, manager, db)
+	assertWaveTwoSecondNode(t, manager, db, probes[2])
+	if got := manager.DefaultTimezone(); got != "" {
+		t.Errorf("default timezone = %q after shutdown, want unchanged empty", got)
+	}
+	// Retry semantics: the hook must have run in both waves (failure + retry),
+	// proving the rolled-back closures were re-presented rather than dropped.
+	if n := hookCalls.Load(); n != 2 {
+		t.Errorf("close hook invoked %d times, want exactly 2 (failing flush + retry)", n)
+	}
+	// Fully flushed: a repeated Shutdown is a no-op success and must not
+	// re-present closures.
+	if err := manager.Shutdown(ctx); err != nil {
+		t.Errorf("repeat shutdown after success = %v, want nil", err)
+	}
+	if n := hookCalls.Load(); n != 2 {
+		t.Errorf("close hook invoked %d times after repeat shutdown, want exactly 2 (no redundant work)", n)
+	}
+
+	assertPostShutdownDisplayProjection(t, manager)
+	if err := manager.ObserveReport(reportAt("node-1", time.Now().UTC(), 999, 999, 9999)); !errors.Is(err, ErrManagerStopped) {
+		t.Errorf("post-shutdown observe error = %v, want ErrManagerStopped", err)
+	}
+	if err := manager.SetDefaultTimezone("Asia/Tokyo"); !errors.Is(err, ErrManagerStopped) {
+		t.Errorf("post-shutdown SetDefaultTimezone error = %v, want ErrManagerStopped", err)
+	}
+}
+
+// assertWaveTwoSecondNode verifies the retry wave's committing-transaction
+// window: node-2 was snapshotted and persisted with its real unrolled 70/80
+// counters, the concurrent cross-cycle ResolveDisplay must have been a pure
+// projection, and after the commit the entry is clean, no orphan closure
+// survives and memory still matches the persisted row on the accounting
+// counters and cycle start (the in-memory end carries only the harness
+// rewind, which a fenced manager never persists or rolls).
+func assertWaveTwoSecondNode(t *testing.T, manager *Manager, db *gorm.DB, probe *shutdownMutationProbe) {
+	t.Helper()
+	dirty, closures, mem := readLedgerState(manager, "node-2")
+	if dirty {
+		t.Error("successful retry left node-2 dirty: a ResolveDisplay lazy rollover leaked past the retry transaction window")
+	}
+	if closures != 0 {
+		t.Errorf("successful retry left %d unflushed closures after node-2 window: an orphan rollover closure leaked", closures)
+	}
+	persisted := loadPersistedLedger(t, db, "node-2")
+	if persisted.AccumulatedUp != 70 || persisted.AccumulatedDown != 80 {
+		t.Errorf("persisted node-2 accumulated %d/%d, want the untampered 70/80", persisted.AccumulatedUp, persisted.AccumulatedDown)
+	}
+	if mem.AccumulatedUp != 70 || mem.AccumulatedDown != 80 {
+		t.Errorf("in-memory node-2 accumulated %d/%d, want the unrolled 70/80: ResolveDisplay mutated live state", mem.AccumulatedUp, mem.AccumulatedDown)
+	}
+	if persisted.CycleStartAt == nil || mem.CycleStartAt == nil || !mem.CycleStartAt.Equal(*persisted.CycleStartAt) {
+		t.Errorf("node-2 cycle start diverged: persisted %v memory %v", persisted.CycleStartAt, mem.CycleStartAt)
+	}
+	if probe.display.Up != 0 || probe.display.Down != 0 {
+		t.Errorf("retry-window node-2 display = %d/%d, want the projected fresh cycle 0/0", probe.display.Up, probe.display.Down)
+	}
+	if probe.display.CycleStartAt == nil || !probe.display.CycleStartAt.After(*mem.CycleStartAt) {
+		t.Errorf("retry-window node-2 display cycle start = %v, want a new cycle after %v", probe.display.CycleStartAt, mem.CycleStartAt)
+	}
+}
+
+// assertPostShutdownDisplayProjection runs one cross-cycle ResolveDisplay on
+// node-2 after a successful stop. The node is genuinely expired (the harness
+// rewind was never rolled), so the lazy-rollover mutation path is really
+// exercised: the projection may report the rolled cycle, but memory, dirty
+// flags and the closure queue must stay byte-identical.
+func assertPostShutdownDisplayProjection(t *testing.T, manager *Manager) {
+	t.Helper()
+	dirtyBefore, closuresBefore, memBefore := readLedgerState(manager, "node-2")
+	if dirtyBefore {
+		t.Fatal("precondition: node-2 must be clean before the post-shutdown display probe")
+	}
+	if memBefore.CycleEndAt == nil || time.Now().UTC().Before(memBefore.CycleEndAt.UTC()) {
+		t.Fatalf("precondition: node-2 cycle end %v must be genuinely expired, otherwise the lazy mutation path is never exercised", memBefore.CycleEndAt)
+	}
+	display := manager.ResolveDisplay("node-2", 0, 0)
+	if display.Up != 0 || display.Down != 0 {
+		t.Errorf("post-shutdown display = %d/%d, want the projected fresh cycle 0/0", display.Up, display.Down)
+	}
+	if display.Calibrated {
+		t.Error("post-shutdown display unexpectedly calibrated")
+	}
+	if display.CycleStartAt == nil || !display.CycleStartAt.After(*memBefore.CycleStartAt) {
+		t.Errorf("post-shutdown display cycle start = %v, want a new cycle after %v", display.CycleStartAt, memBefore.CycleStartAt)
+	}
+	dirtyAfter, closuresAfter, memAfter := readLedgerState(manager, "node-2")
+	if closuresAfter != closuresBefore {
+		t.Errorf("post-shutdown ResolveDisplay queued closures: %d -> %d", closuresBefore, closuresAfter)
+	}
+	if dirtyAfter {
+		t.Error("post-shutdown ResolveDisplay dirtied the entry")
+	}
+	if !reflect.DeepEqual(memBefore, memAfter) {
+		t.Errorf("post-shutdown ResolveDisplay mutated memory:\nbefore=%+v\nafter =%+v", memBefore, memAfter)
+	}
+}
+
+// TestShutdownPersistsFinalObservations is the regression guard for the
+// flush-then-stop race: samples accepted before Shutdown must be persisted by
+// the final flush, and samples arriving after Shutdown must be rejected
+// instead of silently dropped.
+func TestShutdownPersistsFinalObservations(t *testing.T) {
+	manager, db := newTestManager(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := manager.UpdateConfig(ctx, "node-1", UpdateConfigRequest{CycleConfig: monthlyConfig()}, reportPtr("node-1", now, 100, 200, 1000)); err != nil {
+		t.Fatal(err)
+	}
+	// Observe a sample but never flush: only Shutdown's final flush may persist it.
+	if err := manager.ObserveReport(reportAt("node-1", now.Add(time.Minute), 160, 260, 1060)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	var persisted models.ClientTrafficLedger
+	if err := db.First(&persisted, "uuid = ?", "node-1").Error; err != nil {
+		t.Fatalf("load persisted ledger after shutdown: %v", err)
+	}
+	if persisted.AccumulatedUp != 60 || persisted.AccumulatedDown != 60 {
+		t.Fatalf("final flush persisted %d/%d, want 60/60", persisted.AccumulatedUp, persisted.AccumulatedDown)
+	}
+	// Post-shutdown observations are rejected rather than silently lost.
+	if err := manager.ObserveReport(reportAt("node-1", now.Add(2*time.Minute), 999, 999, 1120)); !errors.Is(err, ErrManagerStopped) {
+		t.Fatalf("post-shutdown observe error = %v, want ErrManagerStopped", err)
+	}
+	if err := manager.Shutdown(ctx); err != nil {
+		t.Fatalf("second shutdown = %v, want nil", err)
+	}
+}
+
+// TestShutdownFailureCanRetryFinalFlush verifies that a failed final flush
+// does not latch the manager into a false successful stopped state: residual
+// dirty rows and closures are retried and persisted by a repeated Shutdown.
+func TestShutdownFailureCanRetryFinalFlush(t *testing.T) {
+	manager, db := newTestManager(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := manager.UpdateConfig(ctx, "node-1", UpdateConfigRequest{CycleConfig: monthlyConfig()}, reportPtr("node-1", now, 100, 200, 1000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ObserveReport(reportAt("node-1", now.Add(time.Minute), 160, 260, 1060)); err != nil {
+		t.Fatal(err)
+	}
+
+	failures := 1
+	manager.SetCycleCloseHook(func(tx *gorm.DB, closures []ClosedCycleSnapshot) error {
+		if failures > 0 {
+			failures--
+			return errors.New("injected final flush failure")
+		}
+		return nil
+	})
+	manager.mu.Lock()
+	manager.nextClosure = 1
+	manager.closures = append(manager.closures, queuedClose{
+		sequence: 1,
+		snapshot: closeSnapshot(manager.entries["node-1"].row, now, CloseReasonManualReset),
+	})
+	manager.mu.Unlock()
+
+	if err := manager.Shutdown(ctx); err == nil || !strings.Contains(err.Error(), "injected final flush failure") {
+		t.Fatalf("first shutdown error = %v, want injected failure", err)
+	}
+	if err := manager.Shutdown(ctx); err != nil {
+		t.Fatalf("retry shutdown = %v, want nil", err)
+	}
+	var persisted models.ClientTrafficLedger
+	if err := db.First(&persisted, "uuid = ?", "node-1").Error; err != nil {
+		t.Fatalf("load persisted ledger after retry: %v", err)
+	}
+	if persisted.AccumulatedUp != 60 || persisted.AccumulatedDown != 60 {
+		t.Fatalf("persisted accumulation after retry = up %d down %d, want 60/60", persisted.AccumulatedUp, persisted.AccumulatedDown)
+	}
+	manager.mu.RLock()
+	stillDirty := manager.entries["node-1"].dirty
+	manager.mu.RUnlock()
+	if stillDirty {
+		t.Fatal("successful shutdown retry left the entry dirty")
+	}
+	if err := manager.Shutdown(ctx); err != nil {
+		t.Fatalf("third shutdown after successful retry = %v, want nil", err)
+	}
+}
+
+// Atomic client+ledger removal is regression-tested end-to-end through the
+// admin:removeClient RPC in web/rpc/jsonrpc/admin.audit_test.go
+// (TestAdminRemoveClientRollsBackOnLedgerHookFailure): a same-package happy
+// path here could never falsify a non-atomic two-step deletion, because a
+// successful delete looks identical whether or not it ran inside one
+// transaction.
+
+// TestSetDefaultTimezoneBackwardShiftPreservesUsage guards the reverse
+// direction of timezone inheritance refresh: moving the inherited timezone
+// backwards (Asia/Tokyo -> UTC) shifts the cycle start later in absolute time
+// while still describing the same accounting cycle, so accumulated usage must
+// survive instead of being wiped by a false rollover.
+func TestSetDefaultTimezoneBackwardShiftPreservesUsage(t *testing.T) {
+	manager, _ := newTestManager(t)
+	if err := manager.SetDefaultTimezone("Asia/Tokyo"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := CycleConfig{Mode: ModeMonthly, ResetDay: 1, IntervalDays: 30}
+	if err := manager.UpdateConfig(context.Background(), "node-1", UpdateConfigRequest{CycleConfig: cfg}, reportPtr("node-1", time.Now().UTC(), 100, 200, 500)); err != nil {
+		t.Fatal(err)
+	}
+	entry := manager.entries["node-1"]
+	entry.row.AccumulatedUp, entry.row.AccumulatedDown, entry.row.OffsetUp = 440, 550, 9
+	if err := manager.SetDefaultTimezone("UTC"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := manager.Get("node-1")
+	if got.AccumulatedUp != 440 || got.AccumulatedDown != 550 || got.OffsetUp != 9 {
+		t.Fatalf("backward timezone shift wiped usage: %+v", got)
+	}
+	if len(manager.closures) != 0 {
+		t.Fatalf("backward timezone shift produced %d spurious closures", len(manager.closures))
 	}
 }
 

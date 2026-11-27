@@ -37,6 +37,8 @@ func TestComputeCounterDeltaUsesUptimeForRebootDetection(t *testing.T) {
 		{name: "increase with increasing uptime", cur: 200, prev: 100, curUptime: 100, prevUptime: 80, want: 100},
 		{name: "counter rollback without reboot", cur: 20, prev: 100, curUptime: 100, prevUptime: 99, want: 0},
 		{name: "uptime tolerance is five seconds", cur: 20, prev: 100, curUptime: 95, prevUptime: 100, want: 0},
+		{name: "monotonic increase across agent restart with persisted counter", cur: 200*oneGiB + 5<<20, prev: 200 * oneGiB, curUptime: 15, prevUptime: 864000, want: 5 << 20},
+		{name: "monotonic equal counter across LXC uptime drop", cur: 100 * oneGiB, prev: 100 * oneGiB, curUptime: 10, prevUptime: 500000, want: 0},
 		{name: "legacy uptime fallback counts small reset", cur: 20, prev: 100, curUptime: 0, prevUptime: 100, want: 20},
 		{name: "legacy fallback rejects large reset", cur: 100 * oneGiB, prev: 200 * oneGiB, curUptime: 0, prevUptime: 0, want: 0},
 		{name: "negative uptime", cur: 10, prev: 1, curUptime: -1, prevUptime: 10, want: 0},

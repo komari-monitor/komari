@@ -71,12 +71,50 @@ type clientTrafficResponse struct {
 	AgentConfigCheckFailed bool       `json:"agent_config_check_failed,omitempty"`
 }
 
+// flexibleBool accepts both JSON booleans and string forms ("true"/"false")
+// because the REST bridge forwards query strings while native JSON-RPC
+// clients send proper booleans.
+type flexibleBool bool
+
+func (f *flexibleBool) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*f = false
+		return nil
+	}
+	if strings.HasPrefix(trimmed, `"`) {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		if strings.TrimSpace(s) == "" {
+			*f = false
+			return nil
+		}
+		parsed, err := strconv.ParseBool(strings.TrimSpace(s))
+		if err != nil {
+			return err
+		}
+		*f = flexibleBool(parsed)
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(data, &b); err != nil {
+		return err
+	}
+	*f = flexibleBool(b)
+	return nil
+}
+
 func adminGetClientTraffic(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
-		UUID             string `json:"uuid"`
-		CheckAgentConfig string `json:"check_agent_config"`
+		UUID             string       `json:"uuid"`
+		CheckAgentConfig flexibleBool `json:"check_agent_config"`
 	}
-	if err := req.BindParams(&params); err != nil || strings.TrimSpace(params.UUID) == "" {
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "invalid uuid or check_agent_config value", nil)
+	}
+	if strings.TrimSpace(params.UUID) == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "uuid is required", nil)
 	}
 	client, err := clients.GetClientByUUID(params.UUID)
@@ -131,24 +169,18 @@ func adminGetClientTraffic(ctx context.Context, req *rpc.JsonRpcRequest) (any, *
 		}
 	}
 
-	if params.CheckAgentConfig != "" {
-		check, parseErr := strconv.ParseBool(params.CheckAgentConfig)
-		if parseErr != nil {
-			return nil, rpc.MakeError(rpc.InvalidParams, "check_agent_config must be a boolean", nil)
-		}
-		if check {
-			checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			startup, startupErr := agent_runtime.GetStartupConfig(checkCtx, params.UUID)
-			cancel()
-			if startupErr == nil {
-				enabled, day := parseMonthRotate(startup["month_rotate"])
-				resp.AgentMonthRotate = &enabled
-				resp.AgentMonthRotateDay = day
-			} else {
-				disabled := false
-				resp.AgentMonthRotate = &disabled
-				resp.AgentConfigCheckFailed = true
-			}
+	if params.CheckAgentConfig {
+		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		startup, startupErr := agent_runtime.GetStartupConfig(checkCtx, params.UUID)
+		cancel()
+		if startupErr == nil {
+			enabled, day := parseMonthRotate(startup["month_rotate"])
+			resp.AgentMonthRotate = &enabled
+			resp.AgentMonthRotateDay = day
+		} else {
+			disabled := false
+			resp.AgentMonthRotate = &disabled
+			resp.AgentConfigCheckFailed = true
 		}
 	}
 	return resp, nil
@@ -250,6 +282,12 @@ func adminUpdateClientTrafficConfig(ctx context.Context, req *rpc.JsonRpcRequest
 	if beforeMode != params.Mode {
 		notifier.ResetTrafficAlertState(params.UUID)
 		if params.PreserveCurrentUsage && switchedFromAgent {
+			// Re-read the client so the alert sync sees the traffic_limit the
+			// same request just persisted; the stale pre-update snapshot would
+			// otherwise skip suppression for newly configured quotas.
+			if refreshed, refreshErr := clients.GetClientByUUID(params.UUID); refreshErr == nil {
+				client = refreshed
+			}
 			notifier.SyncTrafficAlertForClient(client, trafficledger.ResolveDisplay(params.UUID, 0, 0))
 		}
 	}
@@ -376,8 +414,11 @@ func adminResetClientTrafficCycle(ctx context.Context, req *rpc.JsonRpcRequest) 
 
 func formatTrafficBytes(b int64) string {
 	const unit = 1024
-	if b < 0 {
-		return "-" + formatTrafficBytes(-b)
+	// Non-positive values are formatted directly: negating math.MinInt64
+	// overflows back to itself and the old recursive implementation would
+	// overflow the goroutine stack and crash the process.
+	if b <= 0 {
+		return "0 B"
 	}
 	if b < unit {
 		return fmt.Sprintf("%d B", b)

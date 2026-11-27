@@ -28,11 +28,16 @@ func ComputeCounterDelta(current, previous, currentUptime, previousUptime int64)
 		return 0
 	}
 	if currentUptime > 0 && previousUptime > 0 {
-		if previousUptime > 5 && currentUptime < previousUptime-5 {
-			return current
-		}
+		// A monotonic counter never rolls backwards, so an increase is always
+		// real usage even when uptime drops (e.g. agents persisting cumulative
+		// counters across reboots, or LXC containers switching from host uptime
+		// to container uptime). The uptime drop only matters when the counter
+		// itself went backwards.
 		if current >= previous {
 			return current - previous
+		}
+		if previousUptime > 5 && currentUptime < previousUptime-5 {
+			return current
 		}
 		return 0
 	}
