@@ -90,7 +90,7 @@ func ListRecoverableSessions(userUUID string, isAPIKey bool, clientUUID string) 
 		if !session.cleanupDeadline.IsZero() && !session.cleanupDeadline.After(now) {
 			continue
 		}
-		if !isAPIKey && session.UserUUID != userUUID {
+		if !isAPIKey && (userUUID == "" || session.UserUUID != userUUID) {
 			continue
 		}
 		if clientUUID != "" && session.UUID != clientUUID {
@@ -119,6 +119,55 @@ func ListRecoverableSessions(userUUID string, isAPIKey bool, clientUUID string) 
 		result[i] = item.item
 	}
 	return result
+}
+
+// CloseSessionsByClientUUID force-closes every terminal session bound to a
+// deleted client, including sessions still attached to a browser. Ownership
+// checks do not apply because the client itself is gone.
+func CloseSessionsByClientUUID(clientUUID string) {
+	if clientUUID == "" {
+		return
+	}
+	type auditTarget struct {
+		id      string
+		session *TerminalSession
+	}
+	var browsers, agents []*connection.SafeConn
+	var targets []auditTarget
+
+	TerminalSessionsMutex.Lock()
+	for id, session := range TerminalSessions {
+		if session == nil || session.UUID != clientUUID {
+			continue
+		}
+		stopCleanup(session)
+		if session.auditEndReason == "" {
+			session.auditEndReason = "terminated"
+		}
+		stopForwardWaitLocked(session)
+		if session.Browser != nil {
+			browsers = append(browsers, session.Browser)
+		}
+		if session.Agent != nil {
+			agents = append(agents, session.Agent)
+		}
+		recordTerminatedSessionLocked(id, clientUUID)
+		delete(TerminalSessions, id)
+		targets = append(targets, auditTarget{id: id, session: session})
+	}
+	TerminalSessionsMutex.Unlock()
+
+	for _, target := range targets {
+		finalizeSessionAudit(target.id, target.session)
+	}
+	for _, browser := range browsers {
+		notifyTerminate(browser)
+		_ = browser.Close()
+	}
+	for _, agent := range agents {
+		notifyTerminate(agent)
+		_ = agent.Close()
+	}
 }
 
 // TerminateRecoverableSessions closes recoverable (Browser == nil) sessions
@@ -166,7 +215,7 @@ func TerminateRecoverableSessionsWithClientID(userUUID string, isAPIKey bool, re
 		if session.Browser != nil && (clientID == "" || session.BrowserClientID != clientID) {
 			continue
 		}
-		if !isAPIKey && session.UserUUID != userUUID {
+		if !isAPIKey && (userUUID == "" || session.UserUUID != userUUID) {
 			continue
 		}
 

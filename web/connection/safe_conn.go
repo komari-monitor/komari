@@ -55,6 +55,11 @@ var errTooManyDroppedFrames = errors.New("too many frames dropped by plugin hook
 // maxConsecutiveDroppedFrames bounds the internal re-read loop.
 const maxConsecutiveDroppedFrames = 16
 
+// writeDeadline caps every frame write so a half-open peer (sleeping laptop,
+// dead reverse proxy) cannot block a writer goroutine forever on a full TCP
+// send buffer.
+const writeDeadline = 10 * time.Second
+
 // SafeConn wraps a websocket connection with a mutex so concurrent writes
 // cannot interleave frames, and funnels every frame through the optional
 // plugin interceptor when one is attached.
@@ -63,25 +68,40 @@ type SafeConn struct {
 	mu   sync.Mutex
 	ID   int64
 
+	// closeOnce / closeDone decouple Close from the write mutex: closing the
+	// underlying socket must never wait for a writer blocked on a half-open
+	// connection, otherwise a stuck write would deadlock every cleanup path.
+	closeOnce sync.Once
+	closeDone chan struct{}
+
+	// hookMu only protects the interceptor attachment, never socket I/O.
+	hookMu      sync.Mutex
 	interceptor FrameInterceptor
 	info        *ConnInfo
 }
 
 func NewSafeConn(conn *websocket.Conn) *SafeConn {
 	return &SafeConn{
-		conn: conn,
-		mu:   sync.Mutex{},
-		ID:   time.Now().UnixNano(),
+		conn:      conn,
+		mu:        sync.Mutex{},
+		ID:        time.Now().UnixNano(),
+		closeDone: make(chan struct{}),
 	}
 }
 
 // SetInterceptor attaches the hook provider and the connection identity. It
 // must be called before any frame is read or written.
 func (sc *SafeConn) SetInterceptor(info *ConnInfo, interceptor FrameInterceptor) {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
+	sc.hookMu.Lock()
+	defer sc.hookMu.Unlock()
 	sc.info = info
 	sc.interceptor = interceptor
+}
+
+func (sc *SafeConn) hookState() (FrameInterceptor, *ConnInfo) {
+	sc.hookMu.Lock()
+	defer sc.hookMu.Unlock()
+	return sc.interceptor, sc.info
 }
 
 // readFrame reads one frame and runs the wsMessage hook chain. Frames
@@ -93,9 +113,7 @@ func (sc *SafeConn) readFrame() (int, []byte, error) {
 		if err != nil {
 			return 0, nil, err
 		}
-		sc.mu.Lock()
-		interceptor, info := sc.interceptor, sc.info
-		sc.mu.Unlock()
+		interceptor, info := sc.hookState()
 		if interceptor == nil || info == nil {
 			return messageType, data, nil
 		}
@@ -111,32 +129,54 @@ func (sc *SafeConn) readFrame() (int, []byte, error) {
 
 // writeFrame runs the wsSend hook chain then writes one frame. A dropped
 // frame is silently skipped; a nil interceptor writes through immediately.
+// Every write carries writeDeadline so a half-open peer fails fast instead of
+// pinning sc.mu (and every control frame / Close behind it) for minutes.
 func (sc *SafeConn) writeFrame(messageType int, data []byte) error {
+	interceptor, info := sc.hookState()
+	newType, newData := messageType, data
+	if interceptor != nil && info != nil {
+		var drop bool
+		newType, newData, drop = interceptor.OnSend(info, messageType, data)
+		if drop {
+			return nil
+		}
+	}
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	if sc.interceptor == nil || sc.info == nil {
-		return sc.conn.WriteMessage(messageType, data)
+	return sc.writeFrameLocked(newType, newData)
+}
+
+func (sc *SafeConn) writeFrameLocked(messageType int, data []byte) error {
+	deadline := time.Now().Add(writeDeadline)
+	if err := sc.conn.SetWriteDeadline(deadline); err != nil {
+		return err
 	}
-	newType, newData, drop := sc.interceptor.OnSend(sc.info, messageType, data)
-	if drop {
-		return nil
-	}
-	return sc.conn.WriteMessage(newType, newData)
+	return sc.conn.WriteMessage(messageType, data)
 }
 
 func (sc *SafeConn) WriteMessage(messageType int, data []byte) error {
 	return sc.writeFrame(messageType, data)
 }
 
+// WriteControl sends a control frame after the wsSend hook chain. gorilla
+// serializes control-frame writes through its own channel lock independently
+// of the data writer state, so this path neither takes sc.mu nor spawns a
+// helper goroutine. In particular a slow-but-legal data write cannot arm a
+// delayed force-close of an otherwise healthy connection. A zero deadline is
+// given the same bounded default as data frames; nonzero caller deadlines are
+// honored exactly.
 func (sc *SafeConn) WriteControl(messageType int, data []byte, deadline time.Time) error {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	if sc.interceptor == nil || sc.info == nil {
-		return sc.conn.WriteControl(messageType, data, deadline)
+	interceptor, info := sc.hookState()
+	newType, newData := messageType, data
+	if interceptor != nil && info != nil {
+		var drop bool
+		newType, newData, drop = interceptor.OnSend(info, messageType, data)
+		if drop {
+			return nil
+		}
 	}
-	newType, newData, drop := sc.interceptor.OnSend(sc.info, messageType, data)
-	if drop {
-		return nil
+	if deadline.IsZero() {
+		deadline = time.Now().Add(writeDeadline)
 	}
 	return sc.conn.WriteControl(newType, newData, deadline)
 }
@@ -151,16 +191,31 @@ func (sc *SafeConn) WriteJSON(v interface{}) error {
 	return sc.writeFrame(websocket.TextMessage, buf.Bytes())
 }
 
+// Close shuts the underlying socket immediately without waiting for the write
+// mutex. A data write blocked in the kernel on a half-open peer must never
+// deadlock session cleanup: closing the socket interrupts that write, after
+// which the writer releases sc.mu on its own. OnClose runs exactly once.
 func (sc *SafeConn) Close() error {
-	sc.mu.Lock()
-	interceptor, info := sc.interceptor, sc.info
-	sc.interceptor = nil // run OnClose exactly once
-	err := sc.conn.Close()
-	sc.mu.Unlock()
+	var err error
+	var interceptor FrameInterceptor
+	var info *ConnInfo
+	sc.closeOnce.Do(func() {
+		close(sc.closeDone)
+		sc.hookMu.Lock()
+		interceptor, info = sc.interceptor, sc.info
+		sc.interceptor = nil
+		sc.hookMu.Unlock()
+		err = sc.conn.Close()
+	})
 	if interceptor != nil && info != nil {
 		interceptor.OnClose(info)
 	}
 	return err
+}
+
+// SetReadLimit caps inbound frame size; see websocket.Conn.SetReadLimit.
+func (sc *SafeConn) SetReadLimit(limit int64) {
+	sc.conn.SetReadLimit(limit)
 }
 
 func (sc *SafeConn) ReadMessage() (int, []byte, error) {
@@ -188,8 +243,6 @@ func (sc *SafeConn) SetPongHandler(h func(string) error) {
 }
 
 func (sc *SafeConn) GetConn() *websocket.Conn {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
 	return sc.conn
 }
 

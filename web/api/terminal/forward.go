@@ -86,7 +86,10 @@ func ForwardTerminal(id string, browser, agent *connection.SafeConn) {
 		startedAt    time.Time
 	)
 	startBrowser, startAgent := false, false
-	if session != nil && session.Browser == browser && session.Agent == agent {
+	// 先核对 RequesterIp 再递增状态：部署在 Unix Socket 或异常反代后时
+	// ClientIP 可能为空，此时必须直接退出，不能让 activeForwarders/auditConnects
+	// 泄漏卡住会话终态审计与后续转发。
+	if session != nil && session.Browser == browser && session.Agent == agent && session.RequesterIp != "" {
 		requesterIp, userUUID, clientUUID = session.RequesterIp, session.UserUUID, session.UUID
 		stopForwardWaitLocked(session)
 		stop = make(chan struct{})
@@ -201,7 +204,12 @@ func currentBrowserForAgent(id string, agent *connection.SafeConn) (*connection.
 	return session.Browser, true
 }
 
+// terminalMaxFrameBytes caps one WebSocket message so a compromised or
+// malfunctioning peer cannot exhaust server memory with a single giant frame.
+const terminalMaxFrameBytes = 1 << 20
+
 func pumpBrowserFrames(id string, browser *connection.SafeConn) {
+	browser.SetReadLimit(terminalMaxFrameBytes)
 	stopKeepalive, refreshReadDeadline := startTerminalKeepalive(browser)
 	defer stopKeepalive()
 
@@ -217,9 +225,8 @@ func pumpBrowserFrames(id string, browser *connection.SafeConn) {
 				switch control.Type {
 				case controlTypeTerminate, "close":
 					// 浏览器主动结束：closeSession 会把 terminate 转给被控端。
-					if _, active := currentAgentForBrowser(id, browser); active {
-						closeSession(id)
-					}
+					// 身份校验保证被替换掉的旧连接的 terminate 不会误关新世代会话。
+					closeSessionIfCurrent(id, browser)
 					return
 				}
 				agent, active := currentAgentForBrowser(id, browser)
@@ -250,6 +257,7 @@ func pumpBrowserFrames(id string, browser *connection.SafeConn) {
 }
 
 func pumpAgentFrames(id string, agent *connection.SafeConn) {
+	agent.SetReadLimit(terminalMaxFrameBytes)
 	stopKeepalive, refreshReadDeadline := startTerminalKeepalive(agent)
 	defer stopKeepalive()
 
@@ -265,9 +273,7 @@ func pumpAgentFrames(id string, agent *connection.SafeConn) {
 				switch control.Type {
 				case controlTypeTerminate:
 					// 被控端结束（shell 退出等）：closeSession 会转给浏览器。
-					if _, active := currentBrowserForAgent(id, agent); active {
-						closeSession(id)
-					}
+					closeSessionIfCurrent(id, agent)
 					return
 				case controlTypeHeartbeat:
 					browser, active := currentBrowserForAgent(id, agent)
