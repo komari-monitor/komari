@@ -31,6 +31,11 @@ type TerminalSession struct {
 	cleanupGen      uint64
 	cleanupDeadline time.Time
 
+	// controlMu 串行化同一会话的 ready/abort 控制状态转换。锁序固定为
+	// session.controlMu -> TerminalSessionsMutex；不得与 auditMu 嵌套。
+	// 其临界区内只做一次有界 socket 写/事件派发，绝不持 TerminalSessionsMutex 写 socket。
+	controlMu sync.Mutex
+
 	// 审计日志单条聚合状态：同一终端会话只写入一条日志，在重连/挂起/结束时原地更新。
 	// 锁顺序固定为 session.auditMu -> TerminalSessionsMutex，严禁反向加锁。
 	auditMu          sync.Mutex
@@ -224,10 +229,29 @@ func suspendSide(id string, conn *connection.SafeConn, matchBrowser bool) {
 	TerminalSessionsMutex.Unlock()
 
 	_ = conn.Close()
-	// 持锁期间不写 socket：写入可能阻塞，会拖住整个会话表。
-	if survivor != nil {
-		notifyAbort(survivor)
+	// 持全局表锁期间不写 socket：写入可能阻塞，会拖住整个会话表。controlMu
+	// 则把 abort 与后续 reattach 的 ready 串行化：若 reattach 已经先发出 ready，
+	// 这里的复核会看到被摘除槽位不再为空，旧 abort 不得后发覆盖新 ready。
+	if survivor == nil {
+		return
 	}
+	session.controlMu.Lock()
+	defer session.controlMu.Unlock()
+	TerminalSessionsMutex.Lock()
+	current := TerminalSessions[id]
+	alive := current == session
+	if alive {
+		if matchBrowser {
+			alive = current.Browser == nil && current.Agent == survivor
+		} else {
+			alive = current.Agent == nil && current.Browser == survivor
+		}
+	}
+	TerminalSessionsMutex.Unlock()
+	if !alive {
+		return
+	}
+	notifyAbort(survivor)
 	// 浏览器仍在线而被控端掉线时，主动重发终端请求唤醒被控端（兼容不自动重连的旧版 Agent）。
 	if clientUUID != "" {
 		dispatchTerminalRequest(clientUUID, id)
@@ -240,11 +264,22 @@ func suspendAgent(id string, conn *connection.SafeConn)   { suspendSide(id, conn
 // closeSession 结束会话：给两端发 terminate 并清理。terminate 是终态，
 // 收到的一方不会再重连，所以这里可以直接关闭连接。
 func closeSession(id string) {
+	closeSessionIfCurrent(id, nil)
+}
+
+// closeSessionIfCurrent 与 closeSession 相同，但当 conn 非空时要求发起方仍是
+// 会话当前附着的连接：同 client_id 重连替换旧连接后，旧连接读循环随后发出的
+// terminate 不得误杀新世代已恢复的会话。
+func closeSessionIfCurrent(id string, conn *connection.SafeConn) {
 	var browser, agent *connection.SafeConn
 	var closedSession *TerminalSession
 
 	TerminalSessionsMutex.Lock()
 	if session, ok := TerminalSessions[id]; ok && session != nil {
+		if conn != nil && session.Browser != conn && session.Agent != conn {
+			TerminalSessionsMutex.Unlock()
+			return
+		}
 		stopCleanup(session)
 		if session.auditEndReason == "" {
 			session.auditEndReason = "closed"
@@ -272,7 +307,7 @@ func closeSession(id string) {
 }
 
 func canAttachBrowserLocked(session *TerminalSession, clientUUID, userUUID string, apiKey bool, clientID string) (allowed bool, alreadyAttached bool) {
-	if session == nil || session.UUID != clientUUID || (!apiKey && session.UserUUID != userUUID) {
+	if session == nil || session.UUID != clientUUID || (!apiKey && (userUUID == "" || session.UserUUID != userUUID)) {
 		return false, false
 	}
 	if session.Browser != nil && (clientID == "" || session.BrowserClientID != clientID) {
@@ -325,9 +360,18 @@ func attachBrowserWithClientID(id, clientUUID, userUUID string, apiKey bool, con
 	}
 	// 重连的浏览器要立刻知道自己回到了哪一步：被控端已在位就算就绪；
 	// 同时通知被控端浏览器已恢复，便于被控端立即取消本地挂起倒计时（旧版被控端会前向兼容忽略 ready）。
+	// ready 与迟到的 abort 走同一个 controlMu 序列；发送前复核双边仍是目标连接。
 	if oldAgent != nil {
-		notifyReady(conn)
-		notifyReady(oldAgent)
+		session.controlMu.Lock()
+		TerminalSessionsMutex.Lock()
+		current := TerminalSessions[id]
+		stillCurrent := current == session && current.Browser == conn && current.Agent == oldAgent
+		TerminalSessionsMutex.Unlock()
+		if stillCurrent {
+			notifyReady(conn)
+			notifyReady(oldAgent)
+		}
+		session.controlMu.Unlock()
 	}
 	return session, oldAgent != nil, true
 }
@@ -361,9 +405,18 @@ func attachAgent(id string, conn *connection.SafeConn) (*TerminalSession, bool) 
 	if startPump {
 		go pumpAgentFrames(id, conn)
 	}
-	// 被控端就位：浏览器可以停止等待，转发随即开始。
+	// 被控端就位：浏览器可以停止等待，转发随即开始。ready 与迟到的 abort
+	// 走同一个 controlMu 序列；发送前复核双边仍是目标连接。
 	if oldBrowser != nil {
-		notifyReady(oldBrowser)
+		session.controlMu.Lock()
+		TerminalSessionsMutex.Lock()
+		current := TerminalSessions[id]
+		stillCurrent := current == session && current.Agent == conn && current.Browser == oldBrowser
+		TerminalSessionsMutex.Unlock()
+		if stillCurrent {
+			notifyReady(oldBrowser)
+		}
+		session.controlMu.Unlock()
 	}
 	return session, true
 }

@@ -237,6 +237,153 @@ func TestWriteControlIgnoresNilConn(t *testing.T) {
 	notifyTerminate(nil)
 }
 
+// readAvailableControlFrames drains control frames for a short bounded window.
+// It is used only after all server-side control writes in an interleaving have
+// completed, so a missing frame is evidence of absence rather than slowness.
+func readAvailableControlFrames(client *websocket.Conn, window time.Duration) []controlFrame {
+	frames := make([]controlFrame, 0, 4)
+	_ = client.SetReadDeadline(time.Now().Add(window))
+	for {
+		_, data, err := client.ReadMessage()
+		if err != nil {
+			break
+		}
+		if frame, ok := parseControl(data); ok {
+			frames = append(frames, frame)
+		}
+	}
+	return frames
+}
+
+func assertNoReadyThenAbort(t *testing.T, frames []controlFrame) {
+	t.Helper()
+	seenReady := false
+	for _, frame := range frames {
+		if frame.Type == controlTypeReady {
+			seenReady = true
+		}
+		if seenReady && frame.Type == controlTypeAbort {
+			t.Fatalf("stale abort followed ready in control sequence: %+v", frames)
+		}
+	}
+}
+
+// TestConcurrentBrowserReattachDoesNotOverwriteReady is a bidirectional
+// interleaving regression test for MF-2. An abort caused by B1 may precede the
+// new ready, but it must never be written after that ready.
+func TestConcurrentBrowserReattachDoesNotOverwriteReady(t *testing.T) {
+	for trial := 0; trial < 15; trial++ {
+		resetTerminalSessions(t)
+		id := "session-interleave-browser"
+		browser1Safe, browser1Client := newControlPair(t)
+		agentSafe, agentClient := newControlPair(t)
+		browser2Safe, browser2Client := newControlPair(t)
+		t.Cleanup(func() { _ = browser1Client.Close() })
+		t.Cleanup(func() { _ = browser2Client.Close() })
+		t.Cleanup(func() { _ = agentClient.Close() })
+
+		session := newSession(t, id, "owner-uuid", "client-a")
+		session.Browser = browser1Safe
+		session.BrowserClientID = "tab-1"
+		session.Agent = agentSafe
+
+		suspendDone := make(chan struct{})
+		go func() {
+			suspendBrowser(id, browser1Safe)
+			close(suspendDone)
+		}()
+		attachDone := make(chan bool, 1)
+		go func() {
+			_, _, ok := attachBrowserWithClientID(id, "client-a", "owner-uuid", false, browser2Safe, "tab-1")
+			attachDone <- ok
+		}()
+		<-suspendDone
+		if ok := <-attachDone; !ok {
+			t.Fatalf("trial %d: browser reattach failed", trial)
+		}
+		assertNoReadyThenAbort(t, readAvailableControlFrames(agentClient, 15*time.Millisecond))
+	}
+}
+
+// TestConcurrentAgentReattachDoesNotOverwriteReady is the mirror interleaving:
+// after the browser receives ready for a replacement agent, no stale abort from
+// the old agent's suspend path may overtake it.
+func TestConcurrentAgentReattachDoesNotOverwriteReady(t *testing.T) {
+	for trial := 0; trial < 15; trial++ {
+		resetTerminalSessions(t)
+		id := "session-interleave-agent"
+		browserSafe, browserClient := newControlPair(t)
+		agent1Safe, agent1Client := newControlPair(t)
+		agent2Safe, agent2Client := newControlPair(t)
+		t.Cleanup(func() { _ = browserClient.Close() })
+		t.Cleanup(func() { _ = agent1Client.Close() })
+		t.Cleanup(func() { _ = agent2Client.Close() })
+
+		agent_runtime.MarkV2Client("client-a")
+		_ = agent_runtime.TakeV2Events("client-a", nil, 0)
+		session := newSession(t, id, "owner-uuid", "client-a")
+		session.Browser = browserSafe
+		session.Agent = agent1Safe
+
+		suspendDone := make(chan struct{})
+		go func() {
+			suspendAgent(id, agent1Safe)
+			close(suspendDone)
+		}()
+		attachDone := make(chan bool, 1)
+		go func() {
+			_, ok := attachAgent(id, agent2Safe)
+			attachDone <- ok
+		}()
+		<-suspendDone
+		if ok := <-attachDone; !ok {
+			t.Fatalf("trial %d: agent reattach failed", trial)
+		}
+		assertNoReadyThenAbort(t, readAvailableControlFrames(browserClient, 15*time.Millisecond))
+	}
+}
+
+// TestCloseSessionIfCurrentIgnoresStaleTerminate checks that a terminate from
+// a replaced browser generation cannot close the reattached session, while the
+// current browser generation still can.
+func TestCloseSessionIfCurrentIgnoresStaleTerminate(t *testing.T) {
+	resetTerminalSessions(t)
+	id := "session-stale-terminate"
+	browser1Safe, browser1Client := newControlPair(t)
+	browser2Safe, browser2Client := newControlPair(t)
+	agentSafe, agentClient := newControlPair(t)
+	t.Cleanup(func() { _ = browser1Client.Close() })
+	t.Cleanup(func() { _ = browser2Client.Close() })
+	t.Cleanup(func() { _ = agentClient.Close() })
+
+	session := newSession(t, id, "owner-uuid", "client-a")
+	session.Browser = browser1Safe
+	session.BrowserClientID = "tab-1"
+	session.Agent = agentSafe
+
+	if _, _, ok := attachBrowserWithClientID(id, "client-a", "owner-uuid", false, browser2Safe, "tab-1"); !ok {
+		t.Fatal("browser reattach failed")
+	}
+	if frame := readControlFrame(t, browser2Client); frame.Type != controlTypeReady {
+		t.Fatalf("browser2 frame = %q, want ready", frame.Type)
+	}
+	if frame := readControlFrame(t, agentClient); frame.Type != controlTypeReady {
+		t.Fatalf("agent frame = %q, want ready", frame.Type)
+	}
+
+	closeSessionIfCurrent(id, browser1Safe)
+	TerminalSessionsMutex.Lock()
+	present := TerminalSessions[id] == session
+	TerminalSessionsMutex.Unlock()
+	if !present {
+		t.Fatal("stale browser terminate closed the reattached session")
+	}
+	closeSessionIfCurrent(id, browser2Safe)
+	if frame := readControlFrame(t, agentClient); frame.Type != controlTypeTerminate {
+		t.Fatalf("agent frame after current terminate = %q, want terminate", frame.Type)
+	}
+}
+
 // TestParseControl pins how inbound text frames are classified: only JSON with
 // a type is a control message, everything else is terminal content.
 func TestParseControl(t *testing.T) {
