@@ -61,6 +61,15 @@ func ResolveLocation(nodeTimezone, defaultTimezone string) (*time.Location, erro
 	return loc, nil
 }
 
+// Bounds keep calendar arithmetic inside the ±292-year range of
+// time.Duration so calendarDayDifference never saturates into a permanently
+// expired cycle window.
+const (
+	maxIntervalDays = 3660
+	minAnchorYear   = 1970
+	maxAnchorYear   = 2100
+)
+
 func ValidateCycleConfig(cfg CycleConfig) error {
 	if cfg.ResetDay < 1 || cfg.ResetDay > 31 {
 		return fmt.Errorf("reset_day must be between 1 and 31")
@@ -68,11 +77,17 @@ func ValidateCycleConfig(cfg CycleConfig) error {
 	if cfg.IntervalDays < 1 {
 		return fmt.Errorf("interval_days must be at least 1")
 	}
+	if cfg.IntervalDays > maxIntervalDays {
+		return fmt.Errorf("interval_days must be at most %d", maxIntervalDays)
+	}
 	switch cfg.Mode {
 	case ModeAgent, ModeMonthly, ModeManual:
 	case ModeFixedDays:
 		if cfg.AnchorAt == nil || cfg.AnchorAt.IsZero() {
 			return fmt.Errorf("anchor_at is required for fixed_days mode")
+		}
+		if year := cfg.AnchorAt.Year(); year < minAnchorYear || year > maxAnchorYear {
+			return fmt.Errorf("anchor_at year must be between %d and %d", minAnchorYear, maxAnchorYear)
 		}
 	default:
 		return fmt.Errorf("unsupported traffic cycle mode %q", cfg.Mode)
